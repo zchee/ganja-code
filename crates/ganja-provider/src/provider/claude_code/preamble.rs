@@ -9,13 +9,30 @@
 //!
 //! The cost is stated where it falls due rather than hidden: across every
 //! fresh record the model keeps what it was asked and what its tools
-//! returned and **loses the words of its own earlier replies**. Two
-//! consequences follow, and neither is a defect to be fixed here. A
-//! compaction summary is `Message::assistant`, so it renders as *nothing* —
-//! `/compact` on this wire opens a fresh record with the prompt alone. And an
-//! ask the model answered in text alone reads as unanswered: run 9d's
-//! preamble ended on run 1's third ask, and with no reply beneath it the
-//! model obeyed the transcript and called the tool again.
+//! returned and **loses the words of its own earlier replies**. An
+//! ask the model answered in text alone therefore reads as unanswered: run
+//! 9d's preamble ended on run 1's third ask, and with no reply beneath it the
+//! model obeyed the transcript and called the tool again. That is not a
+//! defect to be fixed here.
+//!
+//! # A compaction summary is carried, in the user's voice
+//!
+//! The one assistant message this render does not drop is a **compaction
+//! summary**, and it is recognised by position: ganja's window opens on an
+//! assistant message exactly when a compaction has replaced the history with
+//! its summary (`session.rs`'s `compact_if_needed` installs `[summary]` as
+//! the whole window). Dropping it, as this module did first, made `/compact`
+//! on this wire open a fresh record with the prompt alone — a compaction that
+//! kept nothing. So it is rendered as **context the user carries in**: a
+//! `[User]` paragraph opening [`CARRIED_CONTEXT`], its text through
+//! `neutralize` like every other rendered byte, and never an `[Assistant]`
+//! line — the assistant voice is the one the recording measured refused.
+//!
+//! **Unmeasured live.** No recorded run carried a summary at all, so whether
+//! the vendor's safeguard serves model-written text in the user's voice is
+//! not known. If it refuses, the bound the wire already has catches it: a
+//! refused record's replacement opens with no preamble, and a second refusal
+//! in a row spends nothing.
 //!
 //! # The render is a write
 //!
@@ -54,6 +71,16 @@ pub const MID_TURN_RESUME: &str = "[the tool calls above have been answered; con
 /// result are a user's voice arriving through a tool, which the model names
 /// as injection and declines (M19 (b)).
 pub const MID_TURN_HEADER: &str = "[User, while the tool ran]";
+
+/// What a carried compaction summary opens with, after its `[User]` marker.
+///
+/// It says whose words follow and how old they are, so the model reads the
+/// summary as the conversation's own memory handed back rather than as a new
+/// ask to act on.
+///
+/// Not one of `MARKERS`: it never opens a line — `[User]` does, and that
+/// marker is already escaped wherever rendered content spells it.
+pub const CARRIED_CONTEXT: &str = "Context carried from before this record:";
 
 /// Every line marker this module's grammar gives a meaning to.
 ///
@@ -139,13 +166,15 @@ pub struct Rendered {
 /// `[User]`, `[Tool Call] <tool> <input>` and `[Tool Result]` /
 /// `[Tool Result (error)]` lines, under [`HEADER`]. **Never an `[Assistant]`
 /// line** — see the module doc for what that costs and why it is not
-/// negotiable.
+/// negotiable. A history that opens on an assistant message opens on a
+/// compaction summary, and that one is carried as a `[User]` paragraph under
+/// [`CARRIED_CONTEXT`] instead of being dropped.
 ///
 /// A `Peer` part is another agent's words and is treated as the assistant's
 /// for this rule: nothing rendered.
 #[must_use]
 pub fn render(history: &[Message]) -> Rendered {
-    let mut rendered = lines(history);
+    let mut rendered = lines(history, Summary::Carried);
     if rendered.text.is_empty() {
         return rendered;
     }
@@ -164,7 +193,8 @@ pub fn render(history: &[Message]) -> Rendered {
 /// question.
 #[must_use]
 pub fn render_turn(turn: &[Message]) -> Rendered {
-    let mut rendered = lines(turn);
+    // A turn's slice opens on its own prompt, so nothing in it is a summary.
+    let mut rendered = lines(turn, Summary::Dropped);
     if rendered.text.is_empty() {
         rendered.text = MID_TURN_RESUME.to_owned();
 
@@ -186,20 +216,39 @@ pub fn carried(message: &Message) -> String {
     format!("{MID_TURN_HEADER} {}", neutralize(&message_text(message)))
 }
 
+/// Whether a history's leading assistant message is carried as a summary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Summary {
+    /// The whole history before a turn: a leading assistant message is the
+    /// compaction summary, carried under [`CARRIED_CONTEXT`].
+    Carried,
+    /// A turn's own messages: every assistant message is dropped.
+    Dropped,
+}
+
 /// The three line kinds, with no header and no closing line.
-fn lines(messages: &[Message]) -> Rendered {
+fn lines(messages: &[Message], summary: Summary) -> Rendered {
     let mut paragraphs: Vec<String> = Vec::new();
     let mut user_ids = Vec::new();
     let mut assistant_turns_dropped = 0;
 
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         // An assistant message contributes no text and no id — but its tool
         // parts still do, because a `[Tool Call]` and its `[Tool Result]` are
         // the trail that makes an answered ask read as answered. An ask
         // answered in words alone has no trail, and the model reads it as
         // unanswered: run 9d obeyed exactly that and called the tool again.
+        //
+        // The exception is the summary a compacted window opens on, which is
+        // carried in the user's voice. Its id joins no `user_ids`: it is not
+        // a user message, and `sent` is the request's user-id list.
         if message.role == Role::Assistant {
-            assistant_turns_dropped += 1;
+            let text = message_text(message);
+            if summary == Summary::Carried && index == 0 && !text.trim().is_empty() {
+                paragraphs.push(format!("[User] {CARRIED_CONTEXT}\n\n{}", neutralize(&text)));
+            } else {
+                assistant_turns_dropped += 1;
+            }
         } else {
             let text = message_text(message);
             if !text.trim().is_empty() {

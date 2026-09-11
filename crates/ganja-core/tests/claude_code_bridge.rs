@@ -687,9 +687,14 @@ fn hook_block(
 // What opens a fresh record, and what does not
 // ---------------------------------------------------------------------------
 
-/// **AC-4.6c**, the `/model` half. A model change mid-conversation closes the
-/// held process and opens a fresh record carrying the new `--model`, with a
-/// preamble that quotes no assistant text.
+/// **AC-4.6c**, the `/model` half, as `eawi` reshaped it. A model change
+/// mid-conversation is first *asked* of the live process over the control
+/// channel (`set_model`) and confirmed on its next `system/init`; a process
+/// that ignores the ask — this fake keeps naming its opening model — still
+/// finishes the turn it was asked on, is closed at that turn's end, and the
+/// **next** request opens a fresh record carrying the new `--model`, with a
+/// preamble that quotes no assistant text. So an unhonoured switch costs one
+/// turn and never a silent wrong model.
 ///
 /// The two values a person *chose* — model and effort — are the only ones that
 /// do this. Keeping a chosen model stale would bill the opening model under a
@@ -701,9 +706,10 @@ fn hook_block(
 /// why the preamble is checked line by line rather than merely for its
 /// presence.
 #[tokio::test]
-async fn a_model_switch_opens_a_fresh_record_whose_preamble_quotes_no_assistant() {
+async fn a_model_switch_the_process_ignores_opens_a_fresh_record_whose_preamble_quotes_no_assistant()
+ {
     let home = ganja_testkit::temp_dir();
-    let cli = FakeCli::new(calls_the_tool(&["found it", "still here"]));
+    let cli = FakeCli::new(calls_the_tool(&["found it", "still here", "and once more"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
     let provider = wired(&cli, home.path());
     let engine = seated(&provider, tool, rule(Action::Allow));
@@ -713,16 +719,29 @@ async fn a_model_switch_opens_a_fresh_record_whose_preamble_quotes_no_assistant(
     drain(&mut events).await;
     assert_eq!(cli.conversation().len(), 1, "one conversation, one process");
 
+    // A spelling the fake's `system/init` (`claude-opus-5[1m]`) cannot be read
+    // as: `opus` would count as honoured, since the served spelling could be
+    // the one asked for, and the process would rightly be kept.
     engine
-        .send(Command::SwitchModel { model: "opus".to_owned() })
+        .send(Command::SwitchModel { model: "claude-sonnet-5".to_owned() })
         .await
         .expect("an uncataloged wire serves any spelling");
     engine.send(prompt("and again")).await.expect("the engine is idle");
     drain(&mut events).await;
+    assert_eq!(
+        cli.conversation().len(),
+        1,
+        "the switch is asked of the live process, which answers this turn"
+    );
+
+    // The fake never reports the asked-for model, so the process is closed at
+    // the turn's end and the prompt after it opens the fresh record.
+    engine.send(prompt("once more")).await.expect("the engine is idle");
+    drain(&mut events).await;
 
     let records = cli.conversation();
     let [first, second] = records.as_slice() else {
-        panic!("the chosen model changed, so the record should have, got {records:?}");
+        panic!("the ignored switch should have cost exactly one turn, got {records:?}");
     };
     assert_eq!(
         cli.record(*first).exit,
@@ -732,7 +751,7 @@ async fn a_model_switch_opens_a_fresh_record_whose_preamble_quotes_no_assistant(
 
     let argv = cli.argv(*second);
     let at = argv.iter().position(|token| token == "--model").expect("the fresh record names it");
-    assert_eq!(argv[at + 1], "opus", "with the model the person chose");
+    assert_eq!(argv[at + 1], "claude-sonnet-5", "with the model the person chose");
     assert!(!argv.iter().any(|token| token == "--resume"), "and resuming nothing: {argv:?}");
 
     let opening = first_frame(&cli, *second);

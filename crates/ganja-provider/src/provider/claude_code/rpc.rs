@@ -78,8 +78,33 @@ pub struct InitializeResult {
 /// The one capability this server declares.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Capabilities {
-    /// Present and empty: the CLI reads the key, not its contents.
-    pub tools: serde_json::Map<String, serde_json::Value>,
+    /// Present, which is what makes the CLI ask for a roster at all.
+    pub tools: ToolsCapability,
+}
+
+/// What this server says about its roster (`i5oi`).
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ToolsCapability {
+    /// That the roster may change while the process lives, and that this side
+    /// will say so with [`LIST_CHANGED`]. The CLI subscribes to that
+    /// notification only for a server declaring this (W1a Q3.9-3.10, read off
+    /// the bundle's code path), and the notification is the one way a live
+    /// process hears a roster that grew. **Unmeasured live**: no recorded run
+    /// declared it, so what the CLI does on receipt — re-list and advertise
+    /// the new tools from its next request — is the bundle's reading and no
+    /// frame's.
+    #[serde(rename = "listChanged")]
+    pub list_changed: bool,
+}
+
+/// The JSON-RPC notification this side sends when the roster moves (`i5oi`).
+pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// The [`LIST_CHANGED`] notification's JSON-RPC envelope: no `id`, because a
+/// notification is answered with nothing.
+#[must_use]
+pub fn list_changed() -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "method": LIST_CHANGED})
 }
 
 /// The name and version this server answers under.
@@ -179,7 +204,7 @@ pub fn answer(message: &serde_json::Value, tools: &[ToolDefinition], version: &s
                 &id,
                 &InitializeResult {
                     protocol_version: protocol,
-                    capabilities: Capabilities { tools: serde_json::Map::new() },
+                    capabilities: Capabilities { tools: ToolsCapability { list_changed: true } },
                     server_info: ServerInfo {
                         name: SERVER.to_owned(),
                         version: version.to_owned(),

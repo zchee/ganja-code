@@ -70,10 +70,13 @@ fn a_refused_entry_never_logs_as_an_exited_one() {
 /// A capped, closed or diverged entry's next request has a reason of its own,
 /// so the ring says nothing a spawn can use.
 #[test]
-fn the_three_reasons_a_spawn_learns_nothing_from_say_nothing() {
+fn the_two_reasons_a_spawn_learns_nothing_from_say_nothing() {
     assert_eq!(Reason::Cap.spawn_word(), None);
     assert_eq!(Reason::Close.spawn_word(), None);
-    assert_eq!(Reason::Divergence.spawn_word(), None);
+    // `eawi`: an unconfirmed model switch closes an entry at a turn's end,
+    // and the next spawn reads the ring — so a divergence names itself
+    // rather than reading as a record this ganja did not write.
+    assert_eq!(Reason::Divergence.spawn_word(), Some("divergence"));
 }
 
 // --------------------------------------------------------------- (i) idle
@@ -348,7 +351,7 @@ async fn a_changed_system_prompt_rides_the_same_process_and_the_next_fresh_recor
 #[tokio::test]
 async fn a_changed_roster_rides_the_same_process_too() {
     let home = temp();
-    let cli = FakeCli::new(says(&["one", "two"]));
+    let cli = FakeCli::new(says(&["one", "two", "three"]));
     let provider = wired(&cli, home.path());
 
     turn(&provider, request(vec![user("m1", "first")], 0)).await;
@@ -362,22 +365,60 @@ async fn a_changed_roster_rides_the_same_process_too() {
     });
     turn(&provider, changed).await;
 
+    assert_eq!(cli.count(), 1, "a moved roster closes nothing");
+    let grown = provider.held.meta(&key("m1")).expect("the entry lives").tools_hash;
+
+    // `i5oi`: the move is the entry's own from here on, so the same roster
+    // again is no change and announces nothing a second time. (The fake does
+    // not re-list on the notification; the task-level test drives that.)
+    let mut again = request(
+        vec![
+            user("m1", "first"),
+            assistant("a1", "one"),
+            user("m2", "second"),
+            assistant("a2", "two"),
+            user("m3", "third"),
+        ],
+        4,
+    );
+    again.tools = changed_tools();
+    turn(&provider, again).await;
     assert_eq!(cli.count(), 1);
     assert_eq!(
-        cli.record(0).tools_list,
-        ["read"],
-        "nothing re-dialled, so the roster is the one it opened with"
+        provider.held.meta(&key("m1")).expect("the entry lives").tools_hash,
+        grown,
+        "once per change: the recorded roster did not move again"
     );
 
     provider.shutdown().await;
 }
 
+/// The roster `a_changed_roster_rides_the_same_process_too` grows to.
+fn changed_tools() -> Vec<crate::tool::ToolDefinition> {
+    let mut tools = super::super::tests::roster();
+    tools.push(crate::tool::ToolDefinition {
+        name: "bash".to_owned(),
+        description: "runs a command".to_owned(),
+        schema: serde_json::json!({}),
+    });
+    tools
+}
+
 /// AC-3.15 (b): the two values a **person** chose. Keeping a chosen model
-/// stale bills the opening model under a status bar that says otherwise.
+/// stale bills the opening model under a status bar that says otherwise — and
+/// since `eawi` a model change is asked of the live process with `set_model`
+/// rather than paid for with a fresh record, confirmed on the next
+/// `system/init`.
 #[tokio::test]
-async fn a_changed_model_closes_the_process_and_opens_a_fresh_record() {
+async fn a_model_switch_the_process_confirms_keeps_the_process_and_its_record() {
     let home = temp();
-    let cli = FakeCli::new(says(&["one", "two", "three"]));
+    // The second and third turns' `system/init` name the model the switch
+    // asked for: a CLI that honoured `set_model`.
+    let mut script = says(&["one", "two", "three"]);
+    for turn in &mut script.turns[1..] {
+        turn.init_model = Some("claude-sonnet-5[1m]".to_owned());
+    }
+    let cli = FakeCli::new(script);
     let provider = wired(&cli, home.path());
 
     turn(&provider, request(vec![user("m1", "first")], 0)).await;
@@ -385,15 +426,22 @@ async fn a_changed_model_closes_the_process_and_opens_a_fresh_record() {
     let mut changed =
         request(vec![user("m1", "first"), assistant("a1", "one"), user("m2", "second")], 2);
     changed.model = "claude-sonnet-5".to_owned();
-    turn(&provider, changed.clone()).await;
+    let events = turn(&provider, changed.clone()).await;
 
-    assert_eq!(cli.count(), 2, "the person chose it, so it is honoured");
-    assert!(cli.argv(1).contains(&"--model".to_owned()));
-    assert!(cli.argv(1).contains(&"claude-sonnet-5".to_owned()));
-    assert!(!cli.argv(1).contains(&"--resume".to_owned()));
-    assert!(cli.signals.lock().expect("the signals").is_empty(), "EOF was enough");
+    assert_eq!(said(&events), "two", "the switched turn answered: {events:?}");
+    assert_eq!(
+        cli.count(),
+        1,
+        "`eawi`: the person chose it and the process was asked, not replaced"
+    );
+    assert_eq!(provider.held_entries(), 1, "and the confirmed process is still held");
+    assert_eq!(
+        provider.served_model().map(|served| (served.requested, served.served)),
+        Some(("claude-sonnet-5".to_owned(), "claude-sonnet-5[1m]".to_owned())),
+        "the bar reads the switch's model beside what the vendor served"
+    );
 
-    // And the next request on the key rides the second process.
+    // The next request on the key is a plain continue on the same process.
     let mut third = request(
         vec![
             user("m1", "first"),
@@ -407,7 +455,90 @@ async fn a_changed_model_closes_the_process_and_opens_a_fresh_record() {
     third.model = changed.model;
     turn(&provider, third).await;
 
-    assert_eq!(cli.count(), 2, "the second process is the one that continues");
+    assert_eq!(cli.count(), 1, "one process across the whole change");
+    assert_eq!(
+        cli.record(0).user_frames,
+        ["first", "second", "third"],
+        "and one record, so the model kept its own earlier replies"
+    );
+
+    provider.shutdown().await;
+}
+
+/// `eawi`'s other half: a process that ignores `set_model` — its next
+/// `system/init` still names the model it opened with — finishes the turn it
+/// was asked on, is closed at that turn's end, and the next request opens a
+/// fresh record under `--model` the way every model change did before. An
+/// unhonoured switch costs one turn, and the served slot shows which model
+/// that turn ran on.
+#[tokio::test]
+async fn a_model_switch_the_process_ignores_costs_one_turn_then_a_fresh_record() {
+    let home = temp();
+    let cli = FakeCli::new(says(&["one", "two", "three"]));
+    let provider = wired(&cli, home.path());
+
+    turn(&provider, request(vec![user("m1", "first")], 0)).await;
+
+    let mut changed =
+        request(vec![user("m1", "first"), assistant("a1", "one"), user("m2", "second")], 2);
+    changed.model = "claude-sonnet-5".to_owned();
+    let events = turn(&provider, changed.clone()).await;
+
+    assert_eq!(said(&events), "two", "the turn still finishes: {events:?}");
+    assert_eq!(cli.count(), 1, "it was asked on the live process");
+    assert_eq!(
+        provider.served_model().map(|served| served.served),
+        Some("claude-opus-5[1m]".to_owned()),
+        "never a silent wrong model: the slot names what actually answered"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.held_entries() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the unconfirmed process is closed at the turn's end");
+
+    let mut third = request(
+        vec![
+            user("m1", "first"),
+            assistant("a1", "one"),
+            user("m2", "second"),
+            assistant("a2", "two"),
+            user("m3", "third"),
+        ],
+        4,
+    );
+    third.model = changed.model;
+    turn(&provider, third).await;
+
+    assert_eq!(cli.count(), 2, "the next request opens a fresh record");
+    assert!(cli.argv(1).contains(&"--model".to_owned()));
+    assert!(cli.argv(1).contains(&"claude-sonnet-5".to_owned()));
+    assert!(!cli.argv(1).contains(&"--resume".to_owned()));
+
+    provider.shutdown().await;
+}
+
+/// `eawi` does not reach an effort: the SDK declares no `set_effort`, so a
+/// model change that arrives **with** an effort change still closes the
+/// process and opens a fresh record at once, as before.
+#[tokio::test]
+async fn a_model_change_beside_an_effort_change_still_opens_a_fresh_record() {
+    let home = temp();
+    let cli = FakeCli::new(says(&["one", "two"]));
+    let provider = wired(&cli, home.path());
+
+    turn(&provider, request(vec![user("m1", "first")], 0)).await;
+
+    let mut changed =
+        request(vec![user("m1", "first"), assistant("a1", "one"), user("m2", "second")], 2);
+    changed.model = "claude-sonnet-5".to_owned();
+    changed.effort_options.insert("effort".to_owned(), serde_json::json!("high"));
+    turn(&provider, changed).await;
+
+    assert_eq!(cli.count(), 2, "an effort has no control request, so it respawns");
+    assert!(cli.argv(1).contains(&"claude-sonnet-5".to_owned()));
 
     provider.shutdown().await;
 }
@@ -575,10 +706,13 @@ async fn a_compaction_is_a_new_key_that_starts_from_nothing() {
 
     assert_eq!(cli.count(), 2, "a new key spawns rather than inheriting a streak");
     let opened = &cli.record(1).user_frames[0];
-    assert_eq!(
-        opened, "carry on",
-        "a summary is assistant text, so the preamble renders nothing at all: {opened}"
+    assert!(
+        opened.contains(&format!("[User] {}", super::super::preamble::CARRIED_CONTEXT))
+            && opened.contains("Summary so far")
+            && opened.ends_with("carry on"),
+        "the summary is carried in the user's voice ahead of the prompt (`q3ep`): {opened}"
     );
+    assert!(!opened.contains("[Assistant]"), "never as assistant text: {opened}");
 
     provider.shutdown().await;
 }
@@ -734,7 +868,9 @@ async fn every_arm_that_spawns_builds_an_argv_and_none_of_them_resumes() {
     )
     .await;
 
-    // model.
+    // model: since `eawi` asked of the live process rather than spawned —
+    // and unconfirmed by this fake's `init`, so the effort step below finds
+    // no entry and spawns.
     let mut moved =
         request(vec![user("m1", "first"), assistant("a1", "one"), user("m3", "instead")], 2);
     moved.model = "claude-sonnet-5".to_owned();
@@ -749,7 +885,7 @@ async fn every_arm_that_spawns_builds_an_argv_and_none_of_them_resumes() {
         assert!(!argv.contains(&"--resume".to_owned()), "{argv:?}");
         assert!(argv.contains(&"--session-id".to_owned()), "{argv:?}");
     }
-    assert!(cli.count() >= 5, "each arm above spawned: {}", cli.count());
+    assert!(cli.count() >= 4, "each spawning arm above spawned: {}", cli.count());
 
     provider.shutdown().await;
 }
@@ -1521,4 +1657,198 @@ async fn a_conversation_locked_elsewhere_is_answered_without_reading_its_binding
 
     drop(held);
     provider.shutdown().await;
+}
+
+// ------------------------------------------------ an unusual draw (2z4r)
+
+/// One `rate_limit_event` line, in the recording's own envelope.
+fn rate_limit_line(info: &serde_json::Value) -> String {
+    serde_json::json!({
+        "type": "rate_limit_event",
+        "rate_limit_info": info,
+        "uuid": "<u>",
+        "session_id": "<sid>",
+    })
+    .to_string()
+}
+
+/// `2z4r`. An unusual draw parks **one** sentence per turn — a second unusual
+/// event in the same turn keeps the first one's words — the next turn may park
+/// again, and an ordinary event takes the sentence down, because it is about
+/// now. Never a failure: the stream carries no event for it at all.
+#[tokio::test]
+async fn an_unusual_draw_is_noticed_once_per_turn_and_ordinary_draw_takes_it_down() {
+    let wiring = wiring(Vec::new());
+    let mut turn = super::Turn::default();
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let notice = || wiring.slots.rate_notice.lock().expect("the rate-notice slot").clone();
+
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    super::open_turn(&wiring, &mut turn, events);
+
+    let warned = serde_json::json!({"status": "allowed_warning", "rateLimitType": "five_hour"});
+    let rejected = serde_json::json!({"status": "rejected", "rateLimitType": "seven_day"});
+    let ordinary = serde_json::json!({"status": "allowed", "isUsingOverage": false});
+
+    super::handle(&wiring, &mut turn, &mut stdin, &rate_limit_line(&warned)).await;
+    let first = notice().expect("an unusual draw parks a sentence");
+    assert!(first.contains("close to its five_hour limit"), "{first}");
+
+    super::handle(&wiring, &mut turn, &mut stdin, &rate_limit_line(&rejected)).await;
+    assert_eq!(notice(), Some(first), "once per turn: the first sentence stands");
+    assert_eq!(
+        wiring.slots.rate.lock().expect("the rate slot").clone(),
+        Some(rejected.clone()),
+        "while the windows themselves stay newest-wins"
+    );
+    assert!(streamed.try_recv().is_err(), "a notice, never an event on the turn's stream");
+
+    // The next turn may say it again.
+    let (events, _streamed) = tokio::sync::mpsc::channel(16);
+    super::open_turn(&wiring, &mut turn, events);
+    super::handle(&wiring, &mut turn, &mut stdin, &rate_limit_line(&rejected)).await;
+    assert!(
+        notice().is_some_and(|said| said.contains("seven_day limit reached")),
+        "a new turn parks its own sentence: {:?}",
+        notice()
+    );
+
+    super::handle(&wiring, &mut turn, &mut stdin, &rate_limit_line(&ordinary)).await;
+    assert_eq!(notice(), None, "ordinary draw takes the sentence down");
+}
+
+// ------------------------------------------ a roster that moved (i5oi)
+
+/// `i5oi`, at the task. A `Roster` queued ahead of a `Turn` puts the
+/// `tools/list_changed` notification on the pipe **before** the frame that
+/// opens the turn, as a host→CLI `mcp_message` addressed to this server; and
+/// the `tools/list` the CLI sends next is answered with the new roster. What
+/// the real CLI does on receipt is unmeasured — this pins what the wire says
+/// and what it answers, which is all of it that is this side's.
+#[tokio::test]
+async fn a_moved_roster_is_announced_before_the_turn_and_the_next_list_carries_it() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let (stdin, stdin_end) = tokio::io::duplex(64 * 1024);
+    let (stdout, mut stdout_end) = tokio::io::duplex(64 * 1024);
+    let (exit_now, exit) = tokio::sync::oneshot::channel::<()>();
+    let io = crate::provider::claude_code::process::ChildIo {
+        stdin: Box::new(stdin),
+        stdout: Box::new(stdout),
+        stderr: None,
+        exit: Box::pin(async move {
+            let _ = exit.await;
+            Ok(std::process::ExitStatus::from_raw(0))
+        }),
+        kill: Box::new(|_| {}),
+    };
+
+    let mut grown = super::super::tests::roster();
+    grown.push(crate::tool::ToolDefinition {
+        name: "bash".to_owned(),
+        description: "runs a command".to_owned(),
+        schema: serde_json::json!({}),
+    });
+
+    let (input, inputs) = tokio::sync::mpsc::channel(4);
+    let (events, _streamed) = tokio::sync::mpsc::channel(16);
+    input.send(super::Input::Roster { tools: grown }).await.expect("the queue is open");
+    input
+        .send(super::Input::Turn {
+            frame: super::super::frame::user_line(&super::super::frame::UserFrame {
+                content: "second".to_owned(),
+                attachments: Vec::new(),
+                parent_tool_use_id: None,
+            }),
+            sent: Vec::new(),
+            events,
+        })
+        .await
+        .expect("the queue is open");
+    let task = tokio::spawn(super::run(
+        io,
+        inputs,
+        wiring(super::super::tests::roster()),
+        DEFAULT_IDLE_BOUND,
+    ));
+
+    let mut written = tokio::io::BufReader::new(stdin_end).lines();
+    let mut next = async || -> serde_json::Value {
+        let line = written.next_line().await.expect("a readable pipe").expect("a line");
+        serde_json::from_str(&line).expect("one JSON frame per line")
+    };
+
+    let announced = next().await;
+    assert_eq!(announced["type"], "control_request", "{announced}");
+    assert_eq!(
+        announced["request"],
+        serde_json::json!({
+            "subtype": "mcp_message",
+            "server_name": "ganja",
+            "message": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+        }),
+        "the notification, addressed to this server"
+    );
+    let opened = next().await;
+    assert_eq!(opened["type"], "user", "and only then the turn's frame: {opened}");
+
+    // The CLI re-lists, as the bundle reads it would.
+    stdout_end
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "control_request",
+                    "request_id": "cli-1",
+                    "request": {
+                        "subtype": "mcp_message",
+                        "server_name": "ganja",
+                        "message": {"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+                    },
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("the task reads stdout");
+    let listed = next().await;
+    let names: Vec<&str> = listed["response"]["response"]["mcp_response"]["result"]["tools"]
+        .as_array()
+        .expect("a tools/list answer")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(names, ["read", "bash"], "the new roster, in advertised order: {listed}");
+
+    let _ = exit_now.send(());
+    task.await.expect("the task ends without panicking");
+}
+
+// -------------------------------------------- the model switch (eawi)
+
+/// `eawi`: what a `system/init` may say after a switch and still count as the
+/// switch honoured. Lenient where the vendor's spelling is not ganja's — the
+/// `default` choice, a `[1m]` context marker, an alias with no `-` — and
+/// strict everywhere else, so a different model is never read as the asked
+/// one.
+#[test]
+fn a_served_model_honours_a_switch_only_when_it_could_be_the_one_asked_for() {
+    let rows = [
+        ("claude-sonnet-5", "claude-sonnet-5", true),
+        ("claude-sonnet-5", "claude-sonnet-5[1m]", true),
+        ("default", "claude-opus-5[1m]", true),
+        ("sonnet", "claude-sonnet-5", true),
+        ("opus", "claude-opus-5[1m]", true),
+        ("claude-sonnet-5", "claude-opus-5[1m]", false),
+        ("claude-sonnet-5", "claude-sonnet-5-20260101", false),
+        ("sonnet", "claude-opus-5", false),
+        ("claude-sonnet-5", "", false),
+    ];
+
+    for (asked, served, expected) in rows {
+        assert_eq!(super::honoured(asked, served), expected, "asked {asked:?}, served {served:?}");
+    }
 }

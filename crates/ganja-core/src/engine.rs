@@ -3512,10 +3512,11 @@ impl Engine {
                     .map(|info| info.context_tokens)
             })
             .unwrap_or(0);
-        // Absent for an uncataloged model, the same answer compaction gives:
-        // only the catalog can say what fits, and inventing a denominator
-        // would put a percentage on a window nobody measured.
-        let window = catalog::model(&self.model()).map(|model| model.context_window);
+        // Absent for a model nothing sizes, the same answer compaction gives:
+        // the catalog's row, or the one an uncataloged wire borrows for what
+        // its vendor served — and past both, inventing a denominator would
+        // put a percentage on a window nobody measured.
+        let window = crate::session::context_window(self.provider.as_ref(), &self.model());
 
         ContextEstimate { tokens, window }
     }
@@ -3627,7 +3628,7 @@ impl Engine {
         .count();
 
         let model = self.model();
-        let window = catalog::model(&model).map(|model| model.context_window);
+        let window = crate::session::context_window(self.provider.as_ref(), &model);
 
         ContextBreakdown {
             model,

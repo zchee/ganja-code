@@ -25,9 +25,10 @@
 //! preamble carries the user's asks and the tool trail and never the model's
 //! own words, and the cost is stated rather than hidden: **across every fresh
 //! record the model loses the words of its own earlier replies**, a
-//! compaction summary is assistant text and so renders as nothing at all, and
-//! an ask the model answered in text alone reads as unanswered and may be
-//! redone.
+//! compaction summary — assistant text — is carried only in the user's voice
+//! under `[User] Context carried from before this record:` (`preamble.rs`,
+//! unmeasured live), and an ask the model answered in text alone reads as
+//! unanswered and may be redone.
 //!
 //! That is a measured tendency and not a rule the frames prove: run 2e-1 and
 //! run 2e-2 are the same record under the same argv one turn apart, one
@@ -192,6 +193,21 @@ impl ClaudeCodeProvider {
     #[must_use]
     pub fn held_entries(&self) -> usize {
         self.held.len()
+    }
+
+    /// What the vendor last said is unusual about this account's draw, as a
+    /// sentence a person can read (**D556**, `2z4r`).
+    ///
+    /// Polled, like [`Provider::plan_windows`], and newest-wins: parked at most
+    /// once per turn by the first `rate_limit_event` whose `status` is not
+    /// `allowed` or whose `isUsingOverage` is true, and taken down by the next
+    /// event that reads as ordinary draw. [`draw_notice`] decides the words.
+    /// On the concrete type rather than the trait because no trait method
+    /// carries a notice of this kind yet; a frontend that wants to draw it
+    /// needs that accessor first.
+    #[must_use]
+    pub fn rate_notice(&self) -> Option<String> {
+        self.slots.rate_notice.lock().expect("the rate-notice slot is never poisoned").clone()
     }
 
     /// What this seat may name, as `(id, display name)` pairs (**D556**,
@@ -507,6 +523,36 @@ pub fn owed_text(owed: &[&Message]) -> String {
         .join("\n\n")
 }
 
+/// The media types this wire writes as content blocks (`m1jk`): the four
+/// image types and PDF, the same five `anthropic.rs`'s `accepts_attachment`
+/// admits, since the CLI hands a user frame's blocks to that same API.
+pub const ATTACHMENT_MIMES: &[&str] =
+    &["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
+
+/// The binary attachments the owed messages carry, in request order (`m1jk`).
+///
+/// Only a `File` part whose payload the engine's send-time read filled in, and
+/// only one of [`ATTACHMENT_MIMES`] — which is what `accepts_attachment` told
+/// the engine, re-checked because the part is the engine's and the allowlist
+/// is this wire's. **The owed set only**: a message rendered into a fresh
+/// record's preamble keeps its `[attached: path]` line and loses its bytes,
+/// because re-sending every image a conversation ever held on each fresh
+/// record would bill them all again for a turn about none of them.
+#[must_use]
+pub fn attachments(owed: &[&Message]) -> Vec<frame::Attachment> {
+    owed.iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match &part.body {
+            PartBody::File { mime, content: Some(data), .. }
+                if ATTACHMENT_MIMES.contains(&mime.as_str()) =>
+            {
+                Some(frame::Attachment { mime: mime.clone(), data: data.clone() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// A stable hash of what a process opened under, for the `stale_<what>` log
 /// line.
 fn hash_of(value: &impl std::hash::Hash) -> u64 {
@@ -547,12 +593,12 @@ impl Provider for ClaudeCodeProvider {
         ID
     }
 
-    /// Attachments are not carried in v1: a `File` part degrades to its name
-    /// in the text a frame carries, which is what the base trait's default
-    /// already means.
+    /// The Messages API's own allowlist (`m1jk`): what the CLI hands the API
+    /// as a user frame's content block, and so what this wire writes as one
+    /// ([`attachments`]). Anything else stays a `File` part degraded to its
+    /// name in the frame's text, which is what the trait's default means.
     fn accepts_attachment(&self, mime: &str) -> bool {
-        let _ = mime;
-        false
+        ATTACHMENT_MIMES.contains(&mime)
     }
 
     fn served_model(&self) -> Option<crate::provider::ServedModel> {
@@ -597,6 +643,14 @@ impl Provider for ClaudeCodeProvider {
     /// there would mean inventing a budget of 100 fictional units and drawing
     /// it under a heading about throttling. This wire receives no rate-limit
     /// headers, and answering nothing for them is the honest answer.
+    ///
+    /// **Closed by measurement** (`2z4r`), not left open: the recording holds
+    /// sixteen `rate_limit_event`s and every one carries `unifiedWindows`'
+    /// `utilization`/`resetsAt` pairs beside `status` and `overageStatus` —
+    /// fractions of a budget, never a count against a limit. What else the
+    /// event carries, a status or an overage draw that is not ordinary, is a
+    /// sentence and not a window: [`draw_notice`] and
+    /// [`ClaudeCodeProvider::rate_notice`].
     ///
     /// **Two recorded shapes, one output**, which is why the conversion lives
     /// here rather than at any reader:
@@ -712,6 +766,62 @@ fn plan_reset(value: &serde_json::Value) -> Option<std::time::SystemTime> {
     std::time::UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(stamp.as_second()).ok()?))
 }
 
+/// The sentence a person is owed when a `rate_limit_event` says this account's
+/// draw is not ordinary, or [`None`] when it is (**D556**, `2z4r`).
+///
+/// Not ordinary means one of two things the event carries beside its windows:
+/// a `status` other than `allowed` — the SDK declares `allowed_warning` and
+/// `rejected` (`sdk.d.ts:3039`) — or `isUsingOverage: true` (`:3046`), a turn
+/// billed past the plan. **Neither has been seen live**: all sixteen of the
+/// recording's events read `allowed` and `false`, so every sentence below is
+/// built against the declared shape alone. A notice rather than a failure,
+/// because the CLI decides whether a rejected draw ends the turn and says so
+/// in its own `result`; this side only makes sure a person hears why.
+///
+/// The vendor's words reach a frontend, so each is admitted only as the
+/// lowercase-and-underscore token every declared value is: a `rateLimitType`
+/// outside that shape reads as "plan", and a status outside it reads as
+/// unrecognised rather than being quoted.
+#[must_use]
+pub fn draw_notice(info: &serde_json::Value) -> Option<String> {
+    fn token(value: Option<&serde_json::Value>) -> Option<&str> {
+        value.and_then(serde_json::Value::as_str).filter(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+    }
+
+    let limit = token(info.get("rateLimitType")).unwrap_or("plan");
+    let mut said = Vec::new();
+
+    match info.get("status").and_then(serde_json::Value::as_str) {
+        // No status at all is not a claim of anything, and `allowed` is the
+        // ordinary draw every recorded event reported.
+        None | Some("allowed") => {}
+        Some("allowed_warning") => {
+            said.push(format!("the claude CLI warns this account is close to its {limit} limit"));
+        }
+        Some("rejected") => {
+            said.push(format!("the claude CLI reports this account's {limit} limit reached"));
+        }
+        Some(_) => match token(info.get("status")) {
+            Some(status) => said
+                .push(format!("the claude CLI reports this account's {limit} limit as `{status}`")),
+            None => said.push(format!(
+                "the claude CLI reports an unrecognised status for this account's {limit} limit"
+            )),
+        },
+    }
+
+    if info.get("isUsingOverage").and_then(serde_json::Value::as_bool) == Some(true) {
+        said.push("this turn is drawing on overage, billed past the plan".to_owned());
+    }
+
+    (!said.is_empty()).then(|| said.join("; "))
+}
+
 /// The catalog effort this turn runs under, if any.
 #[must_use]
 fn effort_of(request: &ChatRequest) -> Option<String> {
@@ -760,11 +870,20 @@ impl ClaudeCodeProvider {
             }
 
             // The two values a person **chose**. A `system` or `tools`
-            // difference closes nothing — the process keeps what it opened
-            // with — because those are machinery nobody picked, where keeping
+            // difference closes nothing — the process keeps its opening prompt
+            // and is told a moved roster (`i5oi`) — because those are
+            // machinery nobody picked, where keeping
             // a chosen model stale bills the opening model under a status bar
             // that says otherwise.
             if meta.model != request.model {
+                // Asked of the live process rather than paid for with a fresh
+                // record (`eawi`) — but only when nothing else about the
+                // request needs one: a changed effort has no control request
+                // (the SDK declares no `set_effort`), and a rewind is a
+                // conversation the process no longer shares.
+                if meta.effort == effort && honest(&meta.sent, &request) {
+                    return self.switch_model(&key, &meta, request, cancel).await;
+                }
                 self.held.close(&key, held::Reason::Divergence).await;
 
                 return self.spawn(&key, "model", request, cancel).await;
@@ -912,7 +1031,13 @@ impl ClaudeCodeProvider {
         tokio::spawn(held::run(io, inputs, wiring, held::DEFAULT_IDLE_BOUND));
 
         let text = owed_text(&owed(&[], &request));
-        let frame = frame::user_line(&frame::UserFrame { content: text, parent_tool_use_id: None });
+        // Text only: a title and a summary are read as text, so an image
+        // would be billed for an answer that never looks at it.
+        let frame = frame::user_line(&frame::UserFrame {
+            content: text,
+            attachments: Vec::new(),
+            parent_tool_use_id: None,
+        });
 
         tracing::info!(
             provider = ID,
@@ -1005,11 +1130,11 @@ impl ClaudeCodeProvider {
             )));
         }
 
-        // A live process runs under its opening prompt and roster. The change
-        // is logged **once per change** and picked up by the next fresh
-        // record, so D480's walk-ins and a `/plugin` reload cost nothing while
-        // the process lives.
-        self.log_stale(key, meta, &request);
+        // A live process runs under its opening prompt: a changed one is
+        // logged **once per change** and picked up by the next fresh record,
+        // so D480's walk-ins cost nothing while the process lives. A changed
+        // roster is told to the process instead (`i5oi`), below.
+        let roster_moved = self.log_stale(key, meta, &request);
 
         let text = owed_text(&owed);
         let mut sent = meta.sent.clone();
@@ -1036,15 +1161,68 @@ impl ClaudeCodeProvider {
             "riding the held process"
         );
 
-        let frame = frame::user_line(&frame::UserFrame { content: text, parent_tool_use_id: None });
+        // The roster first, on the same channel, so the notification is on
+        // the pipe before the frame that opens the turn it is for — a D492
+        // activation or a `/plugin` reload is then callable from this turn,
+        // where it used to wait for the next fresh record.
+        if roster_moved {
+            let _ = input.send(held::Input::Roster { tools: request.tools.clone() }).await;
+        }
+        let frame = frame::user_line(&frame::UserFrame {
+            content: text,
+            attachments: attachments(&owed),
+            parent_tool_use_id: None,
+        });
         let _ = input.send(held::Input::Turn { frame, sent, events }).await;
         self.watch_cancel(input, cancel);
 
         Ok(stream)
     }
 
-    /// Says once that a live process is running under a value that has moved.
-    fn log_stale(&self, key: &held::Key, meta: &held::Meta, request: &ChatRequest) {
+    /// A `/model` change on a live process: `set_model`, then the turn
+    /// (`eawi`).
+    ///
+    /// The entry's `model` moves **before** the answer is in, so the next
+    /// request is a continue rather than a second switch; what keeps that
+    /// from being a silent wrong model is the task's check, which closes the
+    /// entry at this turn's end when the process's own `system/init` names a
+    /// model the switch did not ask for. The earlier replies stay in the
+    /// record either way this turn — that is the whole of what the switch buys.
+    async fn switch_model(
+        &self,
+        key: &held::Key,
+        meta: &held::Meta,
+        request: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        let Some(input) = self.held.input(key) else {
+            return self.spawn(key, "model", request, cancel).await;
+        };
+
+        tracing::info!(
+            provider = ID,
+            key,
+            arm = Arm::Continue.word(),
+            from = %meta.model,
+            to = %request.model,
+            held_entries = self.held.len(),
+            "switching the held process's model"
+        );
+        self.held.with_meta(key, |entry| entry.model.clone_from(&request.model));
+        let _ = input.send(held::Input::SetModel { model: request.model.clone() }).await;
+
+        self.continue_turn(key, meta, request, cancel).await
+    }
+
+    /// Says once that a live process is running under a value that has moved,
+    /// and answers whether the **roster** is one of them (`i5oi`).
+    ///
+    /// A moved roster is recorded as the entry's own from here on — the
+    /// caller tells the process — so the same roster on the next request is
+    /// no change at all and a further change is one more. `stale_tools` stays
+    /// the log word, because the line still says the roster the process
+    /// opened with is not the one this request carries.
+    fn log_stale(&self, key: &held::Key, meta: &held::Meta, request: &ChatRequest) -> bool {
         let system = hash_of(&request.system);
         let tools = tools_hash(&request.tools);
 
@@ -1057,15 +1235,19 @@ impl ClaudeCodeProvider {
             );
             self.held.with_meta(key, |meta| meta.logged_stale_system = Some(system));
         }
-        if tools != meta.tools_hash && meta.logged_stale_tools != Some(tools) {
-            tracing::info!(
-                provider = ID,
-                key,
-                stale_tools = true,
-                "the process keeps its opening roster"
-            );
-            self.held.with_meta(key, |meta| meta.logged_stale_tools = Some(tools));
+        if tools == meta.tools_hash {
+            return false;
         }
+
+        tracing::info!(
+            provider = ID,
+            key,
+            stale_tools = true,
+            "the roster moved; telling the process with tools/list_changed"
+        );
+        self.held.with_meta(key, |meta| meta.tools_hash = tools);
+
+        true
     }
 
     /// Reopens a turn whose process is gone, once per turn.
@@ -1325,6 +1507,7 @@ impl ClaudeCodeProvider {
 
         let frame = frame::user_line(&frame::UserFrame {
             content: paragraphs.join("\n\n"),
+            attachments: attachments(&owed),
             parent_tool_use_id: None,
         });
         let _ = input.send(held::Input::Turn { frame, sent, events }).await;

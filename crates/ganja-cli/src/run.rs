@@ -57,6 +57,7 @@
 
 use std::io::{self, IsTerminal as _, Read as _, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
@@ -215,6 +216,23 @@ pub struct RunArgs {
     // one thing this table refuses to hold.
     #[arg(long, value_name = "NAME", conflicts_with = "attach")]
     effort: Option<String>,
+    /// Tell the model how long it has, in `/deadline`'s grammar: a span
+    /// (`90s`, `5m`, `1h30m`) or a clock time later today (`10:00`). Every
+    /// request of the turn then carries the time left; nothing is cancelled.
+    // Resolved at the clap boundary (`deadline_flag`), so a value the grammar
+    // has not got, or a clock time already behind, is refused before any
+    // engine is assembled — and resolved once, so the instant is the one this
+    // reading of the clock names rather than a span re-added to a later one.
+    // Held in the wire's own spelling, milliseconds since the epoch. Refused
+    // together with `--attach` for `--effort`'s reason: the client's surface
+    // carries no deadline route (**D557**, `ganja-code-qecz`).
+    #[arg(
+        long,
+        value_name = "DURATION|HH:MM",
+        value_parser = deadline_flag,
+        conflicts_with = "attach"
+    )]
+    deadline: Option<u64>,
     /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -325,13 +343,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
     engine.seed_effort(config.effort).await;
     // After the session, so the flag outranks whatever effort a resumed row
     // restored; before the turn, so a bad name is this refusal — listing the
-    // model's real names — and never a request built around it.
-    let outcome = match effort_switch(&engine, args.effort).await {
-        Ok(()) => {
-            drive(&engine, session, &message, args.command.as_deref(), auto, args.format).await
-        }
-        Err(refusal) => Err(refusal),
-    };
+    // model's real names — and never a request built around it. The deadline
+    // after it and before the prompt, so the turn's very first request
+    // carries the block: a budget that bit from the second step on would
+    // leave the step most likely to wander unhurried.
+    let outcome = async {
+        effort_switch(&engine, args.effort).await?;
+        seed_deadline(&engine, args.deadline).await?;
+        drive(&engine, session, &message, args.command.as_deref(), auto, args.format).await
+    }
+    .await;
 
     // Every local MCP server's process group ends here, whichever way the turn
     // went, and before the refusal below leaves the function.
@@ -367,6 +388,45 @@ async fn effort_switch(engine: &Engine, effort: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Hands the engine `--deadline`'s instant, or does nothing when the flag was
+/// not given.
+///
+/// The same [`EngineCommand::SetDeadline`] the TUI's `/deadline` sends, so a
+/// headless turn is hurried by exactly the request-only block a screen's turn
+/// is, and a run without the flag sends nothing — not even a clearing
+/// command, since a fresh engine has nothing to clear.
+async fn seed_deadline(engine: &Engine, until: Option<u64>) -> Result<()> {
+    if until.is_some() {
+        engine.send(EngineCommand::SetDeadline { until }).await?;
+    }
+
+    Ok(())
+}
+
+/// `--deadline`'s value parser: `/deadline`'s own resolver
+/// ([`ganja_tui::command::resolve_deadline`]) read against the clock now, then
+/// spelled the way [`EngineCommand::SetDeadline`] carries an instant.
+///
+/// # Errors
+///
+/// The resolver's reason, which clap prints after naming the flag and the
+/// value. Deliberately without the slash command's usage sentence: that one
+/// offers an `off` this flag does not take, and clap's own framing already
+/// names `--deadline <DURATION|HH:MM>`.
+fn deadline_flag(argument: &str) -> Result<u64, String> {
+    let until = ganja_tui::command::resolve_deadline(argument, SystemTime::now())?;
+
+    // The resolver already refuses an instant the wire cannot carry, so this
+    // arm is its contract restated rather than a case anybody meets; the
+    // sentence is there so that breaking that contract refuses a run instead
+    // of sending one a deadline nobody chose.
+    until
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
+        .ok_or_else(|| format!("{argument:?} names an instant a deadline cannot carry"))
 }
 
 /// Installs [`REFUSED`] as standing rules the engine re-applies itself.

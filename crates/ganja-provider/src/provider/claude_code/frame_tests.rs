@@ -360,8 +360,11 @@ fn a_replaced_prompt_rides_the_initialize_as_a_list() {
 
 #[test]
 fn a_user_frame_is_one_line_and_never_a_subagents() {
-    let line =
-        super::user_line(&UserFrame { content: "hello".to_owned(), parent_tool_use_id: None });
+    let line = super::user_line(&UserFrame {
+        content: "hello".to_owned(),
+        attachments: Vec::new(),
+        parent_tool_use_id: None,
+    });
 
     assert!(line.ends_with('\n'), "the CLI reads a frame per line");
     assert_eq!(line.matches('\n').count(), 1);
@@ -371,6 +374,65 @@ fn a_user_frame_is_one_line_and_never_a_subagents() {
     assert_eq!(sent["message"]["role"], "user");
     assert_eq!(sent["message"]["content"], "hello");
     assert_eq!(sent["parent_tool_use_id"], serde_json::Value::Null);
+}
+
+/// `m1jk`. An attachment turns `content` into the `MessageParam` block array:
+/// the text first, then each attachment as the Messages API block its type
+/// earns — an `image` for a picture and a `document` for a PDF, each with a
+/// `base64` source. The shape is the SDK's declared one; no recorded frame
+/// carried it.
+#[test]
+fn a_user_frame_with_attachments_is_the_text_block_then_one_block_per_attachment() {
+    let line = super::user_line(&UserFrame {
+        content: "what is in these".to_owned(),
+        attachments: vec![
+            super::Attachment { mime: "image/png".to_owned(), data: "iVBORw0K".to_owned() },
+            super::Attachment { mime: "application/pdf".to_owned(), data: "JVBERi0x".to_owned() },
+        ],
+        parent_tool_use_id: None,
+    });
+    assert_eq!(line.matches('\n').count(), 1, "still one frame, one line");
+
+    let sent: serde_json::Value = serde_json::from_str(line.trim()).expect("a JSON line");
+    assert_eq!(
+        sent["message"]["content"],
+        json!([
+            {"type": "text", "text": "what is in these"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"}},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0x"}},
+        ])
+    );
+    assert_eq!(sent["message"]["role"], "user");
+}
+
+/// `eawi` and `i5oi`: the two host→CLI requests that carry a payload, in the
+/// SDK's declared shapes (`sdk.d.ts:2746-2749`, `:2569-2573`). `default` is
+/// the SDK's absent `model`, never the literal.
+#[test]
+fn the_payload_requests_are_spelled_the_way_the_sdk_declares_them() {
+    let switch: serde_json::Value =
+        serde_json::from_str(super::set_model_line("r1", Some("claude-sonnet-5")).trim())
+            .expect("a JSON line");
+    assert_eq!(switch["type"], "control_request");
+    assert_eq!(switch["request_id"], "r1");
+    assert_eq!(switch["request"], json!({"subtype": "set_model", "model": "claude-sonnet-5"}));
+
+    let to_default: serde_json::Value =
+        serde_json::from_str(super::set_model_line("r2", None).trim()).expect("a JSON line");
+    assert_eq!(to_default["request"], json!({"subtype": "set_model"}));
+
+    let pushed: serde_json::Value = serde_json::from_str(
+        super::mcp_message_line("r3", "ganja", &json!({"jsonrpc": "2.0", "method": "m"})).trim(),
+    )
+    .expect("a JSON line");
+    assert_eq!(
+        pushed["request"],
+        json!({
+            "subtype": "mcp_message",
+            "server_name": "ganja",
+            "message": {"jsonrpc": "2.0", "method": "m"},
+        })
+    );
 }
 
 #[test]

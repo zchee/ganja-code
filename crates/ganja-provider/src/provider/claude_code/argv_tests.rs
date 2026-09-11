@@ -269,6 +269,44 @@ fn an_effort_is_named_only_when_the_turn_runs_under_one() {
     );
 }
 
+/// `fd5v`: readable thinking is asked for by a turn that asked for reasoning,
+/// and by no other. The effort is that ask — the one reasoning signal a
+/// `ChatRequest` carries on this wire — so the pair follows it both ways, on
+/// both model spellings, and never reaches a one-shot, whose text is read and
+/// whose reasoning is not.
+#[test]
+fn readable_thinking_is_asked_for_only_when_the_turn_runs_under_an_effort() {
+    for spawn in conversations() {
+        let argv = Argv::conversation(&spawn).expect("a built argv");
+        let display = value_after(&argv, "--thinking-display");
+
+        match spawn.effort {
+            Some(_) => assert_eq!(
+                display.as_deref(),
+                Some("summarized"),
+                "an effort-bearing turn must ask for the thinking text: {:?}",
+                spelled(&argv)
+            ),
+            None => assert_eq!(
+                display,
+                None,
+                "a turn with no effort asked for no reasoning and must not pay for its text: {:?}",
+                spelled(&argv)
+            ),
+        }
+    }
+
+    for one_shot in one_shots() {
+        let argv = Argv::one_shot(&one_shot).expect("a built argv");
+        assert_eq!(
+            value_after(&argv, "--thinking-display"),
+            None,
+            "a title or a summary reads text only: {:?}",
+            spelled(&argv)
+        );
+    }
+}
+
 // ---------------------------------------------------------------- the env
 
 /// The whole environment posture, read off `Command::get_envs()` — no

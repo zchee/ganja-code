@@ -898,28 +898,62 @@ pub fn deadline(text: &str, now: SystemTime) -> Option<Deadline> {
     Some(match argument {
         "" => Deadline::Show,
         "off" => Deadline::Off,
-        // The clock form is tried by its own shape rather than after the span
-        // parser has failed, because the two grammars cannot overlap — a span
-        // has no colon in it — and because the refusals differ: a clock time
-        // may be well-formed and still be refused for being behind, which is
-        // a sentence the span parser has no way to produce.
-        _ if argument.contains(':') => clock_deadline(argument, now),
-        _ => match parse_span(argument) {
-            Some(span) => match now.checked_add(span) {
-                Some(until) => Deadline::Set(until),
-                // A span so large the clock cannot hold it. Refused rather
-                // than clamped: somebody who typed it meant a number, and
-                // silently substituting a different one is worse than saying
-                // no.
-                None => Deadline::Refused(refused_deadline(format!(
-                    "{argument:?} is further off than this machine's clock reaches"
-                ))),
-            },
-            None => Deadline::Refused(refused_deadline(format!(
-                "`/deadline` did not understand {argument:?}"
-            ))),
+        _ => match resolve_deadline(argument, now) {
+            Ok(until) => Deadline::Set(until),
+            Err(reason) => Deadline::Refused(refused_deadline(reason)),
         },
     })
+}
+
+/// A budget in `/deadline`'s grammar, resolved against `now` to the instant it
+/// names: a span (`90s`, `5m`, `1h30m`) that far from `now`, or a clock time
+/// (`10:00`) today, local.
+///
+/// **The one parser of that grammar, with two doors** (**D557**): [`deadline`]
+/// reads a typed `/deadline` line, and `ganja run --deadline` reads a flag, so
+/// the two cannot come to disagree about what `1h30m` means. Only an instant is
+/// resolved here. `off` and the bare line are the slash command's own words
+/// rather than budgets, so [`deadline`] answers them before it asks, and a
+/// flag handed `off` is refused — a fresh headless run has nothing to clear.
+///
+/// # Errors
+///
+/// The reason as one sentence, without the usage that follows it: each door
+/// ends it with its own, [`deadline`] with `/deadline`'s grammar. Refused are a
+/// span of no time at all, a unit or shape the grammar has not got, a clock
+/// time out of range or already behind, and an instant further off than
+/// [`ganja_protocol::Command::SetDeadline`]'s milliseconds can name.
+pub fn resolve_deadline(argument: &str, now: SystemTime) -> Result<SystemTime, String> {
+    // The clock form is tried by its own shape rather than after the span
+    // parser has failed, because the two grammars cannot overlap — a span
+    // has no colon in it — and because the refusals differ: a clock time
+    // may be well-formed and still be refused for being behind, which is
+    // a sentence the span parser has no way to produce.
+    let until = if argument.contains(':') {
+        clock_deadline(argument, now)?
+    } else {
+        let span = parse_span(argument)
+            .ok_or_else(|| format!("`/deadline` did not understand {argument:?}"))?;
+        now.checked_add(span).ok_or_else(|| further_off(argument))?
+    };
+
+    // The wire spells the instant in `u64` milliseconds since the epoch, which
+    // runs out long before this machine's clock does. Without this check a
+    // span past it resolved, reached the frontend's conversion as nothing, and
+    // went out as `until: None` — clearing the deadline somebody had just set
+    // while the notice said it was set. One sentence for both ceilings,
+    // because to whoever typed the number they are the same fact.
+    let carried = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .is_ok_and(|since| u64::try_from(since.as_millis()).is_ok());
+    if carried { Ok(until) } else { Err(further_off(argument)) }
+}
+
+/// A span so large no deadline can name its end. Refused rather than clamped:
+/// somebody who typed it meant a number, and silently substituting a different
+/// one is worse than saying no.
+fn further_off(argument: &str) -> String {
+    format!("{argument:?} is further off than this machine's clock reaches")
 }
 
 /// `HH:MM` resolved against `now`: today's local wall clock.
@@ -929,11 +963,9 @@ pub fn deadline(text: &str, now: SystemTime) -> Option<Deadline> {
 /// almost certainly mistyped or misread the time; giving them a deadline
 /// twenty-three hours out would be a budget nobody chose, and the whole point
 /// of this feature is that the person chose it.
-fn clock_deadline(argument: &str, now: SystemTime) -> Deadline {
-    let refuse = |reason: String| Deadline::Refused(refused_deadline(reason));
-
+fn clock_deadline(argument: &str, now: SystemTime) -> Result<SystemTime, String> {
     let Some((hours, minutes)) = argument.split_once(':') else {
-        return refuse(format!("`/deadline` did not understand {argument:?}"));
+        return Err(format!("`/deadline` did not understand {argument:?}"));
     };
     // The shapes first, on the text: one or two digits for the hour and
     // exactly two for the minute, so `10:0` and `10:000` are refused rather
@@ -945,19 +977,19 @@ fn clock_deadline(argument: &str, now: SystemTime) -> Deadline {
     // sentence: they *are* clock times in shape, and what is wrong with them
     // is worth saying rather than folding into "did not understand".
     let (Ok(hour), Ok(minute)) = (hours.parse::<i8>(), minutes.parse::<i8>()) else {
-        return refuse(format!("`/deadline` did not understand {argument:?}"));
+        return Err(format!("`/deadline` did not understand {argument:?}"));
     };
     if !shaped {
-        return refuse(format!("`/deadline` did not understand {argument:?}"));
+        return Err(format!("`/deadline` did not understand {argument:?}"));
     }
     if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
-        return refuse(format!(
+        return Err(format!(
             "{argument:?} is not a clock time: the hours run 00 to 23 and the minutes 00 to 59"
         ));
     }
 
     let Ok(stamp) = jiff::Timestamp::try_from(now) else {
-        return refuse("this machine's clock is outside the range ganja can read".to_owned());
+        return Err("this machine's clock is outside the range ganja can read".to_owned());
     };
     let Ok(zoned) = stamp
         .to_zoned(jiff::tz::TimeZone::system())
@@ -971,17 +1003,17 @@ fn clock_deadline(argument: &str, now: SystemTime) -> Deadline {
         // A local time that does not exist today — the hour a spring-forward
         // transition skips. Naming the gap is more use than a generic
         // refusal, because the fix is to pick another minute.
-        return refuse(format!("{argument:?} does not happen today in this time zone"));
+        return Err(format!("{argument:?} does not happen today in this time zone"));
     };
 
     let until = SystemTime::from(zoned.timestamp());
     if until <= now {
-        return refuse(format!(
+        return Err(format!(
             "{argument:?} is already behind: a clock time names a moment later today"
         ));
     }
 
-    Deadline::Set(until)
+    Ok(until)
 }
 
 /// `<n>h<n>m<n>s` in any subset — `90s`, `5m`, `1h30m`, `2h`, `1h30m15s` — or

@@ -906,3 +906,87 @@ fn the_snapshot_stands_alone() {
         snapshot.models[0].pricing
     );
 }
+
+/// The recording's two served spellings, a row published below a million
+/// and a spelling nobody lends for, against one fixture table.
+///
+/// Probed through `borrowed_in` for the reason `scoped` is: the window raise
+/// is only visible on a row that publishes less than the suffix promises, and
+/// the process-global snapshot's `claude-opus-5` already publishes a million.
+#[test]
+fn a_served_spelling_borrows_the_lenders_sizing_and_its_million_suffix_raises_the_window() {
+    let body = r#"{
+          "anthropic": {
+            "models": {
+              "claude-opus-5": { "limit": { "context": 200000, "output": 64000 },
+                                 "cost": { "input": 5, "output": 25 } },
+              "claude-haiku-4-5": { "limit": { "context": 200000, "output": 32000 },
+                                    "cost": { "input": 1, "output": 5 } }
+            }
+          }
+        }"#;
+    let catalog = parse(body).expect("the fixture is a catalog");
+
+    let cases = [
+        (
+            "the unsuffixed spelling lends the row as published",
+            "claude-code",
+            "claude-opus-5",
+            Some(("anthropic/claude-opus-5", 200_000, 64_000)),
+        ),
+        (
+            "the million suffix names the same row and raises its window",
+            "claude-code",
+            "claude-opus-5[1m]",
+            Some(("anthropic/claude-opus-5", 1_000_000, 64_000)),
+        ),
+        (
+            "the raise applies to whichever row the suffix is on",
+            "claude-code",
+            "claude-haiku-4-5[1m]",
+            Some(("anthropic/claude-haiku-4-5", 1_000_000, 32_000)),
+        ),
+        (
+            "a spelling no lending row answers borrows nothing",
+            "claude-code",
+            "claude-fable-5-1",
+            None,
+        ),
+        ("a suffix alone is not a model", "claude-code", "[1m]", None),
+        (
+            "a provider outside the table borrows nothing even for a real row",
+            "cursor",
+            "claude-opus-5",
+            None,
+        ),
+    ];
+
+    for (name, provider, served, expected) in cases {
+        let got = super::borrowed_in(&catalog, provider, served)
+            .map(|row| (row.row, row.context_window, row.max_output));
+        let expected = expected.map(|(row, window, output)| (row.to_owned(), window, output));
+        assert_eq!(got, expected, "{name}: borrowed_in({provider:?}, {served:?})");
+    }
+}
+
+/// The recording's own spellings against the table every session reads, so
+/// the pin is about the rows a claude-code session actually finds, not only
+/// about a fixture.
+#[test]
+fn the_recordings_served_spellings_find_a_window_in_the_shipped_table() {
+    for served in ["claude-opus-5", "claude-opus-5[1m]"] {
+        let row = super::borrowed_row("claude-code", served)
+            .unwrap_or_else(|| panic!("{served} should borrow the anthropic row"));
+        assert_eq!(row.row, "anthropic/claude-opus-5", "{served}");
+        assert!(row.context_window >= 1_000_000, "{served}: {row:?}");
+    }
+}
+
+/// Borrowing sizing is not being cataloged: the seat bills no token, so the
+/// provider that borrows a window must still be one this table cannot price.
+#[test]
+fn a_borrowing_provider_is_still_not_cataloged() {
+    assert!(super::borrowed_row("claude-code", "claude-opus-5").is_some());
+    assert!(!carries("claude-code"), "claude-code borrows sizing, never a price");
+    assert!(model_for("claude-code", "claude-opus-5").is_none());
+}

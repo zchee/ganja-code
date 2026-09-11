@@ -51,8 +51,12 @@
 //! - **(iii) divergence** — a request whose `model` or `effort` differs from
 //!   the live entry's. Narrowed to those two: they are what a person chose,
 //!   and keeping a chosen model stale bills the opening model under a status
-//!   bar that says otherwise. A `system` or `tools` difference closes
-//!   **nothing** — the process keeps what it opened with, logged once.
+//!   bar that says otherwise. A `model` change alone is first **asked** of
+//!   the live process with `set_model` (`eawi`, unmeasured live) and closes
+//!   the entry only at the end of a turn whose `system/init` did not confirm
+//!   it. A `system` or `tools` difference closes **nothing**: the process
+//!   keeps its opening prompt, logged once, and is told a moved roster with
+//!   `tools/list_changed` (`i5oi`, unmeasured live).
 //! - **(iv) refused** — a `system/model_refusal_no_fallback` arrived. The
 //!   entry is closed at that turn's `result` and the binding remembers it, so
 //!   the next spawn knows even from a later ganja process.
@@ -169,9 +173,11 @@ pub enum Reason {
     Refused,
     /// Rule (ii).
     Cap,
-    /// Rule (iii). The Spawn arm never reads this one: a divergence's reason
-    /// word is decided off the live entry's own `model`/`effort` before the
-    /// entry is closed, because the binding holds neither.
+    /// Rule (iii). The Spawn arm reads this one only after a model switch the
+    /// process did not confirm (`eawi`), which closes the entry at a turn's
+    /// end; every other divergence's reason word is decided off the live
+    /// entry's own `model`/`effort` before the entry is closed, because the
+    /// binding holds neither.
     Divergence,
     /// An explicit close, or the provider going away.
     Close,
@@ -190,7 +196,11 @@ impl Reason {
             Self::IdleEvicted => Some("idle-evicted"),
             Self::Stranded => Some("stranded"),
             Self::Refused => Some("refused-record"),
-            Self::Cap | Self::Divergence | Self::Close => None,
+            // Read only after a model switch the process did not confirm
+            // (`eawi`): every other divergence spawns its own record at once,
+            // under a word of its own, and never asks the ring.
+            Self::Divergence => Some("divergence"),
+            Self::Cap | Self::Close => None,
         }
     }
 }
@@ -227,8 +237,6 @@ pub struct Meta {
     /// under the same changed prompt logs nothing and a third under a further
     /// change logs once more.
     pub logged_stale_system: Option<u64>,
-    /// The same for the roster.
-    pub logged_stale_tools: Option<u64>,
 }
 
 impl Meta {
@@ -253,7 +261,6 @@ impl Meta {
             last_frame_at: Instant::now(),
             busy: false,
             logged_stale_system: None,
-            logged_stale_tools: None,
         }
     }
 }
@@ -287,6 +294,32 @@ pub enum Input {
         carried_id: Option<String>,
         /// Where the rest of the turn's events go.
         events: mpsc::Sender<ProviderEvent>,
+    },
+    /// Replace the roster `tools/list` answers with, and tell the CLI it moved
+    /// (`i5oi`).
+    ///
+    /// Sent **ahead of** the `Turn` it belongs to, on the same channel, so the
+    /// notification is written before the frame that opens the turn the new
+    /// roster is for. Never sent beside a `Resolve`: an answered ask's
+    /// `tools/call` may still be on its way, and a roster that moved under it
+    /// could refuse by name a call the engine has already run.
+    Roster {
+        /// The request's roster, in the order the engine advertised it.
+        tools: Vec<crate::tool::ToolDefinition>,
+    },
+    /// Ask the process to answer as `model` from its next turn on, and check
+    /// that it did (`eawi`).
+    ///
+    /// Sent ahead of the `Turn` it is for, like [`Input::Roster`]. The check
+    /// is that turn's own `system/init`: a model this side cannot read there
+    /// — a different one, or none because no `init` arrived — closes the entry
+    /// at that turn's `result` under [`Reason::Divergence`], so the next
+    /// request opens a fresh record under `--model` the way every model
+    /// change did before. An unhonoured switch costs that one turn, on the
+    /// model the served-model slot names, and is never silent.
+    SetModel {
+        /// The model the request asked for, in ganja's spelling.
+        model: String,
     },
     /// End the running turn, keeping the process.
     Cancel,
@@ -640,6 +673,9 @@ pub struct Slots {
     pub served_model: Arc<Mutex<Option<ServedModel>>>,
     /// What the vendor last said about the account's windows.
     pub rate: Arc<Mutex<Option<serde_json::Value>>>,
+    /// The sentence the last unusual draw earned, until an ordinary one takes
+    /// it down (`2z4r`, [`super::draw_notice`]).
+    pub rate_notice: Arc<Mutex<Option<String>>>,
 }
 
 /// Everything one task needs that is not its own child.
@@ -700,6 +736,21 @@ struct Turn {
     refusal: Option<super::frame::Refusal>,
     /// Whether readable thinking is open, so a second block gets a break.
     reasoning_open: bool,
+    /// Whether this turn has already parked an unusual-draw notice, so a
+    /// second event in the same turn says nothing new (`2z4r`).
+    rate_noticed: bool,
+    /// The model a `set_model` asked for, until the `system/init` that says
+    /// whether it was honoured (`eawi`). Not reset by `open_turn`: it is
+    /// written just **before** the turn it is checked on opens.
+    model_check: Option<String>,
+    /// Whether that `system/init` named a model the switch did not ask for,
+    /// so the turn's `result` closes the entry.
+    model_unhonoured: bool,
+    /// The ids of control requests written **ahead of** a turn — a roster
+    /// notice, a model switch — kept apart from `minted` because the turn they
+    /// precede is what clears `minted`, so their answers would otherwise read
+    /// as a stranger's.
+    ahead: std::collections::HashSet<String>,
     /// The `request_id`s this side minted, so an echoed `control_response` is
     /// told from an answer.
     minted: std::collections::HashSet<String>,
@@ -744,7 +795,7 @@ enum Deadline {
 pub async fn run(
     io: super::process::ChildIo,
     mut inputs: mpsc::Receiver<Input>,
-    wiring: Wiring,
+    mut wiring: Wiring,
     idle_bound: Duration,
 ) {
     use tokio::io::AsyncWriteExt as _;
@@ -835,6 +886,12 @@ pub async fn run(
                         record_sent(&wiring, &mut turn, sent);
                     }
                 }
+                Some(Input::Roster { tools }) => {
+                    announce_roster(&mut wiring, &mut turn, &mut stdin, tools).await;
+                }
+                Some(Input::SetModel { model }) => {
+                    switch_model(&mut wiring, &mut turn, &mut stdin, model).await;
+                }
                 Some(Input::Cancel) => cancel(&wiring, &mut turn, &mut stdin).await,
                 Some(Input::Close) => break,
                 None => inputs_open = false,
@@ -915,7 +972,7 @@ pub async fn run(
                 Input::Turn { events, .. } | Input::Resolve { events, .. } => {
                     let _ = events.try_send(ProviderEvent::Failed(error.clone()));
                 }
-                Input::Cancel | Input::Close => {}
+                Input::Roster { .. } | Input::SetModel { .. } | Input::Cancel | Input::Close => {}
             }
         }
     }
@@ -1011,6 +1068,7 @@ fn open_turn(wiring: &Wiring, turn: &mut Turn, events: mpsc::Sender<ProviderEven
     turn.expected_calls = 0;
     turn.emitted_calls = 0;
     turn.reasoning_open = false;
+    turn.rate_noticed = false;
     turn.refusal = None;
     turn.suppress_assistant = false;
 
@@ -1235,6 +1293,19 @@ async fn handle(
             turn.seen_init = true;
             served(wiring, &init.model);
 
+            // The switch's answer: the first `init` after a `set_model`.
+            if let Some(asked) = turn.model_check.take() {
+                turn.model_unhonoured = !honoured(&asked, &init.model);
+                tracing::info!(
+                    provider = super::ID,
+                    key = %wiring.key,
+                    asked = %asked,
+                    served_model = %init.model,
+                    honoured = !turn.model_unhonoured,
+                    "the process answered the model switch"
+                );
+            }
+
             let mut meta = wiring.meta.lock().expect("an entry's meta is never poisoned");
             meta.session_id.clone_from(&init.session_id);
             drop(meta);
@@ -1300,7 +1371,28 @@ async fn handle(
             tracing::debug!(provider = super::ID, key = %wiring.key, is_replay, "the CLI recorded a user frame");
         }
         Inbound::RateLimit(info) => {
+            let notice = super::draw_notice(&info);
             *wiring.slots.rate.lock().expect("the rate slot is never poisoned") = Some(info);
+
+            let mut slot =
+                wiring.slots.rate_notice.lock().expect("the rate-notice slot is never poisoned");
+            match notice {
+                // The sentence is about now, so ordinary draw takes it down.
+                None => *slot = None,
+                // Once per turn: a second unusual event in the same turn is
+                // the same news, and the first one's words stand.
+                Some(_) if turn.rate_noticed => {}
+                Some(sentence) => {
+                    turn.rate_noticed = true;
+                    tracing::info!(
+                        provider = super::ID,
+                        key = %wiring.key,
+                        notice = %sentence,
+                        "the vendor says this draw is not ordinary"
+                    );
+                    *slot = Some(sentence);
+                }
+            }
         }
         Inbound::AuthStatus { is_authenticating, output } => {
             // Kept by construction: on every run of the recording this frame
@@ -1339,7 +1431,22 @@ async fn handle(
                 .await;
             }
         },
-        Inbound::ControlResponse { request_id, .. } => {
+        Inbound::ControlResponse { request_id, error, .. } => {
+            // An answer to a request written ahead of this turn. A refused
+            // switch is logged and left to the `init` check, which is what
+            // decides; a refused roster notice changes nothing this side did.
+            if turn.ahead.remove(&request_id) {
+                if let Some(error) = error {
+                    tracing::info!(
+                        provider = super::ID,
+                        key = %wiring.key,
+                        %error,
+                        "the CLI refused a request written ahead of the turn"
+                    );
+                }
+
+                return None;
+            }
             // The CLI echoes every `control_response` this side sends, so an
             // id this side did not mint is that echo and never an answer.
             if !turn.minted.remove(&request_id) {
@@ -1428,6 +1535,21 @@ fn finish(wiring: &Wiring, turn: &mut Turn, result: super::frame::Result_) -> Op
         binding.refused_streak = 0;
     });
 
+    // A switch this turn could not confirm — a different model, or no `init`
+    // at all, so the check is still armed — closes the entry now, and the
+    // next request opens a fresh record under `--model` (`eawi`). The turn
+    // itself finished: what it cost is one turn, shown by the served slot.
+    if turn.model_unhonoured || turn.model_check.take().is_some() {
+        turn.model_unhonoured = false;
+        tracing::info!(
+            provider = super::ID,
+            key = %wiring.key,
+            "the model switch was not confirmed; the next turn opens a fresh record"
+        );
+
+        return Some(Reason::Divergence);
+    }
+
     None
 }
 
@@ -1488,6 +1610,95 @@ fn step_ends(wiring: &Wiring, turn: &mut Turn) {
     close_turn(wiring, turn);
     turn.expected_calls = 0;
     turn.emitted_calls = 0;
+}
+
+/// The roster moved: `tools/list` answers with the new one from here on, and
+/// the CLI is told so once (`i5oi`).
+///
+/// The notification is a host→CLI `mcp_message` control request whose answer
+/// is the CLI's own empty success, so its id joins `ahead` and that answer is
+/// consumed rather than logged as a stranger's. **Unmeasured live**: what the
+/// CLI does next — a fresh `tools/list`, answered here from `wiring.tools` — is
+/// the bundle's reading (W1a Q3.9-3.10), and no recorded run sent this.
+async fn announce_roster(
+    wiring: &mut Wiring,
+    turn: &mut Turn,
+    stdin: &mut Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    tools: Vec<crate::tool::ToolDefinition>,
+) {
+    wiring.tools = tools;
+
+    let request_id = crate::protocol::uuidv7();
+    turn.ahead.insert(request_id.clone());
+    write(
+        stdin,
+        &super::frame::mcp_message_line(
+            &request_id,
+            super::rpc::SERVER,
+            &super::rpc::list_changed(),
+        ),
+    )
+    .await;
+
+    tracing::info!(
+        provider = super::ID,
+        key = %wiring.key,
+        tools = wiring.tools.len(),
+        "told the process its roster changed"
+    );
+}
+
+/// Asks the process to answer as `model`, and arms the check its next
+/// `system/init` answers (`eawi`).
+///
+/// The served-model pair's `requested` half moves with it, so the bar reads
+/// the model this switch asked for beside whatever the vendor says it served.
+async fn switch_model(
+    wiring: &mut Wiring,
+    turn: &mut Turn,
+    stdin: &mut Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    model: String,
+) {
+    let request_id = crate::protocol::uuidv7();
+    turn.ahead.insert(request_id.clone());
+    let named = (model != super::DEFAULT_MODEL).then_some(model.as_str());
+    write(stdin, &super::frame::set_model_line(&request_id, named)).await;
+
+    tracing::info!(
+        provider = super::ID,
+        key = %wiring.key,
+        from = %wiring.requested_model,
+        to = %model,
+        "asked the process to switch model"
+    );
+    wiring.requested_model.clone_from(&model);
+    turn.model_check = Some(model);
+    turn.model_unhonoured = false;
+}
+
+/// Whether a `system/init`'s `served` model is the one a switch to `asked`
+/// could have produced (`eawi`).
+///
+/// Compared leniently, because the vendor's spelling is not ganja's and a
+/// request cannot ask for one: `default` is the vendor's choice and matches
+/// anything; a trailing `[…]` context marker is the vendor's (`claude-opus-5`
+/// is served as `claude-opus-5[1m]`); and an alias with no `-` in it —
+/// `opus`, `sonnet` — matches a served id naming it. Anything else must be
+/// equal. Lenient in the direction that keeps a process, which a wrong answer
+/// here costs nothing more than the served-model slot already shows; strict
+/// would respawn on every alias, which is the cost this bead removes.
+#[must_use]
+pub fn honoured(asked: &str, served: &str) -> bool {
+    if asked == super::DEFAULT_MODEL {
+        return true;
+    }
+
+    let served = served.split_once('[').map_or(served, |(bare, _)| bare);
+    if served == asked {
+        return true;
+    }
+
+    !asked.is_empty() && !asked.contains('-') && served.contains(asked)
 }
 
 /// A JSON-RPC message for a server this side declared.

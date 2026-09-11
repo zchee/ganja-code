@@ -426,6 +426,106 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
     }
 }
 
+/// A model nothing sizes — no catalog row, and a wire that borrows none —
+/// never compacts on its own, because there is no fill level to read. But a
+/// `/compact` a person typed on it used to return without asking anything,
+/// which left the one transcript nothing else will bound with no door at all
+/// (bead `q3ep`). It now asks for the summary and stores it exactly as a
+/// cataloged session's is stored.
+#[tokio::test]
+async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_summary() {
+    const SUMMARY: &str = "## Objective\n- find the thing";
+    const UNSIZED: &str = "a-model-no-catalog-row-answers";
+    assert!(crate::catalog::model(UNSIZED).is_none(), "the test needs a model nothing sizes");
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta(SUMMARY.to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let seen = Arc::clone(&provider.seen);
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let storage = Storage::open(directory.path().join("storage"));
+    // A measure no window could hold, so an automatic trigger that had any
+    // window to compare it with would fire on the very next turn.
+    let session = ganja_testkit::seed_session(&storage, u64::MAX / 16);
+    ganja_testkit::seed_message(&storage, &session, &Message::user("the objective"));
+
+    let engine = Engine::persistent(
+        provider,
+        UNSIZED,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        storage,
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&session).await.expect("the session loads");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "next".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+    assert_eq!(
+        seen.lock().expect("the request log is never poisoned").len(),
+        1,
+        "the automatic trigger has no window to measure and asks nothing but the turn"
+    );
+    assert_eq!(engine.current_session().and_then(|info| info.summary), None);
+
+    engine.send(Command::Compact).await.expect("an idle engine accepts a compaction");
+    let compacting = drain(&mut events).await;
+
+    {
+        let requests = seen.lock().expect("the request log is never poisoned");
+        assert_eq!(requests.len(), 2, "the manual compaction asked the provider: {requests:?}");
+        let summarize = &requests[1];
+        assert!(summarize.tools.is_empty(), "the summarize request is the toolless one");
+        assert_eq!(summarize.messages.len(), 1, "one message carries the whole conversation");
+        let prompt = summarize.messages[0]
+            .parts
+            .iter()
+            .filter_map(Part::as_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("[User]: the objective"), "serialized into it: {prompt}");
+    }
+
+    let summary = compacting
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageStarted { message, .. } if message.role == Role::Assistant => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .expect("the summary enters the transcript");
+    assert_eq!(summary.parts.first().and_then(Part::as_text), Some(SUMMARY));
+    assert_eq!(
+        engine.current_session().and_then(|info| info.summary).as_ref(),
+        Some(&summary.id),
+        "the window now opens at the summary"
+    );
+
+    // Stored exactly as a cataloged wire's summary is: the record names it
+    // and the transcript holds it, read back through a second handle.
+    let reread = Storage::open(directory.path().join("storage"));
+    let info = reread.load_info(&session).expect("the record reads").expect("the record exists");
+    assert_eq!(info.summary.as_ref(), Some(&summary.id), "the stored record names the summary");
+    let transcript = reread.load_transcript(&session).expect("the transcript reads");
+    assert!(
+        transcript.iter().any(|message| message.id == summary.id
+            && message.parts.first().and_then(Part::as_text) == Some(SUMMARY)),
+        "the stored transcript holds the summary: {transcript:?}"
+    );
+}
+
 /// The status bar's context meter polls this the way it polls `jobs()`:
 /// the estimate is the stored measure compaction reads, and the window is
 /// the catalog's — both visible without a turn in flight (**D469**).
@@ -487,6 +587,72 @@ async fn the_context_estimate_has_no_window_for_an_uncataloged_model() {
         estimate.window, None,
         "only the catalog can size a window, and it does not know the fake model"
     );
+}
+
+/// A wire that names what its vendor served, and nothing else: the id is
+/// the one `catalog::borrowed_row` lends to, and the served pair is set by
+/// the test the way a turn's frames would set it.
+struct ServingProvider {
+    served: Mutex<Option<crate::provider::ServedModel>>,
+}
+
+#[async_trait]
+impl Provider for ServingProvider {
+    fn id(&self) -> &str {
+        "claude-code"
+    }
+
+    async fn stream(
+        &self,
+        _request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        Ok(stream::iter(vec![ProviderEvent::Finish(FinishReason::Completed)]).boxed())
+    }
+
+    fn served_model(&self) -> Option<crate::provider::ServedModel> {
+        self.served.lock().expect("the served slot is never poisoned").clone()
+    }
+}
+
+/// An uncataloged model gets a window once its vendor names a served model
+/// a catalog row answers for — the meter and `/context` both, from the one
+/// derivation compaction reads — and loses it again when the served name
+/// answers some other request (a delegated child's) or no row at all.
+#[tokio::test]
+async fn a_served_model_lends_an_uncataloged_session_the_borrowed_rows_window() {
+    let provider = Arc::new(ServingProvider { served: Mutex::new(None) });
+    let engine = bare(Arc::clone(&provider) as Arc<dyn Provider>, "default");
+    let serve = |requested: &str, served: &str| {
+        *provider.served.lock().expect("the served slot is never poisoned") =
+            Some(crate::provider::ServedModel {
+                requested: requested.to_owned(),
+                served: served.to_owned(),
+            });
+    };
+
+    assert_eq!(engine.context_estimate().window, None, "nothing served yet, nothing to borrow");
+    assert_eq!(engine.context_breakdown().await.window, None);
+
+    serve("default", "claude-opus-5[1m]");
+    assert_eq!(
+        engine.context_estimate().window,
+        Some(1_000_000),
+        "the served spelling borrows anthropic/claude-opus-5, raised by its [1m] suffix"
+    );
+    let breakdown = engine.context_breakdown().await;
+    assert_eq!(breakdown.window, Some(1_000_000), "/context reads the same denominator");
+    assert_eq!(breakdown.reserve, Some(100_000), "and derives its reserve from it");
+
+    serve("sonnet", "claude-sonnet-5");
+    assert_eq!(
+        engine.context_estimate().window,
+        None,
+        "a served name that answers another model's request says nothing about this one"
+    );
+
+    serve("default", "claude-no-such-model");
+    assert_eq!(engine.context_estimate().window, None, "a spelling no row answers lends nothing");
 }
 
 /// An engine with something in every fixed category, for the breakdown

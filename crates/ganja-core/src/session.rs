@@ -2939,6 +2939,36 @@ pub(crate) fn compaction_reserve(window: u64) -> u64 {
     window.saturating_sub(window.saturating_mul(9) / 10)
 }
 
+/// The context window a turn on `model` is sized against, or [`None`] when
+/// nothing can say.
+///
+/// The catalog's own row first — sizing keeps the id-only lookup, as it
+/// always has. Past it, a provider the catalog cannot price may still
+/// **borrow** a window (`catalog::borrowed_row`): its vendor names what it
+/// served, and that spelling can be another provider's row. Never the row's
+/// price — the borrowed type has none — because the one provider that
+/// borrows today bills a subscription seat rather than tokens (**D556**).
+///
+/// The served name is read only when it answers **this** model's request.
+/// `Provider::served_model` is provider-wide and newest-wins, so a delegated
+/// child on a model of its own moves it; its `requested` half is ganja's own
+/// spelling, the same one `model` is, which is what makes that check an
+/// equality rather than a guess about two vendors' names.
+///
+/// One function for the three readers — the auto-trigger and the fit guard
+/// in [`compact_if_needed`], and the engine's `context_estimate` and
+/// `context_breakdown` — so the meter a person reads and the trigger that
+/// acts on it cannot disagree about the denominator.
+pub(crate) fn context_window(provider: &dyn Provider, model: &str) -> Option<u64> {
+    if let Some(row) = catalog::model(model) {
+        return Some(row.context_window);
+    }
+
+    let served = provider.served_model().filter(|served| served.requested == model)?;
+
+    catalog::borrowed_row(provider.id(), &served.served).map(|row| row.context_window)
+}
+
 /// Summarizes the live window into a fresh assistant message when the last
 /// request already filled 90% of the model's context window, then resets the
 /// window to that summary so the user's turn proceeds inside budget.
@@ -2949,8 +2979,11 @@ pub(crate) fn compaction_reserve(window: u64) -> u64 {
 /// uncompacted rather than dead. The trigger diverges deliberately: upstream
 /// core estimates the assembled request, this port compares the stored
 /// `context_tokens` against the catalog window at turn start, which is the
-/// contract P4 froze (the measure survives resume, and a model the catalog
-/// does not know never compacts).
+/// contract P4 froze (the measure survives resume). A model nothing sizes —
+/// no catalog row and no borrowed one, [`context_window`] — never compacts
+/// **on its own**; a manual `/compact` on it still does, without the fit
+/// guard, because the person asked and nothing else will bound that
+/// transcript.
 ///
 /// The summary is announced as one complete [`Event::MessageStarted`] rather
 /// than streamed: the frozen protocol closes a message only through the
@@ -2980,30 +3013,46 @@ async fn compact_if_needed(
         if info.id != persist.session {
             return ControlFlow::Continue(None);
         }
-        let Some(model) = catalog::model(&turn.model) else {
-            if !live.warned_uncataloged {
-                live.warned_uncataloged = true;
-                tracing::warn!(
-                    model = turn.model.as_str(),
-                    "not in the catalog, so its context window is unknown; \
-                     this session will never auto-compact"
-                );
+        // Read out before the latch below takes `live` mutably.
+        let (summary_id, filled) = (info.summary.clone(), info.context_tokens);
+        let window = context_window(turn.provider.as_ref(), &turn.model);
+        match window {
+            None => {
+                // Once per session, and worded for a window that may still
+                // arrive: a borrowing wire names what it served only after
+                // its first turn, so turn one of such a session lands here
+                // and a later turn does not.
+                if !live.warned_uncataloged {
+                    live.warned_uncataloged = true;
+                    tracing::warn!(
+                        model = turn.model.as_str(),
+                        "not in the catalog and no borrowed row sizes it, so its context \
+                         window is unknown; auto-compaction is off until one does"
+                    );
+                }
+                // The automatic trigger has no fill level to read and walks
+                // away. A manual one goes ahead: the person asked, and a
+                // wire nothing sizes is exactly the one whose transcript
+                // nothing else will ever bound — `/compact` is its only door.
+                // What it loses is the fit guard below, which has no window
+                // to measure against.
+                if !forced {
+                    return ControlFlow::Continue(None);
+                }
             }
-            // A manual compaction still has to know what fits, and only the
-            // catalog can say. Nothing to do but say so.
-            return ControlFlow::Continue(None);
-        };
-        // tokens × 10 ≥ window × 9 is "at least 90% full" without leaving
-        // the integers; a saturated multiply only ever fails toward
-        // compacting sooner. A manual compaction skips the question: the user
-        // asked, and how full the window is was their business to judge.
-        if !forced
-            && info.context_tokens.saturating_mul(10) < model.context_window.saturating_mul(9)
-        {
-            return ControlFlow::Continue(None);
+            // tokens × 10 ≥ window × 9 is "at least 90% full" without leaving
+            // the integers; a saturated multiply only ever fails toward
+            // compacting sooner. A manual compaction skips the question: the
+            // user asked, and how full the window is was their business to
+            // judge.
+            Some(window) => {
+                if !forced && filled.saturating_mul(10) < window.saturating_mul(9) {
+                    return ControlFlow::Continue(None);
+                }
+            }
         }
 
-        (info.summary.clone(), model.context_window)
+        (summary_id, window)
     };
 
     // Past every return above, so this fires when a compaction is really about
@@ -3036,9 +3085,13 @@ async fn compact_if_needed(
     // Upstream core's fit guard: a summarize prompt the model cannot hold —
     // estimated at four characters per token — is not sent at all. Skipping
     // keeps the turn alive; the alternative is a summarize request that
-    // fails or loops on the very overflow it exists to relieve.
+    // fails or loops on the very overflow it exists to relieve. Only where
+    // there is a window to fit: a manual compaction on a model nothing sizes
+    // sends the prompt and lets the provider be the one to refuse it.
     let estimated = estimate_tokens(prompt.chars().count());
-    if estimated > context_window.saturating_sub(SUMMARY_OUTPUT_TOKENS) {
+    if let Some(context_window) = context_window
+        && estimated > context_window.saturating_sub(SUMMARY_OUTPUT_TOKENS)
+    {
         tracing::warn!(
             estimated,
             context_window,

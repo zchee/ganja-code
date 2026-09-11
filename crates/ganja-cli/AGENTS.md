@@ -7,6 +7,8 @@
 
 The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login` — a key, or a browser or device login where the provider has one — plus `auth list`/`logout` and `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, — with `run` — to take one turn with no screen at all, and — with `serve` — to put the same engine behind a socket until a signal ends it.
 
+`run --deadline <DURATION|HH:MM>` is **D557**'s headless half (`ganja-code-qecz`): it tells a headless turn how long it has, exactly as `/deadline` tells a screen's. The value is `/deadline`'s own grammar, read by the one parser both doors share — `ganja_tui::command::resolve_deadline`, called from the flag's clap value parser — so the flag and the slash command cannot come to mean two things by one span. Resolving at the clap boundary is the point: a value the grammar has not got, a clock time already behind, and `off` (the slash command's word for clearing, and a fresh run has nothing to clear) are refused before an engine is assembled, so no session is created and no request is spent to report a typo; and the clock is read once, there, so the instant is the one that reading names. `run` sends the instant as `Command::SetDeadline` after the session is selected and before the prompt, so the turn's **first** request already carries the request-only block — a budget that bit from the second step on would leave the step most likely to wander unhurried. Nothing is cancelled when it passes, as on a screen. `--attach` with it is a parse error for `--effort`'s reason: the attached client's surface has no deadline route, and a flag that parsed and then hurried nothing is what that flag table refuses to hold. `tests/run.rs` sees the block reach the first request through the one output of this binary that measures a request rather than a reply — the fake provider's word count, reported as the step's `step_finish` input tokens.
+
 ## Key Files
 
 | File | Description |
@@ -46,7 +48,7 @@ Subcommands print to stdout and diagnostics to stderr, so a caller capturing std
 
 ### Internal
 
-`ganja-provider` (`auth`, for the login flows `auth login` drives — named directly because that command assembles no engine), `ganja-core` (`catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
+`ganja-provider` (`auth`, for the login flows `auth login` drives — named directly because that command assembles no engine), `ganja-core` (`catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`, and `command::resolve_deadline` for `run --deadline`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
 
 ### External
 
