@@ -81,6 +81,15 @@ pub const BASE: &[&str] = &[
     "--replay-user-messages",
 ];
 
+/// The pair a conversation's argv carries when its turn runs under an effort.
+///
+/// `summarized` because it is the one display the recording measured making a
+/// `thinking` block's text arrive (run 4); run 1 passed none and read an empty
+/// string under a 1 148-character signature. Never on a one-shot or a
+/// listing: a title and a summary read text and never reasoning, so the text
+/// would be paid for and dropped.
+pub const THINKING_DISPLAY: [&str; 2] = ["--thinking-display", "summarized"];
+
 /// The value the token after `--permission-mode` must always be.
 ///
 /// Asserted rather than merely built, and the assertion is stronger than
@@ -347,6 +356,19 @@ impl Argv {
         argv.push("--session-id".into());
         argv.push(spawn.session_id.as_str().into());
         push_model_and_effort(&mut argv, &spawn.model, spawn.effort.as_deref());
+
+        // Readable thinking, asked for only by a turn that asked for
+        // reasoning. The one such ask a `ChatRequest` carries on this wire is
+        // the effort — `effort_options` is what `/effort` splices, and this
+        // wire has no other reasoning field — so an effort is the signal and
+        // nothing else is. Without the flag the CLI withholds the text under
+        // a full signature (run 1); with it the text arrives (run 4). Thinking
+        // is billed and this wire has no catalog row to price it with, which
+        // is why it is not passed to a turn that never asked (**D556**,
+        // `fd5v`).
+        if spawn.effort.is_some() {
+            argv.extend(THINKING_DISPLAY.iter().map(OsString::from));
+        }
 
         checked(argv, NEVER_ON_CONVERSATION)
     }

@@ -1162,27 +1162,234 @@ async fn an_unwarmed_account_reports_no_windows_rather_than_empty_ones() {
     assert!(wire.plan_windows().is_empty(), "and a null reading is still nothing");
 }
 
+/// Every `rate_limit_event` the recordings hold **verbatim**, read off the
+/// fixtures themselves.
+///
+/// The recording names sixteen and keeps one as a frame (run 1 [24]); the
+/// other fifteen are described in `#` lines, which a decoder cannot read. The
+/// replay fixture keeps one more. Both are returned, so a later recording
+/// that adds frames grows this set without the test changing.
+fn recorded_rate_limit_events() -> Vec<serde_json::Value> {
+    const PROBE: &str = include_str!("../../tests/fixtures/claude-code-sdk-mcp-probe.txt");
+    const RUN_1: &str = include_str!("../../tests/fixtures/claude-code-replay-run1.json");
+
+    let from_probe = PROBE
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|entry| entry["frame"].clone());
+    let from_replay = serde_json::from_str::<Vec<serde_json::Value>>(RUN_1)
+        .expect("the replay fixture is a JSON array")
+        .into_iter();
+
+    from_probe.chain(from_replay).filter(|frame| frame["type"] == "rate_limit_event").collect()
+}
+
+/// `2z4r`, closed by measurement. Every recorded `rate_limit_event` decodes to
+/// the frame this wire acts on and reads as **two** plan windows — utilization
+/// shapes with a reset, never a count — so nothing about it belongs in
+/// `rate_windows`. And every one is ordinary draw, so none of them earns a
+/// notice: the sentence exists for a shape the recording never produced.
+#[tokio::test]
+async fn every_recorded_rate_limit_event_reads_as_two_plan_windows_and_no_notice() {
+    let events = recorded_rate_limit_events();
+    assert_eq!(
+        events.len(),
+        2,
+        "the probe's run-1 frame and the replay's: a recording that grows more must grow this \
+         count on purpose"
+    );
+
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["hi"]));
+    let wire = wired(&cli, home.path());
+
+    for event in &events {
+        let super::frame::Inbound::RateLimit(info) = super::frame::read(event) else {
+            panic!("a recorded rate_limit_event decoded as something else: {event}");
+        };
+
+        assert_eq!(
+            super::draw_notice(&info),
+            None,
+            "every recorded event is `allowed` and draws no overage: {info}"
+        );
+
+        *wire.slots.rate.lock().expect("the rate slot") = Some(info.clone());
+        let windows = wire.plan_windows();
+        let names: Vec<&str> = windows.iter().map(|window| window.name.as_str()).collect();
+        assert_eq!(names, ["five_hour", "seven_day"], "two windows from {info}");
+
+        for window in &windows {
+            assert!(
+                (0.0..=100.0).contains(&window.used_percent),
+                "a fraction scaled to a percentage: {window:?}"
+            );
+            assert!(window.resets_at.is_some(), "every recorded window says when it refills");
+        }
+        assert!(wire.rate_windows().is_empty(), "and no count against any limit: {info}");
+    }
+}
+
+/// `2z4r`'s sentence, row by row against the SDK's declared shape
+/// (`sdk.d.ts:3038-3048`) — none of these rows has been seen live.
+#[test]
+fn an_unordinary_draw_is_one_sentence_and_ordinary_draw_is_none() {
+    let rows: [(serde_json::Value, Option<&str>); 7] = [
+        (serde_json::json!({"status": "allowed", "isUsingOverage": false}), None),
+        (serde_json::json!({}), None),
+        (
+            serde_json::json!({"status": "allowed_warning", "rateLimitType": "seven_day"}),
+            Some("the claude CLI warns this account is close to its seven_day limit"),
+        ),
+        (
+            serde_json::json!({"status": "rejected", "rateLimitType": "five_hour"}),
+            Some("the claude CLI reports this account's five_hour limit reached"),
+        ),
+        (
+            serde_json::json!({"status": "allowed", "isUsingOverage": true}),
+            Some("this turn is drawing on overage, billed past the plan"),
+        ),
+        (
+            serde_json::json!({"status": "rejected", "isUsingOverage": true}),
+            Some(
+                "the claude CLI reports this account's plan limit reached; this turn is drawing \
+                 on overage, billed past the plan",
+            ),
+        ),
+        // A peer's words reach a frontend only as the token shape every
+        // declared value has; anything else is named, never quoted.
+        (
+            serde_json::json!({"status": "\u{1b}[2Jgone", "rateLimitType": "five\nhour"}),
+            Some("the claude CLI reports an unrecognised status for this account's plan limit"),
+        ),
+    ];
+
+    for (info, expected) in rows {
+        assert_eq!(super::draw_notice(&info).as_deref(), expected, "for {info}");
+    }
+}
+
+// ------------------------------------------------- attachments (m1jk)
+
+/// A user message carrying one `File` part, as the engine hands a request
+/// once its send-time read has run (`content` filled for a binary type).
+fn attached(id: &str, text: &str, mime: &str, content: Option<&str>) -> Message {
+    let mut message = user(id, text);
+    message.parts.push(Part {
+        id: PartId::ascending(),
+        body: PartBody::File {
+            path: format!("shot.{}", mime.rsplit('/').next().unwrap_or("bin")),
+            mime: mime.to_owned(),
+            start: None,
+            end: None,
+            content: content.map(str::to_owned),
+        },
+    });
+
+    message
+}
+
+/// `m1jk`: the Messages API's allowlist and nothing else — the same five
+/// `anthropic.rs` admits, because the CLI hands a user frame's blocks to that
+/// API.
+#[tokio::test]
+async fn the_wire_accepts_exactly_the_messages_api_attachment_types() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["hi"]));
+    let wire = wired(&cli, home.path());
+
+    let rows = [
+        ("image/jpeg", true),
+        ("image/png", true),
+        ("image/gif", true),
+        ("image/webp", true),
+        ("application/pdf", true),
+        ("image/svg+xml", false),
+        ("image/heic", false),
+        ("text/plain", false),
+        ("application/zip", false),
+        ("", false),
+    ];
+    for (mime, accepted) in rows {
+        assert_eq!(wire.accepts_attachment(mime), accepted, "for `{mime}`");
+    }
+}
+
+/// `m1jk`: what the owed set carries is what the frame carries — a filled
+/// binary part of an admitted type, in request order — and a part the engine
+/// did not fill, or one of a type this wire refused, is left to its
+/// `[attached: path]` line.
+#[test]
+fn the_owed_set_carries_its_filled_admitted_attachments_in_order() {
+    let owed = [
+        attached("m1", "look", "image/png", Some("PNGDATA")),
+        attached("m2", "unread", "image/jpeg", None),
+        attached("m3", "text", "text/plain", Some("dGV4dA==")),
+        attached("m4", "and this", "application/pdf", Some("PDFDATA")),
+    ];
+    let owed: Vec<&Message> = owed.iter().collect();
+
+    assert_eq!(
+        super::attachments(&owed),
+        [
+            super::frame::Attachment { mime: "image/png".to_owned(), data: "PNGDATA".to_owned() },
+            super::frame::Attachment {
+                mime: "application/pdf".to_owned(),
+                data: "PDFDATA".to_owned()
+            },
+        ]
+    );
+    assert!(
+        super::owed_text(&owed).contains("[attached: shot.png]"),
+        "the text still names the file beside its block: {}",
+        super::owed_text(&owed)
+    );
+}
+
+/// `m1jk`, through the wire: an image on the prompt turns the frame's content
+/// into a block array. The fake records a frame's content only when it is a
+/// string, so the empty record is the proof the content was not one — and
+/// the turn still ran to its answer.
+#[tokio::test]
+async fn an_image_on_the_prompt_rides_the_frame_as_a_block_and_the_turn_runs() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["a cat"]));
+    let wire = wired(&cli, home.path());
+
+    let events = drain(
+        wire.stream(
+            request(vec![attached("m1", "what is this", "image/png", Some("PNGDATA"))], 0),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the turn runs"),
+    )
+    .await;
+
+    assert_eq!(said(&events), "a cat", "{events:?}");
+    assert_eq!(
+        cli.record(0).user_frames,
+        [String::new()],
+        "a block array, which the fake's string-only record cannot read"
+    );
+}
+
 // ------------------------------------------- the compaction shape (Dv-21)
 
-/// **AC-4.5**, at the provider seam (**Dv-21**). A compaction summary runs as
-/// a **one-shot** that enters no table entry, and the conversation turn after
-/// it opens a fresh record whose opening frame is the **prompt alone** — no
-/// summary text anywhere.
+/// **AC-4.5**, at the provider seam (**Dv-21**), as `q3ep` amends it. A
+/// compaction summary runs as a **one-shot** that enters no table entry, and
+/// the conversation turn after it opens a fresh record whose opening frame
+/// carries the summary as **user-voiced context** — a `[User]` paragraph under
+/// `preamble::CARRIED_CONTEXT` — ahead of the prompt, and never as assistant
+/// text, the one voice the vendor safeguard refused every time it was offered.
 ///
-/// Driven here rather than through `Command::Compact`, which on this wire does
-/// nothing at all: `session.rs`'s manual-compaction path needs a context
-/// window to know what fits, only the catalog can say, and this provider has no
-/// rows (`session.rs:2862-2874`). What the AC is *about* is the wire's own
-/// behaviour when a summary is `messages[0]`, and that is exactly what a
-/// request with an empty roster and `turn_start == 0` produces — the one-shot
-/// marker `stream()` reads.
-///
-/// This is §ADR 2's stated cost, pinned so nobody later reads it as a bug. On a
-/// wire that never resumes, the summary is assistant text, and assistant text
-/// is the one thing the vendor safeguard refused every time it was offered — so
-/// what survives a compaction here is the user's own words.
+/// Driven here with a request whose `messages[0]` is the summary, which is the
+/// shape a compaction leaves: the one-shot marker `stream()` reads is the
+/// empty roster with `turn_start == 0`, and the next turn's history opens on
+/// the assistant message the compaction installed.
 #[tokio::test]
-async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_nothing() {
+async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_user_context() {
     const SUMMARY: &str = "SUMMARY-OF-EVERYTHING-SO-FAR";
 
     let home = ganja_testkit::temp_dir();
@@ -1214,10 +1421,11 @@ async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_nothi
     assert_eq!(wire.held_entries(), 1, "and that one is the conversation's, held");
 
     let opening = cli.record(1).user_frames.first().cloned().expect("it was handed a frame");
-    assert!(opening.contains("carry on then"), "which opens with the prompt: {opening:?}");
+    assert!(opening.ends_with("carry on then"), "which ends with the prompt: {opening:?}");
     assert!(
-        !opening.contains(SUMMARY),
-        "and carries no summary text at all, which is what ADR 2 costs: {opening:?}"
+        opening.contains(&format!("[User] {}", super::preamble::CARRIED_CONTEXT))
+            && opening.contains(SUMMARY),
+        "and carries the summary as context the user hands back (`q3ep`): {opening:?}"
     );
-    assert!(!opening.contains("[Assistant]"), "no assistant label either: {opening:?}");
+    assert!(!opening.contains("[Assistant]"), "no assistant label: {opening:?}");
 }

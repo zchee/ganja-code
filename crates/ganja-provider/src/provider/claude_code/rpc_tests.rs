@@ -11,7 +11,9 @@ fn roster() -> Vec<ToolDefinition> {
     }]
 }
 
-/// The bytes the recording proves accepted, modulo the ids: run 1's idx3.
+/// The bytes the recording proves accepted, modulo the ids: run 1's idx3 —
+/// and one key more since `i5oi`, `tools.listChanged`, which no recorded run
+/// declared.
 #[test]
 fn initialize_is_answered_with_the_clis_own_protocol_version_echoed() {
     let asked = json!({
@@ -36,7 +38,7 @@ fn initialize_is_answered_with_the_clis_own_protocol_version_echoed() {
             "id": 0,
             "result": {
                 "protocolVersion": "2025-11-25",
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {"listChanged": true}},
                 "serverInfo": {"name": "ganja", "version": "0.1.0"},
             },
         })
@@ -54,6 +56,23 @@ fn the_initialize_answer_declares_the_capability_that_earns_a_roster_request() {
     };
 
     assert!(sent["result"]["capabilities"].get("tools").is_some());
+}
+
+/// `i5oi`: the roster may move while the process lives, and the server says
+/// so up front — the declaration the CLI subscribes to `list_changed` on — and
+/// then says it with a notification that carries no id, because JSON-RPC
+/// answers a notification with nothing.
+#[test]
+fn the_server_declares_a_roster_that_can_change_and_announces_it_without_an_id() {
+    let Answer::Reply(sent) = answer(&json!({"method": "initialize", "id": 0}), &roster(), "0.1.0")
+    else {
+        panic!("initialize is answered here");
+    };
+    assert_eq!(sent["result"]["capabilities"]["tools"]["listChanged"], json!(true), "{sent}");
+
+    let announced = super::list_changed();
+    assert_eq!(announced, json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}));
+    assert!(announced.get("id").is_none(), "a notification carries no id: {announced}");
 }
 
 #[test]

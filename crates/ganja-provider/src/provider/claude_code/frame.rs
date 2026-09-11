@@ -501,9 +501,38 @@ pub struct Initialize {
 pub struct UserFrame {
     /// The text.
     pub content: String,
+    /// Binary attachments the frame carries beside its text (`m1jk`), in the
+    /// order their parts appeared. Empty on every frame the recording holds,
+    /// and empty is what keeps `content` a bare string — see [`user_line`].
+    #[serde(skip)]
+    pub attachments: Vec<Attachment>,
     /// Always [`None`] on this wire: nothing it writes is a subagent's.
     #[serde(rename = "parent_tool_use_id")]
     pub parent_tool_use_id: Option<String>,
+}
+
+/// One binary attachment on a user frame (`m1jk`): what the engine's
+/// send-time read filled into a `File` part the wire said it accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    /// One of the media types the wire's `accepts_attachment` admits.
+    pub mime: String,
+    /// The payload, already base64 — the engine encodes it, not this side.
+    pub data: String,
+}
+
+impl Attachment {
+    /// The Messages API content block this attachment is written as: a
+    /// `document` for a PDF and an `image` for everything else the wire
+    /// admits, each with a `base64` source — `anthropic.rs`'s own split.
+    fn block(&self) -> serde_json::Value {
+        let kind = if self.mime == "application/pdf" { "document" } else { "image" };
+
+        serde_json::json!({
+            "type": kind,
+            "source": {"type": "base64", "media_type": self.mime, "data": self.data},
+        })
+    }
 }
 
 /// A request this side makes of the CLI.
@@ -546,11 +575,28 @@ pub fn initialize_line(request_id: &str, initialize: &Initialize) -> String {
 }
 
 /// A user message frame.
+///
+/// With no attachments `content` is the bare string every recorded frame
+/// carries, byte for byte. With any, it is a block array — the text first,
+/// then each attachment as its Messages API block — which is the
+/// `MessageParam` content `SDKUserMessage.message` is declared as
+/// (`sdk.d.ts:3410-3412`). **Unmeasured live** (`m1jk`): no recorded frame
+/// carried a block, and an unfamiliar block is the kind of input the vendor
+/// safeguard has refused whole turns over on this wire, so the first live
+/// attachment is also the first measurement of it.
 #[must_use]
 pub fn user_line(frame: &UserFrame) -> String {
+    let content = if frame.attachments.is_empty() {
+        serde_json::Value::from(frame.content.as_str())
+    } else {
+        std::iter::once(serde_json::json!({"type": "text", "text": frame.content}))
+            .chain(frame.attachments.iter().map(Attachment::block))
+            .collect()
+    };
+
     line(&serde_json::json!({
         "type": "user",
-        "message": {"role": "user", "content": frame.content},
+        "message": {"role": "user", "content": content},
         "parent_tool_use_id": frame.parent_tool_use_id,
     }))
 }
@@ -562,6 +608,47 @@ pub fn control_request_line(request_id: &str, request: ControlRequest) -> String
         "type": "control_request",
         "request_id": request_id,
         "request": {"subtype": request.subtype()},
+    }))
+}
+
+/// Asks a live process to answer its next turn as `model` (`eawi`).
+///
+/// The SDK's `SDKControlSetModelRequest` (`sdk.d.ts:2746-2749`): the subtype
+/// and an optional `model`, whose absence the SDK reads as the default. So
+/// [`None`] — this wire's `default` — sends no `model` key at all, for the
+/// reason `--model` is never passed for it. **Unmeasured live**: the recording
+/// holds no `set_model`, which is why the switch is verified on the next
+/// `system/init` rather than trusted.
+#[must_use]
+pub fn set_model_line(request_id: &str, model: Option<&str>) -> String {
+    let mut request = serde_json::json!({"subtype": "set_model"});
+    if let Some(model) = model {
+        request["model"] = serde_json::Value::from(model);
+    }
+
+    line(&serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": request,
+    }))
+}
+
+/// A JSON-RPC message this side's server pushes to the CLI unasked (`i5oi`).
+///
+/// The same `mcp_message` subtype the CLI uses to reach this side, travelling
+/// the other way: the SDK declares it host→CLI as `SDKControlMcpMessageRequest`
+/// (`sdk.d.ts:2569-2573`), `server_name` and `message` beside the subtype. **Unmeasured
+/// live** — the recording holds this frame only in the CLI→host direction.
+#[must_use]
+pub fn mcp_message_line(
+    request_id: &str,
+    server_name: &str,
+    message: &serde_json::Value,
+) -> String {
+    line(&serde_json::json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "mcp_message", "server_name": server_name, "message": message},
     }))
 }
 
