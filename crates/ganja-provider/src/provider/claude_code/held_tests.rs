@@ -52,6 +52,9 @@ fn each_bound_is_the_number_its_own_reasoning_produced() {
     // Sixty times the slowest first frame after a `user` frame (2.0 s).
     assert_eq!(SILENCE_BOUND, Duration::from_secs(120));
     assert_eq!(DEFAULT_IDLE_BOUND, Duration::from_secs(600));
+    // Over a hundred times the slowest EOF-to-exit the recording measured
+    // (14 ms), and fourteen times run 7's whole life (exit 1 in 141 ms).
+    assert_eq!(super::EXIT_SETTLE_BOUND, Duration::from_secs(2));
 }
 
 /// The ring's word for a refused entry maps to `refused-record` and **never**
@@ -1145,6 +1148,207 @@ fn the_clis_first_stderr_line_is_surfaced_bounded_and_labelled_as_its_own() {
         "bounded whatever the line is made of: {} bytes",
         wide.len()
     );
+}
+
+/// A child built by hand rather than spawned, because the order is the whole
+/// point: a real child's exit, its closed pipes and its last stderr bytes reach
+/// the task in whichever order the runtime notices them, and a loaded Linux
+/// runner noticed them in an order a spawned child cannot be made to repeat.
+/// Here each piece lands at an instant of its own on a paused clock, so the
+/// order a test names is the only one there is.
+struct FakeChild {
+    /// Whether anything reads its stdin. Nothing does once a child has exited,
+    /// which is when a pipe refuses a write.
+    reads_stdin: bool,
+    /// The line it writes to stderr.
+    says: &'static str,
+    /// When that line reaches the pipe.
+    says_at: Duration,
+    /// When it exits 1, closing its stdin and stdout, or never.
+    exits_at: Option<Duration>,
+}
+
+impl FakeChild {
+    fn io(self) -> crate::provider::claude_code::process::ChildIo {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        use tokio::io::AsyncWriteExt as _;
+
+        let Self { reads_stdin, says, says_at, exits_at } = self;
+        let (stdin, stdin_end) = tokio::io::duplex(64);
+        // Dropped here when nothing reads it, and a duplex whose other end is
+        // gone refuses every write with `BrokenPipe`, the way a pipe does.
+        let stdin_end = reads_stdin.then_some(stdin_end);
+        let (stdout, stdout_end) = tokio::io::duplex(64);
+        let (stderr, mut stderr_end) = tokio::io::duplex(1024);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(says_at).await;
+            // A wire that stopped reading is what the assertions are about;
+            // this write failing would say nothing they do not.
+            let _ = stderr_end.write_all(format!("{says}\n").as_bytes()).await;
+        });
+
+        crate::provider::claude_code::process::ChildIo {
+            stdin: Box::new(stdin),
+            stdout: Box::new(stdout),
+            stderr: Some(Box::new(stderr)),
+            exit: Box::pin(async move {
+                let Some(at) = exits_at else {
+                    let _running = (stdin_end, stdout_end);
+                    return std::future::pending().await;
+                };
+                tokio::time::sleep(at).await;
+                drop((stdin_end, stdout_end));
+
+                Ok(std::process::ExitStatus::from_raw(1 << 8))
+            }),
+            kill: Box::new(|_| {}),
+        }
+    }
+}
+
+/// Plays one turn on `io` through the task itself: every event the turn
+/// streamed, and how long the first of them took.
+///
+/// The turn is queued **before** the task starts, so writing its frame is the
+/// first thing the task does.
+async fn a_turn_on(
+    io: crate::provider::claude_code::process::ChildIo,
+) -> (Vec<crate::provider::ProviderEvent>, Duration) {
+    let (input, inputs) = tokio::sync::mpsc::channel(4);
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    input
+        .send(super::Input::Turn { frame: "{}\n".to_owned(), sent: Vec::new(), events })
+        .await
+        .expect("the task's queue is open");
+
+    let started = tokio::time::Instant::now();
+    let task = tokio::spawn(super::run(io, inputs, wiring(Vec::new()), DEFAULT_IDLE_BOUND));
+
+    let mut seen = Vec::new();
+    let mut took = None;
+    while let Some(event) = streamed.recv().await {
+        took.get_or_insert_with(|| started.elapsed());
+        seen.push(event);
+    }
+
+    // A child still running is closed the way every entry is; one that exited
+    // has already ended the task, and the refused send is that.
+    let _ = input.send(super::Input::Close).await;
+    task.await.expect("the task ends without panicking");
+
+    (seen, took.unwrap_or_default())
+}
+
+/// Every failure among `events`, in order.
+fn failures(events: &[crate::provider::ProviderEvent]) -> Vec<&crate::provider::ProviderError> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            crate::provider::ProviderEvent::Failed(error) => Some(error),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A CLI that exits before it reads a byte leaves its stdin closed behind it,
+/// so the turn's write is refused — and the turn still fails with what the CLI
+/// said, never with the refused write. The write used to win whenever it was
+/// noticed first, which put `Broken pipe` where `claude_code_run.rs`'s refusal
+/// sentence belonged on three CI runs in four (bead `ganja-code-3te9`).
+#[tokio::test(start_paused = true)]
+async fn a_cli_that_exits_before_reading_its_stdin_fails_the_turn_with_its_own_words() {
+    let exiting = |says: &'static str| FakeChild {
+        reads_stdin: false,
+        says,
+        says_at: Duration::ZERO,
+        // The recording's slowest EOF-to-exit: the write is refused well
+        // before the exit is there to be seen.
+        exits_at: Some(Duration::from_millis(14)),
+    };
+    let sentence = ganja_testkit::fake_claude::NEEDS_VERBOSE;
+
+    let (events, _) = a_turn_on(exiting(sentence).io()).await;
+    assert!(
+        matches!(
+            failures(&events).as_slice(),
+            [crate::provider::ProviderError::Transport(message)]
+                if *message == format!("{}{sentence}", super::SAID_LABEL)
+        ),
+        "one failure, carrying the CLI's own sentence labelled as its own: {events:?}"
+    );
+
+    // And the login arm, which the same order hid just as well.
+    let (events, _) = a_turn_on(exiting("Invalid API key · Please run /login").io()).await;
+    assert!(
+        matches!(
+            failures(&events).as_slice(),
+            [crate::provider::ProviderError::Auth(message)] if message == super::NO_LOGIN
+        ),
+        "one failure, and it is the missing login rather than the pipe: {events:?}"
+    );
+}
+
+/// The other half: a refused write is the turn's failure only for a CLI still
+/// running once the exit has had [`super::EXIT_SETTLE_BOUND`] to arrive in —
+/// so a child that closed its stdin and stayed up fails the turn by name
+/// rather than hanging it.
+#[tokio::test(start_paused = true)]
+async fn a_refused_write_to_a_cli_still_running_fails_the_turn_once_the_bound_passes() {
+    let running = FakeChild {
+        reads_stdin: false,
+        says: "still running",
+        says_at: Duration::ZERO,
+        exits_at: None,
+    };
+
+    let (events, took) = a_turn_on(running.io()).await;
+    assert!(
+        matches!(
+            failures(&events).as_slice(),
+            [crate::provider::ProviderError::Transport(message)]
+                if message.starts_with("could not write the turn: ")
+        ),
+        "one failure, and it is the write's own: {events:?}"
+    );
+    assert!(
+        took >= super::EXIT_SETTLE_BOUND,
+        "reported only after the exit had the whole bound to arrive in: {took:?}"
+    );
+}
+
+/// The exit handled before the CLI's words have been read: on Linux, where
+/// tokio reaps a child through a pidfd, the exit and the last stderr bytes can
+/// become ready in one reactor turn and the exit be taken first. The turn
+/// still fails with the words rather than with a CLI that said nothing —
+/// whether its frame was written, so the exit arrives by the loop's own exit
+/// arms, or refused, so it arrives by the write's wait.
+#[tokio::test(start_paused = true)]
+async fn a_cli_whose_words_are_read_after_its_exit_still_fails_the_turn_with_them() {
+    let sentence = ganja_testkit::fake_claude::NEEDS_VERBOSE;
+
+    for reads_stdin in [true, false] {
+        let late = FakeChild {
+            reads_stdin,
+            says: sentence,
+            // After the exit: the order in which the buffer used to be read
+            // before the reader had filled it.
+            says_at: Duration::from_millis(28),
+            exits_at: Some(Duration::from_millis(14)),
+        };
+
+        let (events, _) = a_turn_on(late.io()).await;
+        assert!(
+            matches!(
+                failures(&events).as_slice(),
+                [crate::provider::ProviderError::Transport(message)]
+                    if *message == format!("{}{sentence}", super::SAID_LABEL)
+            ),
+            "one failure carrying the CLI's words, its frame {}: {events:?}",
+            if reads_stdin { "written" } else { "refused" }
+        );
+    }
 }
 
 /// `busy` says a turn is running, and the table's two views of idleness both
