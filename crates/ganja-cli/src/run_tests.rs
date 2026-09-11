@@ -429,3 +429,96 @@ fn a_typed_message_and_a_piped_one_join_with_the_pipe_last() {
     assert_eq!(resolve_input("", "fn main() {}"), "fn main() {}");
     assert_eq!(resolve_input("", ""), "");
 }
+
+/// `ganja run`'s flags, parsed the way the binary parses them — so what these
+/// tests see is what clap does with an argv, the value parsers included.
+#[derive(clap::Parser)]
+struct Flags {
+    #[command(flatten)]
+    run: super::RunArgs,
+}
+
+/// `now`, in the milliseconds [`ganja_protocol::Command::SetDeadline`] spells.
+fn millis(now: std::time::SystemTime) -> u64 {
+    let since = now.duration_since(std::time::UNIX_EPOCH).expect("this clock is after the epoch");
+
+    u64::try_from(since.as_millis()).expect("today's milliseconds fit a u64")
+}
+
+/// **qecz.** `--deadline 5m` is resolved where it is parsed, against the clock
+/// of that moment, and held as the instant the engine will be sent — so the
+/// value is somewhere in the window this parse took, five minutes on.
+#[test]
+fn a_deadline_span_is_resolved_at_the_flag_to_that_far_from_now() {
+    use clap::Parser as _;
+
+    let before = millis(std::time::SystemTime::now());
+    let parsed = Flags::try_parse_from(["run", "--deadline", "5m", "hello"])
+        .unwrap_or_else(|error| panic!("a span the grammar takes parses: {error}"));
+    let after = millis(std::time::SystemTime::now());
+
+    let until = parsed.run.deadline.expect("the flag was given, so an instant is held");
+    assert!(
+        (before + 300_000..=after + 300_000).contains(&until),
+        "{until} is five minutes after a moment in [{before}, {after}]"
+    );
+}
+
+/// **qecz.** No flag, no deadline: a run that says nothing about time sends
+/// the engine nothing about it.
+#[test]
+fn a_run_without_the_flag_holds_no_deadline() {
+    use clap::Parser as _;
+
+    let parsed = Flags::try_parse_from(["run", "hello"]).expect("a plain run parses");
+    assert_eq!(parsed.run.deadline, None);
+}
+
+/// **qecz.** Everything `/deadline`'s resolver refuses is refused here, at the
+/// flag, before an engine exists — including `off`, which is the slash
+/// command's word for clearing and names no instant, and `00:00`, a clock time
+/// that is behind at every moment of the day. The value is attached with `=`
+/// so a leading `-` reaches the value parser rather than clap's flag reading.
+#[test]
+fn a_deadline_the_grammar_has_not_got_is_refused_at_the_flag() {
+    use clap::Parser as _;
+
+    for typed in ["5x", "-1m", "0s", "5m5m", "25:00", "10:0", "00:00", "off", "soon", ""] {
+        let Err(error) = Flags::try_parse_from(["run", &format!("--deadline={typed}"), "hello"])
+        else {
+            panic!("{typed:?} is not something the grammar takes, so no run may start on it");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ValueValidation,
+            "{typed:?} is refused by the value parser, not by some other rule: {error}"
+        );
+        let reason = ganja_tui::command::resolve_deadline(typed, std::time::SystemTime::now())
+            .expect_err("the resolver refuses what the flag refuses");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&reason),
+            "{typed:?}: the refusal is the resolver's own sentence ({reason:?}), got {rendered:?}"
+        );
+    }
+}
+
+/// **qecz.** `--attach` drives a server's engine through a client that has no
+/// deadline route, so a deadline there would parse and then hurry nothing —
+/// the pair is refused, as `--effort` with `--attach` is.
+#[test]
+fn attaching_with_a_deadline_fails_to_parse() {
+    use clap::Parser as _;
+
+    let Err(error) = Flags::try_parse_from([
+        "run",
+        "--attach",
+        "http://127.0.0.1:4096",
+        "--deadline",
+        "5m",
+        "hello",
+    ]) else {
+        panic!("a deadline the attached client cannot carry is refused");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{error}");
+}

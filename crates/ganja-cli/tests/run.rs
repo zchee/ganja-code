@@ -491,6 +491,94 @@ fn continuing_and_naming_a_session_at_once_fails_to_parse() {
 }
 
 // ---------------------------------------------------------------------------
+// `--deadline` (`ganja-code-qecz`): D557's budget, headless.
+// ---------------------------------------------------------------------------
+
+/// How many words the first request of a fresh `--format json` run carried,
+/// with `args` before the message.
+///
+/// The fake provider reports the word count of every message it was handed as
+/// the request's input tokens — request-only messages included — and the
+/// step's `step_finish` object carries that usage. It is the one place this
+/// binary's output says anything about the *request* rather than the reply,
+/// which is what a request-only block needs: no event and no stored part
+/// carries one. A fresh project per call, so nothing the other run left behind
+/// can change the count.
+fn first_request_words(args: &[&str]) -> u64 {
+    let run = Run::playing(&one_word());
+    let ran =
+        run.ganja().args(["run", "--format", "json"]).args(args).arg("hello").assert().success();
+    let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
+
+    objects(&stdout)
+        .iter()
+        .find(|object| object["type"] == "step_finish")
+        .and_then(|object| object["part"]["usage"]["input_tokens"].as_u64())
+        .unwrap_or_else(|| panic!("no step_finish reported the request's size: {stdout}"))
+}
+
+/// **qecz.** `ganja run --deadline 5m` hurries the turn it runs: the first
+/// request carries D557's block, where the same run without the flag carries
+/// nothing beside the prompt. The block's own wording is byte-pinned where it
+/// is written (`ganja-core`'s session tests); what only this binary can show is
+/// that the flag reaches it before the first step is sent.
+#[test]
+fn a_deadline_reaches_the_first_request_a_headless_turn_sends() {
+    let without = first_request_words(&[]);
+    let with = first_request_words(&["--deadline", "5m"]);
+
+    assert_eq!(without, 1, "a run without the flag sends the one-word prompt and nothing else");
+    assert!(
+        with > without + 20,
+        "the flag's block should add its sentences to the first request: {with} words against {without}"
+    );
+}
+
+/// **qecz.** A value the grammar has not got is refused at the flag, before an
+/// engine is assembled — so no session is created and no request is spent to
+/// learn of a typo. The refusal is `/deadline`'s own reason.
+#[test]
+fn a_deadline_the_grammar_has_not_got_is_refused_before_any_turn() {
+    let run = Run::playing(&one_word());
+
+    run.ganja()
+        .args(["run", "--deadline", "5x", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--deadline"))
+        .stderr(predicate::str::contains("did not understand"));
+    assert!(run.sessions().is_empty(), "a refused flag started no turn and stored no session");
+}
+
+/// **qecz.** A clock time already behind is refused rather than rolled to
+/// tomorrow, exactly as `/deadline` refuses it. `00:00` is behind at every
+/// moment of a day, so this holds whenever the suite runs.
+#[test]
+fn a_deadline_clock_time_already_behind_is_refused_before_any_turn() {
+    let run = Run::playing(&one_word());
+
+    run.ganja()
+        .args(["run", "--deadline", "00:00", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already behind"));
+    assert!(run.sessions().is_empty(), "a refused flag started no turn and stored no session");
+}
+
+/// **qecz.** The attached client carries no deadline route, so the pair would
+/// parse and then hurry nothing; clap refuses it, as it refuses `--effort`
+/// with `--attach`. The address is never dialled — the refusal comes first.
+#[test]
+fn attaching_with_a_deadline_fails_to_parse() {
+    Run::playing(&one_word())
+        .ganja()
+        .args(["run", "--attach", "http://127.0.0.1:9", "--deadline", "5m", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+// ---------------------------------------------------------------------------
 // The nd-JSON shape (`run.ts:678-691`, `:717-798`).
 // ---------------------------------------------------------------------------
 

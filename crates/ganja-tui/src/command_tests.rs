@@ -838,3 +838,63 @@ fn a_typed_deadline_hints_with_the_grammar_its_refusals_name() {
         "the roster carries the command the door guards on"
     );
 }
+
+/// **qecz.** The `/deadline` door is the shared resolver and nothing more: an
+/// instant it resolves is the one the line sets, and a reason it gives is the
+/// line's refusal with `/deadline`'s usage after it. `ganja run --deadline`
+/// reads the same resolver, so this is what keeps the flag and the slash
+/// command from ever meaning two different things by one span.
+#[test]
+fn the_deadline_door_is_the_shared_resolver_with_its_own_usage_appended() {
+    let now = six_in_the_morning();
+    for typed in [
+        "5m", "90s", "1h30m15s", "10:00", "9:30", "05:00", "25:00", "10:0", "5x", "-1m", "0s",
+        "5m5m", "soon",
+    ] {
+        let wanted = match super::resolve_deadline(typed, now) {
+            Ok(until) => Deadline::Set(until),
+            Err(reason) => {
+                Deadline::Refused(format!("{reason}. /deadline {}", super::DEADLINE_GRAMMAR))
+            }
+        };
+        assert_eq!(
+            super::deadline(&format!("/deadline {typed}"), now),
+            Some(wanted),
+            "{typed:?}: the door answered something the resolver did not"
+        );
+    }
+}
+
+/// **qecz.** `off` and the empty line are the slash command's own words, not
+/// budgets, so the resolver a flag reads refuses both — and says why without
+/// the slash command's usage, which advertises an `off` a flag does not take.
+#[test]
+fn the_deadline_resolver_refuses_the_slash_commands_own_words_and_names_no_usage() {
+    let now = six_in_the_morning();
+    for typed in ["off", ""] {
+        let Err(reason) = super::resolve_deadline(typed, now) else {
+            panic!("{typed:?} names no instant, so the resolver has none to give");
+        };
+        assert!(reason.contains("did not understand"), "{typed:?}: {reason:?} says why");
+        assert!(
+            !reason.contains(super::DEADLINE_GRAMMAR),
+            "{typed:?}: {reason:?} carries a usage, which is each door's to add"
+        );
+    }
+}
+
+/// **qecz.** A span whose end the wire's `u64` milliseconds cannot name is
+/// refused, not set. Before the resolver checked, it resolved, the frontend's
+/// conversion turned it into nothing, and the engine was sent `until: None` —
+/// the command that *clears* a deadline, under a notice saying one was set.
+#[test]
+fn a_span_past_what_a_deadline_can_carry_is_refused_rather_than_cleared() {
+    let now = six_in_the_morning();
+    // 3.6e17 seconds: the clock can hold it on a 64-bit platform, its
+    // milliseconds cannot fit a `u64`.
+    let Some(Deadline::Refused(refusal)) = super::deadline("/deadline 99999999999999h", now) else {
+        panic!("a deadline no command can carry is refused");
+    };
+    assert!(refusal.contains("further off"), "{refusal:?} says why");
+    assert!(refusal.ends_with(super::DEADLINE_GRAMMAR), "{refusal:?} ends with the grammar");
+}
