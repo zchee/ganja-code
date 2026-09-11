@@ -108,6 +108,27 @@ pub const STRANDED_BOUND: Duration = Duration::from_secs(3_600);
 /// bounds silence, never patience.
 pub const SILENCE_BOUND: Duration = Duration::from_secs(120);
 
+/// How long a turn failing because its child went away waits for the rest of
+/// that exit to arrive: the exit itself, after the turn's frame was refused,
+/// and the end of the CLI's stderr, after an exit before `system/init`.
+///
+/// Both waits have one reason. An exit before `system/init` is decided by what
+/// the CLI said on the way out — its own sentence, or [`NO_LOGIN`] — and the
+/// runtime is free to notice the pieces of an exit in any order. Without the
+/// first wait, a pipe refusing the frame put `Broken pipe` where that sentence
+/// belonged whenever the pipe was noticed before the exit; without the second,
+/// an exit handled before the stderr reader had read to the end reported a CLI
+/// that said nothing — and on Linux, where tokio reaps a child through a
+/// pidfd, the exit and the last stderr bytes can become ready in the same
+/// reactor turn (bead `ganja-code-3te9`).
+///
+/// **Two seconds**: over a hundred times the slowest EOF-to-exit the recording
+/// measured (14 ms), and fourteen times run 7's whole life (exit 1 in 141 ms).
+/// Wrong on the long side, a child that closed its stdin and kept running, or
+/// a descendant still holding its stderr open, delays a turn that fails either
+/// way by up to this much per wait.
+const EXIT_SETTLE_BOUND: Duration = Duration::from_secs(2);
+
 /// What `idle_bound` is when nobody has said otherwise.
 ///
 /// The number is cursor's; the sentence that sizes it is not. There, 600 s
@@ -734,7 +755,9 @@ pub async fn run(
     // because an exit before `system/init` is told from a transport failure
     // by what the CLI said on the way out, and by nothing else.
     let said = Arc::new(Mutex::new(Vec::<String>::new()));
-    if let Some(stderr) = stderr {
+    // Kept, so an exit before `system/init` can wait for the reader to reach
+    // the end of what the CLI said before that exit is decided by it.
+    let mut stderr_reader = stderr.map(|stderr| {
         let said = Arc::clone(&said);
         tokio::spawn(async move {
             let mut lines = super::frame::Lines::new(tokio::io::BufReader::new(stderr));
@@ -751,8 +774,8 @@ pub async fn run(
                     said.push(line);
                 }
             }
-        });
-    }
+        })
+    });
 
     // A channel rather than the future itself: a completed future must not be
     // polled again, and a closed channel may be, forever.
@@ -785,6 +808,18 @@ pub async fn run(
                     drop_previous_turn(&mut turn);
                     open_turn(&wiring, &mut turn, events);
                     if let Err(error) = stdin.write_all(frame.as_bytes()).await {
+                        // The exit decides, not whichever of the two this task
+                        // noticed first: a refused write is a child that has
+                        // usually exited already, and only its exit knows what
+                        // it said on the way out. The write's own error is the
+                        // answer only for a child still running past the bound.
+                        if let Ok(Some(status)) =
+                            tokio::time::timeout(EXIT_SETTLE_BOUND, exited.recv()).await
+                        {
+                            finish_reading_stderr(&mut stderr_reader, &turn).await;
+                            died = report_exit(&wiring, &mut turn, &said, status);
+                            break;
+                        }
                         fail(&wiring, &mut turn, format!("could not write the turn: {error}"));
                         continue;
                     }
@@ -832,6 +867,7 @@ pub async fn run(
                 // exit arm below says with what.
                 Ok(None) => {
                     if let Some(status) = exited.recv().await {
+                        finish_reading_stderr(&mut stderr_reader, &turn).await;
                         died = report_exit(&wiring, &mut turn, &said, status);
                     }
                     break;
@@ -843,6 +879,7 @@ pub async fn run(
             },
             status = exited.recv() => {
                 if let Some(status) = status {
+                    finish_reading_stderr(&mut stderr_reader, &turn).await;
                     died = report_exit(&wiring, &mut turn, &said, status);
                 }
                 break;
@@ -1052,6 +1089,27 @@ fn evict(wiring: &Wiring, reason: Reason) {
         *wiring.slots.eviction.lock().expect("the eviction slot is never poisoned") =
             Some(Eviction { key: wiring.key.clone(), at: std::time::SystemTime::now() });
     }
+}
+
+/// Waits, bounded, for the stderr reader to reach the end of what the CLI
+/// wrote, so an exit before `system/init` is decided by all of it.
+///
+/// [`report_exit`] reads the buffer at once and another task fills it, so an
+/// exit handled first used to read a CLI that had said nothing — the second of
+/// the two orders [`EXIT_SETTLE_BOUND`] exists for. After `system/init` the
+/// buffer decides nothing, so nothing waits. Bounded because a descendant that
+/// inherited the pipe can hold it open past the exit.
+async fn finish_reading_stderr(reader: &mut Option<tokio::task::JoinHandle<()>>, turn: &Turn) {
+    if turn.seen_init {
+        return;
+    }
+    let Some(reader) = reader.take() else {
+        return;
+    };
+
+    // Past the bound, or with a reader that panicked, the exit is decided by
+    // whatever had been read by then.
+    let _ = tokio::time::timeout(EXIT_SETTLE_BOUND, reader).await;
 }
 
 /// What an exit that nothing here asked for means.
