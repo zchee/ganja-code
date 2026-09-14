@@ -520,6 +520,167 @@ async fn a_model_switch_the_process_ignores_costs_one_turn_then_a_fresh_record()
     provider.shutdown().await;
 }
 
+/// The text a relayed `result` carries once [`ErrsOn`] has turned it into an
+/// error.
+const ERRORED: &str = "the turn errored";
+
+/// A CLI that plays `cli`'s script but answers the `failing`th turn — counted
+/// from zero across every process it spawns — with a `result` carrying
+/// `is_error: true`.
+///
+/// That is what a seat that cannot serve an asked model, or a transient
+/// vendor error, ends a turn with. The fake has no knob for it: its only
+/// errored `result` is a refusal's, and a refusal takes the arm that closes
+/// an entry whatever else the turn did.
+struct ErrsOn {
+    cli: std::sync::Arc<FakeCli>,
+    failing: usize,
+    results: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::provider::claude_code::process::Spawner for ErrsOn {
+    fn spawn(
+        &self,
+        bin: &std::path::Path,
+        argv: &[std::ffi::OsString],
+        env: &crate::provider::claude_code::argv::ChildEnv,
+    ) -> Result<crate::provider::claude_code::process::ChildIo, crate::provider::ProviderError>
+    {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let mut io =
+            crate::provider::claude_code::process::Spawner::spawn(&*self.cli, bin, argv, env)?;
+        let (mut relayed, stdout) = tokio::io::duplex(1 << 18);
+        let upstream = std::mem::replace(&mut io.stdout, Box::new(stdout));
+        let failing = self.failing;
+        let results = std::sync::Arc::clone(&self.results);
+
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(upstream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(mut frame)
+                        if frame["type"] == "result"
+                            && results.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                == failing =>
+                    {
+                        frame["is_error"] = serde_json::Value::Bool(true);
+                        frame["result"] = serde_json::Value::from(ERRORED);
+                        frame.to_string()
+                    }
+                    _ => line,
+                };
+                if relayed.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(io)
+    }
+}
+
+/// A provider wired to `cli` through [`ErrsOn`], its `failing`th turn errored.
+fn errs_on(
+    cli: &std::sync::Arc<FakeCli>,
+    home: &std::path::Path,
+    failing: usize,
+) -> super::super::ClaudeCodeProvider {
+    super::super::ClaudeCodeProvider::with_parts(
+        std::path::PathBuf::from("/nonexistent/claude"),
+        "2.1.263 (Claude Code)".to_owned(),
+        std::sync::Arc::new(ErrsOn {
+            cli: std::sync::Arc::clone(cli),
+            failing,
+            results: std::sync::Arc::default(),
+        }),
+        Paths::under(home),
+    )
+}
+
+/// `4mbv`: an unconfirmed switch is settled on **every** `result`, not only
+/// on a served one. A process that ignores `set_model` and then fails the
+/// very turn it was asked on — a seat that cannot serve the asked model, a
+/// transient vendor error — is closed at that turn's end all the same, so the
+/// next request opens a fresh record under `--model` instead of serving one
+/// more turn, unasked, on the model the person switched away from.
+#[tokio::test]
+async fn a_model_switch_on_an_errored_turn_still_closes_the_entry() {
+    let home = temp();
+    let cli = FakeCli::new(says(&["one", "two", "three"]));
+    let provider = errs_on(&cli, home.path(), 1);
+
+    turn(&provider, request(vec![user("m1", "first")], 0)).await;
+
+    let mut changed =
+        request(vec![user("m1", "first"), assistant("a1", "one"), user("m2", "second")], 2);
+    changed.model = "claude-sonnet-5".to_owned();
+    let events = turn(&provider, changed.clone()).await;
+
+    assert!(
+        failure(&events).is_some_and(|failed| failed.contains(ERRORED)),
+        "the switched turn is reported failed, with what the CLI said: {events:?}"
+    );
+    assert_eq!(cli.count(), 1, "the switch was asked on the live process");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.held_entries() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the unconfirmed process is closed at the errored turn's end");
+
+    let mut third = request(
+        vec![
+            user("m1", "first"),
+            assistant("a1", "one"),
+            user("m2", "second"),
+            assistant("a2", "two"),
+            user("m3", "third"),
+        ],
+        4,
+    );
+    third.model = changed.model;
+    let events = turn(&provider, third).await;
+
+    assert_eq!(said(&events), "three", "the next turn is served: {events:?}");
+    assert_eq!(cli.count(), 2, "on a fresh record");
+    assert!(cli.argv(1).contains(&"--model".to_owned()));
+    assert!(cli.argv(1).contains(&"claude-sonnet-5".to_owned()));
+    assert!(!cli.argv(1).contains(&"--resume".to_owned()));
+
+    provider.shutdown().await;
+}
+
+/// The other half of `4mbv`: an errored turn with no switch pending is only a
+/// failed turn. The process and its record are kept, and the next request
+/// continues on them.
+#[tokio::test]
+async fn an_errored_turn_with_no_switch_pending_keeps_its_process() {
+    let home = temp();
+    let cli = FakeCli::new(says(&["one", "two"]));
+    let provider = errs_on(&cli, home.path(), 0);
+
+    let events = turn(&provider, request(vec![user("m1", "first")], 0)).await;
+    assert!(
+        failure(&events).is_some_and(|failed| failed.contains(ERRORED)),
+        "the turn is reported failed: {events:?}"
+    );
+    assert_eq!(provider.held_entries(), 1, "and the process is still held");
+
+    let events = turn(
+        &provider,
+        request(vec![user("m1", "first"), assistant("a1", "one"), user("m2", "second")], 2),
+    )
+    .await;
+
+    assert_eq!(said(&events), "two", "the next turn is served: {events:?}");
+    assert_eq!(cli.count(), 1, "on the same process");
+    assert_eq!(cli.record(0).user_frames, ["first", "second"], "and the same record");
+
+    provider.shutdown().await;
+}
+
 /// `eawi` does not reach an effort: the SDK declares no `set_effort`, so a
 /// model change that arrives **with** an effort change still closes the
 /// process and opens a fresh record at once, as before.
@@ -700,9 +861,13 @@ async fn a_compaction_is_a_new_key_that_starts_from_nothing() {
 
     // A compaction replaces `messages[0]`, so the key moves — and the new key
     // reads its own binding, which does not exist, rather than the old key's
-    // refusal.
-    turn(&provider, request(vec![assistant("s1", "Summary so far: …"), user("m9", "carry on")], 1))
-        .await;
+    // refusal. The summary carries the engine's mark, as a minted one does
+    // (`ruto`).
+    let summary = crate::protocol::Message {
+        compaction_summary: true,
+        ..assistant("s1", "Summary so far: …")
+    };
+    turn(&provider, request(vec![summary, user("m9", "carry on")], 1)).await;
 
     assert_eq!(cli.count(), 2, "a new key spawns rather than inheriting a streak");
     let opened = &cli.record(1).user_frames[0];
@@ -1165,6 +1330,163 @@ async fn a_call_carrying_no_id_for_a_tool_nobody_denied_is_still_surfaced() {
         first,
         crate::provider::ProviderEvent::ToolCallStart { ref name, .. } if name == "grep"
     ));
+}
+
+/// The other order a denied call can arrive in (`yu5p`): the `tools/call`
+/// reaches the wire **before** its ask is answered, so `call_arrived` parks
+/// it beside the ask and returns. The resolve that then says deny used to
+/// record the refusal and write nothing for the call, and the CLI waited on
+/// it for the whole hour its `tools/call` timeout allows. It is answered in
+/// the deny arm itself, with the refusal the after-deny path gives.
+#[tokio::test]
+async fn a_call_parked_before_its_ask_is_denied_is_answered_with_the_refusal() {
+    use tokio::io::AsyncReadExt as _;
+
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("ask-1".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    // The call first: parked beside its ask, and answered by nobody yet.
+    let mut call = a_call("read", "toolu_1");
+    call.id = serde_json::json!(7);
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", call).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    assert_eq!(written, "", "a call waiting on its ask is not answered on arrival");
+    {
+        let meta = wiring.meta.lock().expect("meta");
+        assert_eq!(
+            meta.pending
+                .iter()
+                .map(|parked| (parked.call_request_id.as_deref(), parked.call_rpc_id.clone()))
+                .collect::<Vec<_>>(),
+            [(Some("req-1"), Some(serde_json::json!(7)))],
+            "the call's two ids are parked beside the ask"
+        );
+    }
+
+    // Then the deny.
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a control_response line"))
+        .collect();
+
+    assert_eq!(lines.len(), 2, "the ask and the call, each answered: {written}");
+    assert_eq!(lines[0]["response"]["request_id"], "ask-1", "the ask first: {written}");
+    assert_eq!(
+        lines[0]["response"]["response"],
+        serde_json::json!({"behavior": "deny", "message": "denied"}),
+        "answered with the person's deny, as before"
+    );
+    assert_eq!(lines[1]["response"]["request_id"], "req-1", "then the call: {written}");
+    let reply = &lines[1]["response"]["response"]["mcp_response"];
+    assert_eq!(reply["id"], serde_json::json!(7), "echoing the call's own JSON-RPC id");
+    assert_eq!(reply["result"]["isError"], serde_json::json!(true), "as a refusal: {written}");
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        super::DENIED_CALL,
+        "in the words a call arriving after the deny is answered with"
+    );
+
+    assert_eq!(
+        turn.denied.get("toolu_1").map(String::as_str),
+        Some("read"),
+        "the denial is still recorded, so a second call for it is refused too"
+    );
+    assert!(wiring.meta.lock().expect("meta").pending.is_empty(), "and nothing is left parked");
+}
+
+/// `yu5p` on the secondary path: a `tools/call` with no ask before it is its
+/// own ask, parked with the call's two ids and no ask id. Denied, it is
+/// answered with the same refusal, and with nothing else, since no
+/// `can_use_tool` was asked for a deny payload to answer.
+#[tokio::test]
+async fn a_call_that_was_its_own_ask_is_answered_with_the_refusal_when_denied() {
+    use tokio::io::AsyncReadExt as _;
+
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn { expected_calls: 1, ..super::Turn::default() };
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+
+    let mut call = a_call("read", "toolu_1");
+    call.id = serde_json::json!(9);
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", call).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    assert_eq!(written, "", "the call is the ask, so it waits on the person");
+    assert!(
+        matches!(
+            streamed.try_recv(),
+            Ok(crate::provider::ProviderEvent::ToolCallStart { ref name, .. }) if name == "read"
+        ),
+        "and was surfaced as an ordinary ask"
+    );
+    {
+        let meta = wiring.meta.lock().expect("meta");
+        assert_eq!(
+            meta.pending
+                .iter()
+                .map(|parked| (
+                    parked.request_id.as_deref(),
+                    parked.call_request_id.as_deref(),
+                    parked.call_rpc_id.clone()
+                ))
+                .collect::<Vec<_>>(),
+            [(None, Some("req-1"), Some(serde_json::json!(9)))],
+            "parked with the call's ids and no ask id"
+        );
+    }
+
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a control_response line"))
+        .collect();
+
+    assert_eq!(lines.len(), 1, "the call alone is answered, there being no ask: {written}");
+    assert_eq!(lines[0]["response"]["request_id"], "req-1", "by the call's request id");
+    let reply = &lines[0]["response"]["response"]["mcp_response"];
+    assert_eq!(reply["id"], serde_json::json!(9), "echoing the call's own JSON-RPC id");
+    assert_eq!(reply["result"]["isError"], serde_json::json!(true), "as a refusal: {written}");
+    assert_eq!(reply["result"]["content"][0]["text"], super::DENIED_CALL);
+
+    assert_eq!(turn.denied.get("toolu_1").map(String::as_str), Some("read"));
+    assert!(wiring.meta.lock().expect("meta").pending.is_empty(), "and nothing is left parked");
 }
 
 /// The secondary path is the one arm where a name this turn never advertised

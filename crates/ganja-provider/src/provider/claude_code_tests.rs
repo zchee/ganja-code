@@ -1412,9 +1412,15 @@ async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_user_
     );
 
     // The conversation that follows it: the summary is the assistant's, so the
-    // engine carries it as an assistant message and the wire renders it as
-    // nothing at all.
-    let carried = request(vec![assistant("m2", SUMMARY), user("m3", "carry on then")], 1);
+    // engine carries it as an assistant message marked as the summary, and the
+    // wire renders it as user-voiced context (`q3ep`, by the mark since `ruto`).
+    let carried = request(
+        vec![
+            Message { compaction_summary: true, ..assistant("m2", SUMMARY) },
+            user("m3", "carry on then"),
+        ],
+        1,
+    );
     drain(wire.stream(carried, CancellationToken::new()).await.expect("the turn runs")).await;
 
     assert_eq!(cli.count(), 2, "the turn after a compaction opens a record of its own");

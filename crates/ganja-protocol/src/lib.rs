@@ -989,6 +989,27 @@ pub struct Message {
     /// one written now.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub request_only: bool,
+    /// Marks the one message class the engine mints as a **compaction
+    /// summary**, so a wire can tell it from any other assistant message
+    /// without trusting where it sits (`ruto`).
+    ///
+    /// A summary is text the model wrote about everything before it, and a
+    /// wire that opens a fresh record on a rendered preamble — `claude-code` —
+    /// carries it forward in the **user's** voice, because an assistant line
+    /// there is the voice its vendor's safeguard refused. Promoting "whatever
+    /// assistant message leads the window" was right only while nothing but a
+    /// summary could lead one: a rewind variant, a seeded or forked session,
+    /// or some later engine-minted block that did would have been promoted
+    /// silently. The mark is what the engine knows; the position is only what
+    /// it happens to imply today.
+    ///
+    /// Set where the summary is minted, and backfilled on the head of a
+    /// resumed window whose id the session record names as its summary, so a
+    /// row compacted before this existed is marked too. `false` for every
+    /// message any constructor makes, and skipped when false, so a transcript
+    /// written before this existed is byte-identical to one written now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compaction_summary: bool,
 }
 
 impl Message {
@@ -1005,6 +1026,7 @@ impl Message {
             model: None,
             usage: None,
             request_only: false,
+            compaction_summary: false,
         }
     }
 
@@ -1028,6 +1050,7 @@ impl Message {
             model: Some(model.into()),
             usage: None,
             request_only: false,
+            compaction_summary: false,
         }
     }
 

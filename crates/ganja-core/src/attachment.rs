@@ -56,6 +56,41 @@ pub fn is_binary(mime: &str) -> bool {
     )
 }
 
+/// What [`read_bounded`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Bounded {
+    /// The whole file: it held no more than the limit.
+    Whole(Vec<u8>),
+    /// More than the limit. Nothing past one byte beyond it was read, and what
+    /// was read is dropped.
+    Over,
+}
+
+/// Reads `path` whole when it holds at most `limit` bytes, and answers
+/// [`Bounded::Over`] when it holds more, having read at most one byte past the
+/// limit.
+///
+/// One open and one bounded read, never a size check first: a file that grows
+/// between a `metadata` and a `read` is read whole anyway, and so is one whose
+/// size says nothing — a device, a pipe — which is exactly the read this
+/// exists to refuse.
+///
+/// # Errors
+///
+/// Whatever opening or reading `path` fails with.
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Bounded> {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(path)?.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+
+    Ok(if u64::try_from(read).unwrap_or(u64::MAX) > limit {
+        Bounded::Over
+    } else {
+        Bounded::Whole(bytes)
+    })
+}
+
 #[cfg(test)]
 #[path = "attachment_tests.rs"]
 mod tests;

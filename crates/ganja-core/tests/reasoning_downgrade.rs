@@ -170,6 +170,7 @@ fn stored_step() -> Message {
         model: Some(MODEL.to_owned()),
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }
 }
 
@@ -207,6 +208,7 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     };
     for message in [&asked, &stored_step()] {
         storage.save_message(&session, message).expect("the envelope stores");

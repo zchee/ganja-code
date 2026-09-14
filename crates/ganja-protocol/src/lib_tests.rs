@@ -49,6 +49,7 @@ fn pinned_message() -> Message {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }
 }
 
@@ -1687,6 +1688,7 @@ fn a_message_carrying_only_a_peers_words_has_content() {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     };
 
     assert!(message.has_content());
@@ -1768,4 +1770,39 @@ fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() 
     assert_eq!(guards.parts[0].as_text(), Some("the team is still working"));
     assert!(!Message::user("an ordinary prompt").request_only, "and nothing else sets it");
     assert!(!Message::assistant("a-model").request_only);
+}
+
+/// `ruto`. A compaction summary is marked in the type and invisible on the
+/// wire when a message is not one — the three properties the `request_only`
+/// pin above holds, for the same reasons: `false` writes the bytes a
+/// transcript from before the field carries, a document with no key reads as
+/// `false`, and the mark survives a round trip so a request can carry it to a
+/// wire. No constructor sets it; the engine does, at the mint.
+#[test]
+fn a_compaction_summary_is_marked_and_an_ordinary_message_is_byte_unchanged() {
+    let ordinary = pinned_message();
+    let written = serde_json::to_string(&ordinary).expect("a message serializes");
+    assert!(
+        !written.contains("compaction_summary"),
+        "an ordinary message carries no such key at all: {written}"
+    );
+
+    let decoded: Message =
+        serde_json::from_str(&written).expect("what was written reads back verbatim");
+    assert!(!decoded.compaction_summary, "and a document with no key reads as false");
+    assert_eq!(decoded, ordinary);
+
+    let summary = Message { compaction_summary: true, ..pinned_message() };
+    let written = serde_json::to_string(&summary).expect("a message serializes");
+    assert!(
+        written.contains(r#""compaction_summary":true"#),
+        "the mark is written when set: {written}"
+    );
+    let decoded: Message = serde_json::from_str(&written).expect("and reads back");
+    assert!(decoded.compaction_summary);
+    assert_eq!(decoded, summary);
+
+    assert!(!Message::user("a prompt").compaction_summary, "no constructor sets it");
+    assert!(!Message::assistant("a-model").compaction_summary);
+    assert!(!Message::request_only_user("the team is still working").compaction_summary);
 }

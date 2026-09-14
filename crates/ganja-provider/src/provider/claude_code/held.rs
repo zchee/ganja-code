@@ -53,10 +53,11 @@
 //!   and keeping a chosen model stale bills the opening model under a status
 //!   bar that says otherwise. A `model` change alone is first **asked** of
 //!   the live process with `set_model` (`eawi`, unmeasured live) and closes
-//!   the entry only at the end of a turn whose `system/init` did not confirm
-//!   it. A `system` or `tools` difference closes **nothing**: the process
-//!   keeps its opening prompt, logged once, and is told a moved roster with
-//!   `tools/list_changed` (`i5oi`, unmeasured live).
+//!   the entry only at the `result` of a turn whose `system/init` did not
+//!   confirm it — every `result`, an errored one included (`4mbv`), not only
+//!   a served one. A `system` or `tools` difference closes **nothing**: the
+//!   process keeps its opening prompt, logged once, and is told a moved
+//!   roster with `tools/list_changed` (`i5oi`, unmeasured live).
 //! - **(iv) refused** — a `system/model_refusal_no_fallback` arrived. The
 //!   entry is closed at that turn's `result` and the binding remembers it, so
 //!   the next spawn knows even from a later ganja process.
@@ -1497,11 +1498,30 @@ fn finish(wiring: &Wiring, turn: &mut Turn, result: super::frame::Result_) -> Op
         return Some(Reason::Refused);
     }
 
+    // A switch this turn could not confirm — a different model, or no `init`
+    // at all, so the check is still armed — is settled on **every** `result`
+    // past the refusal arm, which closes the entry anyway (`4mbv`). Read here,
+    // ahead of the error arm, because an errored turn is exactly the one a
+    // seat that cannot serve the asked model ends with, and deciding only on
+    // a served one let the next turn run, unasked, on the old model.
+    let armed = turn.model_check.take().is_some();
+    let unconfirmed = std::mem::take(&mut turn.model_unhonoured) || armed;
+
     // **`is_error`, never `subtype`** — every `result` in the recording says
     // `subtype: "success"`, refused ones included.
     if result.is_error {
         emit(turn, ProviderEvent::Failed(crate::provider::ProviderError::Transport(result.text)));
         close_turn(wiring, turn);
+
+        if unconfirmed {
+            tracing::info!(
+                provider = super::ID,
+                key = %wiring.key,
+                "the model switch was not confirmed; the next turn opens a fresh record"
+            );
+
+            return Some(Reason::Divergence);
+        }
 
         return None;
     }
@@ -1535,12 +1555,10 @@ fn finish(wiring: &Wiring, turn: &mut Turn, result: super::frame::Result_) -> Op
         binding.refused_streak = 0;
     });
 
-    // A switch this turn could not confirm — a different model, or no `init`
-    // at all, so the check is still armed — closes the entry now, and the
-    // next request opens a fresh record under `--model` (`eawi`). The turn
-    // itself finished: what it cost is one turn, shown by the served slot.
-    if turn.model_unhonoured || turn.model_check.take().is_some() {
-        turn.model_unhonoured = false;
+    // The unconfirmed switch read above closes the entry now, and the next
+    // request opens a fresh record under `--model` (`eawi`). The turn itself
+    // finished: what it cost is one turn, shown by the served slot.
+    if unconfirmed {
         tracing::info!(
             provider = super::ID,
             key = %wiring.key,
@@ -1747,8 +1765,10 @@ async fn mcp(
 ///
 /// Three ways it can land: after its ask was answered (the ordinary one, and
 /// it is answered from what the resolve recorded); before the resolve, in
-/// which case it waits on the parked ask; or with no ask at all — the
-/// secondary path, where the call **is** the ask.
+/// which case it waits on the parked ask and the resolve answers it — with the
+/// tool's result on allow, with the refusal on deny (`yu5p`); or with no ask
+/// at all — the secondary path, where the call **is** the ask and the resolve
+/// answers it the same two ways.
 async fn call_arrived(
     wiring: &Wiring,
     turn: &mut Turn,
@@ -1874,11 +1894,16 @@ async fn call_arrived(
     step_ends(wiring, turn);
 }
 
-/// What a `tools/call` for an ask already answered `deny` is answered with.
+/// What a `tools/call` for an ask answered `deny` is answered with, whether
+/// it arrives after the answer or was already parked beside the ask when the
+/// answer came (`yu5p`).
 ///
-/// Terse on purpose: the refusal the person's dialog produced already reached
-/// the model as the `can_use_tool`'s own `deny.message`, and this line only
-/// has to say that the call did not happen either.
+/// Terse on purpose: on the primary path the refusal the person's dialog
+/// produced already reached the model as the `can_use_tool`'s own
+/// `deny.message`, and this line only has to say that the call did not happen
+/// either. On the secondary path, where the call was the ask and no
+/// `can_use_tool` was answered, this line is all the model reads; carrying the
+/// message there is a follow-up bead.
 const DENIED_CALL: &str = "this call was refused and did not run";
 
 /// Answers one `tools/call` from this side alone: a failed result, no ask, no
@@ -1939,11 +1964,23 @@ async fn answer_asks(
         }
 
         match answer.result {
-            // A denied call is never called, so there is nothing to answer.
             // The name goes in beside the id because this removal is what
             // leaves a call carrying no id nothing else to match against.
             None => {
                 turn.denied.insert(parked.tool_use_id.clone(), parked.name.clone());
+
+                // A denied call is never called — unless it already was: a
+                // `tools/call` that arrived ahead of this answer is parked
+                // beside its ask, or **as** the ask on the secondary path, and
+                // the CLI waits on it up to the hour this side declared. It
+                // gets the refusal a call arriving after the deny is given
+                // (`yu5p`). One that has not arrived yet is answered from
+                // `denied` when it does.
+                if let (Some(request_id), Some(rpc_id)) =
+                    (&parked.call_request_id, &parked.call_rpc_id)
+                {
+                    refuse_call(turn, stdin, request_id, rpc_id, DENIED_CALL).await;
+                }
             }
             Some(result) => match (&parked.call_request_id, &parked.call_rpc_id) {
                 // The call already arrived and was waiting on this.

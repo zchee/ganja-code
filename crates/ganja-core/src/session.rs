@@ -3149,6 +3149,11 @@ async fn compact_if_needed(
         .unwrap_or_else(|| estimate_tokens(text.chars().count()));
 
     let mut summary = Message::assistant(turn.model.clone());
+    // Marked here, where the engine knows what it is minting, so a wire that
+    // carries a summary forward reads the mark rather than inferring it from
+    // where the message sits (`ruto`). Set before the save, so the stored row
+    // carries it too.
+    summary.compaction_summary = true;
     summary.parts.push(Part::text(text));
     summary.usage = usage;
     summary.complete();
@@ -4067,7 +4072,9 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 ///   when one was named;
 /// - a binary mime the wire carries stays a file part, its `content` filled
 ///   with the base64 the wire's encoder will spend — the read happens here so
-///   `ganja-protocol` never needs a base64 dependency;
+///   `ganja-protocol` never needs a base64 dependency — unless the file holds
+///   more than [`MAX_ATTACHMENT_BYTES`], when it degrades to a text block
+///   naming the file, its kind and that limit (`yr3e`);
 /// - a binary mime the wire does **not** carry degrades to a text block naming
 ///   the file and its kind. Never a dropped part and never a failed turn: the
 ///   model learns what was attached even when the wire cannot show it
@@ -4087,11 +4094,34 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 ///
 /// The read is synchronous on the turn task, like every
 /// [`Persist`] write: these are small files, and the lane that absorbs
-/// backpressure is this one.
+/// backpressure is this one. A binary one that is not small costs a read of
+/// the limit and one byte more, never the whole of it.
 fn resolve_mentions(
     messages: &mut [Message],
     root: &std::path::Path,
     carries: &dyn Fn(&str) -> bool,
+) {
+    resolve_mentions_within(messages, root, carries, MAX_ATTACHMENT_BYTES);
+}
+
+/// The most bytes one binary attachment may hold and still be carried.
+///
+/// The Messages API's 32 MB request ceiling, rounded up to 32 MiB (`yr3e`). A file past it cannot
+/// fit however it is sent, since base64 only grows it, so reading it whole —
+/// then encoding it, then copying it into a request body or, on the
+/// `claude-code` wire, one stdin line — would spend memory on a request the
+/// vendor refuses anyway. Every wire reads the same `content`, so the bound
+/// is the engine's rather than any one wire's.
+const MAX_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// [`resolve_mentions`] under a binary-attachment `limit` of the caller's
+/// choosing, which is what lets a test reach the bound without writing
+/// [`MAX_ATTACHMENT_BYTES`] of fixture.
+fn resolve_mentions_within(
+    messages: &mut [Message],
+    root: &std::path::Path,
+    carries: &dyn Fn(&str) -> bool,
+    limit: u64,
 ) {
     for message in messages {
         for part in &mut message.parts {
@@ -4103,8 +4133,8 @@ fn resolve_mentions(
             part.body = if !crate::attachment::is_binary(&mime) {
                 PartBody::Text { text: attached(root, &path, start, end) }
             } else if carries(&mime) {
-                match std::fs::read(root.join(&path)) {
-                    Ok(bytes) => {
+                match crate::attachment::read_bounded(&root.join(&path), limit) {
+                    Ok(crate::attachment::Bounded::Whole(bytes)) => {
                         use base64::Engine as _;
                         use base64::engine::general_purpose::STANDARD;
                         PartBody::File {
@@ -4115,6 +4145,16 @@ fn resolve_mentions(
                             content: Some(STANDARD.encode(bytes)),
                         }
                     }
+                    // Named, never carried: the model still learns what was
+                    // attached, in the block a type the wire cannot carry
+                    // earns, and the vendor is never sent a request it would
+                    // refuse whole.
+                    Ok(crate::attachment::Bounded::Over) => PartBody::Text {
+                        text: format!(
+                            "<attached-file path=\"{path}\" mime=\"{mime}\">\n(attached by name only: \
+                             larger than the {limit}-byte attachment limit)\n</attached-file>"
+                        ),
+                    },
                     // The same failure block a text mention earns: the user
                     // attached it deliberately, and a silently missing
                     // attachment reads as a user who never mentioned anything.

@@ -18,12 +18,17 @@
 //! # A compaction summary is carried, in the user's voice
 //!
 //! The one assistant message this render does not drop is a **compaction
-//! summary**, and it is recognised by position: ganja's window opens on an
-//! assistant message exactly when a compaction has replaced the history with
-//! its summary (`session.rs`'s `compact_if_needed` installs `[summary]` as
-//! the whole window). Dropping it, as this module did first, made `/compact`
-//! on this wire open a fresh record with the prompt alone — a compaction that
-//! kept nothing. So it is rendered as **context the user carries in**: a
+//! summary**, and it is recognised by the mark the engine puts on it —
+//! `Message::compaction_summary`, set where `session.rs`'s `compact_if_needed`
+//! mints it and backfilled where a resumed window is cut at the record's
+//! summary — and by leading the history, since a window opens user-first or on
+//! its summary (`ruto`). Position alone promotes nothing: an unmarked
+//! assistant message that happens to lead is dropped like any other, so a
+//! later way for one to lead a window cannot put model-written text in the
+//! user's voice without the engine vouching for it. Dropping the summary, as
+//! this module did first, made `/compact` on this wire open a fresh record
+//! with the prompt alone — a compaction that kept nothing. So it is rendered
+//! as **context the user carries in**: a
 //! `[User]` paragraph opening [`CARRIED_CONTEXT`], its text through
 //! `neutralize` like every other rendered byte, and never an `[Assistant]`
 //! line — the assistant voice is the one the recording measured refused.
@@ -166,9 +171,10 @@ pub struct Rendered {
 /// `[User]`, `[Tool Call] <tool> <input>` and `[Tool Result]` /
 /// `[Tool Result (error)]` lines, under [`HEADER`]. **Never an `[Assistant]`
 /// line** — see the module doc for what that costs and why it is not
-/// negotiable. A history that opens on an assistant message opens on a
-/// compaction summary, and that one is carried as a `[User]` paragraph under
-/// [`CARRIED_CONTEXT`] instead of being dropped.
+/// negotiable. A history that opens on a message the engine marked as its
+/// compaction summary carries that one as a `[User]` paragraph under
+/// [`CARRIED_CONTEXT`] instead of dropping it; the mark decides, never the
+/// position alone (`ruto`).
 ///
 /// A `Peer` part is another agent's words and is treated as the assistant's
 /// for this rule: nothing rendered.
@@ -216,11 +222,11 @@ pub fn carried(message: &Message) -> String {
     format!("{MID_TURN_HEADER} {}", neutralize(&message_text(message)))
 }
 
-/// Whether a history's leading assistant message is carried as a summary.
+/// Whether a history's leading compaction summary is carried.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Summary {
-    /// The whole history before a turn: a leading assistant message is the
-    /// compaction summary, carried under [`CARRIED_CONTEXT`].
+    /// The whole history before a turn: a leading message carrying the
+    /// engine's compaction-summary mark is carried under [`CARRIED_CONTEXT`].
     Carried,
     /// A turn's own messages: every assistant message is dropped.
     Dropped,
@@ -240,11 +246,17 @@ fn lines(messages: &[Message], summary: Summary) -> Rendered {
         // unanswered: run 9d obeyed exactly that and called the tool again.
         //
         // The exception is the summary a compacted window opens on, which is
-        // carried in the user's voice. Its id joins no `user_ids`: it is not
-        // a user message, and `sent` is the request's user-id list.
+        // carried in the user's voice — known by the engine's mark and by
+        // leading, never by leading alone (`ruto`). Its id joins no
+        // `user_ids`: it is not a user message, and `sent` is the request's
+        // user-id list.
         if message.role == Role::Assistant {
             let text = message_text(message);
-            if summary == Summary::Carried && index == 0 && !text.trim().is_empty() {
+            if summary == Summary::Carried
+                && index == 0
+                && message.compaction_summary
+                && !text.trim().is_empty()
+            {
                 paragraphs.push(format!("[User] {CARRIED_CONTEXT}\n\n{}", neutralize(&text)));
             } else {
                 assistant_turns_dropped += 1;

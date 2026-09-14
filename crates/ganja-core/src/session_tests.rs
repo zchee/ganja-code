@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
     context_carried, continue_for_the_team, parse_args, peer_envelope, resolve, resolve_mentions,
-    serialize_message, session_mention_parts, sliced, title_model, user_message,
+    resolve_mentions_within, serialize_message, session_mention_parts, sliced, title_model,
+    user_message,
 };
 use crate::catalog;
 use crate::engine::Fanout;
@@ -427,6 +428,7 @@ fn resolving_a_mention_is_not_a_read() {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }];
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
@@ -451,6 +453,7 @@ fn message_mentioning(path: &str) -> Vec<Message> {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }]
 }
 
@@ -494,6 +497,66 @@ fn a_binary_mention_the_wire_cannot_carry_degrades_to_its_name() {
     assert!(
         text.contains("image/png") && text.contains("does not carry"),
         "and why the bytes are not there: {text}"
+    );
+}
+
+/// `yr3e`: a file past the attachment limit is named, never read whole and
+/// carried. It degrades to the same by-name block a type the wire cannot carry
+/// earns, and the block says which limit it was past.
+#[test]
+fn a_binary_mention_over_the_attachment_limit_is_attached_by_name_only() {
+    let root = tempfile::tempdir().expect("a scratch directory");
+    std::fs::write(root.path().join("shot.png"), b"12345").expect("the fixture writes");
+
+    let mut messages = message_mentioning("shot.png");
+    resolve_mentions_within(&mut messages, root.path(), &|mime| mime == "image/png", 4);
+
+    assert_eq!(
+        messages[0].parts[0].as_text(),
+        Some(
+            "<attached-file path=\"shot.png\" mime=\"image/png\">\n(attached by name only: \
+             larger than the 4-byte attachment limit)\n</attached-file>"
+        ),
+        "the part degraded to its name and the limit: {:?}",
+        messages[0].parts[0]
+    );
+}
+
+/// The limit is inclusive, and a file at it is carried exactly as one under it
+/// always was: a file part whose base64 is every byte.
+#[test]
+fn a_binary_mention_exactly_at_the_attachment_limit_is_carried_whole() {
+    let root = tempfile::tempdir().expect("a scratch directory");
+    std::fs::write(root.path().join("shot.png"), b"1234").expect("the fixture writes");
+
+    let mut messages = message_mentioning("shot.png");
+    resolve_mentions_within(&mut messages, root.path(), &|mime| mime == "image/png", 4);
+
+    let PartBody::File { content: Some(content), .. } = &messages[0].parts[0].body else {
+        panic!("the part stays a file part: {:?}", messages[0].parts[0]);
+    };
+    {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        assert_eq!(STANDARD.decode(content).expect("the payload is base64"), b"1234");
+    }
+}
+
+/// A binary attachment the wire carries but nobody can read keeps the block it
+/// always earned: the user attached it deliberately, and a silently missing
+/// attachment reads as a user who never mentioned anything.
+#[test]
+fn a_binary_mention_that_cannot_be_read_says_so() {
+    let root = tempfile::tempdir().expect("a scratch directory");
+
+    let mut messages = message_mentioning("gone.png");
+    resolve_mentions_within(&mut messages, root.path(), &|mime| mime == "image/png", 4);
+
+    let text = messages[0].parts[0].as_text().expect("the part degraded to text");
+    assert!(
+        text.starts_with("<attached-file path=\"gone.png\">\n(could not be read: ")
+            && text.ends_with(")\n</attached-file>"),
+        "the failure block, naming the file: {text}"
     );
 }
 
