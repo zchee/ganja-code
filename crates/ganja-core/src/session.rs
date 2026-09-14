@@ -4106,7 +4106,7 @@ fn resolve_mentions(
 
 /// The most bytes one binary attachment may hold and still be carried.
 ///
-/// The Messages API's request ceiling, 32 MB (`yr3e`). A file past it cannot
+/// The Messages API's 32 MB request ceiling, rounded up to 32 MiB (`yr3e`). A file past it cannot
 /// fit however it is sent, since base64 only grows it, so reading it whole —
 /// then encoding it, then copying it into a request body or, on the
 /// `claude-code` wire, one stdin line — would spend memory on a request the
