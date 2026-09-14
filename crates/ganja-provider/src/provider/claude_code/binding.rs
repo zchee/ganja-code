@@ -3,7 +3,6 @@
 //!
 //! # It is never a resume target
 //!
-//! The binding predates posture C and survived it with one field demoted.
 //! `cli_session_id` is kept **for logs** — a person can find the CLI's own
 //! `.jsonl` for a record this wire opened — and is read by no argv builder;
 //! `--resume` is on `NEVER_ANYWHERE`, so there is no code path that could
@@ -178,10 +177,10 @@ impl Paths {
         })?;
 
         let mut at = self.root.clone();
-        create_private(&at)?;
+        seal_leaf(&at)?;
         for component in under.components() {
             at.push(component);
-            create_private(&at)?;
+            seal_leaf(&at)?;
         }
 
         Ok(())
@@ -208,7 +207,7 @@ impl Lock {
     /// caller: read no binding, write none, open a fresh record.
     pub fn claim(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
-            create_private(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+            seal_leaf(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         }
 
         let file = fs::OpenOptions::new()
@@ -262,7 +261,7 @@ pub fn load(path: &Path) -> Option<Binding> {
 /// which is a cost, not a failure.
 pub fn store(path: &Path, binding: &Binding) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        create_private(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        seal_leaf(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
 
     let bytes = serde_json::to_vec(binding).map_err(|error| error.to_string())?;
@@ -278,37 +277,26 @@ pub fn store(path: &Path, binding: &Binding) -> Result<(), String> {
     })
 }
 
-/// `mkdir -p` at `0700`: a binding names a conversation, and the directory
-/// listing alone would say how many a person is holding.
-fn create_private(directory: &Path) -> io::Result<()> {
+/// `mkdir -p` at `0700` for `directory` alone — every directory above it is
+/// left as it was, which is [`Paths::create_private`]'s job for this tree.
+///
+/// `0700` because a binding names a conversation, and the directory listing
+/// alone would say how many a person is holding.
+fn seal_leaf(directory: &Path) -> io::Result<()> {
     fs::create_dir_all(directory)?;
     private(directory)
 }
 
-#[cfg(unix)]
 fn private(directory: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(not(unix))]
-fn private(_directory: &Path) -> io::Result<()> {
-    // Windows has no mode bit to set here, and this build ships no windows
-    // lane; the directory inherits whatever the data home grants.
-    Ok(())
-}
-
-#[cfg(unix)]
 fn owner_only(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn owner_only(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

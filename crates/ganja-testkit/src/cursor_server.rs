@@ -37,21 +37,13 @@
 //! is written, so the id-matching has nothing to disambiguate.
 //!
 //! Three steps exist for the turn a server *drops* rather than finishes
-//! (**D553**'s recovery, W3): [`Step::ExecNoWait`] writes an exec and moves
+//! (**D553**'s recovery): [`Step::ExecNoWait`] writes an exec and moves
 //! on without its answer, [`Step::Hangup`] ends the connection under it once
 //! the test says the Run is held, and [`Step::KvGet`]/[`Step::KvGetComposed`]
 //! ask the kv channel for what the next Run's state names — the gets a fresh
-//! Run over a composed history has to answer. `PATIENCE` is a bound on a
-//! fixture bug, never a mechanism: no script here waits for it to expire, and
-//! the drop is a step, not a timeout. Expiring at a [`Step::Hangup`] nobody
-//! released, it writes an EndStream **error** frame naming the unreleased
-//! hangup before the connection ends, so a script that resumed the Run
-//! without releasing it fails the turn by that name rather than passing
-//! twenty seconds late. What the frame cannot reach is a Run still *held*
-//! through the expiry: its fold sits in the held-run table unread, the
-//! keeper's next beat drops it as `Closed`, and the resume recovers on a
-//! fresh Run — the frame lands on a body nobody is reading, and that shape
-//! is bounded by the expiry alone.
+//! Run over a composed history has to answer. The drop is a step, never a
+//! timeout: `PATIENCE` is a bound on a fixture bug, and its own doc says what
+//! expiring at an unreleased hangup does.
 //!
 //! # What it is not
 //!
@@ -76,13 +68,20 @@ pub const END_STREAM: u8 = 0b0000_0010;
 /// How long one step may wait for the answer it asked for.
 ///
 /// Generous because CI machines stall, and reached only when the client never
-/// answers at all — or, for a [`Step::Hangup`], when the test never releases
-/// it, which is answered with an EndStream error frame naming the unreleased
-/// hangup so the turn reading that body fails by name — in which case the
-/// test's own failure message is what matters, not the wait. **Not a
-/// mechanism**: a script that leaned on this expiring would stall a
-/// workspace run by twenty seconds per case, so every drop a test wants is a
-/// step it writes.
+/// answers at all — in which case the test's own failure message is what
+/// matters, not the wait — or, for a [`Step::Hangup`], when the test never
+/// releases it. That expiry writes an EndStream **error** frame naming the
+/// unreleased hangup before the connection ends, so a script that resumed the
+/// Run without releasing it fails the turn by that name rather than `PATIENCE`
+/// late, by a truncation it cannot tell from any other. What the frame cannot
+/// reach is a Run still *held* through the expiry: its fold sits in the
+/// held-run table unread, the keeper's next beat drops it as `Closed`, and the
+/// resume recovers on a fresh Run — the frame lands on a body nobody is
+/// reading, and that shape is bounded by the expiry alone.
+///
+/// **Not a mechanism**: a script that leaned on this expiring would stall a
+/// workspace run by `PATIENCE` per case, so every drop a test wants is a step
+/// it writes.
 const PATIENCE: Duration = Duration::from_secs(20);
 
 /// One thing the server does on an open Run stream.
@@ -717,10 +716,7 @@ async fn run_step(step: Step, run: &mut Run<'_>) -> std::io::Result<Flow> {
             if tokio::time::timeout(PATIENCE, run.recording.hangup.notified()).await.is_err() {
                 // Named on the wire and not only in this error: the error
                 // below reaches nothing a test reads, where an EndStream
-                // verdict reaches the fold — so a script that resumed the Run
-                // without releasing the hangup fails its turn by this
-                // sentence, rather than twenty seconds late by a truncation
-                // it cannot tell from any other.
+                // verdict reaches the fold (`PATIENCE`'s doc).
                 let complaint = "the test never released the hangup this script reached";
                 let verdict = serde_json::json!({ "error": { "code": "deadline_exceeded", "message": complaint } });
                 write_chunk(&mut run.writer, &envelope(END_STREAM, verdict.to_string().as_bytes()))

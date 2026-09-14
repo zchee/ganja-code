@@ -20,40 +20,18 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{HeldRuns, Key, Reason, Resolution};
-use crate::protocol::{FinishReason, Message, MessageId, Part, PartBody, ToolState};
+use super::{HeldRuns, Key, REOPENED, Reason, Resolution};
+use crate::protocol::{FinishReason, Message, MessageId, ToolState};
 use crate::provider::cursor::tests::{
-    Answered, Served, end_stream, finished, framed, opening, roster, sent_so_far, serve_run, text,
-    turn_ended,
+    Answered, Served, answered, completed, end_stream, finished, framed, opening, provider_at,
+    read_args, roster, sent_so_far, serve_run, text, through_provider, turn_ended,
 };
 use crate::provider::cursor::{Bridge, CursorProvider, Duplex, connect, history, proto};
-use crate::provider::{ChatRequest, CredentialSource, Provider as _, ProviderEvent};
-
-/// The same request one step later, with the assistant's tool part on it —
-/// what the engine hands back after running the call.
-fn answered(request: &ChatRequest, call_id: &str, state: ToolState) -> ChatRequest {
-    let mut resumed = request.clone();
-    let mut reply = Message::assistant(&request.model);
-    reply.parts.push(Part {
-        id: crate::protocol::PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
-    });
-    resumed.messages.push(reply);
-
-    resumed
-}
+use crate::provider::{ChatRequest, CredentialSource, ProviderEvent};
 
 /// A frame carrying the server calling the declared tool.
 fn called(id: u32, tool_call_id: &str) -> Vec<u8> {
-    exec(id, |exec| {
-        exec.mcp_args = buffa::MessageField::some(
-            proto::McpArgs::default()
-                .with_name("read")
-                .with_tool_name("read")
-                .with_tool_call_id(tool_call_id)
-                .with_provider_identifier("ganja"),
-        );
-    })
+    exec(id, |exec| exec.mcp_args = buffa::MessageField::some(read_args(tool_call_id)))
 }
 
 /// A frame carrying one exec, `fill` having chosen its kind and arguments.
@@ -126,17 +104,6 @@ fn calls(events: &[ProviderEvent], call_id: &str) {
         ],
         "the exec arrives whole, so one delta carries the whole argument object"
     );
-}
-
-fn completed(output: &str) -> ToolState {
-    ToolState::Completed {
-        input: serde_json::json!({}),
-        output: output.to_owned(),
-        title: "read".to_owned(),
-        metadata: serde_json::json!({}),
-        started: 0,
-        completed: 0,
-    }
 }
 
 /// The shape the whole feature rests on: a declared tool called mid-stream
@@ -313,31 +280,6 @@ async fn a_resume_whose_body_closed_under_it_reopens_a_run_rather_than_reading_o
         "the turn read on from a fresh run rather than failing: {events:?}"
     );
     assert_resumed_over(served, &resumed, "the file's contents").await;
-}
-
-/// The provider a recovery is driven through: the loopback `served` answers
-/// on, with a credential that is a value rather than a store.
-fn provider_at(served: &Served) -> CursorProvider {
-    CursorProvider::at(
-        &served.base_url,
-        CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
-    )
-    .expect("loopback may carry a token")
-}
-
-/// One turn through `Provider::stream`, collected — bounded, because a
-/// recovery that hung would otherwise hang the suite.
-async fn through_provider(provider: &CursorProvider, request: ChatRequest) -> Vec<ProviderEvent> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        provider
-            .stream(request, CancellationToken::new())
-            .await
-            .expect("the turn opens on the loopback")
-            .collect()
-            .await
-    })
-    .await
-    .expect("the turn ends rather than hanging")
 }
 
 /// What a recovered Run's run request has to say: `resume_action`, and a
@@ -539,33 +481,50 @@ fn opening_with(id: MessageId) -> ChatRequest {
     request
 }
 
+/// The cap's memory is bounded, and the bound is first in, first out: a key
+/// leaves the recovered list only once [`REOPENED`] later turns have been
+/// recovered after it, and may then recover once more — while the newest
+/// recovery is still remembered, so its second attempt is capped.
+///
+/// Driven through `resolve` alone: a request carrying a finished result and
+/// keyed to nothing held is exactly the shape that recovers, so no Run has to
+/// be paused for any of the keys.
+#[test]
+fn the_oldest_recovery_leaves_the_cap_after_the_bound_and_the_newest_does_not() {
+    let held = HeldRuns::default();
+    let recovering: Vec<ChatRequest> = (0..=REOPENED)
+        .map(|_| answered(&opening("auto"), "call-1", completed("after the drop")))
+        .collect();
+    for request in &recovering {
+        assert!(
+            matches!(held.resolve(request), Resolution::Recover(_)),
+            "every key's first recovery is allowed"
+        );
+    }
+
+    let newest = recovering.last().expect("the bound is not zero");
+    assert!(
+        matches!(held.resolve(newest), Resolution::Failed(_)),
+        "the newest recovered key is still remembered, so its second attempt is capped"
+    );
+    assert!(
+        matches!(held.resolve(&recovering[0]), Resolution::Recover(_)),
+        "the oldest left the list after {REOPENED} later recoveries, so it recovers again"
+    );
+}
+
 /// **AC-14.** The reason a recovery names is the reason its bridge actually
 /// went, which is what makes the log line worth reading: four reasons, four
-/// distinct clauses, and a resume keyed to a Run dropped for each one
-/// recovers with that reason's clause in its sentence.
-#[tokio::test]
-async fn every_drop_reason_has_a_sentence_of_its_own_and_the_recovery_names_it() {
+/// distinct clauses. That a recovery carries its drop's clause is each drop's
+/// own test, against the drop the keeper really made.
+#[test]
+fn every_drop_reason_has_a_sentence_of_its_own() {
     let reasons = [Reason::Cancelled, Reason::Idle, Reason::Closed, Reason::Evicted];
     let spelled: Vec<&str> = reasons.iter().map(Reason::spelled).collect();
     let mut unique = spelled.clone();
     unique.sort_unstable();
     unique.dedup();
     assert_eq!(unique.len(), spelled.len(), "four reasons, four sentences: {spelled:?}");
-
-    let held = Arc::new(HeldRuns::default());
-    for (index, reason) in reasons.into_iter().enumerate() {
-        let call_id = format!("call-{index}");
-        let paused = pause("auto", &held, &call_id).await;
-        let key = Key::of(&paused.request).expect("a request with a message keys");
-        let clause = reason.spelled();
-        held.drop_run(&key, reason);
-
-        let resumed = answered(&paused.request, &call_id, completed("after the drop"));
-        let Resolution::Recover(why) = held.resolve(&resumed) else {
-            panic!("a resume keyed to a dropped run recovers");
-        };
-        assert!(why.contains(clause), "the recovery names its drop: {why:?} lacks {clause:?}");
-    }
 }
 
 /// Waits for the keeper task to notice what the test just did.

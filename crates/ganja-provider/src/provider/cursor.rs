@@ -525,9 +525,6 @@ impl CursorWire {
                         answers,
                         system: request.system.clone(),
                         roster: request.tools.clone(),
-                        // Moved in rather than cloned: the request bytes
-                        // above already carry the ids, and this is the last
-                        // reader of the composition.
                         blobs: composed.blobs,
                     },
                 ),

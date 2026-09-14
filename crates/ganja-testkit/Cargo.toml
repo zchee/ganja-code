@@ -54,6 +54,10 @@ tokio = { workspace = true, features = ["io-std", "signal"] }
 # `CancellationToken` lives behind `rt`, the same feature ganja-core itself
 # enables it with.
 tokio-util = { workspace = true, features = ["rt"] }
+# `LogCapture::install` takes a `tracing::Level` and hands back the guard
+# `tracing::subscriber::set_default` returns; `tracing-subscriber` re-exports
+# neither type.
+tracing.workspace = true
 # `LogCapture` is a `MakeWriter`: the trait every suite that reads its own
 # log back needs implemented once rather than eight times.
 tracing-subscriber.workspace = true

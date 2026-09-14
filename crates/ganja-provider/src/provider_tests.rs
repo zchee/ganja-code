@@ -579,3 +579,66 @@ fn a_spliced_body_keeps_the_wires_fields_over_the_efforts() {
         .expect("a spliced body serializes");
     assert_eq!(untouched, body, "no effort means the wire's body exactly");
 }
+
+/// `turn_start` is a caller's value on a `pub` field, so the one clamp both
+/// history-keyed wires read it through brings a value past the end back to
+/// the last message, leaves one in range alone, and answers `0` for a
+/// request with nothing in it rather than underflowing.
+#[test]
+fn a_turn_start_past_the_end_clamps_to_the_last_message() {
+    use crate::protocol::Message;
+
+    let request = super::ChatRequest {
+        model: "any".to_owned(),
+        system: None,
+        messages: vec![Message::user("first"), Message::user("second")],
+        turn_start: 99,
+        tools: Vec::new(),
+        effort_options: serde_json::Map::new(),
+    };
+    assert_eq!(request.clamped_turn_start(), 1, "past the end is the last index");
+
+    let in_range = super::ChatRequest { turn_start: 0, ..request.clone() };
+    assert_eq!(in_range.clamped_turn_start(), 0, "a value in range is kept");
+
+    let empty = super::ChatRequest { messages: Vec::new(), ..request };
+    assert_eq!(empty.clamped_turn_start(), 0, "no messages clamps to zero, never below");
+}
+
+/// The defaults are pinned against the **trait**, not against one wire.
+///
+/// Enumerating the builtins would prove less and cost more: most of them
+/// cannot be constructed without a credential, and what matters is that a
+/// wire which overrides nothing gets these answers. So this is the smallest
+/// `Provider` there is.
+#[tokio::test]
+async fn a_wire_that_overrides_nothing_gets_the_trait_defaults() {
+    use super::Provider as _;
+
+    struct Inherits;
+
+    #[async_trait::async_trait]
+    impl super::Provider for Inherits {
+        fn id(&self) -> &str {
+            "inherits"
+        }
+
+        async fn stream(
+            &self,
+            _request: super::ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<futures::stream::BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(stream::empty().boxed())
+        }
+    }
+
+    let wire = Inherits;
+
+    assert_eq!(wire.served_model(), None);
+    assert_eq!(wire.last_eviction(), None);
+    assert!(wire.rate_windows().is_empty());
+    assert!(wire.plan_windows().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(1), wire.shutdown())
+        .await
+        .expect("a wire that holds nothing closes nothing");
+}

@@ -13,15 +13,15 @@
 //! `--no-session-persistence`. That flag is therefore forbidden on one
 //! builder and required on the other, which is a distinction a single
 //! never-list cannot draw. So [`NEVER_ANYWHERE`] holds what **no** argv of
-//! this wire may carry and is checked against both, and
-//! [`NEVER_ON_CONVERSATION`] is that list plus the one flag, checked against
-//! the held-process builder alone.
+//! this wire may carry and is checked against every builder, and
+//! [`NEVER_ON_CONVERSATION`] holds the one flag only a one-shot may carry,
+//! checked in addition to it against the held-process builder alone.
 //!
-//! `--resume` is on the wider list, not merely unbuilt (posture C, gate 7):
-//! the recording served it on 2 of 8 turns and refused it on 6, so a builder
-//! that grew it back is a defect this crate refuses to be able to express.
-//! `--include-partial-messages` is there for a different reason — W2's M4
-//! read that under it every completed block arrives twice — and is forbidden
+//! `--resume` is on the wider list, not merely unbuilt (**D556**): the
+//! recording served it on 2 of 8 turns and refused it on 6, so a builder that
+//! grew it back is a defect this crate refuses to be able to express.
+//! `--include-partial-messages` is there for a different reason — M4 read
+//! that under it every completed block arrives twice — and is forbidden
 //! rather than merely unbuilt so that both dropped flags are enforced the
 //! same way.
 //!
@@ -53,10 +53,11 @@ use crate::provider::ProviderError;
 /// `--help` lists for "ask me" (Deviation 10, user-confirmed), `--tools ""`
 /// leaves the CLI none of its own so every tool the model sees is ganja's,
 /// `--setting-sources ""` drops user, project and local settings,
-/// `--strict-mcp-config` keeps a discovered `.mcp.json` out, and the last
-/// four quiet the CLI's own extras: no slash commands, no browser, no system
-/// prompt snapshot, an `auth_status` frame at dial, and every user message
-/// echoed back so a wire can see what the CLI recorded.
+/// `--strict-mcp-config` keeps a discovered `.mcp.json` out, and of the last
+/// five, three turn off the CLI's own extras — slash commands, the browser,
+/// the system-prompt snapshot — and two add frames: an `auth_status` at dial,
+/// and every user message echoed back so a wire can see what the CLI
+/// recorded.
 pub const BASE: &[&str] = &[
     "-p",
     "--input-format",
@@ -67,7 +68,7 @@ pub const BASE: &[&str] = &[
     "--permission-prompt-tool",
     "stdio",
     "--permission-mode",
-    "manual",
+    PERMISSION_MODE,
     "--tools",
     "",
     "--setting-sources",
@@ -106,12 +107,11 @@ pub const PERMISSION_MODE: &str = "manual";
 /// behind ganja's back. Two are there because the recording measured them
 /// and they lost:
 ///
-/// - **`--resume`**: served on 2 of 8 turns, refused on 6 (posture C, gate
-///   7). The wire never resumes a record; every divergence opens a fresh one.
+/// - **`--resume`**: served on 2 of 8 turns, refused on 6 (**D556**). The
+///   wire never resumes a record; every divergence opens a fresh one.
 /// - **`--include-partial-messages`**: under it a completed block arrives
-///   twice, as `stream_event` deltas and again as an `assistant` frame (W2's
-///   M4), so the reader decodes the `assistant` frame and the flag is not
-///   passed.
+///   twice, as `stream_event` deltas and again as an `assistant` frame (M4),
+///   so the reader decodes the `assistant` frame and the flag is not passed.
 ///
 /// Both are forbidden rather than absent so that a builder growing one back
 /// is refused here, at every builder's own never-list check, in every profile
@@ -148,7 +148,8 @@ pub const NEVER_ANYWHERE: &[&str] = &[
     "--include-partial-messages",
 ];
 
-/// [`NEVER_ANYWHERE`] plus the one flag only a one-shot may carry.
+/// The one flag only a one-shot may carry, checked in addition to
+/// [`NEVER_ANYWHERE`] against a held conversation's argv.
 ///
 /// A held process is the continuity this wire has; telling it not to persist
 /// its record would throw that away at the first turn.
@@ -164,7 +165,7 @@ pub const NEVER_ON_CONVERSATION: &[&str] = &["--no-session-persistence"];
 /// side deciding which of the vendor's own isolation the vendor did not mean.
 ///
 /// The eleven: the two `ANTHROPIC_*` credentials, which would outrank the
-/// CLI's login and bill a platform key silently (pre-mortem 5); `NODE_OPTIONS`
+/// CLI's login and bill a platform key silently; `NODE_OPTIONS`
 /// and `DEBUG`, which change what the runtime does before any of ours runs;
 /// and the seven `CLAUDE_CODE_*` names a ganja run under a `claude` session
 /// inherits and that would tell the child it is something it is not.
@@ -294,11 +295,14 @@ pub const SET: &[(&str, &str)] = &[
     ("CLAUDE_CODE_QUESTION_PREVIEW_FORMAT", "markdown"),
 ];
 
-/// What a conversation's process is spawned with.
+/// What a process that takes a turn is spawned with: a held conversation's,
+/// or a title's or a compaction summary's one-shot, told apart by which
+/// builder it is handed to.
 ///
-/// It carries **no resume variant**, which is posture C expressed as a type:
-/// there is no value of this struct that names a record to continue, so the
-/// arm that would have built `--resume` cannot be written by accident.
+/// It carries **no resume variant**, which is the held process's never-resume
+/// rule expressed as a type: there is no value of this struct that names a
+/// record to continue, so the arm that would have built `--resume` cannot be
+/// written by accident.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spawn {
     /// The record this process opens, minted fresh every time.
@@ -309,113 +313,83 @@ pub struct Spawn {
     pub effort: Option<String>,
 }
 
-/// What a title or compaction-summary process is spawned with.
+// The three builders are pure: they read nothing, spawn nothing and allocate a
+// `Vec` from their argument. All three check their own never-list before
+// returning, in **every** profile — so a forbidden token is refused at the
+// builder rather than handed to the child.
+
+/// The argv a held conversation's process is spawned with.
 ///
-/// The same three values and one flag more: this process answers one request
-/// and its record is worth nothing afterwards.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OneShot {
-    /// The record this process opens, which it is also told not to keep.
-    pub session_id: String,
-    /// The model the request asked for, or the wire's default.
-    pub model: String,
-    /// The catalog effort's name, when this turn runs under one.
-    pub effort: Option<String>,
+/// # Errors
+///
+/// Returns a [`ProviderError::Transport`] naming the token when this argv
+/// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of
+/// [`NEVER_ON_CONVERSATION`], matched by its `--flag` up to `=`.
+pub fn conversation(spawn: &Spawn) -> Result<Vec<OsString>, ProviderError> {
+    let mut argv = base();
+    argv.push("--session-id".into());
+    argv.push(spawn.session_id.as_str().into());
+    push_model_and_effort(&mut argv, &spawn.model, spawn.effort.as_deref());
+
+    // Readable thinking, asked for only by a turn that asked for reasoning.
+    // The one such ask a `ChatRequest` carries on this wire is the effort —
+    // `effort_options` is what `/effort` splices, and this wire has no other
+    // reasoning field — so an effort is the signal and nothing else is.
+    // Without the flag the CLI withholds the text under a full signature (run
+    // 1); with it the text arrives (run 4). Thinking is billed and this wire
+    // has no catalog row to price it with, which is why it is not passed to a
+    // turn that never asked (**D556**, `fd5v`).
+    if spawn.effort.is_some() {
+        argv.extend(THINKING_DISPLAY.iter().map(OsString::from));
+    }
+
+    checked(argv, NEVER_ON_CONVERSATION)
 }
 
-/// What a **listing** process is spawned with (**D556**, Dv-17).
+/// The argv a listing process is spawned with (**D556**, Dv-17).
 ///
-/// One value, and the two it does *not* carry are the point: a listing asks
-/// the CLI what models the seat may name, so naming one would be asking the
-/// question with the answer already in it — and an effort is a property of a
-/// turn this process never takes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listing {
-    /// The record this process opens, which it is also told not to keep.
-    pub session_id: String,
+/// A one-shot's shape without `--model` or `--effort`: the same fresh
+/// `--session-id` and the same `--no-session-persistence`, because a
+/// listing's record is worth nothing the moment its answer is read. It names
+/// no model because a listing asks the CLI what models the seat may name,
+/// and naming one would be asking the question with the answer already in
+/// it; and no effort, a property of a turn this process never takes. Here
+/// rather than at the caller so that every rule about what may appear on this
+/// wire's command line stays in one file.
+///
+/// # Errors
+///
+/// Returns a [`ProviderError::Transport`] naming the token when this argv
+/// would carry one of [`NEVER_ANYWHERE`], matched by its `--flag` up to `=`.
+pub fn listing(session_id: &str) -> Result<Vec<OsString>, ProviderError> {
+    let mut argv = base();
+    argv.push("--session-id".into());
+    argv.push(session_id.into());
+    argv.push("--no-session-persistence".into());
+
+    checked(argv, &[])
 }
 
-/// The three argv builders.
+/// The argv a one-shot's process is spawned with: this process answers one
+/// request and its record is worth nothing afterwards.
 ///
-/// Pure: they read nothing, spawn nothing and allocate a `Vec` from their
-/// argument. All three check their own never-list before returning, in
-/// **every** profile — so a forbidden token is refused at the builder rather
-/// than handed to the child.
-pub struct Argv;
+/// # Errors
+///
+/// Returns a [`ProviderError::Transport`] naming the token when this argv
+/// would carry one of [`NEVER_ANYWHERE`], matched by its `--flag` up to `=`.
+pub fn one_shot(spawn: &Spawn) -> Result<Vec<OsString>, ProviderError> {
+    let mut argv = base();
+    argv.push("--session-id".into());
+    argv.push(spawn.session_id.as_str().into());
+    argv.push("--no-session-persistence".into());
+    push_model_and_effort(&mut argv, &spawn.model, spawn.effort.as_deref());
 
-impl Argv {
-    /// The argv a held conversation's process is spawned with.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ProviderError::Transport`] naming the token when this argv
-    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
-    /// builder's own list, matched by its `--flag` up to `=`.
-    pub fn conversation(spawn: &Spawn) -> Result<Vec<OsString>, ProviderError> {
-        let mut argv = base();
-        argv.push("--session-id".into());
-        argv.push(spawn.session_id.as_str().into());
-        push_model_and_effort(&mut argv, &spawn.model, spawn.effort.as_deref());
-
-        // Readable thinking, asked for only by a turn that asked for
-        // reasoning. The one such ask a `ChatRequest` carries on this wire is
-        // the effort — `effort_options` is what `/effort` splices, and this
-        // wire has no other reasoning field — so an effort is the signal and
-        // nothing else is. Without the flag the CLI withholds the text under
-        // a full signature (run 1); with it the text arrives (run 4). Thinking
-        // is billed and this wire has no catalog row to price it with, which
-        // is why it is not passed to a turn that never asked (**D556**,
-        // `fd5v`).
-        if spawn.effort.is_some() {
-            argv.extend(THINKING_DISPLAY.iter().map(OsString::from));
-        }
-
-        checked(argv, NEVER_ON_CONVERSATION)
-    }
-
-    /// The argv a listing process is spawned with (**D556**, Dv-17).
-    ///
-    /// A one-shot's shape without `--model` or `--effort`: the same fresh
-    /// `--session-id` and the same `--no-session-persistence`, because a
-    /// listing's record is worth nothing the moment its answer is read. Here
-    /// rather than at the caller so that every rule about what may appear on
-    /// this wire's command line stays in one file.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ProviderError::Transport`] naming the token when this argv
-    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
-    /// builder's own list, matched by its `--flag` up to `=`.
-    pub fn listing(listing: &Listing) -> Result<Vec<OsString>, ProviderError> {
-        let mut argv = base();
-        argv.push("--session-id".into());
-        argv.push(listing.session_id.as_str().into());
-        argv.push("--no-session-persistence".into());
-
-        checked(argv, NEVER_ANYWHERE)
-    }
-
-    /// The argv a one-shot's process is spawned with.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ProviderError::Transport`] naming the token when this argv
-    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
-    /// builder's own list, matched by its `--flag` up to `=`.
-    pub fn one_shot(one_shot: &OneShot) -> Result<Vec<OsString>, ProviderError> {
-        let mut argv = base();
-        argv.push("--session-id".into());
-        argv.push(one_shot.session_id.as_str().into());
-        argv.push("--no-session-persistence".into());
-        push_model_and_effort(&mut argv, &one_shot.model, one_shot.effort.as_deref());
-
-        checked(argv, NEVER_ANYWHERE)
-    }
+    checked(argv, &[])
 }
 
 /// `argv`, unless it carries a flag this wire may not pass.
 ///
-/// An `if` rather than the `debug_assert!` the three builders used to end on:
+/// A refusal rather than the `debug_assert!` the three builders used to end on:
 /// the macro expands to nothing in a release build, so the list was enforced
 /// by the builders' own shape and by the fake CLI and **not** by the shipped
 /// binary (CC-4). A real `assert!` would be the wrong direction too. The two

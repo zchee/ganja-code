@@ -122,6 +122,37 @@ pub use rate::{PlanWindow, RateWindow, RateWindows};
 /// with the wording "[Tool execution was interrupted]".
 pub(crate) const NO_RESULT: &str = "[no result recorded]";
 
+/// The bound on one rendered `[Tool Call]` input, in bytes: 8 KiB.
+///
+/// Both wires that carry a conversation as rendered text — cursor's composed
+/// history and a fresh `claude` record's preamble — cut every call input
+/// through `clamp` at this one bound, so the two cannot drift. An argument
+/// larger than this is file content — `write`'s `content`, `edit`'s strings —
+/// which is on disk and one `read` away, and on a wire where the request
+/// grows with the transcript, what compounds is worth bounding. Tool
+/// *outputs* are already clamped in the transcript at the tool layer and are
+/// rendered whole. The cut is a plain in-memory one, deliberately not
+/// `truncate::clamp_bytes`, which spills its overflow to a file and would
+/// write one on every request.
+pub const CALL_INPUT_LIMIT: usize = 8 * 1024;
+
+/// `input` cut at [`CALL_INPUT_LIMIT`] on a char boundary, with an elision
+/// naming exactly how many bytes were omitted; and whether it was cut.
+pub(crate) fn clamp(mut input: String) -> (String, bool) {
+    use fmt::Write as _;
+
+    if input.len() <= CALL_INPUT_LIMIT {
+        return (input, false);
+    }
+
+    let cut = input.floor_char_boundary(CALL_INPUT_LIMIT);
+    let omitted = input.len() - cut;
+    input.truncate(cut);
+    write!(input, "… [+{omitted} bytes]").expect("writing into a String cannot fail");
+
+    (input, true)
+}
+
 /// Refuses to build a provider whose login is not in the store.
 ///
 /// `storage_key` rather than a second spelling: what the file calls a
@@ -248,6 +279,17 @@ pub struct ChatRequest {
     /// every request had before efforts existed — means no effort, and the
     /// body is exactly the wire's own.
     pub effort_options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ChatRequest {
+    /// [`Self::turn_start`], clamped to an index [`Self::messages`] actually
+    /// has — `0` for a request with no messages at all.
+    ///
+    /// The one spelling every wire that reads the marker goes through, so two
+    /// wires cannot disagree about where an out-of-range turn begins.
+    pub(crate) fn clamped_turn_start(&self) -> usize {
+        self.turn_start.min(self.messages.len().saturating_sub(1))
+    }
 }
 
 /// The request body a wire sends, with the effort's options under it.
@@ -659,8 +701,6 @@ pub struct ServedModel {
 pub struct Eviction {
     /// The conversation whose process was closed, as that wire keys it.
     pub key: String,
-    /// When it was closed.
-    pub at: std::time::SystemTime,
 }
 
 /// The credential one request presents, whatever kind of credential it is.

@@ -169,15 +169,17 @@ pub fn resolve(
         let state =
             part_for(&pending.tool_use_id, turn).ok_or_else(|| pending.tool_use_id.clone())?;
 
-        let answer = match state {
-            ToolState::Completed { output, .. } => Resolution {
-                tool_use_id: pending.tool_use_id.clone(),
-                permission: Permission::Allow { updated_input: pending.input.clone() },
-                result: Some(rpc::CallToolResult {
-                    content: vec![rpc::Content::text(output.clone())],
-                    is_error: false,
-                }),
-            },
+        // The call may run, and `text` is the one block its `tools/call` is
+        // answered with.
+        let allow = |text: &str, is_error: bool| {
+            (
+                Permission::Allow { updated_input: pending.input.clone() },
+                Some(rpc::CallToolResult { content: vec![rpc::Content::text(text)], is_error }),
+            )
+        };
+
+        let (permission, result) = match state {
+            ToolState::Completed { output, .. } => allow(output, false),
             ToolState::Error { error, .. } if is_refusal(error) => {
                 // The one place a mid-turn message travels as text. It rides
                 // the **first** deny and no other, so two denied asks in one
@@ -192,22 +194,11 @@ pub fn resolve(
                     _ => error.clone(),
                 };
 
-                Resolution {
-                    tool_use_id: pending.tool_use_id.clone(),
-                    permission: Permission::Deny { message },
-                    result: None,
-                }
+                (Permission::Deny { message }, None)
             }
             // Ran and failed: the model reads the failure as the tool's own
             // answer, never as a refusal.
-            ToolState::Error { error, .. } => Resolution {
-                tool_use_id: pending.tool_use_id.clone(),
-                permission: Permission::Allow { updated_input: pending.input.clone() },
-                result: Some(rpc::CallToolResult {
-                    content: vec![rpc::Content::text(error.clone())],
-                    is_error: true,
-                }),
-            },
+            ToolState::Error { error, .. } => allow(error, true),
             // A part that is still pending or running is a part the engine
             // has not finished with, which is the same disagreement as a
             // missing one.
@@ -216,7 +207,7 @@ pub fn resolve(
             }
         };
 
-        answers.push(answer);
+        answers.push(Resolution { tool_use_id: pending.tool_use_id.clone(), permission, result });
     }
 
     if owed.is_some() && carried_on.is_none() {
@@ -230,8 +221,7 @@ pub fn resolve(
 ///
 /// D462 keeps parts in call order, so a linear walk finds the right one and a
 /// map would be a second index over the same list.
-#[must_use]
-pub fn part_for<'a>(call_id: &str, turn: &'a [Message]) -> Option<&'a ToolState> {
+fn part_for<'a>(call_id: &str, turn: &'a [Message]) -> Option<&'a ToolState> {
     turn.iter().flat_map(|message| &message.parts).find_map(|part| match &part.body {
         PartBody::Tool { call_id: part_id, state, .. } if part_id == call_id => Some(state),
         _ => None,
@@ -245,12 +235,6 @@ pub fn part_for<'a>(call_id: &str, turn: &'a [Message]) -> Option<&'a ToolState>
 #[must_use]
 pub fn registry_name(model_facing: &str) -> String {
     model_facing.strip_prefix(MODEL_FACING_PREFIX).unwrap_or(model_facing).to_owned()
-}
-
-/// What the model is told a tool is called.
-#[must_use]
-pub fn model_facing_name(registry: &str) -> String {
-    format!("{MODEL_FACING_PREFIX}{registry}")
 }
 
 /// What a cancelled turn's parked asks are answered with.

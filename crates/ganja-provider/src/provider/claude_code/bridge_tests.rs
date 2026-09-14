@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use super::{
-    CarriedOn, MODEL_FACING_PREFIX, Pending, Permission, cancelled, model_facing_name, part_for,
-    registry_name, resolve,
+    CarriedOn, MODEL_FACING_PREFIX, Pending, Permission, cancelled, part_for, registry_name,
+    resolve,
 };
 use crate::protocol::{Message, Part, PartBody, PartId, ToolState};
 
@@ -272,7 +272,6 @@ fn the_answers_come_back_in_the_order_the_asks_were_parked() {
 #[test]
 fn a_model_facing_name_is_stripped_back_to_the_registrys_own() {
     assert_eq!(registry_name("mcp__ganja__ganja_ping"), "ganja_ping");
-    assert_eq!(model_facing_name("ganja_ping"), "mcp__ganja__ganja_ping");
     assert_eq!(MODEL_FACING_PREFIX, "mcp__ganja__");
 }
 

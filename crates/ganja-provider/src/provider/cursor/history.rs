@@ -62,25 +62,15 @@
 //! carry no text.
 
 use std::collections::HashMap;
-use std::fmt::{self, Write as _};
+use std::fmt;
+use std::ops::RangeInclusive;
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use super::{ID, proto, request};
 use crate::protocol::{Message, MessageId, PartBody, Role, ToolState};
-use crate::provider::{ChatRequest, NO_RESULT};
-
-/// The bound on one rendered `[Tool Call]` input, in bytes: 8 KiB.
-///
-/// An argument larger than this is file content — `write`'s `content`,
-/// `edit`'s strings — which is on disk and one `read` away, and on a wire
-/// where the request grows with the transcript and nothing compacts it, what
-/// compounds is worth bounding. Tool *outputs* are already clamped in the
-/// transcript at the tool layer and are rendered whole. The cut is a plain
-/// in-memory one, deliberately not `truncate::clamp_bytes`, which spills its
-/// overflow to a file and would write one on every request.
-pub const CALL_INPUT_LIMIT: usize = 8 * 1024;
+use crate::provider::{ChatRequest, NO_RESULT, clamp};
 
 /// What the run request asks the agent to do, decided by the request's own
 /// shape.
@@ -150,7 +140,10 @@ pub struct Composed {
     /// [`derived`] from the first message's id; absent on a request with no
     /// messages, which nothing keys to.
     pub conversation_id: Option<String>,
-    /// How many `[Tool Call]` inputs were cut at [`CALL_INPUT_LIMIT`].
+    /// How many `[Tool Call]` inputs were cut at
+    /// [`CALL_INPUT_LIMIT`](crate::provider::CALL_INPUT_LIMIT) — the count
+    /// the composition's log line reports, carried here as that count's pin,
+    /// since no test reads a debug line back.
     pub clamped_calls: usize,
 }
 
@@ -188,7 +181,7 @@ pub fn compose(request: &ChatRequest) -> Composed {
 
 /// Walks `request.messages` into the history entries and the action.
 ///
-/// **The boundary.** The newest user turn is [`request::newest_user_run`]'s
+/// **The boundary.** The newest user turn is [`newest_user_run`]'s
 /// slice — the run of user messages back to the reply before it, clamped at
 /// `turn_start`. When the request's last message is the user's, that run is
 /// the action and everything before it is history; otherwise — the last
@@ -218,11 +211,11 @@ pub fn compose(request: &ChatRequest) -> Composed {
 pub(super) fn entries(request: &ChatRequest) -> History<'_> {
     let messages = request.messages.as_slice();
 
-    let (history, action) = match request::newest_user_run(request) {
+    let (history, action) = match newest_user_run(request) {
         // The newest user message is the last message: the run is the action.
         Some(run) if *run.end() + 1 == messages.len() => {
             let start = *run.start();
-            (&messages[..start], Action::User { text: request::newest_user_text(request, run) })
+            (&messages[..start], Action::User { text: newest_user_text(request, run) })
         }
         // A user message exists but the assistant's follows it: a resume.
         Some(_) => (messages, Action::Resume),
@@ -275,8 +268,70 @@ pub(super) fn entries(request: &ChatRequest) -> History<'_> {
     History { entries, action }
 }
 
+/// The indices of the conversation's newest user **turn**: every user
+/// message from the last one back to the reply before it — but never back
+/// past [`ChatRequest::turn_start`] — or [`None`] when the conversation holds
+/// no user message at all.
+///
+/// A run rather than one message, because the engine adds to a turn by
+/// appending user messages rather than by editing the last one — a steer
+/// drained at a step boundary, and the team guards' request-only block after
+/// a reply (D547) — and a wire that sent only the newest of them would answer
+/// a guard block while dropping the steer beside it, which is what this did
+/// until 2026-09-02. What came before the run is **history**, and since
+/// **D553** it travels too: [`entries`] reads this bound to decide where
+/// history ends and the action begins.
+///
+/// **The run's lower bound is two facts, not one, and the second cannot be
+/// read off `messages`.** The reply is the near bound; the turn's own opening
+/// is the far one. A finished turn that took a steer leaves the steer in
+/// history *after* its reply, so the next turn's request reads `[prompt,
+/// reply, steer, prompt2]` — the same four roles, in the same order, as the
+/// within-turn `[prompt, reply, steer, block]`, every one of them a
+/// `Message::user` whose id and timestamp ascend across the boundary exactly
+/// as they do within it. Nothing here distinguishes them, which is why the
+/// engine states where this turn began and this walk is clamped to it rather
+/// than guessing. A continuation block emitted where nothing was steered —
+/// `[prompt, reply, block]` — is still a run of one, the block; the prompt
+/// and the reply it is about are the history composed beside it.
+fn newest_user_run(request: &ChatRequest) -> Option<RangeInclusive<usize>> {
+    let messages = &request.messages;
+    let newest = messages.iter().rposition(|message| matches!(message.role, Role::User))?;
+    let first = messages[..newest]
+        .iter()
+        .rposition(|message| !matches!(message.role, Role::User))
+        .map_or(0, |reply| reply + 1)
+        // Never past this turn's own opening: a steer the *previous* turn
+        // consumed sits after that turn's reply, so the walk above would
+        // reach back through it and re-send it as part of this prompt.
+        .max(request.turn_start)
+        // And never past the newest user message itself. `turn_start` is a
+        // `pub` field on a `pub` struct, so its value is a caller's and not
+        // this module's: a request whose last message is an assistant's, with
+        // a marker pointing past the user message before it, would otherwise
+        // slice `first > newest` and panic the wire. A run of one is the
+        // honest answer to that — the newest user turn is still the newest
+        // user message — where a panic is no answer at all.
+        .min(newest);
+
+    Some(first..=newest)
+}
+
+/// The text of `run`, [`newest_user_run`]'s slice: its messages' text parts
+/// in order, joined the way distinct parts read as distinct paragraphs.
+///
+/// Takes the run rather than finding it, because its one caller —
+/// [`entries`] — has already scanned for the run to decide where history
+/// ends, and the boundary is one scan rather than two. A conversation with no
+/// user message at all, which the engine never builds, has no run to pass;
+/// that caller composes the empty message for it, which is more honest than
+/// refusing a request this module was still asked to encode.
+fn newest_user_text(request: &ChatRequest, run: RangeInclusive<usize>) -> String {
+    request.messages[run].iter().flat_map(texts).collect::<Vec<_>>().join("\n\n")
+}
+
 /// What one part contributes to the walk.
-pub(super) enum Piece<'a> {
+enum Piece<'a> {
     Text(&'a str),
     Call {
         /// The tool's registry name, and the state the call is in.
@@ -292,7 +347,7 @@ pub(super) enum Piece<'a> {
 /// silently into "not sent", and a part the model ought to read is not
 /// something to discover from a bug report. The set excluded is
 /// `anthropic.rs`'s, plus `File` — the module doc says why for each.
-pub(super) fn pieces(message: &Message) -> impl Iterator<Item = Piece<'_>> {
+fn pieces(message: &Message) -> impl Iterator<Item = Piece<'_>> {
     message.parts.iter().filter_map(|part| match &part.body {
         PartBody::Text { text } => Some(Piece::Text(text)),
         PartBody::Tool { tool, state, .. } => Some(Piece::Call { tool, state }),
@@ -319,7 +374,7 @@ pub(super) fn pieces(message: &Message) -> impl Iterator<Item = Piece<'_>> {
 }
 
 /// The text parts of `message`, in order — what a user turn is made of.
-pub(super) fn texts(message: &Message) -> impl Iterator<Item = &str> {
+fn texts(message: &Message) -> impl Iterator<Item = &str> {
     pieces(message).filter_map(|piece| match piece {
         Piece::Text(text) => Some(text),
         Piece::Call { .. } => None,
@@ -438,7 +493,8 @@ impl Turn {
 /// as `{role: "system", content}`; a user entry as a `user` text entry; an
 /// assistant entry as an `assistant` text entry whose text is the reply's
 /// text followed by one `[Tool Call] <tool> <input>` paragraph per call, the
-/// input as compact JSON cut at [`CALL_INPUT_LIMIT`]; a result entry as a
+/// input as compact JSON cut at
+/// [`CALL_INPUT_LIMIT`](crate::provider::CALL_INPUT_LIMIT); a result entry as a
 /// `user` text entry reading `[Tool Result]\n<output>` or
 /// `[Tool Result (error)]\n<error>`.
 ///
@@ -459,7 +515,7 @@ impl Turn {
 /// summary becomes `messages[0]`) and per-invocation on the title and
 /// summary one-shots — harmless every time, since nothing is read back under
 /// it and every request carries a complete state.
-pub(super) fn blobs(history: &History<'_>, request: &ChatRequest) -> Composed {
+fn blobs(history: &History<'_>, request: &ChatRequest) -> Composed {
     let mut store = Store::default();
     let mut root = Vec::with_capacity(history.entries.len());
     let mut turns = Vec::new();
@@ -557,21 +613,6 @@ fn assistant_text(text: &str, calls: &[Call<'_>], clamped_calls: &mut usize) -> 
     }
 
     paragraphs.join("\n\n")
-}
-
-/// `input` cut at [`CALL_INPUT_LIMIT`] on a char boundary, with an elision
-/// naming exactly how many bytes were omitted; and whether it was cut.
-pub(crate) fn clamp(mut input: String) -> (String, bool) {
-    if input.len() <= CALL_INPUT_LIMIT {
-        return (input, false);
-    }
-
-    let cut = input.floor_char_boundary(CALL_INPUT_LIMIT);
-    let omitted = input.len() - cut;
-    input.truncate(cut);
-    write!(input, "… [+{omitted} bytes]").expect("writing into a String cannot fail");
-
-    (input, true)
 }
 
 /// A result entry's text, the reference's `[Tool Result]` prefix with the

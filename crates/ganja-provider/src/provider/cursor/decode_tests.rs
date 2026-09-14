@@ -406,7 +406,7 @@ fn a_kv_kind_this_build_cannot_answer_fails_the_turn_by_name() {
 
 /// **AC-11.** A server message carrying only an arm this build does not
 /// model — the checkpoint, field 3 — decodes to no event and no ask, and is
-/// reported by field number and payload size through the seam the skip log
+/// reported by field number and payload size through what the skip log
 /// reads, never by content.
 #[test]
 fn a_server_message_outside_the_modelled_channels_is_reported_by_number_and_size() {
@@ -431,6 +431,20 @@ fn a_server_message_outside_the_modelled_channels_is_reported_by_number_and_size
         .__buffa_unknown_fields
         .push(buffa::UnknownField { number: 9, data: buffa::UnknownFieldData::Varint(300) });
     assert_eq!(super::unmodelled(&scalar), vec![(9, 2)], "300 is a two-byte varint");
+
+    // A fixed-width arm is sized by its width, whatever value it holds.
+    let mut fixed = proto::ServerMessage::default();
+    fixed
+        .__buffa_unknown_fields
+        .push(buffa::UnknownField { number: 11, data: buffa::UnknownFieldData::Fixed32(0) });
+    fixed
+        .__buffa_unknown_fields
+        .push(buffa::UnknownField { number: 12, data: buffa::UnknownFieldData::Fixed64(u64::MAX) });
+    assert_eq!(
+        super::unmodelled(&fixed),
+        vec![(11, 4), (12, 8)],
+        "a fixed32 is four bytes and a fixed64 eight"
+    );
     assert!(super::unmodelled(&proto::ServerMessage::default()).is_empty());
 }
 

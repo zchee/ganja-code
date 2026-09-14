@@ -60,6 +60,7 @@ use futures::stream::{self, BoxStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{Message, PartBody, Role};
+use crate::provider::anthropic::MESSAGES_API_MIMES;
 use crate::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
 use crate::tool::ToolDefinition;
 
@@ -104,11 +105,14 @@ pub const VERSION_FLOOR: (u64, u64, u64) = (2, 1, 263);
 /// How long `--version` may take before the wire gives up on the binary.
 const VERSION_BOUND: Duration = Duration::from_secs(10);
 
-/// The reason word for a conversation another ganja holds the lock on.
+/// The reason word for a conversation whose last record the vendor safeguard
+/// refused.
 ///
-/// A word rather than a literal because two places have to agree on it: the
-/// arm that names it and the arm that reads it back.
-const LOCKED_ELSEWHERE: &str = "locked-elsewhere";
+/// A word rather than a literal because four places have to agree on it: it
+/// is produced from the binding's `refused` flag and from the drop ring's
+/// [`held::Reason::Refused`], and read back by the two arms that decide what
+/// a refused key may spend next.
+const REFUSED_RECORD: &str = "refused-record";
 
 /// The `claude` CLI as a provider.
 pub struct ClaudeCodeProvider {
@@ -180,8 +184,9 @@ impl ClaudeCodeProvider {
 
     /// The same wire whose entries go idle after `idle_bound`.
     ///
-    /// W4's `select` calls this with the curated `claude_code.idle_bound`
-    /// key; [`held::DEFAULT_IDLE_BOUND`] is what nothing configured means.
+    /// `ganja-core`'s `provider::select` calls this with the curated
+    /// `claude_code.idle_bound` key; [`held::DEFAULT_IDLE_BOUND`] is what
+    /// nothing configured means.
     #[must_use]
     pub fn with_idle_bound(mut self, idle_bound: Duration) -> Self {
         self.held = Arc::new(held::HeldProcesses::new(idle_bound));
@@ -221,9 +226,8 @@ impl ClaudeCodeProvider {
     /// (M11 read sixteen and that is not one), so a listing on this wire
     /// answers what may be named and deliberately not what is running.
     ///
-    /// A one-shot for AC-3.22's reason: it runs in the scratch cwd every
-    /// process on this wire runs in, and its record is worth nothing once its
-    /// answer is read.
+    /// A one-shot: it runs in the scratch cwd every process on this wire runs
+    /// in, and its record is worth nothing once its answer is read.
     ///
     /// # Errors
     ///
@@ -235,22 +239,14 @@ impl ClaudeCodeProvider {
     pub async fn models(&self) -> Result<Vec<(String, String)>, ProviderError> {
         use tokio::io::AsyncWriteExt as _;
 
-        let argv = argv::Argv::listing(&argv::Listing { session_id: crate::protocol::uuidv7() })?;
+        let argv = argv::listing(&crate::protocol::uuidv7())?;
         let cwd = self.paths.one_shot_cwd();
         prepare(&self.paths, &cwd)?;
 
         let mut io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd })?;
         let request_id = crate::protocol::uuidv7();
-        let opening = frame::initialize_line(
-            &request_id,
-            &frame::Initialize {
-                system_prompt: None,
-                sdk_mcp_servers: Vec::new(),
-                sdk_mcp_server_configs: serde_json::json!({}),
-            },
-        );
         io.stdin
-            .write_all(opening.as_bytes())
+            .write_all(opening(&request_id, None, false).as_bytes())
             .await
             .map_err(|failure| ProviderError::Transport(failure.to_string()))?;
 
@@ -430,32 +426,8 @@ fn parse_version(said: &str) -> Option<(u64, u64, u64)> {
 
 // ------------------------------------------------- what the wire has written
 
-/// `request.turn_start`, clamped to an index its message list actually has.
-///
-/// The field is `pub`, so a value past the end is a bound to bring back in
-/// range and never an index to slice on.
-#[must_use]
-pub fn turn_start(request: &ChatRequest) -> usize {
-    request.turn_start.min(request.messages.len().saturating_sub(1))
-}
-
-/// The ids of a request's user messages, in order, over the **whole** of
-/// `messages`.
-///
-/// Before and after `turn_start` alike: which side a message is on is the
-/// engine's taxonomy, and this wire deliberately does not ask.
-#[must_use]
-pub fn user_ids(request: &ChatRequest) -> Vec<String> {
-    request
-        .messages
-        .iter()
-        .filter(|message| message.role == Role::User)
-        .map(|message| message.id.as_str().to_owned())
-        .collect()
-}
-
 /// The ids of a request's user messages that a held record may **remember**:
-/// [`user_ids`] without the request-only ones (**D556**, Dv-22).
+/// every user message's id except the request-only ones (**D556**, Dv-22).
 ///
 /// A request-only message — today exactly the engine's guards block — is built
 /// for one request and never written to the transcript, so it is minted with a
@@ -485,7 +457,7 @@ pub fn remembered_ids(request: &ChatRequest) -> Vec<String> {
 /// False means an id in `sent` is gone from the request — a `/rewind` — which
 /// is what tells that arm from every other reason a process might be missing.
 ///
-/// Asked of [`remembered_ids`] rather than of [`user_ids`], so that a message
+/// Asked of [`remembered_ids`] rather than of every user id, so that a message
 /// which lives in the request alone cannot read as one the transcript lost.
 #[must_use]
 pub fn honest(sent: &[String], request: &ChatRequest) -> bool {
@@ -523,28 +495,23 @@ pub fn owed_text(owed: &[&Message]) -> String {
         .join("\n\n")
 }
 
-/// The media types this wire writes as content blocks (`m1jk`): the four
-/// image types and PDF, the same five `anthropic.rs`'s `accepts_attachment`
-/// admits, since the CLI hands a user frame's blocks to that same API.
-pub const ATTACHMENT_MIMES: &[&str] =
-    &["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
-
 /// The binary attachments the owed messages carry, in request order (`m1jk`).
 ///
 /// Only a `File` part whose payload the engine's send-time read filled in, and
-/// only one of [`ATTACHMENT_MIMES`] — which is what `accepts_attachment` told
-/// the engine, re-checked because the part is the engine's and the allowlist
-/// is this wire's. **The owed set only**: a message rendered into a fresh
-/// record's preamble keeps its `[attached: path]` line and loses its bytes,
-/// because re-sending every image a conversation ever held on each fresh
-/// record would bill them all again for a turn about none of them.
+/// only one of `anthropic::MESSAGES_API_MIMES` — which is what
+/// `accepts_attachment` told the engine, re-checked because the part is the
+/// engine's and the allowlist is the API's. **The owed set only**: a message
+/// rendered into a fresh record's preamble keeps its `[attached: path]` line
+/// and loses its bytes, because re-sending every image a conversation ever
+/// held on each fresh record would bill them all again for a turn about none
+/// of them.
 #[must_use]
 pub fn attachments(owed: &[&Message]) -> Vec<frame::Attachment> {
     owed.iter()
         .flat_map(|message| &message.parts)
         .filter_map(|part| match &part.body {
             PartBody::File { mime, content: Some(data), .. }
-                if ATTACHMENT_MIMES.contains(&mime.as_str()) =>
+                if MESSAGES_API_MIMES.contains(&mime.as_str()) =>
             {
                 Some(frame::Attachment { mime: mime.clone(), data: data.clone() })
             }
@@ -581,7 +548,7 @@ fn tools_hash(tools: &[ToolDefinition]) -> u64 {
 /// part after `turn_start`, so a request that does is one whose tools have
 /// been run and whose process should have been waiting for them.
 fn carries_tool_parts(request: &ChatRequest) -> bool {
-    request.messages[turn_start(request)..]
+    request.messages[request.clamped_turn_start()..]
         .iter()
         .flat_map(|message| &message.parts)
         .any(|part| matches!(part.body, PartBody::Tool { .. }))
@@ -598,19 +565,11 @@ impl Provider for ClaudeCodeProvider {
     /// ([`attachments`]). Anything else stays a `File` part degraded to its
     /// name in the frame's text, which is what the trait's default means.
     fn accepts_attachment(&self, mime: &str) -> bool {
-        ATTACHMENT_MIMES.contains(&mime)
+        MESSAGES_API_MIMES.contains(&mime)
     }
 
     fn served_model(&self) -> Option<crate::provider::ServedModel> {
-        self.slots
-            .served_model
-            .lock()
-            .expect("the served-model slot is never poisoned")
-            .clone()
-            .map(|served| crate::provider::ServedModel {
-                requested: served.requested,
-                served: served.served,
-            })
+        self.slots.served_model.lock().expect("the served-model slot is never poisoned").clone()
     }
 
     /// Closes every held process: stdin EOF, then the two signal bounds, and
@@ -623,12 +582,7 @@ impl Provider for ClaudeCodeProvider {
     }
 
     fn last_eviction(&self) -> Option<crate::provider::Eviction> {
-        self.slots
-            .eviction
-            .lock()
-            .expect("the eviction slot is never poisoned")
-            .clone()
-            .map(|eviction| crate::provider::Eviction { key: eviction.key, at: eviction.at })
+        self.slots.eviction.lock().expect("the eviction slot is never poisoned").clone()
     }
 
     /// What the vendor last said is left of this account's **plan**
@@ -652,26 +606,19 @@ impl Provider for ClaudeCodeProvider {
     /// sentence and not a window: [`draw_notice`] and
     /// [`ClaudeCodeProvider::rate_notice`].
     ///
-    /// **Two recorded shapes, one output**, which is why the conversion lives
-    /// here rather than at any reader:
-    ///
-    /// - `rate_limit_event`'s `rate_limit_info.unifiedWindows` — `utilization`
-    ///   a **fraction** 0–1, `resetsAt` a **unix** second;
-    /// - `get_usage`'s `rate_limits` — `utilization` an **integer percent**
-    ///   0–100, `resets_at` an **ISO-8601** string.
-    ///
-    /// A reader that had to know which it was holding would be a second place
-    /// for the two to disagree. `null` `rate_limits` is what an unwarmed call
-    /// answers and means **no reading** — an empty list, never a window at
+    /// **One recorded shape**, converted here rather than at any reader:
+    /// `rate_limit_event`'s `rate_limit_info.unifiedWindows`, `utilization` a
+    /// **fraction** of the budget and `resetsAt` a **unix** second. No
+    /// windows at all means **no reading** — an empty list, never a window at
     /// zero, which would draw as a budget freshly full.
     fn plan_windows(&self) -> Vec<crate::provider::PlanWindow> {
         let parked = self.slots.rate.lock().expect("the rate slot is never poisoned").clone();
         let Some(parked) = parked else {
             return Vec::new();
         };
-
-        // The event nests its windows and the control response *is* the map.
-        let windows = parked.get("unifiedWindows").unwrap_or(&parked);
+        let Some(windows) = parked.get("unifiedWindows") else {
+            return Vec::new();
+        };
 
         [("five_hour", 300), ("seven_day", 10_080)]
             .into_iter()
@@ -683,10 +630,7 @@ impl Provider for ClaudeCodeProvider {
                     name: name.to_owned(),
                     used_percent,
                     window_minutes: Some(minutes),
-                    resets_at: window
-                        .get("resetsAt")
-                        .or_else(|| window.get("resets_at"))
-                        .and_then(plan_reset),
+                    resets_at: window.get("resetsAt").and_then(plan_reset),
                     // The vendor names the window it is *about* once, beside
                     // the set rather than inside it, so both windows carry it
                     // — which is what it says: which limit this account is
@@ -738,32 +682,22 @@ impl Arm {
     }
 }
 
-/// One window's utilization as a **percentage**, whichever way the vendor sent
-/// it (**D556**, Dv-19).
+/// One window's utilization as a **percentage** (**D556**, Dv-19): the vendor
+/// sends a fraction of the budget, and it is scaled here.
 ///
-/// The two recorded shapes are told apart by their own type rather than by
-/// which frame carried them: `rate_limit_event` sends a fraction as a JSON
-/// float (`0.68`), `get_usage` an integer percent (`69`). A float is scaled, an
-/// integer is already the number [`PlanWindow::used_percent`] wants. Nothing is
-/// clamped — a vendor saying 103 has said something true about an account in
-/// overage, and that type's own doc makes the same point.
+/// Every number is a fraction, an integral one included: the CLI is a
+/// JavaScript program, and a JS serializer writes `1.0` as `1`, so an account
+/// at its whole budget arrives as the integer `1` and reads 100, not 1.
+/// Nothing is clamped — a vendor saying 1.03 has said something true about an
+/// account in overage, and [`PlanWindow::used_percent`]'s own doc makes the
+/// same point.
 fn plan_utilization(value: &serde_json::Value) -> Option<f64> {
-    if let Some(percent) = value.as_u64() {
-        return Some(percent as f64);
-    }
-
     value.as_f64().map(|fraction| fraction * 100.0)
 }
 
-/// One window's reset, from either a unix second or an ISO-8601 string.
+/// One window's reset, a unix second.
 fn plan_reset(value: &serde_json::Value) -> Option<std::time::SystemTime> {
-    if let Some(seconds) = value.as_u64() {
-        return std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds));
-    }
-
-    let stamp = value.as_str()?.parse::<jiff::Timestamp>().ok()?;
-
-    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(stamp.as_second()).ok()?))
+    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(value.as_u64()?))
 }
 
 /// The sentence a person is owed when a `rate_limit_event` says this account's
@@ -920,7 +854,7 @@ impl ClaudeCodeProvider {
         let reason = if self.claim_lock(&key) {
             self.spawn_reason(&key, &request)
         } else {
-            LOCKED_ELSEWHERE
+            "locked-elsewhere"
         };
 
         self.spawn(&key, reason, request, cancel).await
@@ -928,7 +862,7 @@ impl ClaudeCodeProvider {
 
     /// The reason word a Spawn logs, first that applies.
     ///
-    /// Asked only of a key this ganja **holds** — `LOCKED_ELSEWHERE` is
+    /// Asked only of a key this ganja **holds** — `locked-elsewhere` is
     /// decided by [`Self::claim_lock`] before this runs, because a
     /// conversation another ganja owns is one nothing here may read. This
     /// function used to claim that lock itself as its first act, which made
@@ -944,7 +878,7 @@ impl ClaudeCodeProvider {
         };
 
         if binding.refused {
-            return "refused-record";
+            return REFUSED_RECORD;
         }
         if !honest(&binding.sent, request) {
             return "rewind";
@@ -985,10 +919,11 @@ impl ClaudeCodeProvider {
         request: ChatRequest,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         let session_id = crate::protocol::uuidv7();
-        let argv = argv::Argv::one_shot(&argv::OneShot {
+        let effort = effort_of(&request);
+        let argv = argv::one_shot(&argv::Spawn {
             session_id: session_id.clone(),
             model: request.model.clone(),
-            effort: effort_of(&request),
+            effort: effort.clone(),
         })?;
 
         let cwd = self.paths.one_shot_cwd();
@@ -1001,7 +936,7 @@ impl ClaudeCodeProvider {
         let meta = Arc::new(Mutex::new(held::Meta::opening(
             session_id,
             request.model.clone(),
-            effort_of(&request),
+            effort,
             hash_of(&request.system),
             tools_hash(&request.tools),
         )));
@@ -1016,15 +951,7 @@ impl ClaudeCodeProvider {
             cwd: None,
             tools: Vec::new(),
             requested_model: request.model.clone(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            opening: frame::initialize_line(
-                &crate::protocol::uuidv7(),
-                &frame::Initialize {
-                    system_prompt: request.system.clone().map(|system| vec![system]),
-                    sdk_mcp_servers: Vec::new(),
-                    sdk_mcp_server_configs: serde_json::json!({}),
-                },
-            ),
+            opening: opening(&crate::protocol::uuidv7(), request.system.as_deref(), false),
             one_shot: true,
         };
 
@@ -1033,11 +960,7 @@ impl ClaudeCodeProvider {
         let text = owed_text(&owed(&[], &request));
         // Text only: a title and a summary are read as text, so an image
         // would be billed for an answer that never looks at it.
-        let frame = frame::user_line(&frame::UserFrame {
-            content: text,
-            attachments: Vec::new(),
-            parent_tool_use_id: None,
-        });
+        let frame = frame::user_line(&frame::UserFrame { content: text, attachments: Vec::new() });
 
         tracing::info!(
             provider = ID,
@@ -1062,7 +985,7 @@ impl ClaudeCodeProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let at = turn_start(&request);
+        let at = request.clamped_turn_start();
         let turn = &request.messages[at..];
         let sent = self.held.meta(key).map(|meta| meta.sent).unwrap_or_default();
         // A steer the person typed while the tool ran. It is in `messages`
@@ -1168,11 +1091,8 @@ impl ClaudeCodeProvider {
         if roster_moved {
             let _ = input.send(held::Input::Roster { tools: request.tools.clone() }).await;
         }
-        let frame = frame::user_line(&frame::UserFrame {
-            content: text,
-            attachments: attachments(&owed),
-            parent_tool_use_id: None,
-        });
+        let frame =
+            frame::user_line(&frame::UserFrame { content: text, attachments: attachments(&owed) });
         let _ = input.send(held::Input::Turn { frame, sent, events }).await;
         self.watch_cancel(input, cancel);
 
@@ -1257,7 +1177,7 @@ impl ClaudeCodeProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let at = turn_start(&request);
+        let at = request.clamped_turn_start();
         let turn_id = request.messages[at].id.as_str().to_owned();
 
         // Per **turn**, not per key and not per entry: a conversation that
@@ -1291,7 +1211,7 @@ impl ClaudeCodeProvider {
         // The one reading that ends the arm before anything spawns. A key
         // spends at most two consecutive refusals per ganja process: one with
         // the transcript rendered, one with the prompts alone.
-        if reason == "refused-record" {
+        if reason == REFUSED_RECORD {
             let streak = binding::load(&self.paths.binding(key))
                 .map(|binding| binding.refused_streak)
                 .unwrap_or_default();
@@ -1375,10 +1295,10 @@ impl ClaudeCodeProvider {
         // (RR-2). The table's door releases only a key it holds no entry for.
         let release = |_: &ProviderError| self.held.release_lock(key);
 
-        let at = turn_start(&request);
+        let at = request.clamped_turn_start();
         let session_id = crate::protocol::uuidv7();
         let effort = effort_of(&request);
-        let argv = argv::Argv::conversation(&argv::Spawn {
+        let argv = argv::conversation(&argv::Spawn {
             session_id: session_id.clone(),
             model: request.model.clone(),
             effort: effort.clone(),
@@ -1409,7 +1329,7 @@ impl ClaudeCodeProvider {
         let mut assistant_turns_dropped = 0;
         let mut paragraphs: Vec<String> = Vec::new();
 
-        if reason == "refused-record" {
+        if reason == REFUSED_RECORD {
             // The user's asks alone: no header, no tool trail. The closest
             // measured shape to the prompt alone, and one that quotes no model
             // output — the model loses the conversation, not only its own
@@ -1455,19 +1375,7 @@ impl ClaudeCodeProvider {
             cwd: Some(cwd),
             tools: request.tools.clone(),
             requested_model: request.model.clone(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            opening: frame::initialize_line(
-                &crate::protocol::uuidv7(),
-                &frame::Initialize {
-                    system_prompt: request.system.clone().map(|system| vec![system]),
-                    sdk_mcp_servers: vec![rpc::SERVER.to_owned()],
-                    // One hour per `tools/call`, measured honoured and
-                    // unclamped at a 25 s hold.
-                    sdk_mcp_server_configs: serde_json::json!({
-                        rpc::SERVER: {"timeout": 3_600_000}
-                    }),
-                },
-            ),
+            opening: opening(&crate::protocol::uuidv7(), request.system.as_deref(), true),
             one_shot: false,
         };
 
@@ -1508,7 +1416,6 @@ impl ClaudeCodeProvider {
         let frame = frame::user_line(&frame::UserFrame {
             content: paragraphs.join("\n\n"),
             attachments: attachments(&owed),
-            parent_tool_use_id: None,
         });
         let _ = input.send(held::Input::Turn { frame, sent, events }).await;
         self.watch_cancel(input, cancel);
@@ -1527,6 +1434,30 @@ impl ClaudeCodeProvider {
             let _ = input.send(held::Input::Cancel).await;
         });
     }
+}
+
+/// The `initialize` a process is opened with, under `request_id`.
+///
+/// `system` replaces the CLI's own prompt, or leaves it the preset when
+/// [`None`]; `serves_tools` declares this side's server, which only a process
+/// that will be asked for a roster needs.
+fn opening(request_id: &str, system: Option<&str>, serves_tools: bool) -> String {
+    let (sdk_mcp_servers, sdk_mcp_server_configs) = if serves_tools {
+        // One hour per `tools/call`, measured honoured and unclamped at a
+        // 25 s hold.
+        (vec![rpc::SERVER.to_owned()], serde_json::json!({rpc::SERVER: {"timeout": 3_600_000}}))
+    } else {
+        (Vec::new(), serde_json::json!({}))
+    };
+
+    frame::initialize_line(
+        request_id,
+        &frame::Initialize {
+            system_prompt: system.map(|system| vec![system.to_owned()]),
+            sdk_mcp_servers,
+            sdk_mcp_server_configs,
+        },
+    )
 }
 
 /// The bounded channel a turn's events travel on, and the stream over it.

@@ -4,9 +4,9 @@ use buffa::Message as _;
 use sha2::{Digest as _, Sha256};
 
 use super::super::proto;
-use super::{Action, CALL_INPUT_LIMIT, Composed, compose, derived};
+use super::{Action, Composed, compose, derived, newest_user_run, newest_user_text};
 use crate::protocol::{Message, Part, PartBody, PartId, ToolState, Usage};
-use crate::provider::ChatRequest;
+use crate::provider::{CALL_INPUT_LIMIT, ChatRequest};
 
 /// A conversation whose current turn opens at `turn_start`, under the system
 /// prompt every request here carries.
@@ -342,6 +342,90 @@ fn a_compaction_summary_is_carried_in_the_root_and_dropped_from_the_turns() {
     assert_content_addressed(&composed);
 }
 
+/// The newest user turn's text: the boundary, then the text of the run it
+/// found — the two halves composed the way `entries` composes them, so the
+/// three boundary tests below read as one question. Empty for a conversation
+/// with no user message, which has no run.
+fn newest_text(request: &ChatRequest) -> String {
+    newest_user_run(request).map_or_else(String::new, |run| newest_user_text(request, run))
+}
+
+#[test]
+fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
+    let conversation =
+        vec![Message::user("first"), Message::assistant("gpt-5.3-codex"), Message::user("second")];
+    assert_eq!(newest_text(&request(conversation, 2)), "second");
+    assert_eq!(newest_text(&request(Vec::new(), 0)), "");
+
+    // The engine appends to a turn — a steer, the team guards' request-only
+    // block after a reply — and each of those is a message of its own, so
+    // the newest turn is the whole run back to the reply and not its last
+    // message alone (D547). The turn opened at "second", so the marker
+    // bounds nothing here and the run is what it always was.
+    let appended = vec![
+        Message::user("first"),
+        Message::assistant("gpt-5.3-codex"),
+        Message::user("second"),
+        Message::user("<team_still_working>keep going</team_still_working>"),
+    ];
+    assert_eq!(
+        newest_text(&request(appended, 2)),
+        "second\n\n<team_still_working>keep going</team_still_working>"
+    );
+}
+
+/// The turn marker's whole job: a steer a finished turn consumed belongs to
+/// that turn and never rides into the next one's text.
+///
+/// The engine appends a consumed steer to history *after* the assistant it
+/// interrupted, so a turn that took one ends as `[prompt, reply, steer]`; the
+/// next turn pushes its own prompt and this wire sees `[prompt, reply, steer,
+/// prompt2]` — byte-identical to the within-turn `[prompt, reply, steer,
+/// block]` above, since every user message is a `Message::user` and ids and
+/// timestamps ascend across a turn boundary exactly as they do within one. So
+/// the run is bounded by [`ChatRequest::turn_start`] and not by anything this
+/// module could read off `messages`: without it, this asserted the steer being
+/// re-sent.
+#[test]
+fn a_finished_turns_steer_stays_in_that_turn() {
+    let across_turns = vec![
+        Message::user("write the config parser"),
+        Message::assistant("gpt-5.3-codex"),
+        Message::user("actually make it lenient about unknown keys"),
+        Message::user("now add tests"),
+    ];
+
+    assert_eq!(
+        newest_text(&request(across_turns, 3)),
+        "now add tests",
+        "the previous turn consumed that steer; this turn is its prompt alone",
+    );
+}
+
+/// A marker pointing past the newest user message answers that message rather
+/// than panicking the wire.
+///
+/// `turn_start` is a `pub` field, so its value is whatever a caller put there:
+/// a request ending in an assistant message with the marker on the index after
+/// the user message before it would slice `first > newest`, and a wire that
+/// panics on a struct field's value is a wire that a caller's arithmetic can
+/// crash. The run is clamped to the newest user message instead, which is the
+/// most honest thing this walk can still say.
+#[test]
+fn a_turn_marker_past_the_newest_user_message_does_not_panic_the_walk() {
+    let overshot = vec![
+        Message::user("write the config parser"),
+        Message::user("and make it lenient"),
+        Message::assistant("gpt-5.3-codex"),
+    ];
+
+    assert_eq!(
+        newest_text(&request(overshot, 2)),
+        "and make it lenient",
+        "the newest user message alone, and no panic",
+    );
+}
+
 /// **AC-6.** A steer a finished turn consumed is history — a turn of its own,
 /// with no steps — and a continuation block emitted where nothing was steered
 /// now carries the prompt and the reply it is about, the hole
@@ -420,21 +504,14 @@ fn a_request_ending_in_the_assistants_message_resumes_over_the_whole_history() {
     assert_eq!(steered.turns, resumed.turns);
 }
 
-/// **AC-8, the composition half.** A derived id is v4-shaped, distinct for
-/// distinct messages and the same for the same one; a rebuild of one request
-/// names the same ids; and a message's user blob keeps its id on the next
-/// request, which is what makes the history the server cached still name
-/// the same blobs.
+/// **AC-8, the composition half.** A rebuild of one request names the same
+/// ids, and a message's user blob keeps its id on the next request, which is
+/// what makes the history the server cached still name the same blobs. The
+/// shape of a derived id is `ids`' own tests' to pin.
 #[test]
-fn derived_ids_are_v4_shaped_distinct_per_message_and_stable_across_rebuilds() {
+fn composed_ids_are_stable_across_rebuilds_and_the_next_request() {
     let u1 = Message::user("first");
     let u2 = Message::user("second");
-    let id = derived(&u1.id);
-    assert_eq!(id.len(), 36);
-    assert_eq!(id.as_bytes()[14], b'4', "the version nibble: {id}");
-    assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "the variant bits: {id}");
-    assert_ne!(id, derived(&u2.id), "distinct messages, distinct ids");
-    assert_eq!(id, derived(&u1.id), "the same message, the same id");
 
     let first = request(vec![u1.clone(), reply("one", Vec::new()), u2.clone()], 2);
     let once = compose(&first);

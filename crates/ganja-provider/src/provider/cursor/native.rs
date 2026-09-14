@@ -31,14 +31,6 @@
 //! roster.** A turn that is not offering `bash` does not run a shell because
 //! the server asked; that exec keeps D550's typed refusal, exactly as before.
 
-// Whether an `Error` part's text is a refusal rather than a failure was this
-// module's own two-constant predicate until **D556 amended D552 here**, and
-// the amendment is visible on the wire: `is_refusal` knows the `PreToolUse`
-// hook's sentence beside the two permission ones, so from that landing a call
-// a user's hook refused travels to cursor's server as the kind's typed
-// `rejected` arm, where D552 sent it as `success{is_error: true}`. Root
-// `AGENTS.md` says a hook block "routes the same `fail_call` a denied rule
-// does", and the two have to read alike on every wire.
 use ganja_tool::permission_text::is_refusal;
 
 use super::{decode, proto, request};

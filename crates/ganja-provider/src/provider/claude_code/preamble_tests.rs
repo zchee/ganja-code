@@ -5,21 +5,8 @@ use super::{
     render_turn,
 };
 use crate::protocol::{Message, Part, PartBody, ToolState, Usage};
-
-fn user(id: &str, text: &str) -> Message {
-    let mut message = Message::user(text);
-    message.id = crate::protocol::MessageId::from(id.to_owned());
-
-    message
-}
-
-fn assistant(id: &str, text: &str) -> Message {
-    let mut message = Message::assistant("claude-opus-5");
-    message.id = crate::protocol::MessageId::from(id.to_owned());
-    message.parts.push(Part::text(text));
-
-    message
-}
+use crate::provider::CALL_INPUT_LIMIT;
+use crate::provider::claude_code::tests::{assistant, user};
 
 /// An assistant message marked as the engine marks the compaction summary it
 /// mints (`ruto`).
@@ -448,10 +435,10 @@ fn a_carried_message_is_introduced_by_the_header_that_says_who_said_it() {
     assert_eq!(carried(&steer), "[User, while the tool ran] actually, stop");
 }
 
-/// Both constants are literals, pinned here, because a reword changes what
-/// the model reads and nothing else would say so.
+/// All three constants are literals, pinned here, because a reword changes
+/// what the model reads and nothing else would say so.
 #[test]
-fn the_two_constants_read_as_they_are_spelled() {
+fn the_three_constants_read_as_they_are_spelled() {
     assert_eq!(HEADER, "[Conversation so far]");
     assert_eq!(MID_TURN_HEADER, "[User, while the tool ran]");
     assert_eq!(MID_TURN_RESUME, "[the tool calls above have been answered; continue the turn]");
@@ -530,8 +517,9 @@ fn every_part_kind_says_what_it_contributes_to_a_frames_text() {
 
     let text = message_text(&message);
 
-    // Two contribute: the words, and a file degraded to its name — this wire
-    // carries no attachment, so naming it is better than a silence.
+    // Two contribute: the words, and a file degraded to its name — its bytes
+    // ride only an owed message's own frame, so here it is named rather than
+    // dropped.
     assert_eq!(text, "the words\n\n[attached: /tmp/diagram.png]");
     for absent in ["read", "hello", "thinking out loud", "results", "deadbeef", "sealed"] {
         assert!(!text.contains(absent), "{absent} must contribute nothing: {text}");
@@ -550,7 +538,7 @@ fn a_messages_text_parts_are_joined_by_a_blank_line() {
 /// D553 wrote rather than restated.
 #[test]
 fn a_huge_tool_input_is_cut_at_the_shared_bound() {
-    let huge = "x".repeat(super::INPUT_LIMIT * 2);
+    let huge = "x".repeat(CALL_INPUT_LIMIT * 2);
     let history =
         [user("m1", "go"), called("m2", "toolu_1", "write", json!({"content": huge}), "done")];
 
@@ -558,5 +546,5 @@ fn a_huge_tool_input_is_cut_at_the_shared_bound() {
     let call =
         rendered.text.lines().find(|line| line.starts_with("[Tool Call]")).expect("a call line");
 
-    assert!(call.len() < super::INPUT_LIMIT + 64, "the input is clamped, not carried whole");
+    assert!(call.len() < CALL_INPUT_LIMIT + 64, "the input is clamped, not carried whole");
 }

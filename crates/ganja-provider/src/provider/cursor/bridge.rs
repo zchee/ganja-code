@@ -93,9 +93,7 @@
 //! scoped to the provider and reset by nothing — not a clean finish, not a
 //! new turn — which is safe because a [`Key`] is the opening message's id and
 //! message ids ascend, so no later turn can collide with a recovered one; the
-//! FIFO bound is on recoveries, which are rare, so its escape hatch —
-//! sixty-four other recoveries between two resumes of one turn — is not a
-//! shape a session produces.
+//! list is bounded at [`REOPENED`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -136,7 +134,7 @@ const DROPPED: usize = 16;
 /// How many recovered keys the cap remembers.
 ///
 /// A bound on *recoveries*, which are rare, rather than on drops, which are
-/// not: a turn's key leaves this list only when sixty-four other turns have
+/// not: a turn's key leaves this list only when this many other turns have
 /// been recovered after it, which is not a shape a session produces between
 /// two resumes of one turn.
 const REOPENED: usize = 64;
@@ -157,15 +155,10 @@ impl Key {
     /// into range rather than trusted: a marker past the end names no message,
     /// and slicing on it would panic the wire.
     pub(super) fn of(request: &ChatRequest) -> Option<Self> {
-        let opening = request.messages.get(turn_start(request))?;
+        let opening = request.messages.get(request.clamped_turn_start())?;
 
         Some(Self { model: request.model.clone(), opening: opening.id.clone() })
     }
-}
-
-/// `request.turn_start`, clamped to an index its message list actually has.
-fn turn_start(request: &ChatRequest) -> usize {
-    request.turn_start.min(request.messages.len().saturating_sub(1))
 }
 
 /// One exec waiting on ganja's engine.
@@ -310,6 +303,7 @@ impl HeldRuns {
         if let Some((entry, outcomes)) = taken {
             entry.done.cancel();
             return match settle(entry, &outcomes) {
+                Some(fold) => Resolution::Resume(fold),
                 // The body had closed under the entry this request took: a
                 // recovery, capped exactly where the ring's is. The entry left
                 // the table for a resume rather than through `drop_run`, so
@@ -317,11 +311,10 @@ impl HeldRuns {
                 // reads the ring for its reason, and without this entry it
                 // would name whatever drop the ring last held for the key,
                 // which is the *previous* one.
-                Resolution::Recover(why) => {
+                None => {
                     self.remember(&key, Reason::Closed);
-                    self.reopen(&key, why)
+                    self.reopen(&key, self.recovery(&key))
                 }
-                resumed => resumed,
             };
         }
 
@@ -501,16 +494,16 @@ fn outcomes(entry: &Entry, results: &HashMap<String, ToolState>) -> Option<Vec<n
 }
 
 /// Sends every pending exec's answer on the body the pause left open, then
-/// hands the fold back to be read on — or, when the body had closed under it,
-/// answers a recovery: an answer that cannot be delivered is a Run that will
-/// never generate again, so the caller reopens one over the composed
-/// conversation rather than reading a stream nobody is generating into. The
-/// cap on that recovery is the caller's, applied at this function's one call
-/// site in [`HeldRuns::resolve`].
+/// hands the fold back to be read on — or [`None`] when the body had closed
+/// under it: an answer that cannot be delivered is a Run that will never
+/// generate again, so the caller reopens one over the composed conversation
+/// rather than reading a stream nobody is generating into. That recovery and
+/// its cap are the caller's, at this function's one call site in
+/// [`HeldRuns::resolve`].
 ///
 /// `outcomes` is what [`outcomes`] confirmed for this entry, pairing with
 /// `pending` by position; no lock is held here, and nothing awaits.
-fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Resolution {
+fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Option<Box<super::Fold>> {
     let mut delivered = true;
     for (exec, outcome) in entry.pending.iter().zip(outcomes) {
         tracing::debug!(
@@ -531,16 +524,7 @@ fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Resolution {
         }
     }
 
-    if delivered {
-        Resolution::Resume(Box::new(entry.fold))
-    } else {
-        Resolution::Recover(
-            "this turn is answering a cursor tool call, but the run that asked for it closed \
-             its request body before the answers could reach it; reopening a run over the \
-             composed conversation"
-                .to_owned(),
-        )
-    }
+    delivered.then(|| Box::new(entry.fold))
 }
 
 /// The finished tool results this request carries **at or after** its turn's
@@ -550,9 +534,7 @@ fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Resolution {
 /// one's: a session's message list keeps growing, and every previous turn's
 /// tool parts are still in it.
 fn results(request: &ChatRequest) -> HashMap<String, ToolState> {
-    let start = turn_start(request);
-
-    request.messages[start..]
+    request.messages[request.clamped_turn_start()..]
         .iter()
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| match &part.body {

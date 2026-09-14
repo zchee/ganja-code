@@ -115,14 +115,13 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::ops::RangeInclusive;
 
 use buffa::Message as _;
 
-use super::history::{self, Action, Composed};
+use super::history::{Action, Composed};
 use super::{ID, decode, proto};
 use crate::auth::pkce;
-use crate::protocol::Role;
+use crate::provider::ids::render_v4;
 use crate::provider::{ChatRequest, ProviderError};
 use crate::tool::ToolDefinition;
 
@@ -148,14 +147,6 @@ pub(super) fn fresh_id() -> Result<String, ProviderError> {
 
     Ok(render_v4(bytes))
 }
-
-// Sixteen bytes as a v4-shaped UUID. The layout moved to
-// `crate::provider::ids` with `history::derived`, which is its other caller,
-// when **D556** gave that derivation a third consumer outside this module; it
-// is re-exported here because `fresh_id` above is written in terms of it, and
-// because the two ids on a run request being the same *shape* is this
-// module's own arrangement to state.
-pub(super) use crate::provider::ids::render_v4;
 
 /// The tools of `request` as cursor's own client-declared roster (**D552**).
 ///
@@ -643,71 +634,6 @@ pub(super) fn blob_key(id: &[u8]) -> String {
         let _ = write!(rendered, "{byte:02x}");
         rendered
     })
-}
-
-/// The indices of the conversation's newest user **turn**: every user
-/// message from the last one back to the reply before it — but never back
-/// past [`ChatRequest::turn_start`] — or [`None`] when the conversation holds
-/// no user message at all.
-///
-/// A run rather than one message, because the engine adds to a turn by
-/// appending user messages rather than by editing the last one — a steer
-/// drained at a step boundary, and the team guards' request-only block after
-/// a reply (D547) — and a wire that sent only the newest of them would answer
-/// a guard block while dropping the steer beside it, which is what this did
-/// until 2026-09-02. What came before the run is **history**, and since
-/// **D553** it travels too: [`history::entries`] reads this same bound to
-/// decide where history ends and the action begins, so the two cannot
-/// disagree about which message is the last of the conversation and which
-/// the first of the turn.
-///
-/// **The run's lower bound is two facts, not one, and the second cannot be
-/// read off `messages`.** The reply is the near bound; the turn's own opening
-/// is the far one. A finished turn that took a steer leaves the steer in
-/// history *after* its reply, so the next turn's request reads `[prompt,
-/// reply, steer, prompt2]` — the same four roles, in the same order, as the
-/// within-turn `[prompt, reply, steer, block]`, every one of them a
-/// `Message::user` whose id and timestamp ascend across the boundary exactly
-/// as they do within it. Nothing here distinguishes them, which is why the
-/// engine states where this turn began and this walk is clamped to it rather
-/// than guessing. A continuation block emitted where nothing was steered —
-/// `[prompt, reply, block]` — is still a run of one, the block; the prompt
-/// and the reply it is about are the history composed beside it.
-pub(super) fn newest_user_run(request: &ChatRequest) -> Option<RangeInclusive<usize>> {
-    let messages = &request.messages;
-    let newest = messages.iter().rposition(|message| matches!(message.role, Role::User))?;
-    let first = messages[..newest]
-        .iter()
-        .rposition(|message| !matches!(message.role, Role::User))
-        .map_or(0, |reply| reply + 1)
-        // Never past this turn's own opening: a steer the *previous* turn
-        // consumed sits after that turn's reply, so the walk above would
-        // reach back through it and re-send it as part of this prompt.
-        .max(request.turn_start)
-        // And never past the newest user message itself. `turn_start` is a
-        // `pub` field on a `pub` struct, so its value is a caller's and not
-        // this module's: a request whose last message is an assistant's, with
-        // a marker pointing past the user message before it, would otherwise
-        // slice `first > newest` and panic the wire. A run of one is the
-        // honest answer to that — the newest user turn is still the newest
-        // user message — where a panic is no answer at all.
-        .min(newest);
-
-    Some(first..=newest)
-}
-
-/// The text of `run`, [`newest_user_run`]'s slice: its messages' text parts
-/// in order, joined the way distinct parts read as distinct paragraphs.
-///
-/// Takes the run rather than finding it, because its one caller —
-/// `history::entries` — has already scanned for the run to decide where
-/// history ends, and the boundary is one scan rather than two. A
-/// conversation with no user message at all, which the engine never builds,
-/// has no run to pass; that caller composes the empty message for it, which
-/// is more honest than refusing a request this module was still asked to
-/// encode.
-pub(super) fn newest_user_text(request: &ChatRequest, run: RangeInclusive<usize>) -> String {
-    request.messages[run].iter().flat_map(history::texts).collect::<Vec<_>>().join("\n\n")
 }
 
 #[cfg(test)]

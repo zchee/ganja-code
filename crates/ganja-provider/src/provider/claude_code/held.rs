@@ -36,7 +36,7 @@
 //!   for eleven minutes is not idle. The next turn on the key opens a fresh
 //!   record and pays a spawn, a full prefix write and the assistant's earlier
 //!   words, which is why the bound is the person's to set.
-//! - **(i′) stranded** — an ask parked for [`STRANDED_BOUND`], the backstop
+//! - **(i′) stranded** — an ask parked for `STRANDED_BOUND`, the backstop
 //!   rule (i) needs because it excludes exactly that case. One hour is the
 //!   `tools/call` timeout this side hands the CLI, past which the CLI has
 //!   given up on the call and the entry holds nothing a resolve could answer.
@@ -80,7 +80,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::bridge::Pending;
-use crate::provider::ProviderEvent;
+use crate::provider::{ProviderError, ProviderEvent};
 
 /// What a held process is filed under: `ids::derived(messages[0].id)`.
 ///
@@ -103,7 +103,7 @@ pub const HELD_CAP: usize = 8;
 /// abandoned the call itself, so holding an authenticated process longer
 /// would keep it open for an answer the CLI can no longer take. Shorter would
 /// re-seed a dialog somebody was merely slow to answer.
-pub const STRANDED_BOUND: Duration = Duration::from_secs(3_600);
+const STRANDED_BOUND: Duration = Duration::from_secs(3_600);
 
 /// How long a turn may produce no frame at all before it is failed.
 ///
@@ -111,7 +111,7 @@ pub const STRANDED_BOUND: Duration = Duration::from_secs(3_600);
 /// `user` frame (2.0 s) and forty times the slowest `ttft_ms` in it (2 868).
 /// A parked ask suspends it — run 1 held a `tools/call` for 25 s — so this
 /// bounds silence, never patience.
-pub const SILENCE_BOUND: Duration = Duration::from_secs(120);
+pub(super) const SILENCE_BOUND: Duration = Duration::from_secs(120);
 
 /// How long a turn failing because its child went away waits for the rest of
 /// that exit to arrive: the exit itself, after the turn's frame was refused,
@@ -142,8 +142,8 @@ const EXIT_SETTLE_BOUND: Duration = Duration::from_secs(2);
 /// every conversation with a coffee break in it, and being wrong on the
 /// **short** side costs the assistant's words for the rest of the
 /// conversation. That trade — the person's machine against the person's
-/// conversation — is theirs to make, which is why W4 wires it to a config
-/// key.
+/// conversation — is theirs to make, which is why `claude_code.idle_bound`
+/// sets it (**D556**).
 pub const DEFAULT_IDLE_BOUND: Duration = Duration::from_secs(600);
 
 /// How many dropped keys the ring remembers, so a spawn can be told *why* its
@@ -153,8 +153,8 @@ const DROPPED: usize = 16;
 /// How many recovered turns the memory remembers.
 ///
 /// A bound on **recoveries**, which are rare, rather than on turns: the ring
-/// fills by recoveries and not by turns, so posture C's longer-lived entries
-/// do not move it, and a turn's key leaves it only when sixty-four other
+/// fills by recoveries and not by turns, so an entry held across many turns
+/// does not move it, and a turn's key leaves it only when sixty-four other
 /// turns have been recovered after it.
 const RECOVERED: usize = 64;
 
@@ -196,7 +196,7 @@ impl Reason {
             Self::Exited => Some("exited"),
             Self::IdleEvicted => Some("idle-evicted"),
             Self::Stranded => Some("stranded"),
-            Self::Refused => Some("refused-record"),
+            Self::Refused => Some(super::REFUSED_RECORD),
             // Read only after a model switch the process did not confirm
             // (`eawi`): every other divergence spawns its own record at once,
             // under a word of its own, and never asks the ring.
@@ -213,8 +213,6 @@ pub struct Meta {
     pub sent: Vec<String>,
     /// The asks waiting on ganja's engine.
     pub pending: Vec<Pending>,
-    /// The model the CLI said it served, in the vendor's own spelling.
-    pub served_model: Option<String>,
     /// The record's id, for logs.
     pub session_id: String,
     /// A hash of the `system` this process opened under.
@@ -253,7 +251,6 @@ impl Meta {
         Self {
             sent: Vec::new(),
             pending: Vec::new(),
-            served_model: None,
             session_id,
             system_hash,
             tools_hash,
@@ -268,13 +265,8 @@ impl Meta {
 
 /// What a caller sends the task that owns a child.
 ///
-/// The two writing arms carry the `sent` list the write produces rather than
-/// applying it themselves, because **the frame is written before the
-/// binding**: the task writes, then records. A crash between the two leaves
-/// the record one message *ahead* of `sent`, so the next request writes that
-/// message again — a duplicate the model reads twice. The other order turns
-/// the same crash into a message the model never saw and that nothing will
-/// send again, which is why nobody should reorder this.
+/// The writing arms carry the `sent` a write produces, and the task records
+/// it only after the write — the order [`super::binding`] explains.
 pub enum Input {
     /// Write this frame and stream the turn it opens.
     Turn {
@@ -345,11 +337,10 @@ pub struct Held {
     pub task: tokio::task::JoinHandle<()>,
 }
 
-/// The table, the drop ring and the recovery memory.
+/// The table, its locks, the drop ring and the recovery memory.
 ///
-/// Three fields, which are cursor's own three, for cursor's own stated
-/// reason: the once-per-turn memory must not live in a thing the recovery
-/// replaces.
+/// The last two are cursor's, kept apart for cursor's own stated reason: the
+/// once-per-turn memory must not live in a thing the recovery replaces.
 pub struct HeldProcesses {
     table: Mutex<HashMap<Key, Held>>,
     /// One `flock` per conversation this ganja owns.
@@ -576,44 +567,6 @@ impl HeldProcesses {
             .map(|(key, _)| key)
     }
 
-    /// Every key whose entry has gone idle past the bound with nothing
-    /// parked.
-    ///
-    /// The task runs its own deadline; this is the table's own view of the
-    /// same rule, for a caller sweeping several keys at once.
-    #[must_use]
-    pub fn idle(&self, now: Instant) -> Vec<Key> {
-        let table = self.table.lock().expect("the held table is never poisoned");
-
-        table
-            .iter()
-            .filter(|(_, held)| {
-                let meta = held.meta.lock().expect("an entry's meta is never poisoned");
-
-                !meta.busy
-                    && meta.pending.is_empty()
-                    && now.duration_since(meta.last_frame_at) >= self.idle_bound
-            })
-            .map(|(key, _)| key.clone())
-            .collect()
-    }
-
-    /// Every key whose parked ask has waited past [`STRANDED_BOUND`].
-    #[must_use]
-    pub fn stranded(&self, now: Instant) -> Vec<Key> {
-        let table = self.table.lock().expect("the held table is never poisoned");
-
-        table
-            .iter()
-            .filter(|(_, held)| {
-                let meta = held.meta.lock().expect("an entry's meta is never poisoned");
-
-                !meta.pending.is_empty() && now.duration_since(meta.last_frame_at) >= STRANDED_BOUND
-            })
-            .map(|(key, _)| key.clone())
-            .collect()
-    }
-
     /// Closes every entry: the provider is going away.
     pub async fn close_all(&self) {
         let keys: Vec<Key> = {
@@ -628,35 +581,6 @@ impl HeldProcesses {
     }
 }
 
-/// What one idle eviction says, for a frontend to render.
-///
-/// Polled off the provider the way `rate_windows` is (**D484**'s shape), and
-/// held only until the fresh record that pays for it spawns — so the sentence
-/// a person reads shows exactly between the eviction and the turn that pays
-/// for it, and never afterwards.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Eviction {
-    /// The conversation whose process was closed.
-    pub key: Key,
-    /// When it was closed.
-    pub at: std::time::SystemTime,
-}
-
-/// What the CLI actually served, beside what was asked for.
-///
-/// **Logged and surfaced, never compared.** The served name is the vendor's
-/// own spelling of what it chose — `default` comes back
-/// `claude-opus-5[1m]`, a fallback comes back as whatever it fell back to —
-/// and a request cannot ask for a spelling. Divergence is decided on the
-/// request's `model` against the entry's, never on this string.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServedModel {
-    /// What the request asked for.
-    pub requested: String,
-    /// What `system/init` or a `model_fallback` said was served.
-    pub served: String,
-}
-
 /// The provider-wide slots a task writes into, so a frontend can poll what
 /// the wire last saw.
 ///
@@ -669,9 +593,9 @@ pub struct ServedModel {
 pub struct Slots {
     /// The last idle eviction, until the fresh record that pays for it
     /// spawns.
-    pub eviction: Arc<Mutex<Option<Eviction>>>,
+    pub eviction: Arc<Mutex<Option<crate::provider::Eviction>>>,
     /// The newest `{requested, served}` pair.
-    pub served_model: Arc<Mutex<Option<ServedModel>>>,
+    pub served_model: Arc<Mutex<Option<crate::provider::ServedModel>>>,
     /// What the vendor last said about the account's windows.
     pub rate: Arc<Mutex<Option<serde_json::Value>>>,
     /// The sentence the last unusual draw earned, until an ordinary one takes
@@ -699,8 +623,6 @@ pub struct Wiring {
     pub tools: Vec<crate::tool::ToolDefinition>,
     /// What the model was asked for, for the served-model pair.
     pub requested_model: String,
-    /// This build's version, for `serverInfo`.
-    pub version: String,
     /// The `initialize` control request, written before the first frame.
     pub opening: String,
     /// Whether this process answers one turn and ends.
@@ -845,14 +767,14 @@ pub async fn run(
     // `result`.
     let mut inputs_open = true;
     // What killed the child, for a turn that arrives after it is gone.
-    let mut died: Option<crate::provider::ProviderError> = None;
+    let mut died: Option<ProviderError> = None;
 
     if let Err(error) = stdin.write_all(wiring.opening.as_bytes()).await {
         tracing::warn!(provider = super::ID, key = %wiring.key, %error, "could not open the CLI");
     }
 
     loop {
-        let next = deadline(&wiring.meta, &turn, idle_bound);
+        let (at, which) = deadline(&wiring.meta, &turn, idle_bound);
 
         tokio::select! {
             input = inputs.recv(), if inputs_open => match input {
@@ -872,7 +794,11 @@ pub async fn run(
                             died = report_exit(&wiring, &mut turn, &said, status);
                             break;
                         }
-                        fail(&wiring, &mut turn, format!("could not write the turn: {error}"));
+                        fail(
+                            &wiring,
+                            &mut turn,
+                            ProviderError::Transport(format!("could not write the turn: {error}")),
+                        );
                         continue;
                     }
                     // The write happened; only now does the record of it.
@@ -882,7 +808,12 @@ pub async fn run(
                     open_turn(&wiring, &mut turn, events);
                     answer_asks(&wiring, &mut turn, &mut stdin, answers).await;
                     if let Some(id) = carried_id {
-                        let mut sent = wiring.meta.lock().expect("meta").sent.clone();
+                        let mut sent = wiring
+                            .meta
+                            .lock()
+                            .expect("an entry's meta is never poisoned")
+                            .sent
+                            .clone();
                         sent.push(id);
                         record_sent(&wiring, &mut turn, sent);
                     }
@@ -931,7 +862,11 @@ pub async fn run(
                     break;
                 }
                 Err(error) => {
-                    fail(&wiring, &mut turn, format!("could not read the CLI: {error}"));
+                    fail(
+                        &wiring,
+                        &mut turn,
+                        ProviderError::Transport(format!("could not read the CLI: {error}")),
+                    );
                     break;
                 }
             },
@@ -942,25 +877,22 @@ pub async fn run(
                 }
                 break;
             }
-            () = sleep_until(next), if next.is_some() => {
-                let (_, which) = next.expect("the guard proved it is Some");
-                match which {
-                    Deadline::Silence => {
-                        fail(&wiring, &mut turn, format!(
-                            "no frame for {}s from the claude CLI",
-                            SILENCE_BOUND.as_secs()
-                        ));
-                    }
-                    Deadline::Idle => {
-                        evict(&wiring, Reason::IdleEvicted);
-                        break;
-                    }
-                    Deadline::Stranded => {
-                        evict(&wiring, Reason::Stranded);
-                        break;
-                    }
+            () = tokio::time::sleep_until(at) => match which {
+                Deadline::Silence => {
+                    fail(&wiring, &mut turn, ProviderError::Transport(format!(
+                        "no frame for {}s from the claude CLI",
+                        SILENCE_BOUND.as_secs()
+                    )));
                 }
-            }
+                Deadline::Idle => {
+                    evict(&wiring, Reason::IdleEvicted);
+                    break;
+                }
+                Deadline::Stranded => {
+                    evict(&wiring, Reason::Stranded);
+                    break;
+                }
+            },
         }
     }
 
@@ -994,11 +926,7 @@ pub async fn run(
                     signal = ?signal,
                     "the CLI did not take EOF"
                 );
-                // Both bounds, and neither consumes the sender: this loop used
-                // to `take()` a `FnOnce`, so the second iteration found `None`
-                // and `SIGKILL` was never sent to any child (CC-3). A signal
-                // to a child that has already exited is `ESRCH`, and the arm
-                // is reached only when `exited.recv()` timed out anyway.
+                // Both bounds from one sender (CC-3, told on `ChildIo::kill`).
                 kill(signal);
             }
         }
@@ -1010,34 +938,22 @@ pub async fn run(
     }
 }
 
-/// Sleeps until `next`, or forever when there is nothing to wait for.
-async fn sleep_until(next: Option<(Instant, Deadline)>) {
-    match next {
-        Some((at, _)) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Which of the three bounds applies right now.
+/// Which of the three bounds applies right now, and when it falls due.
 ///
 /// Exactly one does: a parked ask suspends the idle rule and the silence
 /// watchdog both — a dialog somebody is reading and a twelve-minute `bash`
 /// are neither idleness nor silence — and a running turn is not idle.
-fn deadline(
-    meta: &Arc<Mutex<Meta>>,
-    turn: &Turn,
-    idle_bound: Duration,
-) -> Option<(Instant, Deadline)> {
+fn deadline(meta: &Arc<Mutex<Meta>>, turn: &Turn, idle_bound: Duration) -> (Instant, Deadline) {
     let meta = meta.lock().expect("an entry's meta is never poisoned");
 
     if !meta.pending.is_empty() {
-        return Some((meta.last_frame_at + STRANDED_BOUND, Deadline::Stranded));
+        return (meta.last_frame_at + STRANDED_BOUND, Deadline::Stranded);
     }
     if turn.events.is_some() {
-        return Some((meta.last_frame_at + SILENCE_BOUND, Deadline::Silence));
+        return (meta.last_frame_at + SILENCE_BOUND, Deadline::Silence);
     }
 
-    Some((meta.last_frame_at + idle_bound, Deadline::Idle))
+    (meta.last_frame_at + idle_bound, Deadline::Idle)
 }
 
 /// A frame crossed; every deadline is measured from now.
@@ -1055,8 +971,8 @@ fn touch(wiring: &Wiring) {
 ///
 /// What it is worth: `outcomes` holds a whole `CallToolResult` — a tool's
 /// output, up to `truncate::MAX_CHARS` — and an allowed ask whose `tools/call`
-/// never arrived left one resident for the life of a held process, which under
-/// posture C is the life of the conversation.
+/// never arrived left one resident for the life of a held process, which is
+/// the life of the conversation.
 fn drop_previous_turn(turn: &mut Turn) {
     turn.outcomes.clear();
     turn.minted.clear();
@@ -1095,16 +1011,15 @@ fn emit(turn: &Turn, event: ProviderEvent) {
     }
 }
 
-/// Fails the running turn, terminally.
+/// Fails the running turn, terminally, with `error`.
 ///
 /// Through [`close_turn`], because a failed turn is an **ended** turn: `busy`
-/// says a turn is running, and the table's own two views of idleness —
-/// [`HeldProcesses::idle`] and [`HeldProcesses::evictable`] — both filter on
-/// it. A failure that cleared the stream and left the flag set made the entry
-/// invisible to the idle sweep and to the cap forever, so enough of them and
-/// the stated cap on authenticated runtimes stopped holding (CC-5).
-fn fail(wiring: &Wiring, turn: &mut Turn, message: String) {
-    emit(turn, ProviderEvent::Failed(crate::provider::ProviderError::Transport(message)));
+/// says a turn is running, and [`HeldProcesses::evictable`] filters on it, so
+/// a failure that cleared the stream and left the flag set hid the entry from
+/// the cap, and enough of them and the stated cap on authenticated runtimes
+/// stopped holding (CC-5).
+fn fail(wiring: &Wiring, turn: &mut Turn, error: ProviderError) {
+    emit(turn, ProviderEvent::Failed(error));
     close_turn(wiring, turn);
 }
 
@@ -1146,7 +1061,7 @@ fn evict(wiring: &Wiring, reason: Reason) {
 
     if reason == Reason::IdleEvicted {
         *wiring.slots.eviction.lock().expect("the eviction slot is never poisoned") =
-            Some(Eviction { key: wiring.key.clone(), at: std::time::SystemTime::now() });
+            Some(crate::provider::Eviction { key: wiring.key.clone() });
     }
 }
 
@@ -1177,7 +1092,7 @@ fn report_exit(
     turn: &mut Turn,
     said: &Arc<Mutex<Vec<String>>>,
     status: std::io::Result<std::process::ExitStatus>,
-) -> Option<crate::provider::ProviderError> {
+) -> Option<ProviderError> {
     let code = status.as_ref().ok().and_then(std::process::ExitStatus::code);
 
     // An exit **before** `system/init` never spent a turn, so what it means
@@ -1186,31 +1101,20 @@ fn report_exit(
     // the first line — run 7's `Session ID … is already in use.` is that arm,
     // exit 1 in 141 ms.
     let reported = if turn.seen_init {
-        let error = crate::provider::ProviderError::Transport(format!(
-            "the claude CLI exited {code:?} mid-turn"
-        ));
-        if turn.events.is_some() {
-            emit(turn, ProviderEvent::Failed(error.clone()));
-            turn.events = None;
-        }
-
-        error
+        ProviderError::Transport(format!("the claude CLI exited {code:?} mid-turn"))
     } else {
         let said = said.lock().expect("the stderr buffer is never poisoned").clone();
-        let error = if said.iter().any(|line| not_logged_in(line)) {
-            crate::provider::ProviderError::Auth(NO_LOGIN.to_owned())
+        if said.iter().any(|line| not_logged_in(line)) {
+            ProviderError::Auth(NO_LOGIN.to_owned())
         } else {
-            crate::provider::ProviderError::Transport(said.first().map_or_else(
+            ProviderError::Transport(said.first().map_or_else(
                 || format!("the claude CLI exited {code:?} before it said anything"),
                 |line| surfaced(line),
             ))
-        };
-
-        emit(turn, ProviderEvent::Failed(error.clone()));
-        turn.events = None;
-
-        error
+        }
     };
+    emit(turn, ProviderEvent::Failed(reported.clone()));
+    turn.events = None;
 
     // An exit 1 that follows an errored `result` is that result's own kind
     // and **not** a transport failure — the CLI's exit code is the last
@@ -1228,7 +1132,7 @@ fn report_exit(
 /// state — it is `{isAuthenticating: false, output: []}` on every run of the
 /// recording, a fully logged-in CLI included — so this arm is reached by the
 /// exit path and by an `auth_status` that ever says otherwise.
-pub const NO_LOGIN: &str = "the claude CLI has no login; run `claude login` in a terminal — \
+const NO_LOGIN: &str = "the claude CLI has no login; run `claude login` in a terminal — \
      ganja never holds this credential";
 
 /// Whether a stderr line is the CLI saying it is not logged in.
@@ -1268,8 +1172,8 @@ fn surfaced(line: &str) -> String {
 /// One frame, read.
 ///
 /// Returns the reason to close this entry when the frame is one that ends the
-/// process — today only a vendor-safeguard refusal, whose `result` closes the
-/// record so that the next turn opens fresh.
+/// process: the `result` of a refused turn, of a one-shot's turn, or of a turn
+/// whose model switch the process did not confirm.
 async fn handle(
     wiring: &Wiring,
     turn: &mut Turn,
@@ -1400,13 +1304,7 @@ async fn handle(
             // is `{isAuthenticating: false, output: []}`, a fully logged-in
             // CLI included, so the arm below has never been observed.
             if is_authenticating || !output.is_empty() {
-                emit(
-                    turn,
-                    ProviderEvent::Failed(crate::provider::ProviderError::Auth(
-                        NO_LOGIN.to_owned(),
-                    )),
-                );
-                turn.events = None;
+                fail(wiring, turn, ProviderError::Auth(NO_LOGIN.to_owned()));
             }
         }
         Inbound::Result(result) => return finish(wiring, turn, result),
@@ -1470,14 +1368,14 @@ async fn handle(
 /// The turn ended.
 fn finish(wiring: &Wiring, turn: &mut Turn, result: super::frame::Result_) -> Option<Reason> {
     if let Some(refusal) = turn.refusal.take() {
-        emit(
+        fail(
+            wiring,
             turn,
-            ProviderEvent::Failed(crate::provider::ProviderError::Transport(format!(
+            ProviderError::Transport(format!(
                 "refused by the vendor safeguard: {} — {}",
                 refusal.category, refusal.explanation
-            ))),
+            )),
         );
-        close_turn(wiring, turn);
 
         // The streak is what bounds what this key may spend: one record with
         // the transcript rendered, one with the prompts alone, and then the
@@ -1510,54 +1408,41 @@ fn finish(wiring: &Wiring, turn: &mut Turn, result: super::frame::Result_) -> Op
     // **`is_error`, never `subtype`** — every `result` in the recording says
     // `subtype: "success"`, refused ones included.
     if result.is_error {
-        emit(turn, ProviderEvent::Failed(crate::provider::ProviderError::Transport(result.text)));
+        fail(wiring, turn, ProviderError::Transport(result.text));
+    } else {
+        emit(
+            turn,
+            ProviderEvent::Usage(crate::protocol::Usage {
+                input_tokens: result.usage.input,
+                output_tokens: result.usage.output,
+                // The CLI reports thinking under `output_tokens_details` and
+                // this wire does not read it: a count nothing renders is a
+                // field to keep honest rather than to guess at.
+                reasoning_tokens: 0,
+                cache_read_tokens: result.usage.cache_read,
+                cache_write_tokens: result.usage.cache_write,
+            }),
+        );
+        emit(turn, ProviderEvent::Finish(crate::protocol::FinishReason::Completed));
         close_turn(wiring, turn);
 
-        if unconfirmed {
-            tracing::info!(
-                provider = super::ID,
-                key = %wiring.key,
-                "the model switch was not confirmed; the next turn opens a fresh record"
-            );
-
-            return Some(Reason::Divergence);
+        if wiring.one_shot {
+            // One process, one turn, stdin closed at the `result`.
+            return Some(Reason::Close);
         }
 
-        return None;
+        // A served turn is the only thing that resets the streak. The fresh
+        // record's own binding write carries it forward, because a record
+        // that has not yet been served has not yet shown the streak is over.
+        amend(wiring, |binding| {
+            binding.refused = false;
+            binding.refused_streak = 0;
+        });
     }
 
-    emit(
-        turn,
-        ProviderEvent::Usage(crate::protocol::Usage {
-            input_tokens: result.usage.input,
-            output_tokens: result.usage.output,
-            // The CLI reports thinking under `output_tokens_details` and this
-            // wire does not read it: a count nothing renders is a field to
-            // keep honest rather than to guess at.
-            reasoning_tokens: 0,
-            cache_read_tokens: result.usage.cache_read,
-            cache_write_tokens: result.usage.cache_write,
-        }),
-    );
-    emit(turn, ProviderEvent::Finish(crate::protocol::FinishReason::Completed));
-    close_turn(wiring, turn);
-
-    if wiring.one_shot {
-        // One process, one turn, stdin closed at the `result`.
-        return Some(Reason::Close);
-    }
-
-    // A served turn is the only thing that resets the streak. The fresh
-    // record's own binding write carries it forward, because a record that
-    // has not yet been served has not yet shown the streak is over.
-    amend(wiring, |binding| {
-        binding.refused = false;
-        binding.refused_streak = 0;
-    });
-
-    // The unconfirmed switch read above closes the entry now, and the next
-    // request opens a fresh record under `--model` (`eawi`). The turn itself
-    // finished: what it cost is one turn, shown by the served slot.
+    // The unconfirmed switch read above closes the entry now, whichever way
+    // the turn ended, and the next request opens a fresh record under
+    // `--model` (`eawi`). What it cost is one turn, shown by the served slot.
     if unconfirmed {
         tracing::info!(
             provider = super::ID,
@@ -1637,7 +1522,7 @@ fn step_ends(wiring: &Wiring, turn: &mut Turn) {
 /// is the CLI's own empty success, so its id joins `ahead` and that answer is
 /// consumed rather than logged as a stranger's. **Unmeasured live**: what the
 /// CLI does next — a fresh `tools/list`, answered here from `wiring.tools` — is
-/// the bundle's reading (W1a Q3.9-3.10), and no recorded run sent this.
+/// the bundle's reading, and no recorded run sent this.
 async fn announce_roster(
     wiring: &mut Wiring,
     turn: &mut Turn,
@@ -1705,8 +1590,7 @@ async fn switch_model(
 /// equal. Lenient in the direction that keeps a process, which a wrong answer
 /// here costs nothing more than the served-model slot already shows; strict
 /// would respawn on every alias, which is the cost this bead removes.
-#[must_use]
-pub fn honoured(asked: &str, served: &str) -> bool {
+fn honoured(asked: &str, served: &str) -> bool {
     if asked == super::DEFAULT_MODEL {
         return true;
     }
@@ -1741,19 +1625,12 @@ async fn mcp(
         return;
     }
 
-    match super::rpc::answer(message, &wiring.tools, &wiring.version) {
+    match super::rpc::answer(message, &wiring.tools) {
         super::rpc::Answer::Reply(reply) => {
-            answered(turn, request_id);
-            write(
-                stdin,
-                &super::frame::control_response_line(request_id, &super::rpc::wrapped(reply)),
-            )
-            .await;
+            respond(turn, stdin, request_id, &super::rpc::wrapped(reply)).await;
         }
         super::rpc::Answer::Empty => {
-            answered(turn, request_id);
-            write(stdin, &super::frame::control_response_line(request_id, &serde_json::json!({})))
-                .await;
+            respond(turn, stdin, request_id, &serde_json::json!({})).await;
         }
         super::rpc::Answer::Call(call) => {
             call_arrived(wiring, turn, stdin, request_id, call).await;
@@ -1789,6 +1666,7 @@ async fn call_arrived(
             .find(|pending| pending.name == call.name)
             .map(|pending| pending.tool_use_id.clone()),
     };
+    let name = super::bridge::registry_name(&call.name);
 
     // **A denied call is never called**, and this is where that is enforced
     // rather than trusted (CC-2). The permission answer already told the CLI
@@ -1807,11 +1685,7 @@ async fn call_arrived(
     // apart, and refusing is the side a guard fails on.
     let denied = match &matched {
         Some(id) => turn.denied.contains_key(id),
-        None => {
-            let name = super::bridge::registry_name(&call.name);
-
-            turn.denied.values().any(|denied| *denied == name)
-        }
+        None => turn.denied.values().any(|denied| *denied == name),
     };
     if denied {
         refuse_call(turn, stdin, request_id, &call.id, DENIED_CALL).await;
@@ -1822,15 +1696,7 @@ async fn call_arrived(
     if let Some(id) = &matched
         && let Some(result) = turn.outcomes.remove(id)
     {
-        answered(turn, request_id);
-        write(
-            stdin,
-            &super::frame::control_response_line(
-                request_id,
-                &super::rpc::wrapped(super::rpc::reply(&call.id, &result)),
-            ),
-        )
-        .await;
+        reply_to_call(turn, stdin, request_id, &call.id, &result).await;
 
         return;
     }
@@ -1856,8 +1722,7 @@ async fn call_arrived(
     // The recording never produced it — `can_use_tool` fired 3 ms, 1 ms and
     // 1 ms first on all three tool-calling runs — and the arm is here so the
     // design absorbs either order rather than assuming one.
-    let name = super::bridge::registry_name(&call.name);
-
+    //
     // It is also the one arm where a name this turn never advertised could
     // reach the engine as a call, since the primary path only ever answers an
     // ask this side surfaced. Refused here for the deny arm's reason: what may
@@ -1924,15 +1789,7 @@ async fn refuse_call(
         is_error: true,
     };
 
-    answered(turn, request_id);
-    write(
-        stdin,
-        &super::frame::control_response_line(
-            request_id,
-            &super::rpc::wrapped(super::rpc::reply(rpc_id, &result)),
-        ),
-    )
-    .await;
+    reply_to_call(turn, stdin, request_id, rpc_id, &result).await;
 }
 
 /// Answers every parked ask this resolve carries.
@@ -1955,12 +1812,7 @@ async fn answer_asks(
         };
 
         if let Some(request_id) = &parked.request_id {
-            answered(turn, request_id);
-            write(
-                stdin,
-                &super::frame::control_response_line(request_id, &answer.permission.payload()),
-            )
-            .await;
+            respond(turn, stdin, request_id, &answer.permission.payload()).await;
         }
 
         match answer.result {
@@ -1985,15 +1837,7 @@ async fn answer_asks(
             Some(result) => match (&parked.call_request_id, &parked.call_rpc_id) {
                 // The call already arrived and was waiting on this.
                 (Some(request_id), Some(rpc_id)) => {
-                    answered(turn, request_id);
-                    write(
-                        stdin,
-                        &super::frame::control_response_line(
-                            request_id,
-                            &super::rpc::wrapped(super::rpc::reply(rpc_id, &result)),
-                        ),
-                    )
-                    .await;
+                    reply_to_call(turn, stdin, request_id, rpc_id, &result).await;
                 }
                 // The ordinary order: the call follows the answer.
                 _ => {
@@ -2022,15 +1866,7 @@ async fn cancel(
 
     for pending in parked {
         if let Some(request_id) = &pending.request_id {
-            answered(turn, request_id);
-            write(
-                stdin,
-                &super::frame::control_response_line(
-                    request_id,
-                    &super::bridge::cancelled().payload(),
-                ),
-            )
-            .await;
+            respond(turn, stdin, request_id, &super::bridge::cancelled().payload()).await;
         }
     }
 
@@ -2039,25 +1875,43 @@ async fn cancel(
     // a *running* turn with a `result` is unmeasured — the recording's
     // interrupt landed 63 ms after an already-finished turn — so the watchdog
     // is the fallback if no `result` follows.
-    let request_id = crate::protocol::MessageId::ascending().as_str().to_owned();
+    let request_id = crate::protocol::uuidv7();
     turn.minted.insert(request_id.clone());
-    write(
-        stdin,
-        &super::frame::control_request_line(&request_id, super::frame::ControlRequest::Interrupt),
-    )
-    .await;
+    write(stdin, &super::frame::interrupt_line(&request_id)).await;
 }
 
-/// Records that this side answered `request_id`, so the CLI's echo of that
-/// answer is told from an answer of its own.
-fn answered(turn: &mut Turn, request_id: &str) {
+/// Answers `request_id` with `payload`, recorded as this side's own so the
+/// CLI's echo of it is told from an answer of the CLI's.
+async fn respond(
+    turn: &mut Turn,
+    stdin: &mut Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    request_id: &str,
+    payload: &serde_json::Value,
+) {
     turn.minted.insert(request_id.to_owned());
+    write(stdin, &super::frame::control_response_line(request_id, payload)).await;
+}
+
+/// Answers one `tools/call` with `result`, under the call's own JSON-RPC id.
+async fn reply_to_call(
+    turn: &mut Turn,
+    stdin: &mut Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    request_id: &str,
+    rpc_id: &serde_json::Value,
+    result: &super::rpc::CallToolResult,
+) {
+    let reply = super::rpc::wrapped(super::rpc::reply(rpc_id, result));
+
+    respond(turn, stdin, request_id, &reply).await;
 }
 
 /// The newest `{requested, served}` pair, provider-wide and newest-wins.
 fn served(wiring: &Wiring, model: &str) {
     *wiring.slots.served_model.lock().expect("the served-model slot is never poisoned") =
-        Some(ServedModel { requested: wiring.requested_model.clone(), served: model.to_owned() });
+        Some(crate::provider::ServedModel {
+            requested: wiring.requested_model.clone(),
+            served: model.to_owned(),
+        });
 }
 
 /// One line to the CLI's stdin.

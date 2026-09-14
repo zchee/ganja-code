@@ -49,10 +49,8 @@
 pub(crate) mod atomic;
 pub mod auth;
 pub mod catalog;
-/// What efforts a model may run under. **Public since D556** for exactly one
-/// door: [`effort::standalone`], which is what an *uncataloged* wire's roster
-/// comes from — a provider with no rows has no `variants` to hang one on, so
-/// something outside the catalog has to answer.
+/// What efforts a model may run under. Public for [`effort::standalone`]
+/// (**D556**).
 pub mod effort;
 /// The entropy both backoff ladders here scatter their waits from — the one
 /// thing the retry policy and the catalog fetcher share, and the reason
