@@ -1328,6 +1328,163 @@ async fn a_call_carrying_no_id_for_a_tool_nobody_denied_is_still_surfaced() {
     ));
 }
 
+/// The other order a denied call can arrive in (`yu5p`): the `tools/call`
+/// reaches the wire **before** its ask is answered, so `call_arrived` parks
+/// it beside the ask and returns. The resolve that then says deny used to
+/// record the refusal and write nothing for the call, and the CLI waited on
+/// it for the whole hour its `tools/call` timeout allows. It is answered in
+/// the deny arm itself, with the refusal the after-deny path gives.
+#[tokio::test]
+async fn a_call_parked_before_its_ask_is_denied_is_answered_with_the_refusal() {
+    use tokio::io::AsyncReadExt as _;
+
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("ask-1".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    // The call first: parked beside its ask, and answered by nobody yet.
+    let mut call = a_call("read", "toolu_1");
+    call.id = serde_json::json!(7);
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", call).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    assert_eq!(written, "", "a call waiting on its ask is not answered on arrival");
+    {
+        let meta = wiring.meta.lock().expect("meta");
+        assert_eq!(
+            meta.pending
+                .iter()
+                .map(|parked| (parked.call_request_id.as_deref(), parked.call_rpc_id.clone()))
+                .collect::<Vec<_>>(),
+            [(Some("req-1"), Some(serde_json::json!(7)))],
+            "the call's two ids are parked beside the ask"
+        );
+    }
+
+    // Then the deny.
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a control_response line"))
+        .collect();
+
+    assert_eq!(lines.len(), 2, "the ask and the call, each answered: {written}");
+    assert_eq!(lines[0]["response"]["request_id"], "ask-1", "the ask first: {written}");
+    assert_eq!(
+        lines[0]["response"]["response"],
+        serde_json::json!({"behavior": "deny", "message": "denied"}),
+        "answered with the person's deny, as before"
+    );
+    assert_eq!(lines[1]["response"]["request_id"], "req-1", "then the call: {written}");
+    let reply = &lines[1]["response"]["response"]["mcp_response"];
+    assert_eq!(reply["id"], serde_json::json!(7), "echoing the call's own JSON-RPC id");
+    assert_eq!(reply["result"]["isError"], serde_json::json!(true), "as a refusal: {written}");
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        super::DENIED_CALL,
+        "in the words a call arriving after the deny is answered with"
+    );
+
+    assert_eq!(
+        turn.denied.get("toolu_1").map(String::as_str),
+        Some("read"),
+        "the denial is still recorded, so a second call for it is refused too"
+    );
+    assert!(wiring.meta.lock().expect("meta").pending.is_empty(), "and nothing is left parked");
+}
+
+/// `yu5p` on the secondary path: a `tools/call` with no ask before it is its
+/// own ask, parked with the call's two ids and no ask id. Denied, it is
+/// answered with the same refusal, and with nothing else, since no
+/// `can_use_tool` was asked for a deny payload to answer.
+#[tokio::test]
+async fn a_call_that_was_its_own_ask_is_answered_with_the_refusal_when_denied() {
+    use tokio::io::AsyncReadExt as _;
+
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn { expected_calls: 1, ..super::Turn::default() };
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+
+    let mut call = a_call("read", "toolu_1");
+    call.id = serde_json::json!(9);
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", call).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    assert_eq!(written, "", "the call is the ask, so it waits on the person");
+    assert!(
+        matches!(
+            streamed.try_recv(),
+            Ok(crate::provider::ProviderEvent::ToolCallStart { ref name, .. }) if name == "read"
+        ),
+        "and was surfaced as an ordinary ask"
+    );
+    {
+        let meta = wiring.meta.lock().expect("meta");
+        assert_eq!(
+            meta.pending
+                .iter()
+                .map(|parked| (
+                    parked.request_id.as_deref(),
+                    parked.call_request_id.as_deref(),
+                    parked.call_rpc_id.clone()
+                ))
+                .collect::<Vec<_>>(),
+            [(None, Some("req-1"), Some(serde_json::json!(9)))],
+            "parked with the call's ids and no ask id"
+        );
+    }
+
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+    drop(stdin);
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a control_response line"))
+        .collect();
+
+    assert_eq!(lines.len(), 1, "the call alone is answered, there being no ask: {written}");
+    assert_eq!(lines[0]["response"]["request_id"], "req-1", "by the call's request id");
+    let reply = &lines[0]["response"]["response"]["mcp_response"];
+    assert_eq!(reply["id"], serde_json::json!(9), "echoing the call's own JSON-RPC id");
+    assert_eq!(reply["result"]["isError"], serde_json::json!(true), "as a refusal: {written}");
+    assert_eq!(reply["result"]["content"][0]["text"], super::DENIED_CALL);
+
+    assert_eq!(turn.denied.get("toolu_1").map(String::as_str), Some("read"));
+    assert!(wiring.meta.lock().expect("meta").pending.is_empty(), "and nothing is left parked");
+}
+
 /// The secondary path is the one arm where a name this turn never advertised
 /// could reach the engine as a call: the primary path only ever answers an ask
 /// this side surfaced.

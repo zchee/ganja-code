@@ -1765,8 +1765,10 @@ async fn mcp(
 ///
 /// Three ways it can land: after its ask was answered (the ordinary one, and
 /// it is answered from what the resolve recorded); before the resolve, in
-/// which case it waits on the parked ask; or with no ask at all — the
-/// secondary path, where the call **is** the ask.
+/// which case it waits on the parked ask and the resolve answers it — with the
+/// tool's result on allow, with the refusal on deny (`yu5p`); or with no ask
+/// at all — the secondary path, where the call **is** the ask and the resolve
+/// answers it the same two ways.
 async fn call_arrived(
     wiring: &Wiring,
     turn: &mut Turn,
@@ -1892,11 +1894,16 @@ async fn call_arrived(
     step_ends(wiring, turn);
 }
 
-/// What a `tools/call` for an ask already answered `deny` is answered with.
+/// What a `tools/call` for an ask answered `deny` is answered with, whether
+/// it arrives after the answer or was already parked beside the ask when the
+/// answer came (`yu5p`).
 ///
-/// Terse on purpose: the refusal the person's dialog produced already reached
-/// the model as the `can_use_tool`'s own `deny.message`, and this line only
-/// has to say that the call did not happen either.
+/// Terse on purpose: on the primary path the refusal the person's dialog
+/// produced already reached the model as the `can_use_tool`'s own
+/// `deny.message`, and this line only has to say that the call did not happen
+/// either. On the secondary path, where the call was the ask and no
+/// `can_use_tool` was answered, this line is all the model reads; carrying the
+/// message there is a follow-up bead.
 const DENIED_CALL: &str = "this call was refused and did not run";
 
 /// Answers one `tools/call` from this side alone: a failed result, no ask, no
@@ -1957,11 +1964,23 @@ async fn answer_asks(
         }
 
         match answer.result {
-            // A denied call is never called, so there is nothing to answer.
             // The name goes in beside the id because this removal is what
             // leaves a call carrying no id nothing else to match against.
             None => {
                 turn.denied.insert(parked.tool_use_id.clone(), parked.name.clone());
+
+                // A denied call is never called — unless it already was: a
+                // `tools/call` that arrived ahead of this answer is parked
+                // beside its ask, or **as** the ask on the secondary path, and
+                // the CLI waits on it up to the hour this side declared. It
+                // gets the refusal a call arriving after the deny is given
+                // (`yu5p`). One that has not arrived yet is answered from
+                // `denied` when it does.
+                if let (Some(request_id), Some(rpc_id)) =
+                    (&parked.call_request_id, &parked.call_rpc_id)
+                {
+                    refuse_call(turn, stdin, request_id, rpc_id, DENIED_CALL).await;
+                }
             }
             Some(result) => match (&parked.call_request_id, &parked.call_rpc_id) {
                 // The call already arrived and was waiting on this.
