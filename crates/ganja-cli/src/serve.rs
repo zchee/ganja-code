@@ -20,6 +20,16 @@
 //! travel out on `/event` and answers come back on
 //! `POST /permission/{id}/reply` (deviation:
 //! serve-keeps-interactive-permissions).
+//!
+//! The SIGTERM and SIGINT listeners are registered **before** the server is
+//! bound, and so before the address line. Both the open port and the line are
+//! what a supervisor reads as "up", and one that signals the instant it sees
+//! either must meet a handler: a TERM that arrives before registration takes
+//! the default disposition and kills the process outright — exit `signal:
+//! 15` instead of the clean 0, with none of the shutdown below run. The
+//! listeners used to be registered after the line was flushed, and a loaded CI
+//! runner landed a TERM in that window (bead `ganja-code-0dj9`);
+//! `tests/serve.rs` signals on the line itself to keep the order pinned.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -52,7 +62,8 @@ pub struct ServeArgs {
 ///
 /// Exit 1 when the engine cannot be assembled, and for the serve layer's
 /// startup refusals — an unresolvable hostname, a taken explicit port, and
-/// the deliberate one: a non-loopback bind with no password configured.
+/// the deliberate one: a non-loopback bind with no password configured. Also
+/// when SIGINT cannot be listened for (see [`Shutdown::listen`]).
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let assembled = assemble(&cwd, &Overrides::default()).await?;
@@ -77,6 +88,9 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     // flagged before the next turn trusts it — the same reason the UI
     // watches and one-shot `run` does not.
     engine.watch_files();
+
+    // Before the bind, not after the address line: see the module docs.
+    let shutdown = Shutdown::listen()?;
 
     let handle = ganja_serve::serve(
         Arc::clone(&engine),
@@ -105,7 +119,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     }
     std::io::stdout().flush().context("failed to write the address line")?;
 
-    wait_for_shutdown().await;
+    shutdown.wait().await;
 
     handle.shutdown().await.context("the server did not stop cleanly")?;
     engine.session_end(ganja_core::hook::EXIT_REASON).await;
@@ -117,28 +131,67 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
-/// The first of SIGINT or SIGTERM, which are the two ways a supervisor or a
-/// terminal ends a server it started.
-async fn wait_for_shutdown() {
+/// SIGINT and SIGTERM, the two ways a supervisor or a terminal ends a server
+/// it started, listened for from the moment this value exists.
+///
+/// A value rather than one `async fn` because registering and waiting have to
+/// happen at two different points: a tokio listener installs its handler when
+/// it is created, not when it is first polled, and a signal that arrives in
+/// between is still delivered to it.
+struct Shutdown {
+    /// `None` when SIGTERM could not be registered: a process that cannot
+    /// still stops on ^C.
     #[cfg(unix)]
-    {
-        let mut sigterm =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(sigterm) => sigterm,
-                // A process that cannot register SIGTERM still stops on ^C.
-                Err(_) => {
-                    let _ = tokio::signal::ctrl_c().await;
-                    return;
-                }
-            };
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+}
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+impl Shutdown {
+    /// Registers both listeners.
+    ///
+    /// # Errors
+    ///
+    /// When SIGINT cannot be registered. That is the fallback SIGTERM's own
+    /// failure leans on, so a server with neither would be stoppable by no
+    /// signal it handles — refused before the bind rather than announced.
+    fn listen() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            Ok(Self {
+                terminate: signal(SignalKind::terminate()).ok(),
+                interrupt: signal(SignalKind::interrupt())
+                    .context("failed to listen for SIGINT")?,
+            })
         }
+        // No compile signal here (windows is parked): `ctrl_c` registers on
+        // its first poll, so the early registration is unix's alone.
+        #[cfg(not(unix))]
+        Ok(Self {})
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+
+    /// The first of the two.
+    async fn wait(self) {
+        #[cfg(unix)]
+        {
+            let Self { terminate, mut interrupt } = self;
+            match terminate {
+                Some(mut terminate) => {
+                    tokio::select! {
+                        _ = interrupt.recv() => {}
+                        _ = terminate.recv() => {}
+                    }
+                }
+                None => {
+                    interrupt.recv().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }

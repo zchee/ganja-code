@@ -151,6 +151,26 @@ fn serve_comes_up_answers_health_and_dies_cleanly_on_sigterm() {
     );
 }
 
+/// A supervisor may signal the moment it reads the address line, and the
+/// server must already be listening for that signal when it says the line.
+///
+/// No health round trip first, which is the difference from the test above:
+/// that one gives the server a whole HTTP exchange to finish starting before
+/// the TERM, and still failed on a loaded CI runner (bead `0dj9`) because the
+/// listener was registered *after* the line was flushed — a TERM landing in
+/// between took the default disposition and killed the process outright,
+/// `signal: 15` where a clean shutdown exits 0. Signalling on the line itself
+/// is the narrowest a supervisor can be, so it is the case that pins the
+/// order: register first, announce second.
+#[test]
+fn a_sigterm_sent_the_instant_the_address_line_appears_still_exits_cleanly() {
+    let project = temporary();
+    std::fs::write(project.path().join("script.json"), one_word().to_string())
+        .expect("the script is writable");
+
+    Served::in_project(project.path()).stop();
+}
+
 /// What the prompt offers, a call over the socket can load.
 ///
 /// `serve` assembles its engine the way `run` and the UI assemble theirs, so
