@@ -800,6 +800,12 @@ pub(crate) enum TurnKind {
         /// same rule a file mention follows: what the token points at now,
         /// not at the moment it was typed.
         session_mentions: Vec<String>,
+        /// The slash line this prompt was expanded from, as the person typed
+        /// it, which the user message carries as [`Message::command`]
+        /// (**D561**). Filled by the engine's command expansion alone; a
+        /// prompt a person typed, a teammate's delivery and a subagent's
+        /// brief all leave it [`None`].
+        command: Option<String>,
     },
     /// Run a command the *user* typed and put it and its output in the
     /// transcript, without asking the model anything. Upstream's `!`
@@ -1569,16 +1575,25 @@ pub fn spell_duration(span: Duration) -> String {
 /// would draw a `>` over nothing, which claims the person typed something they
 /// did not. A message with no peers keeps its empty text part exactly as it
 /// always did, so nothing outside a team changes.
+///
+/// `command` is the slash line a command expansion was typed as (**D561**):
+/// the one place a user message is minted through [`Message::from_command`],
+/// and [`None`] from every caller but the opening prompt of a turn the
+/// engine's command expansion started.
 async fn user_message(
     turn: &Turn,
     text: String,
+    command: Option<&str>,
     peers: &[crate::protocol::team::PeerPayload],
     mentions: &[crate::protocol::Mention],
     skills: &[String],
     session_mentions: &[String],
 ) -> Message {
     let carries = peers.is_empty() || !text.trim().is_empty();
-    let mut user = Message::user(text);
+    let mut user = match command {
+        Some(typed) => Message::from_command(typed, text),
+        None => Message::user(text),
+    };
     if !carries {
         user.parts.clear();
     }
@@ -1668,6 +1683,9 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, Drained> {
         let user = user_message(
             turn,
             input.text,
+            // A steer is a person's own words, typed mid-turn: never an
+            // expansion, so never a typed line to draw in its place.
+            None,
             &input.peers,
             &input.mentions,
             &input.skills,
@@ -2452,8 +2470,19 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // A teammate's message is the second kind and then some: it arrived
     // whole, and it leads the extras because it is content rather than an
     // attachment to some.
-    let user = if let TurnKind::Prompt { mentions, skills, peers, session_mentions } = &turn.kind {
-        user_message(turn, turn.prompt.clone(), peers, mentions, skills, session_mentions).await
+    let user = if let TurnKind::Prompt { mentions, skills, peers, session_mentions, command } =
+        &turn.kind
+    {
+        user_message(
+            turn,
+            turn.prompt.clone(),
+            command.as_deref(),
+            peers,
+            mentions,
+            skills,
+            session_mentions,
+        )
+        .await
     } else {
         Message::user(turn.prompt.clone())
     };

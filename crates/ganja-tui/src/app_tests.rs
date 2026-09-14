@@ -4792,11 +4792,10 @@ async fn the_inspector_does_not_pause_a_streaming_turn() {
     .expect("a fragment is handled");
 
     assert!(app.status.is_streaming(), "the overlay must not pause the turn");
-    let grew = app
-        .chat
-        .messages()
-        .iter()
-        .any(|(_, parts)| parts.iter().any(|part| part.as_text() == Some("still streaming")));
+    let grew =
+        app.chat.messages().iter().any(|(_, parts, _)| {
+            parts.iter().any(|part| part.as_text() == Some("still streaming"))
+        });
     assert!(grew, "the transcript should keep growing while the overlay is open");
 }
 
@@ -6934,6 +6933,7 @@ fn replied(texts: &[&str]) -> Message {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }
 }
 

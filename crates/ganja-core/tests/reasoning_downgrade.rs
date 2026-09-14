@@ -171,6 +171,7 @@ fn stored_step() -> Message {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }
 }
 
@@ -209,6 +210,7 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     };
     for message in [&asked, &stored_step()] {
         storage.save_message(&session, message).expect("the envelope stores");

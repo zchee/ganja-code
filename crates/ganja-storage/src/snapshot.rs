@@ -879,15 +879,20 @@ pub fn patches_from(history: &[Message], anchor: &MessageId) -> Vec<Patch> {
 
 /// The text of the message `anchor` names, for the editor an undo hands it
 /// back to.
+///
+/// A command expansion hands back the slash line it was typed as (**D561**)
+/// rather than the template it expanded to: undoing a prompt and retyping it
+/// is editing it, and what the person typed was the line. Sent again, the
+/// line runs the command again — the expansion sent as a prompt would skip
+/// every gate the command's own door runs.
 #[must_use]
 pub fn prompt_at(history: &[Message], anchor: &MessageId) -> Option<String> {
-    history
-        .iter()
-        .find(|message| message.id == *anchor)?
-        .parts
-        .iter()
-        .find_map(|part| part.as_text())
-        .map(ToOwned::to_owned)
+    let message = history.iter().find(|message| message.id == *anchor)?;
+    if let Some(typed) = &message.command {
+        return Some(typed.clone());
+    }
+
+    message.parts.iter().find_map(|part| part.as_text()).map(ToOwned::to_owned)
 }
 
 /// Every file in `patches` paired with the tree it is restored from, first

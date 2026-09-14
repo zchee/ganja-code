@@ -104,6 +104,7 @@ fn message(id: &str, parts: Vec<Part>) -> Message {
         usage: Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }),
         request_only: false,
         compaction_summary: false,
+        command: None,
     }
 }
 
@@ -222,6 +223,52 @@ fn a_message_is_stored_without_its_parts_and_the_caller_keeps_them() {
         "the envelope is stored without its parts, got {:?}",
         loaded[0].parts
     );
+}
+
+/// **D561**. The slash line a command expansion was typed as rides the
+/// envelope's opaque JSON and comes back from a resume, so a frontend that
+/// reopens the session draws the line the person typed rather than the page
+/// of template it expanded to; and a message carrying none stores no key at
+/// all — the row an older build wrote — and reads back as [`None`].
+#[test]
+fn a_command_expansions_typed_line_survives_a_store_and_a_row_without_one_reads_as_none() {
+    let directory = temporary();
+    let storage = storage(&directory);
+    let id = session("ses_1");
+
+    let expanded = Message {
+        role: Role::User,
+        model: None,
+        usage: None,
+        command: Some("/team 1 --backend codex port the loader".to_owned()),
+        ..message("msg_1", vec![text("prt_1", "You are the lead of a team.\nStage one.")])
+    };
+    let typed = Message {
+        role: Role::User,
+        model: None,
+        usage: None,
+        ..message("msg_2", vec![text("prt_2", "a prompt somebody typed")])
+    };
+    store_message(&storage, &id, &expanded);
+    store_message(&storage, &id, &typed);
+
+    let written: String = beside(&storage)
+        .query_row("SELECT data FROM message WHERE id = 'msg_2'", [], |row| row.get(0))
+        .expect("the envelope row reads");
+    assert!(
+        !written.contains("command"),
+        "a message with no typed line writes the bytes an older build wrote: {written}"
+    );
+
+    let loaded = storage.load_transcript(&id).expect("the transcript loads");
+    assert_eq!(loaded, vec![expanded, typed], "both come back exactly as they were stored");
+    assert_eq!(loaded[0].command.as_deref(), Some("/team 1 --backend codex port the loader"));
+    assert_eq!(
+        loaded[0].parts[0].as_text(),
+        Some("You are the lead of a team.\nStage one."),
+        "and the expansion is still the message's text"
+    );
+    assert_eq!(loaded[1].command, None, "a row without the key reads as None");
 }
 
 #[test]

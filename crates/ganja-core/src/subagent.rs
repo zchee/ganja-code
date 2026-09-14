@@ -2339,6 +2339,9 @@ impl Child {
                     // prompt, and a subagent is offered no `send_message` to
                     // point one at anyway (`postbox: None`, below).
                     session_mentions: Vec::new(),
+                    // A brief is the parent model's words, not a slash line
+                    // anybody typed (**D561**).
+                    command: None,
                 },
                 prompt: request.prompt.clone(),
                 permissions,

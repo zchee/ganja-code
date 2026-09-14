@@ -6,7 +6,8 @@ use ganja_protocol::{Message, MessageId, Part, PartBody, Role};
 use tempfile::TempDir;
 
 use super::{
-    Patch, Snapshots, dedupe, patches_from, pathspecs, redo_anchor, split_nul, undo_anchor,
+    Patch, Snapshots, dedupe, patches_from, pathspecs, prompt_at, redo_anchor, split_nul,
+    undo_anchor,
 };
 
 fn temporary() -> TempDir {
@@ -125,6 +126,29 @@ fn a_walk_forwards_steps_one_prompt_at_a_time_and_then_runs_out() {
         .expect("there is a prompt after the first");
     assert_eq!(next.as_str(), "msg_3");
     assert_eq!(redo_anchor(&history, &next), None);
+}
+
+/// **D561**. An undo hands the editor back what the person typed: the slash
+/// line for a command expansion, where the template it expanded to would be a
+/// page they never wrote and, sent again, a prompt that skips the command's
+/// own door; and the text itself for a prompt they typed.
+#[test]
+fn an_undo_hands_back_the_line_a_command_was_typed_as_and_a_typed_prompt_as_itself() {
+    let expansion = Message {
+        command: Some("/team 1 --backend codex port the loader".to_owned()),
+        ..message("msg_1", Role::User, vec![Part::text("You are the lead.\nStage one.")])
+    };
+    let typed = message("msg_3", Role::User, vec![Part::text("what changed?")]);
+    let history = vec![expansion, typed];
+
+    assert_eq!(
+        prompt_at(&history, &MessageId::from("msg_1".to_owned())).as_deref(),
+        Some("/team 1 --backend codex port the loader")
+    );
+    assert_eq!(
+        prompt_at(&history, &MessageId::from("msg_3".to_owned())).as_deref(),
+        Some("what changed?")
+    );
 }
 
 #[test]

@@ -171,6 +171,7 @@ fn turn_with(
             skills: Vec::new(),
             peers: Vec::new(),
             session_mentions: Vec::new(),
+            command: None,
         },
         tools: Arc::new(Registry::new(vec![tool])),
         skill_roots: crate::tool::skill::Roots::none(),
@@ -429,6 +430,7 @@ fn resolving_a_mention_is_not_a_read() {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }];
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
@@ -454,6 +456,7 @@ fn message_mentioning(path: &str) -> Vec<Message> {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }]
 }
 
@@ -867,6 +870,7 @@ async fn a_message_with_text_and_peers_keeps_the_text_part_first() {
     let user = super::user_message(
         &turn,
         "what did w1 say".to_owned(),
+        None,
         &[crate::protocol::team::PeerPayload::new("w1", None, None, "done")],
         &[],
         &[],
@@ -961,6 +965,7 @@ fn child_of(spawn: &Spawn) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
                 skills: Vec::new(),
                 peers: Vec::new(),
                 session_mentions: Vec::new(),
+                command: None,
             },
             prompt: "do the thing".to_owned(),
             permissions: Permissions::default(),
@@ -1426,6 +1431,7 @@ async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
     let message = user_message(
         &turn,
         String::new(),
+        None,
         &[crate::protocol::team::PeerPayload::new(
             "w2",
             None,

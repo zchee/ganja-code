@@ -86,7 +86,7 @@ fn the_transcript_tab_matches_the_copy_renderer_for_the_same_part() {
             },
         },
     });
-    let messages = [(Role::Assistant, reply.parts.as_slice())];
+    let messages = [(Role::Assistant, reply.parts.as_slice(), None)];
     let session = session(Some("inspector fixture"));
     let (events, usages) = (VecDeque::new(), VecDeque::new());
     let feed = feed(Some(&session), &messages, &events, &usages);

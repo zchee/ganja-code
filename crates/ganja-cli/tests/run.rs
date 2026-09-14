@@ -429,6 +429,26 @@ fn the_team_builtin_reaches_a_headless_turn_as_its_expanded_template() {
     assert!(!prompt.contains("${"), "a placeholder survived the expansion: {prompt}");
 }
 
+/// **D561**, headless. The readable stream never drew a user message — it
+/// carries the answer, headed by the agent and model that gave it — so a
+/// command's expansion, which the model is sent whole (above), reaches the
+/// person running `ganja run --command team` as nothing at all: they typed
+/// the line on their own command line, and a page of template on stdout
+/// would be the transcript pane's fault in a second place.
+#[test]
+fn a_readable_command_run_prints_the_answer_and_none_of_the_template() {
+    let run = Run::playing(&one_word());
+
+    let output = run.ganja().args(["run", "--command", "team", TASK]).assert().success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+
+    assert!(stdout.contains(CLOSING), "the answer is printed: {stdout}");
+    assert!(
+        !stdout.contains("You are running a team pipeline."),
+        "the template's opening sentence reached stdout: {stdout}"
+    );
+}
+
 /// The other half, and the one the root `AGENTS.md` states: a `/team …`
 /// **message** is sent exactly as it was written.
 ///

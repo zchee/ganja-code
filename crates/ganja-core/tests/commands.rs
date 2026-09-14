@@ -38,6 +38,12 @@ use serde_json::json;
 ///
 /// [`config_home`]: ganja_core::config::config_home
 fn command_registry(config: &Config) -> command::Registry {
+    command_registry_at(config, Path::new("/repo"))
+}
+
+/// [`command_registry`] over a worktree the caller names, for the one test
+/// whose project tier has to hold a real `.ganja/commands` file.
+fn command_registry_at(config: &Config, worktree: &Path) -> command::Registry {
     static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
         let home =
             std::env::temp_dir().join(format!("ganja-no-global-commands-{}", std::process::id()));
@@ -49,7 +55,7 @@ fn command_registry(config: &Config) -> command::Registry {
     });
     LazyLock::force(&HOME);
 
-    command::Registry::build(config, Path::new("/repo"))
+    command::Registry::build(config, worktree)
 }
 
 /// What the user message of `request` said.
@@ -256,6 +262,110 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
         requests[1].system.is_none(),
         "so the next turn is not the reviewer: {:?}",
         requests[1].system
+    );
+}
+
+/// The user messages a run of events started, in the order they started.
+fn user_messages(seen: &[Event]) -> Vec<Message> {
+    seen.iter()
+        .filter_map(|event| match event {
+            Event::MessageStarted { message, .. } if message.role == Role::User => {
+                Some(message.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// **D561**. Every command expansion — a builtin and a project's own
+/// Markdown command alike — is minted as a user message whose text is the
+/// expansion, which is what the model is sent, and which carries the slash
+/// line as the person typed it for a frontend to draw instead. A prompt a
+/// person typed carries none: what they typed is already its text.
+#[tokio::test]
+async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carries_none() {
+    let worktree = ganja_testkit::temp_dir();
+    let commands = worktree.path().join(".ganja").join("commands");
+    std::fs::create_dir_all(&commands).expect("the project command tier is creatable");
+    std::fs::write(commands.join("review.md"), "review the diff\nfocusing on $ARGUMENTS\n")
+        .expect("the command file is writable");
+    let registry = command_registry_at(&Config::default(), worktree.path());
+    assert!(
+        registry.names().contains(&"review".to_owned()),
+        "the fixture's file command is on the roster: {:?}",
+        registry.names()
+    );
+
+    let (provider, requests) =
+        ScriptedProvider::new(vec![says("one"), says("two"), says("three"), says("four")]);
+    let engine = Engine::new(
+        provider,
+        "recorder-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    )
+    .with_commands(Arc::new(registry));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let mut minted = Vec::new();
+    for (name, args) in [
+        ("init", ""),
+        // The composer's surrounding whitespace is not part of the line.
+        ("init", "  focus on the test suite  "),
+        ("review", "the shell tool"),
+    ] {
+        engine
+            .send(Command::RunCommand { name: name.to_owned(), args: args.to_owned() })
+            .await
+            .expect("an idle engine runs the command");
+        minted.extend(user_messages(&drain_allowing(&engine, &mut events).await));
+    }
+    engine
+        .send(Command::SendPrompt {
+            text: "/review is only a word here".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    minted.extend(user_messages(&drain_allowing(&engine, &mut events).await));
+
+    let typed: Vec<Option<&str>> =
+        minted.iter().map(|message| message.command.as_deref()).collect();
+    assert_eq!(
+        typed,
+        vec![
+            Some("/init"),
+            Some("/init focus on the test suite"),
+            Some("/review the shell tool"),
+            None,
+        ],
+        "each expansion carries its line as typed, and the typed prompt none"
+    );
+
+    let text = |message: &Message| -> String {
+        message.parts.iter().filter_map(ganja_core::protocol::Part::as_text).collect()
+    };
+    assert!(
+        text(&minted[0]).starts_with("Create or update `AGENTS.md` for this repository."),
+        "the builtin's message text is its whole expansion: {}",
+        text(&minted[0])
+    );
+    assert_eq!(text(&minted[2]), "review the diff\nfocusing on the shell tool");
+    assert_eq!(text(&minted[3]), "/review is only a word here");
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    let sent = requests[2]
+        .messages
+        .iter()
+        .rfind(|message| message.role == Role::User)
+        .expect("the third request carries the file command's message");
+    assert_eq!(
+        text(sent),
+        "review the diff\nfocusing on the shell tool",
+        "and what the model is sent is the expansion, never the typed line"
     );
 }
 

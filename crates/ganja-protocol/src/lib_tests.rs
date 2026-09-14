@@ -50,6 +50,7 @@ fn pinned_message() -> Message {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }
 }
 
@@ -1689,6 +1690,7 @@ fn a_message_carrying_only_a_peers_words_has_content() {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     };
 
     assert!(message.has_content());
@@ -1770,4 +1772,47 @@ fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() 
     assert_eq!(guards.parts[0].as_text(), Some("the team is still working"));
     assert!(!Message::user("an ordinary prompt").request_only, "and nothing else sets it");
     assert!(!Message::assistant("a-model").request_only);
+}
+
+/// **D561**. A message expanded from a slash command carries the line as it
+/// was typed, written when set and read back whole; the expansion stays its
+/// text, because that is what the model, storage and a copy all read.
+///
+/// The unset half is the compatibility promise, and it is the one
+/// [`pinned_message`] already keeps: its bytes are pinned by
+/// `the_wire_format_is_stable` with no `command` key in them, so a
+/// transcript written before this field existed is byte-identical to one
+/// written now — asserted again here so a reader of this test sees it.
+#[test]
+fn a_command_expansion_carries_its_typed_line_and_every_other_message_carries_none() {
+    let typed = "/team 1 --backend codex port the loader";
+    let expanded = "You are the lead of a team.\nStage one: plan.\nStage two: build.";
+    let message = Message::from_command(typed, expanded);
+
+    assert_eq!(message.command.as_deref(), Some(typed));
+    assert_eq!(message.role, Role::User);
+    assert_eq!(message.parts.len(), 1, "one text part, as `Message::user` makes");
+    assert_eq!(
+        message.parts[0].as_text(),
+        Some(expanded),
+        "the expansion is the message's text, whole"
+    );
+
+    let written = serde_json::to_string(&message).expect("a message serializes");
+    assert!(
+        written.contains(r#""command":"/team 1 --backend codex port the loader""#),
+        "the typed line is written when set: {written}"
+    );
+    let decoded: Message = serde_json::from_str(&written).expect("and reads back");
+    assert_eq!(decoded, message, "the typed line survives a round trip");
+
+    let unset = serde_json::to_string(&pinned_message()).expect("a message serializes");
+    assert!(!unset.contains("command"), "an unset line writes no key at all: {unset}");
+    let without: serde_json::Value = serde_json::from_str(&unset).expect("json");
+    let read: Message = serde_json::from_value(without).expect("a document with no key reads");
+    assert_eq!(read.command, None, "and a document without the key reads as None");
+
+    assert_eq!(Message::user("a prompt").command, None, "no other constructor sets it");
+    assert_eq!(Message::assistant("a-model").command, None);
+    assert_eq!(Message::request_only_user("the team is still working").command, None);
 }

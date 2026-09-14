@@ -1011,6 +1011,26 @@ pub struct Message {
     /// written before this existed is byte-identical to one written now.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compaction_summary: bool,
+    /// The slash line this message was expanded from, as the person typed it
+    /// — `/team 1 --backend codex port the loader` — set only by a command
+    /// expansion; [`None`] for every prompt a person typed themselves
+    /// (**D561**).
+    ///
+    /// A command's template becomes the turn's user message whole, which is
+    /// what the model must read; but the person typed one line, and a
+    /// frontend that draws the expansion as their prompt claims they wrote a
+    /// page of instructions. This is what lets a frontend draw the line they
+    /// typed instead, while everything that *uses* the message — the request,
+    /// storage, compaction, a copy of the transcript, [`Part::as_text`] —
+    /// keeps the expansion, which stays in [`Message::parts`] exactly as
+    /// before.
+    ///
+    /// [`None`] for every message any constructor but
+    /// [`Message::from_command`] makes, and skipped when [`None`], so a
+    /// transcript written before this existed is byte-identical to one
+    /// written now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl Message {
@@ -1028,7 +1048,18 @@ impl Message {
             usage: None,
             request_only: false,
             compaction_summary: false,
+            command: None,
         }
+    }
+
+    /// The user message a command expansion becomes: `expanded` as its text,
+    /// which is what the model reads, and `typed` — the slash line as the
+    /// person typed it — as what a frontend draws in its place.
+    ///
+    /// See [`Message::command`] for why the two travel together.
+    #[must_use]
+    pub fn from_command(typed: impl Into<String>, expanded: impl Into<String>) -> Self {
+        Self { command: Some(typed.into()), ..Self::user(expanded) }
     }
 
     /// The same message, marked as living in the request alone.
@@ -1052,6 +1083,7 @@ impl Message {
             usage: None,
             request_only: false,
             compaction_summary: false,
+            command: None,
         }
     }
 

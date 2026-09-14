@@ -87,7 +87,15 @@ const REVERTED_FILE: &str = "\u{21b3} ";
 /// The id stands in for a message with no text at all — an attachment-only
 /// prompt — because a blank row is one a person cannot pick with any
 /// confidence, and the id is at least the thing the engine knows it by.
+///
+/// A command expansion is called by the line the person typed (**D561**),
+/// the line the transcript draws for it: a row naming the first line of a
+/// template is a row naming a prompt nobody on this screen can see.
 fn title(entry: &Entry) -> String {
+    if let Some(typed) = &entry.command {
+        return typed.clone();
+    }
+
     entry
         .parts
         .iter()
@@ -285,6 +293,10 @@ struct Entry {
     /// Only a resume can know this — a live message is equally unfinished
     /// while it streams, and there the absence means "still arriving".
     interrupted: bool,
+    /// The slash line a command expansion was typed as, drawn in place of
+    /// the expansion its first text part holds (**D561**); see
+    /// [`Message::command`](ganja_protocol::Message::command).
+    command: Option<String>,
     /// Why the turn behind this reply died, when it did: the provider's own
     /// words, painted under the reply where the person is looking rather than
     /// squeezed into the status bar's one line.
@@ -697,6 +709,7 @@ impl Chat {
             role: message.role,
             parts: message.parts,
             interrupted,
+            command: message.command,
             error: None,
             markdown: HashMap::new(),
             wrapped: None,
@@ -728,8 +741,16 @@ impl Chat {
     /// because every entry here arrived as an engine event. Reverted entries
     /// are left out for the same reason — they are not on the screen either,
     /// and they are not in what the next request will carry.
+    ///
+    /// A command expansion hands over its whole text, not the line the pane
+    /// folded it to (**D561**): the fold is what the pane draws, and what a
+    /// copy holds is the conversation the model was actually sent — with the
+    /// typed line beside it to label it.
     pub fn messages(&self) -> Vec<crate::transcript::Entry<'_>> {
-        self.shown().iter().map(|entry| (entry.role, entry.parts.as_slice())).collect()
+        self.shown()
+            .iter()
+            .map(|entry| (entry.role, entry.parts.as_slice(), entry.command.as_deref()))
+            .collect()
     }
 
     /// How many `task` calls on screen are still running — the delegated
@@ -1368,6 +1389,7 @@ impl Entry {
         // something a person said. A reply is **many**: each text block and
         // each call carries a bullet of its own, which is the whole of what
         // the grammar claims about who did what (**D487**).
+        let mut typed = self.command.as_deref();
         for part in &self.parts {
             match &part.body {
                 // A reply is markdown; a prompt is what the user typed. The
@@ -1399,9 +1421,24 @@ impl Entry {
                         lines.push(Line::from(spans));
                     }
                 }
+                // A command expansion (**D561**): the line the person typed
+                // stands where the prompt would, and the template it expanded
+                // to is folded to one dim row in the result grammar — a page
+                // of instructions under a `>` would claim they wrote it. Only
+                // the first text part is the expansion, which is why the line
+                // is taken rather than read; anything the engine appended
+                // after it (a settlement receipt) draws as it always did. The
+                // whole text stays on the entry, for the inspector and `/copy`.
                 PartBody::Text { text } => {
-                    let row = Row::new(&prompt_lead(lines.is_empty()), text.clone(), theme.accent);
-                    lines.extend(lay_out(&[row], columns));
+                    let lead = prompt_lead(lines.is_empty());
+                    let rows = match typed.take() {
+                        Some(typed) => vec![
+                            Row::new(&lead, typed.to_owned(), theme.accent),
+                            Row::new(RESULT, fold_hint(text), theme.dim),
+                        ],
+                        None => vec![Row::new(&lead, text.clone(), theme.accent)],
+                    };
+                    lines.extend(lay_out(&rows, columns));
                 }
                 PartBody::Tool { tool, state, .. } => {
                     lines.extend(lay_out(&tool_lines(tool, state, theme, blink), columns));
@@ -1939,6 +1976,18 @@ fn clamp_hint(hidden: usize) -> String {
     format!(
         "\u{2026} +{hidden} line{plural} (ctrl+t to expand)",
         plural = if hidden == 1 { "" } else { "s" },
+    )
+}
+
+/// The one row a command expansion is folded to under the line the person
+/// typed (**D561**): how long the template it expanded to runs, and where to
+/// read it — the Ctrl+T inspector, named in [`clamp_hint`]'s own words for
+/// that same reason.
+fn fold_hint(expansion: &str) -> String {
+    let lines = expansion.lines().count();
+    format!(
+        "expanded to {lines} line{plural} (ctrl+t to read it)",
+        plural = if lines == 1 { "" } else { "s" },
     )
 }
 

@@ -37,13 +37,15 @@ use jiff::Timestamp;
 /// conversation, and a fake-provider session never gets one at all.
 const UNTITLED: &str = "Untitled session";
 
-/// One message, as both formatters read it.
+/// One message, as both formatters read it: its role, the parts that
+/// arrived, and — for a command expansion only — the slash line it was typed
+/// as (**D561**, [`Message::command`](ganja_protocol::Message::command)).
 ///
-/// A pair rather than a [`Message`](ganja_protocol::Message) because the
+/// A tuple rather than a [`Message`](ganja_protocol::Message) because the
 /// transcript on screen is what gets copied, and the chat holds each entry as
-/// its role and the parts that arrived — which is exactly, and only, what
-/// these two functions need.
-pub type Entry<'a> = (Role, &'a [Part]);
+/// exactly these three things — which is exactly, and only, what these two
+/// functions need.
+pub type Entry<'a> = (Role, &'a [Part], Option<&'a str>);
 
 /// Why there was no message to copy.
 ///
@@ -73,11 +75,20 @@ pub fn format(session: &SessionInfo, messages: &[Entry<'_>]) -> String {
     transcript.push_str(&format!("**Updated:** {}\n\n", stamp(session.updated)));
     transcript.push_str("---\n\n");
 
-    for (role, parts) in messages {
+    for (role, parts, command) in messages {
         transcript.push_str(match role {
             Role::User => "## User\n\n",
             Role::Assistant => "## Assistant\n\n",
         });
+        // A command expansion (**D561**) is labelled with the line the person
+        // typed, and its whole text follows under a label of its own: the
+        // chat pane folds the expansion to one row, and this — the clipboard,
+        // and the Ctrl+T inspector's transcript tab, which replays it — is
+        // where it is read in full.
+        if let Some(typed) = command {
+            transcript.push_str(&format!("**Command:** {}\n\n", inline_text(typed)));
+            transcript.push_str("**Expanded to:**\n\n");
+        }
         for part in *parts {
             transcript.push_str(&formatted(part));
         }
@@ -100,8 +111,8 @@ pub fn last_reply(messages: &[Entry<'_>]) -> Result<String, Missing> {
     let parts = messages
         .iter()
         .rev()
-        .find(|(role, _)| *role == Role::Assistant)
-        .map(|(_, parts)| *parts)
+        .find(|(role, ..)| *role == Role::Assistant)
+        .map(|(_, parts, _)| *parts)
         .ok_or(Missing::Assistant)?;
 
     let texts: Vec<&str> = parts.iter().filter_map(Part::as_text).collect();

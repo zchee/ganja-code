@@ -482,6 +482,114 @@ fn snapshot_teammate_message() {
     );
 }
 
+/// A command expansion's template, long enough that drawing it whole would
+/// fill the pane the way `/team`'s did in the screenshot behind **D561**.
+const EXPANSION: &str = "You are the lead of a team of agents.\n\
+    Stage one: plan the work.\n\
+    Stage two: build it.\n\
+    Stage three: verify it.\n\
+    Stage four: fix what the verifier found.\n\
+    Stage five: report.\n\
+    Never skip a stage.\n\
+    The task is: port the loader";
+
+/// The slash line [`EXPANSION`] was typed as.
+const TYPED: &str = "/team 1 --backend codex port the loader";
+
+/// **D561**. A command expansion draws as the line the person typed under
+/// the prompt's own caret, then one dim row in the result grammar saying how
+/// long the template runs and where to read it — never the template itself,
+/// which is a page nobody on this screen typed.
+///
+/// The snapshot is symbols only, this crate's palette-independent shape, so
+/// the two styles that carry the meaning are asserted beside it.
+#[test]
+fn snapshot_command_expansion_folded() {
+    const AREA: Rect = Rect { x: 0, y: 0, width: 80, height: 6 };
+
+    let mut chat = Chat::default();
+    chat.start_message(Message::from_command(TYPED, EXPANSION));
+    let mut reply = Message::assistant("canned");
+    reply.parts.push(Part::text("On it."));
+    chat.start_message(reply);
+
+    let lines = rendered(&mut chat, AREA);
+    insta::with_settings!({snapshot_path => "../snapshots"}, {
+        insta::assert_snapshot!(lines.join("\n"));
+    });
+    assert!(
+        lines.iter().all(|line| !line.contains("Stage")),
+        "no line of the template reaches the pane: {lines:#?}"
+    );
+
+    let mut buffer = Buffer::empty(AREA);
+    chat.render(AREA, &mut buffer, &Theme::default());
+    let theme = Theme::default();
+    assert_eq!(buffer[(2, 0)].style().fg, theme.accent.fg, "the typed line is the prompt's accent");
+    // Column 4 is the first cell past the fold row's `  ⎿ ` lead.
+    assert_eq!(buffer[(4, 1)].style().fg, theme.dim.fg, "and the fold row recedes as chrome");
+}
+
+/// The fold counts in the unit it names, singular included, and a resumed
+/// transcript folds exactly as a streamed one does — both routes end in one
+/// `push`, and the typed line rides the stored message.
+#[test]
+fn a_one_line_expansion_folds_to_one_line_and_a_resumed_one_folds_the_same() {
+    let area = Rect::new(0, 0, 80, 3);
+    let mut live = Chat::default();
+    live.start_message(Message::from_command("/init", "Create or update AGENTS.md."));
+    let mut resumed = Chat::default();
+    resumed.restore_message(Message::from_command("/init", "Create or update AGENTS.md."));
+
+    let drawn = rendered(&mut live, area);
+    assert_eq!(
+        drawn[..2],
+        ["> /init".to_owned(), format!("{RESULT}expanded to 1 line (ctrl+t to read it)")],
+    );
+    assert_eq!(rendered(&mut resumed, area), drawn, "a resume draws what a live turn drew");
+}
+
+/// Only the first text part is the expansion: a part the engine appended
+/// after it — a settlement receipt rides a user message as text — draws as
+/// it always did, hanging under the caret.
+#[test]
+fn text_appended_after_an_expansion_is_drawn_rather_than_folded() {
+    let mut chat = Chat::default();
+    let mut message = Message::from_command(TYPED, EXPANSION);
+    message.parts.push(Part::text("a held message to w1 was released"));
+    chat.start_message(message);
+
+    let lines = rendered(&mut chat, Rect::new(0, 0, 80, 4));
+    assert_eq!(
+        lines[..3],
+        [
+            format!("> {TYPED}"),
+            format!("{RESULT}expanded to 8 lines (ctrl+t to read it)"),
+            "  a held message to w1 was released".to_owned(),
+        ],
+    );
+}
+
+/// What a copy and the inspector read keeps the whole expansion, labelled
+/// with the line it was typed as; and the rewind picker names the entry by
+/// that line, the one the pane draws for it.
+#[test]
+fn a_copy_keeps_the_whole_expansion_and_a_checkpoint_is_named_by_the_typed_line() {
+    let mut chat = Chat::default();
+    chat.start_message(Message::from_command(TYPED, EXPANSION));
+    chat.start_message(Message::user("and then?"));
+
+    let messages = chat.messages();
+    let (_, parts, command) = messages[0];
+    assert_eq!(command, Some(TYPED));
+    assert_eq!(parts[0].as_text(), Some(EXPANSION), "the entry holds the template whole");
+    assert_eq!(messages[1].2, None, "a typed prompt carries no line besides its own text");
+
+    let titles: Vec<String> =
+        chat.checkpoints().into_iter().map(|checkpoint| checkpoint.title).collect();
+    assert_eq!(titles, ["and then?".to_owned(), TYPED.to_owned()], "newest first");
+}
+
 #[test]
 fn events_for_a_message_the_transcript_never_saw_are_ignored() {
     let mut chat = Chat::default();

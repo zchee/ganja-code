@@ -58,6 +58,7 @@ fn assistant() -> Message {
         usage: None,
         request_only: false,
         compaction_summary: false,
+        command: None,
     }
 }
 

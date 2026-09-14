@@ -3978,7 +3978,9 @@ impl Engine {
             Command::SendPrompt { text, mentions, skills, peers, session_mentions } => {
                 self.start_turn(
                     text,
-                    TurnKind::Prompt { mentions, skills, peers, session_mentions },
+                    // What the person typed is what they sent, so there is
+                    // no other line to draw in its place (**D561**).
+                    TurnKind::Prompt { mentions, skills, peers, session_mentions, command: None },
                     None,
                     // A typed prompt carries no `/team` spec: only the builtin
                     // template's own expansion resolves one, and a person who
@@ -4191,6 +4193,13 @@ impl Engine {
                 // its own — those are a person's prompt, not a template's
                 // expansion — so an expanded command names none.
                 session_mentions: Vec::new(),
+                // **D561**: the line as the person typed it, so a frontend
+                // draws that instead of a page of template it never wrote.
+                // Rebuilt from the command's own two halves rather than
+                // carried from the composer, which keeps it one answer for
+                // every door a `RunCommand` arrives through — the TUI, `ganja
+                // run --command`, and `serve`'s command route alike.
+                command: Some(typed_line(name, args)),
             },
             overrides,
             // **F5, Dv-2.** The roster rides the turn only when the model was
@@ -6189,6 +6198,19 @@ fn stale_notice(stale: &[PathBuf], root: &Path) -> Option<String> {
     }
 
     Some(notice)
+}
+
+/// The slash line a [`Command::RunCommand`] was typed as — `/name args`, or
+/// the bare `/name` when nothing followed it — which a command expansion's
+/// user message carries as [`Message::command`] (**D561**).
+///
+/// Surrounding whitespace is the composer's, not the person's, so it is cut;
+/// what sits between the words of `args` is theirs, and stays.
+fn typed_line(name: &str, args: &str) -> String {
+    match args.trim() {
+        "" => format!("/{name}"),
+        args => format!("/{name} {args}"),
+    }
 }
 
 /// A brand-new session record, already on disk by the time it is adopted,
