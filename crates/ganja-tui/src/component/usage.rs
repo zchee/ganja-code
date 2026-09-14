@@ -199,7 +199,7 @@ pub struct Data {
     ///
     /// **This is where the served model always is.** The status bar draws it
     /// only for a `tui.statusline` roster that names `model`, so on a default
-    /// bar this panel is the one surface that has it (rev 8, A6-M1 (c)).
+    /// bar this panel is the one surface that has it.
     pub served_model: Option<ganja_core::provider::ServedModel>,
 }
 

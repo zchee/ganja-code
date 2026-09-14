@@ -1,11 +1,12 @@
 use serde_json::json;
 
-use super::{Block, ControlRequest, Inbound, Initialize, Request, UserFrame};
+use super::{Block, Inbound, Initialize, Request, UserFrame};
 
 /// Every inbound shape below is a frame the recording holds, copied from it
-/// and reduced to the keys this wire reads. The file itself is read by
-/// nothing — it is evidence a person judges — so what a test can pin is that
-/// each recorded shape decodes to the value the wire acts on.
+/// and reduced to the keys this wire reads. The decoder tests here read those
+/// copies and the derived replay, never the recording itself — it is evidence
+/// a person judges — so what a test can pin is that each recorded shape
+/// decodes to the value the wire acts on.
 fn decoded(value: serde_json::Value) -> Inbound {
     super::decode(&value.to_string()).expect("a frame the recording holds")
 }
@@ -235,10 +236,10 @@ fn a_system_subtype_this_build_does_not_know_is_unknown_and_the_two_it_does_are_
     }
 }
 
-/// The fixture's own `assistant` frames carry a reduced key set — the first
-/// W2 lane omitted `timestamp`, `request_id` and `tool_use_meta`, which the
-/// CLI does emit — so a decoder that insisted on the whole set would break on
-/// exactly the keys the fixture cannot under-test.
+/// The fixture's own `assistant` frames omit `timestamp`, `request_id` and
+/// `tool_use_meta`, which the CLI does emit — so a decoder that insisted on
+/// the whole set would break on exactly the keys the fixture cannot
+/// under-test.
 #[test]
 fn a_frame_carrying_fields_this_build_does_not_read_still_decodes() {
     let frame = decoded(json!({
@@ -360,11 +361,8 @@ fn a_replaced_prompt_rides_the_initialize_as_a_list() {
 
 #[test]
 fn a_user_frame_is_one_line_and_never_a_subagents() {
-    let line = super::user_line(&UserFrame {
-        content: "hello".to_owned(),
-        attachments: Vec::new(),
-        parent_tool_use_id: None,
-    });
+    let line =
+        super::user_line(&UserFrame { content: "hello".to_owned(), attachments: Vec::new() });
 
     assert!(line.ends_with('\n'), "the CLI reads a frame per line");
     assert_eq!(line.matches('\n').count(), 1);
@@ -389,7 +387,6 @@ fn a_user_frame_with_attachments_is_the_text_block_then_one_block_per_attachment
             super::Attachment { mime: "image/png".to_owned(), data: "iVBORw0K".to_owned() },
             super::Attachment { mime: "application/pdf".to_owned(), data: "JVBERi0x".to_owned() },
         ],
-        parent_tool_use_id: None,
     });
     assert_eq!(line.matches('\n').count(), 1, "still one frame, one line");
 
@@ -436,13 +433,12 @@ fn the_payload_requests_are_spelled_the_way_the_sdk_declares_them() {
 }
 
 #[test]
-fn the_two_control_requests_this_wire_makes_are_spelled_the_way_the_cli_reads_them() {
-    assert_eq!(ControlRequest::Interrupt.subtype(), "interrupt");
-    assert_eq!(ControlRequest::GetUsage.subtype(), "get_usage");
-
-    let line = super::control_request_line("req-9", ControlRequest::Interrupt);
+fn the_interrupt_is_spelled_the_way_the_cli_reads_it() {
+    let line = super::interrupt_line("req-9");
     let sent: serde_json::Value = serde_json::from_str(line.trim()).expect("a JSON line");
-    assert_eq!(sent["request"]["subtype"], "interrupt");
+
+    assert_eq!(sent["type"], "control_request");
+    assert_eq!(sent["request"], json!({"subtype": "interrupt"}));
     assert_eq!(sent["request_id"], "req-9");
 }
 
@@ -493,19 +489,24 @@ fn an_error_answer_decodes_with_its_reason_and_no_payload() {
 
 /// Run 1's inbound frames, derived from the recording under the same scrub.
 ///
-/// The recording itself (`claude-code-sdk-mcp-probe.txt`) is read by
-/// **nothing** — it is evidence a person judges, and a test that read it
-/// could be made green by editing it. This is the derived artefact a test may
-/// read: the same frames, as JSON, so a decoder change that broke one of them
-/// reddens here.
+/// The recording itself (`claude-code-sdk-mcp-probe.txt`) is evidence a person
+/// judges, and the decoder tests here do not read it. This is the derived
+/// artefact they read: the same frames, as JSON, so a decoder change that
+/// broke one of them reddens here. (`claude_code_tests.rs` does read the
+/// recording's verbatim `rate_limit_event` lines, which are frames rather
+/// than a person's notes about them.)
 const RUN_1: &str = include_str!("../../../tests/fixtures/claude-code-replay-run1.json");
 
-/// AC-3.3. Every frame, and none of them `Unknown` — an unknown one would be
-/// a frame the wire silently skipped on a run it was read from.
+/// [`RUN_1`], parsed.
+fn run_1() -> Vec<serde_json::Value> {
+    serde_json::from_str(RUN_1).expect("the replay fixture is a JSON array")
+}
+
+/// Every frame, and none of them `Unknown` — an unknown one would be a frame
+/// the wire silently skipped on a run it was read from.
 #[test]
 fn every_inbound_frame_of_run_one_decodes_to_something_this_build_knows() {
-    let frames: Vec<serde_json::Value> =
-        serde_json::from_str(RUN_1).expect("the replay fixture is a JSON array");
+    let frames = run_1();
 
     assert!(frames.len() >= 20, "run 1 is the deepest turn the recording holds: {}", frames.len());
 
@@ -522,9 +523,7 @@ fn every_inbound_frame_of_run_one_decodes_to_something_this_build_knows() {
 /// recognising one is named rather than merely counted.
 #[test]
 fn the_replay_fixture_carries_every_kind_the_wire_acts_on() {
-    let frames: Vec<serde_json::Value> =
-        serde_json::from_str(RUN_1).expect("the replay fixture is a JSON array");
-    let read: Vec<Inbound> = frames.iter().map(super::read).collect();
+    let read: Vec<Inbound> = run_1().iter().map(super::read).collect();
 
     let has = |what: fn(&Inbound) -> bool| read.iter().any(what);
 
@@ -543,10 +542,8 @@ fn the_replay_fixture_carries_every_kind_the_wire_acts_on() {
 /// first in `uuid` alone, so nothing may treat one as first.
 #[test]
 fn the_run_re_emits_system_init_at_the_head_of_every_turn() {
-    let frames: Vec<serde_json::Value> =
-        serde_json::from_str(RUN_1).expect("the replay fixture is a JSON array");
     let inits: Vec<Inbound> =
-        frames.iter().map(super::read).filter(|frame| matches!(frame, Inbound::Init(_))).collect();
+        run_1().iter().map(super::read).filter(|frame| matches!(frame, Inbound::Init(_))).collect();
 
     assert!(inits.len() >= 2, "run 1 took three turns: {}", inits.len());
     assert_eq!(inits[0], inits[1], "the wire reads the same three fields from each");

@@ -12,8 +12,8 @@ fn an_argv_without_verbose_is_refused_with_the_clis_own_sentence() {
     assert!(NEEDS_VERBOSE.contains("requires --verbose"));
 }
 
-/// Posture C, enforced by the double as well as by the builders — two
-/// independent statements rather than one restated.
+/// The held process's never-resume rule, enforced by the double as well as by
+/// the builders — two independent statements rather than one restated.
 #[test]
 fn resume_is_refused_the_way_the_cli_refuses_an_option_it_does_not_have() {
     assert_eq!(refuse(&argv(&["--verbose", "--resume", "<sid>"])), Some(1));

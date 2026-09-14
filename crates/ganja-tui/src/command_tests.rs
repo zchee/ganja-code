@@ -783,12 +783,12 @@ fn a_deadline_clock_time_already_behind_is_refused() {
 #[test]
 fn a_deadline_line_this_grammar_has_not_got_is_refused_with_the_usage_sentence() {
     let now = six_in_the_morning();
-    // Four classes, in order: a unit this grammar has not got (`5x`); a sign,
+    // Five classes, in order: a unit this grammar has not got (`5x`); a sign,
     // which no span carries (`-1m`); a span that parses and is no budget at
     // all (`0s`, `0m0s`); a clock time out of range or misshapen (`25:00`,
-    // `10:60`, `10:0`); and text that is neither (`soon`, `x`). The middle two
-    // classes are the ones worth having here — they are the inputs that *look*
-    // like they should work.
+    // `10:60`, `10:0`); and text that is neither (`soon`, `x`). The third and
+    // fourth classes are the ones worth having here — they are the inputs that
+    // *look* like they should work.
     for typed in ["5x", "-1m", "0s", "0m0s", "25:00", "10:60", "10:0", "soon", "x"] {
         let Some(Deadline::Refused(refusal)) = super::deadline(&format!("/deadline {typed}"), now)
         else {
@@ -798,6 +798,20 @@ fn a_deadline_line_this_grammar_has_not_got_is_refused_with_the_usage_sentence()
             refusal.ends_with(super::DEADLINE_GRAMMAR),
             "{typed:?}: {refusal:?} ends with the grammar that would have worked"
         );
+    }
+}
+
+/// **D557.** A line with a colon is read as a clock time, and one whose halves
+/// are not one-or-two digits and exactly two is refused as a shape the grammar
+/// has not got — including `+1`, which Rust's integer parse would take as one.
+#[test]
+fn a_misshapen_clock_time_is_refused_as_not_understood() {
+    let now = six_in_the_morning();
+    for typed in ["10:0", "ab:cd", "+1:00", "123:00", "10:000"] {
+        let Err(reason) = super::resolve_deadline(typed, now) else {
+            panic!("{typed:?} is not a clock time this grammar takes");
+        };
+        assert_eq!(reason, format!("`/deadline` did not understand {typed:?}"), "{typed:?}");
     }
 }
 

@@ -242,7 +242,6 @@ fn the_needle_is_the_launch_lines_own_opening_after_the_head() {
         .expect("ascii");
     let needle = launch_needle(OsStr::new("/opt/my tools/codex")).expect("no NUL");
     assert_eq!(needle, "exec '/opt/my tools/codex'");
-    assert!(!needle.contains("printf"), "{needle}");
     assert!(line.starts_with(LAUNCH_HEAD), "{line}");
     assert!(line[LAUNCH_HEAD.len()..].starts_with(&needle), "{line}");
 }

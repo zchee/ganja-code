@@ -1858,12 +1858,10 @@ fn store_key(provider: &NamedProvider, key: Option<String>) -> Result<()> {
 
 /// Says what a login is about to overwrite, while it still exists.
 ///
-/// **D555** took the sharpest case away rather than this warning: a ChatGPT
-/// login and an OpenAI API key are two ids now, so neither can silently replace
-/// the other and what is left to report is a credential replacing one of its own
-/// kind. Worth reporting still — a second login against the same provider
-/// discards the first — and core cannot report it: it is handed a credential and
-/// a provider, and has no way to know a person is watching. This is the only
+/// A second credential under one provider id replaces the first, whichever
+/// kind either one is — a key over a key, or a key over an OAuth login where a
+/// provider offers both. Core cannot say so: it is handed a credential and a
+/// provider, and has no way to know a person is watching. This is the only
 /// place that does.
 ///
 /// Nothing is refused. A replacement is what `login` is for, and the point is

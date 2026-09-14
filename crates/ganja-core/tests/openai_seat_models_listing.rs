@@ -21,9 +21,9 @@
 //! disabled and the cache home redirected, and the six still come back in
 //! their order.
 
-use std::{env, fs};
+use std::env;
 
-use ganja_core::provider;
+use ganja_core::{catalog, provider};
 
 /// The six, in the order the seam must offer them. Spelled out rather than
 /// imported from the constant: a test that read the same array it is checking
@@ -59,7 +59,7 @@ async fn the_seat_lists_the_pinned_six_and_no_stored_credential_moves_either_id(
     // A ChatGPT login written before the split, sitting under `openai`. The
     // one arrangement that could still produce a fallback read, and neither
     // answer moves: `chatgpt` did not need it, and `openai` must not find it.
-    write_pre_split_chatgpt_login(store.path());
+    ganja_testkit::plant_pre_split_chatgpt_login(store.path());
     assert_offering().await;
 
     // And a platform key beside it, which is what used to decide the whole
@@ -91,44 +91,12 @@ async fn assert_offering() {
         listed.notice
     );
     for model in &listed.models {
-        assert!(
-            !model.name.is_empty(),
-            "a row the catalog cannot name is labelled by its id: {model:?}"
+        assert_eq!(
+            model.name,
+            catalog::model_for("chatgpt", &model.id)
+                .map_or_else(|| model.id.clone(), |info| info.name.clone()),
+            "named by the seat's own catalog rows, and a row the catalog cannot name is \
+             labelled by its id: {model:?}"
         );
-    }
-}
-
-/// A ChatGPT credential filed under `openai`, the way `ganja auth login` wrote
-/// one before **D555** moved the seat to its own key.
-///
-/// The tokens are inert strings: nothing on this path presents them, because
-/// nothing on this path makes a request — and nothing on this path reads them
-/// either, which is the thing being pinned.
-fn write_pre_split_chatgpt_login(data_home: &std::path::Path) {
-    let directory = data_home.join("ganja");
-    fs::create_dir_all(&directory).expect("the store directory is creatable");
-    let path = directory.join("auth.json");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "openai": {
-                "type": "oauth",
-                "refresh": "rt-seat-fixture",
-                "access": "at-seat-fixture",
-                "expires": 4_102_444_800_000_u64,
-            }
-        }))
-        .expect("the fixture serializes"),
-    )
-    .expect("the fixture writes");
-
-    // The store refuses a credential file other users can read, which is a
-    // refusal this fixture would otherwise trip over.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("the fixture is made private");
     }
 }

@@ -19,9 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_provider::provider::claude_code::argv::{
-    Argv, ChildEnv, NEVER_ON_CONVERSATION, Spawn, forbidden,
-};
+use ganja_provider::provider::claude_code::argv::{self, ChildEnv, Spawn};
 use ganja_provider::provider::claude_code::process::{Real, Spawner as _};
 use ganja_provider::provider::claude_code::{ClaudeCodeProvider, DEFAULT_MODEL, binding};
 use ganja_provider::provider::{ChatRequest, Provider as _, ProviderEvent};
@@ -80,7 +78,7 @@ fn main() {
     println!("test result: ok. 1 passed; 0 failed; 0 ignored");
 }
 
-/// (a) through (h), in order, each named in what it prints.
+/// (b) through (j′), in order, each named in what it prints.
 async fn checks() {
     let home = tempfile::tempdir().expect("a temporary data home");
     let script = home.path().join("script.json");
@@ -116,7 +114,6 @@ async fn checks() {
     }
 
     for (what, outcome) in [
-        ("(a) the argv is what the wire says it is", check_argv().await),
         ("(b) a spawn without --verbose is refused", check_verbose(&side).await),
         (
             "(c) the credential is absent under a parent that set it",
@@ -223,30 +220,6 @@ fn ensure(held: bool, said: impl Into<String>) -> Result<(), String> {
     if held { Ok(()) } else { Err(said.into()) }
 }
 
-// -------------------------------------------------------------------- (a)
-
-async fn check_argv() -> Result<(), String> {
-    let argv = Argv::conversation(&Spawn {
-        session_id: "01998a00-0000-7000-8000-00000000000a".to_owned(),
-        model: DEFAULT_MODEL.to_owned(),
-        effort: None,
-    })
-    .map_err(|error| error.to_string())?;
-    let spelled: Vec<String> =
-        argv.iter().map(|token| token.to_string_lossy().into_owned()).collect();
-
-    ensure(spelled.contains(&"--verbose".to_owned()), "no --verbose")?;
-    let at = spelled
-        .iter()
-        .position(|token| token == "--permission-mode")
-        .ok_or("no --permission-mode")?;
-    ensure(spelled.get(at + 1).map(String::as_str) == Some("manual"), "the mode is not manual")?;
-    ensure(
-        forbidden(&argv, NEVER_ON_CONVERSATION).is_none(),
-        format!("a forbidden flag: {:?}", forbidden(&argv, NEVER_ON_CONVERSATION)),
-    )
-}
-
 // -------------------------------------------------------------------- (b)
 
 /// The spawn-without-`--verbose` test **reddens**: the fake refuses the argv
@@ -255,7 +228,7 @@ async fn check_argv() -> Result<(), String> {
 async fn check_verbose(side: &Path) -> Result<(), String> {
     let before = records(side).len();
     let cwd = std::env::temp_dir();
-    let argv: Vec<OsString> = Argv::conversation(&Spawn {
+    let argv: Vec<OsString> = argv::conversation(&Spawn {
         session_id: "01998a00-0000-7000-8000-00000000000b".to_owned(),
         model: DEFAULT_MODEL.to_owned(),
         effort: None,
@@ -287,7 +260,8 @@ async fn check_env(home: &Path, side: &Path) -> Result<(), String> {
     let record = after.last().expect("a record");
 
     // **Presence only.** The value is never read, by the child or by this
-    // test — which is the whole shape of pre-mortem 5's catch.
+    // test — which is the whole shape of the catch: a credential that
+    // outranks the CLI's login bills a platform key in silence.
     ensure(
         record.env_present.get("ANTHROPIC_API_KEY") == Some(&false),
         format!("the credential reached the child: {:?}", record.env_present),
@@ -333,7 +307,7 @@ async fn check_eof(home: &Path, side: &Path) -> Result<(), String> {
 /// Driven through the **public door** rather than through `std::path`: an
 /// assertion that `"relative/path/claude"` is not absolute is true whatever
 /// this wire does, so it would have gone on passing had the refusal been
-/// deleted (verify §(h) 1). What the guard is worth is that `from_env`
+/// deleted. What the guard is worth is that `from_env`
 /// refuses, and says which variable and why — so that is what is asserted,
 /// under the same `EnvGuard` (i) and (i′) already rely on.
 async fn check_relative() -> Result<(), String> {
@@ -366,7 +340,7 @@ async fn check_relative() -> Result<(), String> {
 /// by a signal.
 async fn check_drop(side: &Path) -> Result<(), String> {
     let before = records(side).len();
-    let argv = Argv::conversation(&Spawn {
+    let argv = argv::conversation(&Spawn {
         session_id: "01998a00-0000-7000-8000-00000000000f".to_owned(),
         model: DEFAULT_MODEL.to_owned(),
         effort: None,

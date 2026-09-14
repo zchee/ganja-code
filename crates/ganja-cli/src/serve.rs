@@ -112,10 +112,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     assembled.servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;
-    // And whatever the wire is holding on this machine (**D556**, Dv-14): a
-    // no-op for every provider but `claude-code`, which may be holding
-    // authenticated node runtimes that would otherwise outlive this process.
-    engine.shutdown_provider().await;
+    engine.shutdown_provider().await; // D556
 
     Ok(())
 }

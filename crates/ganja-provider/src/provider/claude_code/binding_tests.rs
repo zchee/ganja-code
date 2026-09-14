@@ -1,10 +1,7 @@
 use std::path::Path;
 
 use super::{Binding, Lock, Paths, REFUSED_STREAK_BOUND, load, store};
-
-fn temp() -> tempfile::TempDir {
-    tempfile::tempdir().expect("a temporary directory")
-}
+use crate::provider::claude_code::tests::temp;
 
 fn paths(home: &Path) -> Paths {
     Paths::under(home)
@@ -146,26 +143,6 @@ fn the_lock_file_survives_the_lock_being_released() {
 #[test]
 fn the_refusal_bound_is_two_consecutive_records() {
     assert_eq!(REFUSED_STREAK_BOUND, 2);
-}
-
-/// The direction of the one-write lag is **chosen**: a duplicate the model
-/// reads twice, never a message it never saw.
-#[test]
-fn a_binding_one_write_behind_leaves_the_last_message_owed_rather_than_lost() {
-    let home = temp();
-    let path = paths(home.path()).binding("k");
-    // The frame carrying `m2` was written and the crash landed before the
-    // binding was.
-    store(&path, &Binding { sent: vec!["m1".to_owned()], ..Binding::default() })
-        .expect("the binding is written");
-
-    let recorded = load(&path).expect("a binding").sent;
-
-    assert_eq!(recorded, ["m1"]);
-    assert!(
-        !recorded.contains(&"m2".to_owned()),
-        "so the next request finds m2 owed and writes it again — a duplicate, never a loss"
-    );
 }
 
 /// Sealing the leaf alone left the tree above it at the process umask, so

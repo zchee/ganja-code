@@ -51,13 +51,8 @@
 //! above: not a transport upstream keys on, but a *command line* — the wire
 //! spawns the vendor's own CLI and hands it `--effort <name>`, so what an
 //! effort has to produce is a name rather than a body fragment. It is also the
-//! one lane whose provider the catalog does not carry, and that is what
-//! `standalone` exists for: every other consumer arrives through
-//! a row's `variants`, which a
-//! provider with no rows has none of, so a roster that belongs to the **wire**
-//! rather than to any one model needs a door of its own. The day a row arrives
-//! for this provider, the ordinary path produces the same maps and that door
-//! stops being consulted.
+//! one lane whose provider the catalog does not carry, which is what
+//! [`standalone`](crate::effort::standalone) is for.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells
@@ -121,9 +116,8 @@ fn wire(provider_id: &str) -> Option<Wire> {
         "openrouter" => Some(Wire::OpenRouter),
         "grok" => Some(Wire::Grok),
         "github-copilot" => Some(Wire::Copilot),
-        // Uncataloged, and named here anyway (**D556**): the five levels are
-        // the CLI's own flag's, so the map is knowable without a row at all.
-        // `standalone` is what reaches it while that stays true.
+        // The five levels are the CLI's own flag's, so the map is knowable
+        // without a row at all (**D556**).
         crate::provider::claude_code::ID => Some(Wire::ClaudeCode),
         _ => None,
     }
@@ -153,9 +147,8 @@ const OPENROUTER_EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
 /// The efforts the `claude` CLI's own `--effort` accepts, weakest to
 /// strongest (bundle-1 §1.3, L144196 — the CLI's own choice list).
 ///
-/// Authored here for [`OPENROUTER_EFFORTS`]'s reason and one of its own: this
-/// provider is uncataloged, so `models.dev` publishes nothing for it at all
-/// and there is no row for a declaration to override. What the levels are is
+/// Authored here for [`OPENROUTER_EFFORTS`]'s reason, and because this
+/// provider has no catalog row at all ([`standalone`]): what the levels are is
 /// the CLI's, read off its own flag rather than guessed.
 const CLAUDE_CODE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -204,14 +197,18 @@ pub(crate) fn roster(model: &ModelInfo) -> Roster {
 #[must_use]
 pub fn standalone(provider_id: &str) -> Option<Roster> {
     match wire(provider_id)? {
-        Wire::ClaudeCode => Some(
-            CLAUDE_CODE_EFFORTS
-                .iter()
-                .map(|effort| ((*effort).to_owned(), claude_code_effort(effort)))
-                .collect(),
-        ),
+        Wire::ClaudeCode => Some(claude_code_roster()),
         Wire::Messages | Wire::Responses | Wire::OpenRouter | Wire::Grok | Wire::Copilot => None,
     }
+}
+
+/// The `claude` CLI's five efforts, each as the map `--effort` is built from —
+/// the one roster [`standalone`] and `table` both hand out for that wire.
+fn claude_code_roster() -> Roster {
+    CLAUDE_CODE_EFFORTS
+        .iter()
+        .map(|effort| ((*effort).to_owned(), claude_code_effort(effort)))
+        .collect()
 }
 
 /// `declared` over `base`, upstream's `mergeDeep(variants, model.variants)`:
@@ -377,10 +374,7 @@ fn table(model: &ModelInfo) -> Roster {
         // at from the other end: there is exactly one model here to gate — the
         // CLI's `default`, which is whatever the seat routes to — and the flag
         // is the CLI's rather than any one model's.
-        Wire::ClaudeCode => CLAUDE_CODE_EFFORTS
-            .iter()
-            .map(|effort| ((*effort).to_owned(), claude_code_effort(effort)))
-            .collect(),
+        Wire::ClaudeCode => claude_code_roster(),
         Wire::Grok => {
             // The xAI doc branch (`transform.ts:787`): grok-3-mini takes
             // exactly two tiers; everything else that reasons takes the

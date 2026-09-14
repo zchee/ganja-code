@@ -114,7 +114,7 @@ pub const ID: &str = openai::ID;
 /// given rather than by whichever credential a machine happens to hold. They
 /// bill against different pools, which is why a turn has to report which of
 /// them ran it — `Backend::provider_id`.
-pub const CHATGPT_ID: &str = "chatgpt";
+pub const CHATGPT_ID: &str = auth::openai::PROVIDER_ID;
 
 /// What an [`ID`] session with no key is refused with, in place of
 /// [`require_key`](super::require_key)'s one-door sentence.
@@ -319,10 +319,9 @@ const ALLOWED_MODELS: [&str; 5] =
 ///
 /// No upstream counterpart: `codex.ts` filters the vendor's catalog through
 /// `serves` and offers whatever survives, so the roster a seat browses drifts
-/// with `models.dev`. This is the owner's own pin instead — six ids, this
-/// order, decided once and answered from the binary (`gpt-6-astra` joined
-/// the five on 2026-09-07, first because it is the newest generation the
-/// seat offers).
+/// with `models.dev`. This is the owner's own pin instead — these ids, this
+/// order, decided once and answered from the binary (`gpt-6-astra` joined on
+/// 2026-09-07, first because it is the newest generation the seat offers).
 ///
 /// **Offered is not servable, and the split is the whole point.** `serves`
 /// stays the `codex.ts:281-292` port it always was, so a session that names
@@ -333,7 +332,7 @@ const ALLOWED_MODELS: [&str; 5] =
 /// because what a seat defaults to and what it offers to browse are two
 /// decisions.
 ///
-/// **The catalog cannot move this list.** Membership is these six lines;
+/// **The catalog cannot move this list.** Membership is these lines;
 /// `ganja models --refresh` re-reads sizing and pricing and never this. A
 /// catalog row is consulted for one thing only, a human-readable name, and its
 /// absence costs nothing — the id stands in.

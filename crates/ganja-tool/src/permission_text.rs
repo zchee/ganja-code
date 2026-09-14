@@ -17,7 +17,7 @@
 //! **D556** added the third sentence and
 //! [`is_refusal`](crate::permission_text::is_refusal). A `PreToolUse` hook
 //! that blocks a call routes the same `fail_call` a denied rule does, so the
-//! two must read alike on every wire — and until now they did not: cursor's
+//! two must read alike on every wire — and before D556 they did not: cursor's
 //! classifier knew the two permission sentences and reported a hook-refused
 //! call as one that ran and broke. The predicate here is the **one** place the
 //! refusal vocabulary is enumerated, so a fourth sentence is added here or
@@ -41,17 +41,10 @@ pub const DENIED_PREFIX: &str = "The user has specified a rule which prevents yo
 /// Everything a hook-refusal sentence says before the hook's own reason.
 ///
 /// D458's `PreToolUse` block, whose text lived at `ganja_core::session`'s
-/// `blocked_by_hook` until **D556** moved it here (the engine reads it from
-/// this constant a wave later, so the constant lands before its second
-/// reader). A prefix rather than a whole sentence for [`DENIED_PREFIX`]'s
-/// reason: the hook's own reason travels with it, because a model told only
-/// that something was refused retries it spelled differently.
-///
-/// It is a refusal and not a failure, which is the whole reason a wire needs
-/// to know it: root `AGENTS.md` says a hook block "routes the same
-/// `fail_call` a denied rule does", so a wire that classified this text as a
-/// tool that ran and broke would tell its server the opposite of what
-/// happened.
+/// `blocked_by_hook` until **D556** moved it here. A prefix rather than a
+/// whole sentence for [`DENIED_PREFIX`]'s reason: the hook's own reason
+/// travels with it, because a model told only that something was refused
+/// retries it spelled differently.
 pub const HOOK_REFUSED_PREFIX: &str = "A PreToolUse hook refused this tool call: ";
 
 /// Whether an `Error` tool part's text is a refusal rather than a failure.

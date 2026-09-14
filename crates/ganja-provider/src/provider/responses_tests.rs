@@ -11,7 +11,7 @@ use super::{
     SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves,
     summarized,
 };
-use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use crate::auth::{AuthError, OauthCredential, RefreshOauth};
 use crate::catalog;
 use crate::protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage};
 use crate::provider::{
@@ -165,12 +165,6 @@ fn the_subscription_wire_is_the_same_vendor_as_the_key_one() {
     for id in [ID, CHATGPT_ID] {
         assert!(PROVIDERS.contains(&id), "a provider nothing can select is a provider nobody has");
     }
-    assert_eq!(
-        CHATGPT_ID,
-        auth::openai::PROVIDER_ID,
-        "the seat's login is stored under the seat's own id, which is what a \
-             renewal then reads back"
-    );
 
     // **AC-0.2/AC-0.3.** Every one of the five arms, so that moving one of
     // this vendor's two cannot silently move a gateway's with it.

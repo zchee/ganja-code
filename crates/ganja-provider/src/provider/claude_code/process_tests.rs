@@ -6,12 +6,8 @@ use tokio_util::sync::CancellationToken;
 use super::Signal;
 use crate::provider::Provider as _;
 use crate::provider::claude_code::tests::{
-    FakeCli, called, drain, failure, request, said, says, turn, user, wired,
+    FakeCli, called, calls_a_tool, drain, failure, request, said, says, temp, turn, user, wired,
 };
-
-fn temp() -> tempfile::TempDir {
-    tempfile::tempdir().expect("a temporary directory")
-}
 
 /// **The arm table.** One row per request shape, naming the arm it takes.
 ///
@@ -77,9 +73,9 @@ async fn each_request_shape_takes_the_arm_the_table_names() {
     }
 }
 
-/// AC-3.12's discriminator: a keyed match with parked asks, a `Tool` part for
-/// each, **and a live process** writes zero `user` frames and sends no second
-/// `initialize` — the same CLI turn continues.
+/// The resolve's discriminator: a keyed match with parked asks, a `Tool` part
+/// for each, **and a live process** writes zero `user` frames and sends no
+/// second `initialize` — the same CLI turn continues.
 #[tokio::test]
 async fn a_resolve_writes_no_user_frame_and_continues_the_same_turn() {
     let home = temp();
@@ -125,19 +121,7 @@ async fn a_resolve_writes_no_user_frame_and_continues_the_same_turn() {
 #[tokio::test]
 async fn a_parked_ask_with_no_result_is_failed_naming_the_id_and_writes_nothing() {
     let home = temp();
-    let cli = FakeCli::new(Script {
-        turns: vec![Turn {
-            tool_calls: vec![Call {
-                id: "toolu_1".to_owned(),
-                name: "read".to_owned(),
-                input: serde_json::json!({}),
-                call_first: false,
-            }],
-            result: "done".to_owned(),
-            ..Turn::default()
-        }],
-        ..Script::default()
-    });
+    let cli = FakeCli::new(calls_a_tool());
     let provider = wired(&cli, home.path());
 
     turn(&provider, request(vec![user("m1", "read it")], 0)).await;
@@ -209,7 +193,9 @@ async fn closing_a_process_sends_eof_and_no_signal() {
 }
 
 /// The two signals are **bounds** on a child that ignored EOF, never the way
-/// out — so a fake that ignores it is what reaches them.
+/// out — so a fake that ignores it is what reaches them. Both, in order: the
+/// `SIGKILL` bound once had two reasons it could never fire while this test
+/// asserted only the first signal, so neither showed (CC-3).
 #[tokio::test(start_paused = true)]
 async fn a_process_that_ignores_eof_is_bounded_by_the_two_signals() {
     let home = temp();
@@ -243,26 +229,6 @@ async fn a_process_that_ignores_eof_is_bounded_by_the_two_signals() {
     );
 }
 
-/// The `SIGKILL` bound had two independent reasons it could never fire, and
-/// the test above asserted only the first signal, so neither showed (CC-3).
-/// One was the exit future holding the child's lock across `wait()`, which
-/// made the kill arm's `try_lock` fail for as long as the child lived; the
-/// other was this driver consuming a `FnOnce` sender on the first bound, so
-/// the second iteration found nothing to call. Both are gone, and this is the
-/// type-level half: a sender that may be called twice.
-#[test]
-fn the_signal_sender_may_be_called_for_both_bounds() {
-    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let recorded = std::sync::Arc::clone(&sent);
-    let kill: Box<dyn Fn(Signal) + Send> =
-        Box::new(move |signal| recorded.lock().expect("the signal list").push(signal));
-
-    kill(Signal::Term);
-    kill(Signal::Kill);
-
-    assert_eq!(*sent.lock().expect("the signal list"), [Signal::Term, Signal::Kill]);
-}
-
 /// `kill(0, sig)` signals **every process in ganja's own group** — on a
 /// tmux-pane teammate arrangement, whatever shares it — and that was the
 /// fallback for a pid that would not narrow (CC-7). A pid this code cannot
@@ -285,19 +251,7 @@ fn a_pid_that_will_not_narrow_is_signalled_not_at_all_rather_than_broadcast() {
 #[tokio::test]
 async fn a_cancel_answers_a_parked_ask_and_keeps_the_process() {
     let home = temp();
-    let cli = FakeCli::new(Script {
-        turns: vec![Turn {
-            tool_calls: vec![Call {
-                id: "toolu_1".to_owned(),
-                name: "read".to_owned(),
-                input: serde_json::json!({}),
-                call_first: false,
-            }],
-            result: "done".to_owned(),
-            ..Turn::default()
-        }],
-        ..Script::default()
-    });
+    let cli = FakeCli::new(calls_a_tool());
     let provider = wired(&cli, home.path());
 
     let cancel = CancellationToken::new();
@@ -340,14 +294,16 @@ async fn a_turn_that_produces_no_frame_at_all_is_failed_naming_the_silence() {
 // not here: `GANJA_CLAUDE_BIN` is process-wide, and this crate's suites run
 // concurrently, so the case that used to sit here could only assert that
 // `"relative/path/claude"` is not absolute — true whatever the wire does, and
-// so a pass that would have survived deleting the refusal (verify §(h) 1).
-// The spawn binary holds one test on a current-thread runtime, which is what
-// makes the real thing safe to drive there.
+// so a pass that would have survived deleting the refusal. The spawn binary
+// holds one test on a current-thread runtime, which is what makes the real
+// thing safe to drive there.
 
 /// An exit before `system/init` never spent a turn, so what it means is
-/// decided by what the CLI said on the way out.
+/// decided by what the CLI said on the way out — and the in-process fake has
+/// no stderr, so what it said is nothing, and the turn says so rather than
+/// hanging.
 #[tokio::test]
-async fn a_process_that_exits_before_it_says_anything_reports_what_it_said() {
+async fn a_process_that_exits_before_it_says_anything_fails_its_turn_saying_the_cli_said_nothing() {
     let home = temp();
     let cli = FakeCli::new(Script {
         turns: Vec::new(),
@@ -358,7 +314,6 @@ async fn a_process_that_exits_before_it_says_anything_reports_what_it_said() {
 
     let events = turn(&provider, request(vec![user("m1", "hello")], 0)).await;
 
-    // The in-process fake has no stderr, so the arm reports the exit itself;
-    // what a test can pin here is that the turn fails rather than hanging.
-    assert!(failure(&events).is_some(), "a process that never opened fails its turn");
+    let failure = failure(&events).expect("a process that never opened fails its turn");
+    assert!(failure.contains("before it said anything"), "{failure}");
 }

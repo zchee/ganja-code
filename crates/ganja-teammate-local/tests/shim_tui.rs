@@ -91,9 +91,11 @@ const DEFANGED: &str = "look[201~/quit\nharmless\ttail";
 /// `tui` is a composer: the marker, bracketed paste on, then its input copied
 /// verbatim to `@LOG@.received`. `silent` is the same composer that never
 /// shows its marker — a trust dialog's shape. `refuse` prints the vendor's
-/// refusal and exits 1. `marker-refuse` runs as `awk` — the one stub that
-/// must change the pane's foreground name, since D554 left readiness no
-/// other door — prints the warning and the marker, waits half the settle,
+/// refusal and exits 1. `marker-refuse` runs as `awk`, so the pane's
+/// foreground name changes as the `exec cat` modes' does (a script that keeps
+/// the shell's name opens no readiness door —
+/// [`a_cli_that_keeps_the_shells_name_waits_the_readiness_bound_and_is_pasted_unsubmitted`]
+/// says why) — prints the warning and the marker, waits half the settle,
 /// **and then** prints the refusal and exits 1, so the poll sees a live
 /// composer that is a corpse by the time its settle ends, with the warning on
 /// the top row tmux's dead notice scrolls off (D554's history read).
@@ -132,10 +134,9 @@ case "$MODE" in
     exit 1
     ;;
   marker-refuse)
-    # Through `exec awk`, not the script's own `printf`s: since D554 the one
-    # readiness door left is `#{{pane_current_command}}` changing (the launch
-    # row is wiped), and a `#!/bin/sh` script never changes it — so the poll
-    # can see this marker on a live pane only from under a non-shell name.
+    # Through `exec awk`, not the script's own `printf`s, so the pane's
+    # foreground name changes and the marker can count (the doc above says
+    # why a script that keeps the shell's name opens no door).
     # The half-settle sleep then puts the death inside the settle a sighting
     # is held for: the one window the marker-seen dead read exists for.
     exec awk -v warning='{warning}' -v marker='{marker}' -v refusal='{refusal}' \
@@ -325,11 +326,11 @@ fn ring(registry: &TeammateRegistry, name: &str) -> Vec<String> {
 /// the runner deliberately did not, in the former case only.
 ///
 /// Nothing about readiness is asserted here, on purpose. The stubs this
-/// serves (`quits`, `hup-immune`) keep the pane shell's name and are today
-/// pasted unsubmitted after the whole `READY_WAIT` — the +15 s each of their
-/// three tests pays — for the reason
+/// serves (`quits`, `hup-immune`) keep the pane shell's name, which today
+/// costs each of their three tests the whole `READY_WAIT` and leaves the text
+/// pasted unsubmitted —
 /// [`a_cli_that_keeps_the_shells_name_waits_the_readiness_bound_and_is_pasted_unsubmitted`]
-/// pins, **once, there**. The three tests calling this are about what
+/// pins that cost and says why. The three tests calling this are about what
 /// happens *after* the paste (an exit after readiness, `take_exited`'s
 /// fields, TERM-first shutdown), so when bead `hcty`'s witness opens the
 /// second door for these stubs the ring will say [`RING_DELIVERED`], this
@@ -538,9 +539,9 @@ async fn a_peer_message_carrying_a_paste_terminator_still_arrives_as_one_body_an
 /// second listing exists precisely for a death that lands between the capture
 /// that saw the marker and the confirmation that follows it. Since **D554**
 /// this stub places its death *there* on purpose: it runs as `awk` (a
-/// `#!/bin/sh` script keeps the shell's name and, with the launch row wiped,
-/// opens no door at all — the `quits` tests' recorded cost), prints its
-/// marker on a live pane, and exits halfway through the settle. So the
+/// `#!/bin/sh` script would open no readiness door —
+/// [`a_cli_that_keeps_the_shells_name_waits_the_readiness_bound_and_is_pasted_unsubmitted`]),
+/// prints its marker on a live pane, and exits halfway through the settle. So the
 /// refusal comes through the marker-seen read, and that read's `warning:`
 /// line — the stub's top row, which the dead notice scrolls into the history
 /// — is what pins `capture_with_history` at that site: read the visible
@@ -1114,8 +1115,8 @@ async fn a_composer_that_never_shows_its_marker_is_pasted_into_but_never_submitt
 /// is wiped. The row its marker used to count under is gone a moment after
 /// Enter, and `#{pane_current_command}` — the name of the pane's
 /// process-group **leader**, measured — is the shell's for the script's whole
-/// life. So the poll waits the whole [`READY_WAIT`] (the +15 s this test and
-/// the three `quits`/`hup-immune` tests each pay), the ring says
+/// life. So the poll waits the whole [`READY_WAIT`] (which this test and the
+/// three `quits`/`hup-immune` tests each pay), the ring says
 /// [`RING_NOT_READY`] and never [`RING_READY`], and the text is pasted for a
 /// person to submit — a proceed, never a failure. None of the three shipped
 /// CLIs is this shape as its vendor ships it; a person's own wrapper script
@@ -1226,36 +1227,21 @@ async fn ending_a_tui_pane_is_identity_checked_against_the_recorded_pair() {
     ours.end().await;
 }
 
-/// The pane's shell is the person's own (**D520**), and a prompt that draws
-/// the composer's own words is an ordinary one — `❯` is grok's marker and the
-/// glyph of every popular zsh prompt, the reporter's included (2026-08-25).
-/// A marker the **shell** drew must not pass for the composer: the paste that
-/// followed one landed in a CLI still drawing, which dropped the Enter and
-/// left the preamble sitting unsubmitted. So here the prompt *is* the marker,
-/// the stub takes [`LATE`] to draw its own, and the spawn waits for the
-/// stub's — proven by the clock, and by the bytes: the stub turns bracketed
-/// paste on only with its marker, so a paste that came on the prompt's would
-/// have reached it unframed.
+/// A composer drawn late on the wiped screen is waited for, and the paste
+/// goes in framed only once it has drawn (**D520**, **D554**).
 ///
-/// Since **D554** the prompt's marker is on screen only between the echo of
-/// the launch line and the wipe its head runs a moment after Enter, and the
-/// stub's own marker counts through the poll's second door — its `exec cat`
-/// changes the pane's foreground name. So what this test proves **live** is
-/// the wipe-then-late-composer path: a spawn that waits [`LATE`] for a
-/// marker drawn on the wiped screen and pastes framed only once it has. The
-/// prompt-marker hazard itself — a marker **on** the launch row passing for
-/// the composer — is no longer discriminated here: the prompt is on screen
-/// for the few milliseconds before the head runs, a poll sees it only by
-/// chance, and both witnesses below are the stub's own. Its deterministic
-/// pin is `shim_tui_tests.rs`'s
-/// `a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_counts`,
-/// which reddens on a row-inclusive door where this one would redden by
-/// luck. The second door is this stub's alone: the `quits` and `hup-immune`
-/// stubs never `exec`, keep the shell's name, and open neither —
-/// [`a_cli_that_keeps_the_shells_name_waits_the_readiness_bound_and_is_pasted_unsubmitted`]
-/// says why, and why no renaming would change it.
+/// The pane's shell is the person's own, and here its prompt *is* the
+/// composer's marker (`❯` is grok's and every popular zsh prompt's). The
+/// line's head wipes that prompt a moment after Enter; the stub takes
+/// [`LATE`] to draw its own marker, which counts through the poll's second
+/// door because its `exec cat` changes the pane's foreground name, and it
+/// turns bracketed paste on only with that marker — so the clock and the
+/// bytes both prove the spawn waited for the stub's. Whether a marker **on**
+/// the launch row passes for the composer, which this test could catch only
+/// by luck, is pinned deterministically by `shim_tui_tests.rs`'s
+/// `a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_counts`.
 #[tokio::test]
-async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_composer() {
+async fn a_composer_drawn_late_on_the_wiped_screen_is_waited_for_and_pasted_framed() {
     let home = ganja_testkit::temp_dir();
     let prompt = format!("{READY_MARKER} ");
     let server = PrivateServer::start(&["sleep", "3600"], &[], &[("PS1", prompt.as_str())]);
@@ -1276,13 +1262,11 @@ async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_co
         started.elapsed()
     );
 
-    // The premise, read off the screen rather than assumed — and since D554
-    // a premise about the wipe: the shell drew its marker-prompt on the
-    // launch line's own row, and that row was on screen only between the
-    // echo and the Enter, the line's head having wiped it along with the
-    // prompt a moment later. What the pane shows now is what the stub drew
-    // on the wiped screen — its own marker, on a row carrying no `exec ` —
-    // with no row of the shell's left for a poll to mistake.
+    // The premise, read off the screen rather than assumed: the line's head
+    // wiped the launch row and the shell's marker-prompt with it, so what the
+    // pane shows is what the stub drew on the wiped screen — its own marker,
+    // on a row carrying no `exec ` — with no row of the shell's left for a
+    // poll to mistake.
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is written");
     let pane_id = file.member("w1").expect("w1 joined the team").tmux_pane_id.clone();
     let screen = server.run(&["capture-pane", "-p", "-J", "-t", &pane_id]);

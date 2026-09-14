@@ -9,15 +9,16 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_testkit::fake_claude::{Record, Script, Turn};
+use ganja_testkit::fake_claude::{self, Call, Record, Script, Turn};
+// Under another name because the sibling suites under `claude_code/` import
+// it, and the gate below reads their sources for the spelling it shares with
+// `std::env`'s shared temporary directory.
+pub(crate) use ganja_testkit::temp_dir as temp;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    ClaudeCodeProvider, DEFAULT_MODEL, honest, owed, parse_version, remembered_ids, user_ids,
-};
+use super::{ClaudeCodeProvider, DEFAULT_MODEL, honest, owed, parse_version, remembered_ids};
 use crate::protocol::{FinishReason, Message, MessageId, Part, PartBody, PartId, ToolState};
 use crate::provider::claude_code::process::{ChildIo, Signal, Spawner};
 use crate::provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent};
@@ -87,30 +88,17 @@ impl Spawner for FakeCli {
         let spelled: Vec<String> =
             argv.iter().map(|token| token.to_string_lossy().into_owned()).collect();
 
-        // The double refuses what the real CLI refuses, so a builder that
-        // grew `--resume` back fails here as well as at `argv_tests.rs`.
-        if let Some(token) =
-            spelled.iter().find(|token| super::argv::NEVER_ANYWHERE.contains(&token.as_str()))
-        {
-            return Err(ProviderError::Transport(format!("error: unknown option '{token}'")));
+        // The double refuses what the real CLI refuses, by its own list rather
+        // than the wire's, so a builder that grew `--resume` back fails here as
+        // well as at `argv_tests.rs`.
+        if let Some(refused) = fake_claude::refusal(&spelled) {
+            return Err(ProviderError::Transport(refused));
         }
-        if !spelled.iter().any(|token| token == "--verbose") {
-            return Err(ProviderError::Transport(
-                ganja_testkit::fake_claude::NEEDS_VERBOSE.to_owned(),
-            ));
-        }
-
-        let session_id = spelled
-            .iter()
-            .position(|token| token == "--session-id")
-            .and_then(|at| spelled.get(at + 1))
-            .cloned()
-            .unwrap_or_default();
 
         let record = Arc::new(Mutex::new(Record {
             argv: spelled.clone(),
             cwd: env.cwd.display().to_string(),
-            session_id,
+            session_id: fake_claude::session_id(&spelled),
             ..Record::default()
         }));
 
@@ -130,8 +118,7 @@ impl Spawner for FakeCli {
             .filter(|spawn| spawn.cwd == env.cwd)
             .map(|spawn| spawn.record.lock().expect("the record").turns_played)
             .sum();
-        let mut script = self.script.clone();
-        script.turns = script.turns.split_off(played.min(script.turns.len()));
+        let script = self.script.resumed_after(played);
 
         self.spawns.lock().expect("the spawn list").push(Spawned {
             argv: spelled,
@@ -140,8 +127,7 @@ impl Spawner for FakeCli {
         });
 
         tokio::spawn(async move {
-            let code =
-                ganja_testkit::fake_claude::replay(cli_stdin, cli_stdout, &script, &record).await;
+            let code = fake_claude::replay(cli_stdin, cli_stdout, &script, &record).await;
             record.lock().expect("the record").exit = code;
             let _ = exited.send(code);
         });
@@ -181,7 +167,7 @@ pub(crate) fn wired(cli: &Arc<FakeCli>, home: &Path) -> ClaudeCodeProvider {
     )
 }
 
-/// A script whose every turn answers `pong`.
+/// A script whose turns answer `answers`, one each, in order.
 pub(crate) fn says(answers: &[&str]) -> Script {
     Script {
         turns: answers
@@ -192,6 +178,23 @@ pub(crate) fn says(answers: &[&str]) -> Script {
                 ..Turn::default()
             })
             .collect(),
+        ..Script::default()
+    }
+}
+
+/// A script whose one turn calls `read` and then waits.
+pub(crate) fn calls_a_tool() -> Script {
+    Script {
+        turns: vec![Turn {
+            tool_calls: vec![Call {
+                id: "toolu_1".to_owned(),
+                name: "read".to_owned(),
+                input: serde_json::json!({}),
+                call_first: false,
+            }],
+            result: "pong".to_owned(),
+            ..Turn::default()
+        }],
         ..Script::default()
     }
 }
@@ -273,15 +276,9 @@ pub(crate) async fn drain(
     // Longer than the silence watchdog, so a test driving *that* is not cut
     // off by this: what this bound is for is a turn that wedges, which is a
     // failure to report rather than a suite to hang.
-    drain_within(stream, super::held::SILENCE_BOUND * 4).await
-}
-
-/// Drains a turn's events under a bound of the caller's choosing.
-pub(crate) async fn drain_within(
-    stream: futures::stream::BoxStream<'static, ProviderEvent>,
-    bound: Duration,
-) -> Vec<ProviderEvent> {
-    tokio::time::timeout(bound, stream.collect()).await.expect("a turn ends within the bound")
+    tokio::time::timeout(super::held::SILENCE_BOUND * 4, stream.collect())
+        .await
+        .expect("a turn ends within the bound")
 }
 
 /// Runs one turn and returns what it produced.
@@ -313,10 +310,6 @@ pub(crate) fn failure(events: &[ProviderEvent]) -> Option<String> {
     })
 }
 
-fn temp() -> tempfile::TempDir {
-    tempfile::tempdir().expect("a temporary directory")
-}
-
 // ----------------------------------------------------------- the version
 
 #[test]
@@ -343,16 +336,6 @@ fn a_build_below_the_floor_sorts_below_it_and_one_above_does_not() {
 
 // ------------------------------------------- sent / honest / owed
 
-#[test]
-fn the_user_ids_of_a_request_are_read_over_the_whole_of_messages() {
-    // Before and after `turn_start` alike: which side a message is on is the
-    // engine's taxonomy, and this wire deliberately does not ask.
-    let request =
-        request(vec![user("m1", "first"), assistant("m2", "a reply"), user("m3", "second")], 2);
-
-    assert_eq!(user_ids(&request), ["m1", "m3"]);
-}
-
 /// **D556**, Dv-22. A request-only message is written like any other user
 /// message and remembered like none: [`owed`] spans it, [`remembered_ids`]
 /// does not, and so [`honest`] cannot mistake the next one's fresh id for an
@@ -366,8 +349,7 @@ fn the_user_ids_of_a_request_are_read_over_the_whole_of_messages() {
 fn a_request_only_message_is_owed_every_time_and_remembered_never() {
     let first = request(vec![user("m1", "prompt"), guards("g1", "keep going")], 0);
 
-    assert_eq!(user_ids(&first), ["m1", "g1"], "it is a user message like any other");
-    assert_eq!(remembered_ids(&first), ["m1"], "and conversation state it is not");
+    assert_eq!(remembered_ids(&first), ["m1"], "conversation state it is not");
     assert_eq!(
         owed(&["m1".to_owned()], &first).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         ["g1"],
@@ -389,7 +371,7 @@ fn a_request_only_message_is_owed_every_time_and_remembered_never() {
 }
 
 /// The other side of the same coin: a **real** rewind still reads as one, so
-/// AC-4.4's arm keeps its meaning.
+/// the rewind arm keeps its meaning.
 #[test]
 fn a_transcript_message_that_is_gone_is_still_a_rewind() {
     let rewound = request(vec![user("m1", "first")], 0);
@@ -481,8 +463,8 @@ async fn a_title_request_spawns_a_process_that_enters_no_table_and_writes_no_bin
         record.tools_list
     );
 
-    let root = home.path().join("ganja").join("claude-code");
-    let bindings: Vec<_> = std::fs::read_dir(&root)
+    let binding = super::binding::Paths::under(home.path()).binding("any");
+    let bindings: Vec<_> = std::fs::read_dir(binding.parent().expect("a parent"))
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
@@ -664,22 +646,9 @@ async fn a_refused_turn_fails_naming_the_category_and_emits_no_text_at_all() {
     let failure = failure(&events).expect("a refused turn fails");
     assert!(failure.contains("reasoning_extraction"), "{failure}");
     assert!(failure.contains("duplicating model outputs"), "verbatim: {failure}");
-}
-
-/// `is_error` is the field, and `subtype` is never consulted: a `result` with
-/// `subtype: "success"` and `is_error: true` is a failure.
-#[tokio::test]
-async fn a_turn_whose_result_carries_is_error_is_failed_whatever_its_subtype_says() {
-    let home = temp();
-    let cli = FakeCli::new(Script {
-        turns: vec![Turn { refused: true, ..Turn::default() }],
-        ..Script::default()
-    });
-    let provider = wired(&cli, home.path());
-
-    let events = turn(&provider, request(vec![user("m1", "ping")], 0)).await;
-
-    assert!(failure(&events).is_some());
+    // The fake's refused `result` says `subtype: "success"` beside
+    // `is_error: true`, so this is also the turn that reads `is_error` and
+    // never `subtype`.
     assert!(
         !events.iter().any(|event| matches!(event, ProviderEvent::Finish(FinishReason::Completed))),
         "a failed turn does not also finish"
@@ -785,27 +754,14 @@ async fn a_conversation_completes_although_every_answer_it_sent_comes_back_echoe
     assert_eq!(
         cli.record(0).tools_list,
         ["read"],
-        "the dial happened, so its answers were echoed and dropped"
+        "the dial happened, so its answers were echoed and dropped — and the roster reached the \
+         CLI under the registry's own bare names, which the CLI prefixes"
     );
 
     provider.shutdown().await;
 }
 
 // ----------------------------------------------------------- the roster
-
-/// Declared **bare**: the CLI prefixes what this side declares.
-#[tokio::test]
-async fn the_roster_reaches_the_cli_under_the_registrys_own_names() {
-    let home = temp();
-    let cli = FakeCli::new(says(&["pong"]));
-    let provider = wired(&cli, home.path());
-
-    turn(&provider, request(vec![user("m1", "ping")], 0)).await;
-
-    assert_eq!(cli.record(0).tools_list, ["read"]);
-
-    provider.shutdown().await;
-}
 
 #[tokio::test]
 async fn the_records_own_prompt_is_the_one_the_request_carried() {
@@ -906,61 +862,9 @@ async fn two_served_spellings_on_one_key_produce_no_divergence() {
     provider.shutdown().await;
 }
 
-/// Every other builtin inherits `None` from the trait, which is the honest
-/// answer for a wire whose vendor serves what it was asked and that holds no
-/// process to evict — and inherits a `shutdown` that returns at once, which
-/// is the honest answer for a wire that holds nothing between turns.
-#[tokio::test]
-async fn every_other_wire_inherits_none_and_a_shutdown_that_returns() {
-    let fake = crate::provider::fake::FakeProvider::default();
-
-    assert_eq!(fake.served_model(), None);
-    assert_eq!(fake.last_eviction(), None);
-    // It returns rather than merely compiles: a default that awaited
-    // something would hang every frontend's exit path.
-    tokio::time::timeout(Duration::from_secs(1), fake.shutdown())
-        .await
-        .expect("the inherited shutdown returns at once");
-}
-
-/// The three defaults are pinned against the **trait**, not against one wire.
-///
-/// Enumerating the builtins would prove less and cost more: most of them
-/// cannot be constructed without a credential, and what matters is that a
-/// wire which overrides nothing gets these three answers. So this is the
-/// smallest `Provider` there is.
-#[tokio::test]
-async fn a_wire_that_overrides_nothing_gets_the_three_defaults() {
-    struct Inherits;
-
-    #[async_trait::async_trait]
-    impl crate::provider::Provider for Inherits {
-        fn id(&self) -> &str {
-            "inherits"
-        }
-
-        async fn stream(
-            &self,
-            _request: ChatRequest,
-            _cancel: CancellationToken,
-        ) -> Result<futures::stream::BoxStream<'static, ProviderEvent>, ProviderError> {
-            Ok(futures::stream::empty().boxed())
-        }
-    }
-
-    let wire = Inherits;
-
-    assert_eq!(wire.served_model(), None);
-    assert_eq!(wire.last_eviction(), None);
-    assert!(wire.rate_windows().is_empty());
-    assert!(wire.plan_windows().is_empty());
-    tokio::time::timeout(Duration::from_secs(1), wire.shutdown())
-        .await
-        .expect("a wire that holds nothing closes nothing");
-}
-
-/// And the one override in the workspace does the closing, reached through
-/// `dyn Provider` — which is how a frontend will call it.
+/// The one override of `shutdown` in the workspace does the closing, reached
+/// through `dyn Provider` — which is how a frontend will call it. The trait's
+/// own defaults are pinned in `provider_tests.rs`.
 #[tokio::test]
 async fn the_one_wire_that_holds_processes_closes_them_through_the_trait() {
     let home = temp();
@@ -1022,14 +926,9 @@ async fn a_tool_ask_is_surfaced_as_an_ordinary_call_and_the_step_ends() {
     provider.shutdown().await;
 }
 
-/// The execution-site invariant, stated where a grep will find it.
-///
-/// The two names are **assembled** rather than written, so that the gate's
-/// own `grep -rn` over `src/provider/claude_code*` finds nothing — including
-/// this file, which that glob also matches. A test that spelled them would
-/// make the gate it exists to serve report itself.
-#[test]
-fn this_crates_claude_code_modules_name_no_tool_runtime() {
+/// `claude_code.rs` and every source under `claude_code/`: the glob a
+/// `grep -rn` over the module reads.
+fn wire_sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/provider");
     let mut sources = vec![root.join("claude_code.rs")];
     sources.extend(
@@ -1040,7 +939,18 @@ fn this_crates_claude_code_modules_name_no_tool_runtime() {
             .filter(|path| path.extension().is_some_and(|kind| kind == "rs")),
     );
 
-    for source in sources {
+    sources
+}
+
+/// The execution-site invariant, stated where a grep will find it.
+///
+/// The two names are **assembled** rather than written, so that the gate's
+/// own `grep -rn` over `src/provider/claude_code*` finds nothing — including
+/// this file, which that glob also matches. A test that spelled them would
+/// make the gate it exists to serve report itself.
+#[test]
+fn this_crates_claude_code_modules_name_no_tool_runtime() {
+    for source in wire_sources() {
         let text = std::fs::read_to_string(&source).expect("a source file");
         for name in [concat!("Tool", "Ctx"), concat!("Registry", "::")] {
             assert!(
@@ -1061,18 +971,8 @@ fn this_crates_claude_code_modules_name_no_tool_runtime() {
 /// reads is the one a `grep -rn` over the module would.
 #[test]
 fn no_source_of_this_wire_hands_a_child_the_shared_temporary_directory() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/provider");
-    let mut sources = vec![root.join("claude_code.rs")];
-    sources.extend(
-        std::fs::read_dir(root.join("claude_code"))
-            .expect("the module directory")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs")),
-    );
-
     let name = concat!("temp", "_dir");
-    for source in sources {
+    for source in wire_sources() {
         let text = std::fs::read_to_string(&source).expect("a source file");
         assert!(
             !text.contains(name),
@@ -1084,23 +984,20 @@ fn no_source_of_this_wire_hands_a_child_the_shared_temporary_directory() {
 
 // ------------------------------------------- the plan windows (Dv-19)
 
-/// **D556**, Dv-19. Both recorded shapes convert to the **same** window, and
-/// what the wire answers is `plan_windows` — never `rate_windows`, which stays
+/// **D556**, Dv-19. The recorded shape converts to two plan windows, and what
+/// the wire answers is `plan_windows` — never `rate_windows`, which stays
 /// empty because this wire receives no rate-limit headers at all.
 ///
-/// The two shapes are the recording's own: `rate_limit_event` sends a fraction
-/// and a unix second (`claude-code-replay-run1.json:328-337`), `get_usage` an
-/// integer percent and an ISO-8601 string (`:712-721`). One reader, because a
-/// caller that had to know which it was holding would be a second place for
-/// the two to disagree.
+/// The shape is the recording's own: `rate_limit_event` sends a fraction and
+/// a unix second (`claude-code-replay-run1.json:328-337`).
 #[tokio::test]
-async fn both_recorded_rate_shapes_convert_to_the_same_plan_windows() {
-    let home = ganja_testkit::temp_dir();
+async fn the_recorded_rate_shape_converts_to_plan_windows_and_never_rate_windows() {
+    let home = temp();
     let cli = FakeCli::new(says(&["hi"]));
     let wire = wired(&cli, home.path());
 
-    // The event's own shape: fraction, unix second, and the window it is about
-    // named once beside the set.
+    // Fraction, unix second, and the window it is about named once beside
+    // the set.
     *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::json!({
         "status": "allowed",
         "resetsAt": 1_788_982_800_u64,
@@ -1112,25 +1009,14 @@ async fn both_recorded_rate_shapes_convert_to_the_same_plan_windows() {
     }));
     let from_event = wire.plan_windows();
 
-    // The control response's: integer percent, ISO-8601, and the map itself.
-    *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::json!({
-        "five_hour": {"utilization": 69, "resets_at": "2026-09-09T19:40:00.000Z"},
-        "seven_day": {"utilization": 45, "resets_at": "2026-09-10T02:00:00.000Z"},
-    }));
-    let from_usage = wire.plan_windows();
-
-    for (event, usage) in from_event.iter().zip(&from_usage) {
-        assert_eq!(event.name, usage.name);
-        assert!(
-            (event.used_percent - usage.used_percent).abs() < 1e-9,
-            "the same utilization either way: {event:?} vs {usage:?}"
-        );
-        assert_eq!(event.resets_at, usage.resets_at, "and the same instant: {event:?}");
-        assert_eq!(event.window_minutes, usage.window_minutes);
-    }
     assert_eq!(from_event.len(), 2, "the vendor's two windows: {from_event:?}");
     assert_eq!(from_event[0].name, "five_hour");
     assert!((from_event[0].used_percent - 69.0).abs() < 1e-9, "{from_event:?}");
+    assert_eq!(
+        from_event[0].resets_at,
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(1_788_982_800)),
+        "the reset is the unix second it was sent as"
+    );
     assert_eq!(from_event[0].window_minutes, Some(300));
     assert_eq!(from_event[1].name, "seven_day");
     assert_eq!(from_event[1].window_minutes, Some(10_080));
@@ -1147,12 +1033,33 @@ async fn both_recorded_rate_shapes_convert_to_the_same_plan_windows() {
     );
 }
 
-/// An unwarmed call answers `rate_limits: null`, and **no reading** is an
-/// empty list — never a window at zero, which would draw as a budget freshly
-/// full.
+/// Every utilization is a fraction, an integral one included: the CLI is a
+/// JavaScript program, and a JS serializer writes `1.0` as `1`, so an account
+/// at its whole budget reads 100 percent, never 1.
+#[test]
+fn an_integral_utilization_is_a_whole_budget_and_not_one_percent() {
+    let home = temp();
+    let cli = FakeCli::new(says(&["hi"]));
+    let wire = wired(&cli, home.path());
+
+    *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::json!({
+        "unifiedWindows": {
+            "five_hour": {"utilization": 1, "resetsAt": 1_788_982_800_u64},
+            "seven_day": {"utilization": 0, "resetsAt": 1_789_005_600_u64},
+        }
+    }));
+    let windows = wire.plan_windows();
+
+    assert!((windows[0].used_percent - 100.0).abs() < 1e-9, "a whole budget: {windows:?}");
+    assert!(windows[1].used_percent.abs() < 1e-9, "and none of it: {windows:?}");
+}
+
+/// A `null` reading is what an unwarmed account reports, and **no reading** is
+/// an empty list — never a window at zero, which would draw as a budget
+/// freshly full.
 #[tokio::test]
 async fn an_unwarmed_account_reports_no_windows_rather_than_empty_ones() {
-    let home = ganja_testkit::temp_dir();
+    let home = temp();
     let cli = FakeCli::new(says(&["hi"]));
     let wire = wired(&cli, home.path());
 
@@ -1200,7 +1107,7 @@ async fn every_recorded_rate_limit_event_reads_as_two_plan_windows_and_no_notice
          count on purpose"
     );
 
-    let home = ganja_testkit::temp_dir();
+    let home = temp();
     let cli = FakeCli::new(says(&["hi"]));
     let wire = wired(&cli, home.path());
 
@@ -1295,7 +1202,7 @@ fn attached(id: &str, text: &str, mime: &str, content: Option<&str>) -> Message 
 /// API.
 #[tokio::test]
 async fn the_wire_accepts_exactly_the_messages_api_attachment_types() {
-    let home = ganja_testkit::temp_dir();
+    let home = temp();
     let cli = FakeCli::new(says(&["hi"]));
     let wire = wired(&cli, home.path());
 
@@ -1353,7 +1260,7 @@ fn the_owed_set_carries_its_filled_admitted_attachments_in_order() {
 /// the turn still ran to its answer.
 #[tokio::test]
 async fn an_image_on_the_prompt_rides_the_frame_as_a_block_and_the_turn_runs() {
-    let home = ganja_testkit::temp_dir();
+    let home = temp();
     let cli = FakeCli::new(says(&["a cat"]));
     let wire = wired(&cli, home.path());
 
@@ -1377,8 +1284,8 @@ async fn an_image_on_the_prompt_rides_the_frame_as_a_block_and_the_turn_runs() {
 
 // ------------------------------------------- the compaction shape (Dv-21)
 
-/// **AC-4.5**, at the provider seam (**Dv-21**), as `q3ep` amends it. A
-/// compaction summary runs as a **one-shot** that enters no table entry, and
+/// At the provider seam (**Dv-21**), as `q3ep` amends it: a compaction
+/// summary runs as a **one-shot** that enters no table entry, and
 /// the conversation turn after it opens a fresh record whose opening frame
 /// carries the summary as **user-voiced context** — a `[User]` paragraph under
 /// `preamble::CARRIED_CONTEXT` — ahead of the prompt, and never as assistant
@@ -1392,7 +1299,7 @@ async fn an_image_on_the_prompt_rides_the_frame_as_a_block_and_the_turn_runs() {
 async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_user_context() {
     const SUMMARY: &str = "SUMMARY-OF-EVERYTHING-SO-FAR";
 
-    let home = ganja_testkit::temp_dir();
+    let home = temp();
     let cli = FakeCli::new(says(&["a title", "carrying on"]));
     let wire = wired(&cli, home.path());
 

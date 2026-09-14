@@ -716,8 +716,10 @@ impl Server {
     }
 
     /// [`Server::capture`] with the tail of the scrollback in front of the
-    /// screen: the last `shim_tui::LAST_WORDS_HISTORY` rows above the
-    /// viewport (`-S -<rows> -E -`), then the screen, joined the same way.
+    /// screen: the last `rows` rows above the viewport (`-S -<rows> -E -`),
+    /// then the screen, joined the same way. tmux clamps a start above the
+    /// history's top to the top, so a pane with fewer rows behind it than
+    /// `rows` is read whole.
     ///
     /// The reader of a **dead** pane's last words asks this one, and the
     /// reason is a tmux fact measured 2026-09-07 on next-3.8 while landing
@@ -734,25 +736,21 @@ impl Server {
     /// looking at the pane would see, and this is a question about what the
     /// pane said.
     ///
-    /// Bounded rather than `-S -`, because the question is that small: only
-    /// the rows a dead pane can have scrolled off are wanted, and the notice
-    /// scrolls exactly one per death, where `-S -` reads the whole history
-    /// — bounded by `history-limit`, which is the person's setting and can be
-    /// fifty thousand rows — into one string for a four-line answer. tmux
-    /// clamps a start above the history's top to the top, so a pane with
-    /// fewer rows behind it than the bound is read whole.
-    ///
     /// # Errors
     ///
     /// As [`Server::capture`].
-    pub async fn capture_with_history(&self, pane_id: &str) -> Result<String, TmuxError> {
+    pub async fn capture_with_history(
+        &self,
+        pane_id: &str,
+        rows: usize,
+    ) -> Result<String, TmuxError> {
         let mut command = self.command();
         command
             .arg("capture-pane")
             .arg("-p")
             .arg("-J")
             .arg("-S")
-            .arg(format!("-{}", crate::shim_tui::LAST_WORDS_HISTORY))
+            .arg(format!("-{rows}"))
             .arg("-E")
             .arg("-")
             .arg("-t")
@@ -1104,9 +1102,9 @@ impl Server {
 /// terminfo.
 ///
 /// The shell reading it still echoes the whole line first — that is the
-/// tty's doing, not the shell's — so the row is on screen exactly between
-/// the echo and the shell running the head, which is the one interval a
-/// readiness poll can still find it in ([`crate::shim_tui::composer_shown`]).
+/// tty's doing, not the shell's — so the row stands until the head runs;
+/// what that leaves a readiness poll is
+/// [`crate::shim_tui::composer_shown`]'s to say.
 pub const LAUNCH_HEAD: &str = "printf '\\033[2J\\033[3J\\033[H'; ";
 
 /// The line typed into a pane's idle shell: wipe the pane
@@ -1159,6 +1157,23 @@ pub fn exec_line(binary: &Path, argv: &[OsString]) -> Result<OsString, TmuxError
     }
 
     Ok(line)
+}
+
+/// Logs the launch line just typed into `pane` for `teammate`, at `debug` —
+/// the one spelling every pane backend logs its line through.
+///
+/// Its head wipes the screen the shell echoed it on (**D554**), so the log is
+/// where a launch stays diagnosable: a CLI that refuses its flags dies under a
+/// blank pane. Nothing secret rides the line, which carries a backend's own
+/// flags and a binary path; credentials travel in the environment, never argv
+/// (**D502**).
+pub(crate) fn trace_launch_line(teammate: &str, pane: &str, line: &OsStr) {
+    tracing::debug!(
+        teammate,
+        pane,
+        line = %line.to_string_lossy(),
+        "the launch line typed into a teammate's pane"
+    );
 }
 
 /// `arg` as one shell word, through shlex's POSIX quoter: bare when every

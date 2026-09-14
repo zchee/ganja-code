@@ -5,8 +5,7 @@ use buffa::Message as _;
 use super::super::tests::roster;
 use super::super::{connect, history, proto, serves_fetch};
 use super::{
-    ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_run, newest_user_text,
-    refusal_answer, run_message,
+    ChatRequest, context_answer, decode, fresh_id, kv_answer, refusal_answer, run_message,
 };
 use crate::protocol::{Message, Part};
 use crate::tool::ToolDefinition;
@@ -502,114 +501,6 @@ fn turn(messages: Vec<Message>, turn_start: usize) -> ChatRequest {
     ChatRequest { messages, turn_start, ..request() }
 }
 
-/// The newest user turn's text: the boundary, then the text of the run it
-/// found — the two halves composed the way `history::entries` composes them,
-/// so the four boundary tests below read as one question. Empty for a
-/// conversation with no user message, which has no run.
-fn newest_text(request: &ChatRequest) -> String {
-    newest_user_run(request).map_or_else(String::new, |run| newest_user_text(request, run))
-}
-
-#[test]
-fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
-    let conversation =
-        vec![Message::user("first"), Message::assistant("gpt-5.3-codex"), Message::user("second")];
-    assert_eq!(newest_text(&turn(conversation, 2)), "second");
-    assert_eq!(newest_text(&turn(Vec::new(), 0)), "");
-
-    // The engine appends to a turn — a steer, the team guards' request-only
-    // block after a reply — and each of those is a message of its own, so
-    // the newest turn is the whole run back to the reply and not its last
-    // message alone (D547). The turn opened at "second", so the marker
-    // bounds nothing here and the run is what it always was.
-    let appended = vec![
-        Message::user("first"),
-        Message::assistant("gpt-5.3-codex"),
-        Message::user("second"),
-        Message::user("<team_still_working>keep going</team_still_working>"),
-    ];
-    assert_eq!(
-        newest_text(&turn(appended, 2)),
-        "second\n\n<team_still_working>keep going</team_still_working>"
-    );
-}
-
-/// The turn marker's whole job: a steer a finished turn consumed belongs to
-/// that turn and never rides into the next one's text.
-///
-/// The engine appends a consumed steer to history *after* the assistant it
-/// interrupted, so a turn that took one ends as `[prompt, reply, steer]`; the
-/// next turn pushes its own prompt and this wire sees `[prompt, reply, steer,
-/// prompt2]` — byte-identical to the within-turn `[prompt, reply, steer,
-/// block]` above, since every user message is a `Message::user` and ids and
-/// timestamps ascend across a turn boundary exactly as they do within one. So
-/// the run is bounded by [`ChatRequest::turn_start`] and not by anything this
-/// module could read off `messages`: without it, this asserted the steer being
-/// re-sent.
-#[test]
-fn a_finished_turns_steer_stays_in_that_turn() {
-    let across_turns = vec![
-        Message::user("write the config parser"),
-        Message::assistant("gpt-5.3-codex"),
-        Message::user("actually make it lenient about unknown keys"),
-        Message::user("now add tests"),
-    ];
-
-    assert_eq!(
-        newest_text(&turn(across_turns, 3)),
-        "now add tests",
-        "the previous turn consumed that steer; this turn is its prompt alone",
-    );
-}
-
-/// And the shape the marker does **not** close, pinned as what it is rather
-/// than left to be discovered: a continuation block emitted where nothing was
-/// steered reaches this wire without the prompt it is about.
-///
-/// The request reads `[prompt, reply, block]` and the turn opened at the
-/// prompt, so `turn_start` is `0` and the run is still the block alone — the
-/// marker raises the run's lower bound and never lowers it, and lowering it
-/// here would mean reaching back *past the assistant's reply*, whose text this
-/// wire does not send. Closing it needs the wire to carry more than the newest
-/// user turn, which is a different change than bounding that turn.
-#[test]
-fn a_continuation_block_still_arrives_without_the_prompt_it_is_about() {
-    let continued = vec![
-        Message::user("port the config loader"),
-        Message::assistant("gpt-5.3-codex"),
-        Message::user("<team_still_working>keep going</team_still_working>"),
-    ];
-
-    assert_eq!(
-        newest_text(&turn(continued, 0)),
-        "<team_still_working>keep going</team_still_working>",
-    );
-}
-
-/// A marker pointing past the newest user message answers that message rather
-/// than panicking the wire.
-///
-/// `turn_start` is a `pub` field, so its value is whatever a caller put there:
-/// a request ending in an assistant message with the marker on the index after
-/// the user message before it would slice `first > newest`, and a wire that
-/// panics on a struct field's value is a wire that a caller's arithmetic can
-/// crash. The run is clamped to the newest user message instead, which is the
-/// most honest thing this walk can still say.
-#[test]
-fn a_turn_marker_past_the_newest_user_message_does_not_panic_the_walk() {
-    let overshot = vec![
-        Message::user("write the config parser"),
-        Message::user("and make it lenient"),
-        Message::assistant("gpt-5.3-codex"),
-    ];
-
-    assert_eq!(
-        newest_text(&turn(overshot, 2)),
-        "and make it lenient",
-        "the newest user message alone, and no panic",
-    );
-}
-
 #[test]
 fn a_minted_id_is_a_v4_uuid_and_two_are_two() {
     let id = fresh_id().expect("entropy is available");
@@ -674,10 +565,11 @@ fn a_resume_goes_out_as_a_fieldless_resume_action_over_the_composed_state() {
     assert!(run.conversation_id.is_some());
 }
 
-/// **AC-8's wire half.** The run request carries the composition's ids and
-/// its conversation id verbatim; the action's own id is minted fresh — so it
+/// **AC-8's wire half.** The run request carries the composition's
+/// conversation id verbatim; the action's own id is minted fresh — so it
 /// differs from every history blob's, and from itself across two sends of
-/// one request, where the state's ids do not.
+/// one request. That the state's ids hold still across a rebuild is the
+/// composition half's, in `history`'s tests.
 #[test]
 fn the_actions_id_is_fresh_where_the_states_ids_are_derived() {
     let asked = request();
@@ -701,15 +593,6 @@ fn the_actions_id_is_fresh_where_the_states_ids_are_derived() {
         Some(history::derived(&opening).as_str()),
         "the conversation id is derived from the first message"
     );
-    assert_eq!(first.conversation_id, second.conversation_id);
-    let state =
-        |run: &proto::RunRequest| run.conversation_state.as_option().cloned().expect("the state");
-    assert_eq!(
-        state(&first).root_prompt_messages_json,
-        state(&second).root_prompt_messages_json,
-        "the same request names the same root blobs twice"
-    );
-    assert_eq!(state(&first).turns, state(&second).turns);
 
     let action_id = |run: &proto::RunRequest| {
         run.action

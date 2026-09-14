@@ -14,10 +14,10 @@
 //! [`Inbound::Unknown`], logged at `debug!` and skipped, and each known shape
 //! decodes **required fields only**: the CLI adds fields between releases,
 //! and a decoder that insisted on the whole set would break on a field this
-//! wire does not read. (The fixture's own `assistant` frames carry a reduced
-//! key set — the first W2 lane omitted `timestamp`, `request_id` and
-//! `tool_use_meta` — so a replay derived from it under-tests exactly those
-//! three keys, which is why an extra-field row is pinned by test.)
+//! wire does not read. (The fixture's own `assistant` frames omit
+//! `timestamp`, `request_id` and `tool_use_meta`, so a replay derived from it
+//! under-tests exactly those three keys, which is why an extra-field row is
+//! pinned by test.)
 //!
 //! # Three readings the recording forced
 //!
@@ -497,18 +497,14 @@ pub struct Initialize {
 /// One frame is one turn: the CLI enqueues each as a new prompt, which is why
 /// several owed messages are joined into one frame's `content` rather than
 /// written as several frames.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct UserFrame {
     /// The text.
     pub content: String,
     /// Binary attachments the frame carries beside its text (`m1jk`), in the
     /// order their parts appeared. Empty on every frame the recording holds,
     /// and empty is what keeps `content` a bare string — see [`user_line`].
-    #[serde(skip)]
     pub attachments: Vec<Attachment>,
-    /// Always [`None`] on this wire: nothing it writes is a subagent's.
-    #[serde(rename = "parent_tool_use_id")]
-    pub parent_tool_use_id: Option<String>,
 }
 
 /// One binary attachment on a user frame (`m1jk`): what the engine's
@@ -532,27 +528,6 @@ impl Attachment {
             "type": kind,
             "source": {"type": "base64", "media_type": self.mime, "data": self.data},
         })
-    }
-}
-
-/// A request this side makes of the CLI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ControlRequest {
-    /// End the running turn. The process keeps reading stdin afterwards (run
-    /// 8), so this ends a turn and never a process.
-    Interrupt,
-    /// What the account has spent.
-    GetUsage,
-}
-
-impl ControlRequest {
-    /// The subtype the CLI reads.
-    #[must_use]
-    pub fn subtype(self) -> &'static str {
-        match self {
-            Self::Interrupt => "interrupt",
-            Self::GetUsage => "get_usage",
-        }
     }
 }
 
@@ -597,17 +572,19 @@ pub fn user_line(frame: &UserFrame) -> String {
     line(&serde_json::json!({
         "type": "user",
         "message": {"role": "user", "content": content},
-        "parent_tool_use_id": frame.parent_tool_use_id,
+        // Always null: nothing this wire writes is a subagent's.
+        "parent_tool_use_id": serde_json::Value::Null,
     }))
 }
 
-/// A request of the CLI.
+/// Ends the running turn. The process keeps reading stdin afterwards (run 8),
+/// so this ends a turn and never a process.
 #[must_use]
-pub fn control_request_line(request_id: &str, request: ControlRequest) -> String {
+pub fn interrupt_line(request_id: &str) -> String {
     line(&serde_json::json!({
         "type": "control_request",
         "request_id": request_id,
-        "request": {"subtype": request.subtype()},
+        "request": {"subtype": "interrupt"},
     }))
 }
 

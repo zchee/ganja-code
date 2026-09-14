@@ -409,12 +409,12 @@ impl Mapping {
 
 /// The top-level fields of `message` this build does not model, as `(field
 /// number, payload bytes)` pairs in wire order — what the skip log names a
-/// server message by, and the seam a test reads the same answer through.
+/// server message by.
 ///
 /// The size is the payload's: a length-delimited field's bytes, a fixed
 /// field's width, a varint's encoded width, a group's encoded content. The
 /// bytes themselves never leave here — a checkpoint is conversation state.
-pub(super) fn unmodelled(message: &proto::ServerMessage) -> Vec<(u32, usize)> {
+fn unmodelled(message: &proto::ServerMessage) -> Vec<(u32, usize)> {
     message
         .__buffa_unknown_fields
         .iter()

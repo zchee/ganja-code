@@ -62,7 +62,7 @@ pub fn derived(id: &MessageId) -> String {
 /// arrangement (`proxy.ts:849` mints one, `:1341-1351` derives the other,
 /// both to this layout).
 #[must_use]
-pub fn render_v4(mut bytes: [u8; 16]) -> String {
+pub(crate) fn render_v4(mut bytes: [u8; 16]) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 

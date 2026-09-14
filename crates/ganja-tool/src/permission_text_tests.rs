@@ -50,12 +50,3 @@ fn each_constant_is_the_sentence_the_engine_renders() {
     );
     assert_eq!(HOOK_REFUSED_PREFIX, "A PreToolUse hook refused this tool call: ");
 }
-
-#[test]
-fn the_two_prefixes_end_in_the_space_their_tail_is_appended_after() {
-    // Both are prefixes rather than whole sentences, and the trailing space
-    // is what keeps the rendered rules and the hook's reason from running
-    // into the last word.
-    assert!(DENIED_PREFIX.ends_with(' '));
-    assert!(HOOK_REFUSED_PREFIX.ends_with(' '));
-}

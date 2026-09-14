@@ -1727,39 +1727,39 @@ fn claudes_mode_names_map_to_ganjas_two_or_are_refused_by_name() {
     );
 }
 
-/// **D556**, Dv-22. A request-only message is marked in the type and invisible
-/// on the wire when it is not one.
+/// **D556**, Dv-22, and `ruto`. Each of a message's two marks — `request_only`
+/// and `compaction_summary` — is written when set and survives a round trip,
+/// which is what lets a request carry it to a wire.
 ///
-/// Three properties, and the first is the compatibility promise: `false`
-/// serializes to exactly the bytes a transcript written before this field
-/// existed carries, so nothing stored has to be migrated and nothing already
-/// stored decodes differently. The second is the other direction — a document
-/// with no such key reads as `false` — and the third is that the flag survives
-/// a round trip at all, which is what lets a request carry it to a wire.
+/// Only the marked half is here. The ordinary half is the compatibility
+/// promise — `false` writes exactly the bytes a transcript from before either
+/// field carries, and a document with no such key reads as `false` — and it
+/// holds for both marks at once through [`pinned_message`], which carries
+/// neither: `the_wire_format_is_stable` pins its bytes and
+/// `events_round_trip_through_json` reads them back.
 #[test]
-fn a_request_only_message_is_marked_and_an_ordinary_one_is_byte_unchanged() {
-    let ordinary = pinned_message();
-    let written = serde_json::to_string(&ordinary).expect("a message serializes");
-    assert!(
-        !written.contains("request_only"),
-        "an ordinary message carries no such key at all: {written}"
-    );
+fn each_message_mark_is_written_when_set_and_survives_a_round_trip() {
+    for (name, marked) in [
+        ("request_only", Message { request_only: true, ..pinned_message() }),
+        ("compaction_summary", Message { compaction_summary: true, ..pinned_message() }),
+    ] {
+        let written = serde_json::to_string(&marked).expect("a message serializes");
+        assert!(
+            written.contains(&format!(r#""{name}":true"#)),
+            "{name} is written when set: {written}"
+        );
+        let decoded: Message = serde_json::from_str(&written).expect("and reads back");
+        assert_eq!(decoded, marked, "{name} survives a round trip");
+    }
 
-    let decoded: Message =
-        serde_json::from_str(&written).expect("what was written reads back verbatim");
-    assert!(!decoded.request_only, "and a document with no key reads as false");
-    assert_eq!(decoded, ordinary);
-
-    let guards = Message { request_only: true, ..pinned_message() };
-    let written = serde_json::to_string(&guards).expect("a message serializes");
-    assert!(written.contains(r#""request_only":true"#), "the flag is written when set: {written}");
-    let decoded: Message = serde_json::from_str(&written).expect("and reads back");
-    assert!(decoded.request_only);
-    assert_eq!(decoded, guards);
+    // No constructor sets `compaction_summary`; the engine does, at the mint.
+    assert!(!Message::user("a prompt").compaction_summary);
+    assert!(!Message::assistant("a-model").compaction_summary);
+    assert!(!Message::request_only_user("the team is still working").compaction_summary);
 }
 
-/// The one constructor that mints one, so the flag is never set by hand at a
-/// call site that also has to remember five other fields.
+/// The one constructor that mints a request-only message, so the flag is never
+/// set by hand at a call site that also has to remember five other fields.
 #[test]
 fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() {
     let guards = Message::request_only_user("the team is still working");
@@ -1770,39 +1770,4 @@ fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() 
     assert_eq!(guards.parts[0].as_text(), Some("the team is still working"));
     assert!(!Message::user("an ordinary prompt").request_only, "and nothing else sets it");
     assert!(!Message::assistant("a-model").request_only);
-}
-
-/// `ruto`. A compaction summary is marked in the type and invisible on the
-/// wire when a message is not one — the three properties the `request_only`
-/// pin above holds, for the same reasons: `false` writes the bytes a
-/// transcript from before the field carries, a document with no key reads as
-/// `false`, and the mark survives a round trip so a request can carry it to a
-/// wire. No constructor sets it; the engine does, at the mint.
-#[test]
-fn a_compaction_summary_is_marked_and_an_ordinary_message_is_byte_unchanged() {
-    let ordinary = pinned_message();
-    let written = serde_json::to_string(&ordinary).expect("a message serializes");
-    assert!(
-        !written.contains("compaction_summary"),
-        "an ordinary message carries no such key at all: {written}"
-    );
-
-    let decoded: Message =
-        serde_json::from_str(&written).expect("what was written reads back verbatim");
-    assert!(!decoded.compaction_summary, "and a document with no key reads as false");
-    assert_eq!(decoded, ordinary);
-
-    let summary = Message { compaction_summary: true, ..pinned_message() };
-    let written = serde_json::to_string(&summary).expect("a message serializes");
-    assert!(
-        written.contains(r#""compaction_summary":true"#),
-        "the mark is written when set: {written}"
-    );
-    let decoded: Message = serde_json::from_str(&written).expect("and reads back");
-    assert!(decoded.compaction_summary);
-    assert_eq!(decoded, summary);
-
-    assert!(!Message::user("a prompt").compaction_summary, "no constructor sets it");
-    assert!(!Message::assistant("a-model").compaction_summary);
-    assert!(!Message::request_only_user("the team is still working").compaction_summary);
 }

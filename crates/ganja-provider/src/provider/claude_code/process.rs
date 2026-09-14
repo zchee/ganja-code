@@ -1,5 +1,8 @@
 //! The seam a `claude` process is spawned across, and the real spawner.
 //!
+//! Unix-only, like the whole of this wire: the signals below go through
+//! `libc`, which this crate names for unix targets alone.
+//!
 //! # Why a trait
 //!
 //! Every test in this suite drives a fake CLI, and none spawns the user's
@@ -52,11 +55,14 @@ pub struct ChildIo {
     pub exit: BoxFuture<'static, std::io::Result<ExitStatus>>,
     /// Sends the child a signal.
     ///
-    /// `Fn`, not `FnOnce`: the two bounds are **two** signals, and a driver
-    /// that had to consume this to send the first could never send the second
-    /// — which is half of what made the `SIGKILL` bound unreachable (CC-3).
-    /// Sending a signal to a child that has already exited is `ESRCH`, so
-    /// calling it twice costs nothing when the first one worked.
+    /// `Fn`, not `FnOnce`, and aimed at the child's **pid** rather than its
+    /// `Child` handle, because the `SIGKILL` bound had two independent
+    /// reasons it could never fire (CC-3): a driver that consumed a `FnOnce`
+    /// on the first bound found nothing to call for the second, and a `Child`
+    /// behind a lock the exit future held across `wait()` was a handle no
+    /// other arm could reach while the child lived. Sending a signal to a
+    /// child that has already exited is `ESRCH`, so calling it twice costs
+    /// nothing when the first one worked.
     pub kill: Box<dyn Fn(Signal) + Send>,
 }
 
@@ -106,9 +112,7 @@ impl Spawner for Real {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // See the module doc. Off, so that a dropped `ChildIo` closes the
-            // pipe and the child takes the EOF path it would have taken
-            // anyway.
+            // See the module doc.
             .kill_on_drop(false);
         env.apply(&mut command);
 
@@ -134,12 +138,8 @@ impl Spawner for Real {
         })?;
         let stderr = child.stderr.take();
 
-        // The handle goes to the exit future, which is the one thing that must
-        // own it: `wait()` is also what reaps, and a `Child` behind a lock the
-        // exit future holds for the process's whole life is a handle no other
-        // arm can ever reach — which is exactly what made the `SIGKILL` bound
-        // unreachable before (CC-3). So the killer takes the **pid** instead,
-        // and both signals go the same way.
+        // The handle goes to the exit future, which reaps; the killer takes the
+        // pid, so both signals go the same way (CC-3, told on `ChildIo::kill`).
         let pid = child.id();
         let exit: BoxFuture<'static, std::io::Result<ExitStatus>> =
             Box::pin(async move { child.wait().await });

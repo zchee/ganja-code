@@ -967,19 +967,20 @@ pub struct Message {
     /// fresh on every request, so **no wire may remember its id as
     /// conversation state**.
     ///
-    /// One message class is like this — the engine's own guards block, which
-    /// rides in front of a turn's prompt and describes what just happened
-    /// rather than what was said. It is a *request*, not a message, which is
-    /// why the transcript must not carry it; and because it is rebuilt on every
-    /// request it carries a different id each time.
+    /// The engine mints two blocks like this — the `/team` guards block, which
+    /// describes what just happened rather than what was said, and the
+    /// deadline block (**D557**), which says how much of the time budget is
+    /// left. Each is a *request*, not a message, which is why the transcript
+    /// must not carry it; and because it is rebuilt on every request it carries
+    /// a different id each time.
     ///
     /// That is invisible to a stateless wire and load-bearing for a stateful
     /// one. A wire that holds a process remembers which user messages it has
     /// already handed over, and compares that memory against the next request
     /// to tell a continuing conversation from a rewound one. A fresh id in the
     /// same position reads as "an id I was given is gone" — a rewind — so
-    /// without this flag every guarded request would close the process and pay
-    /// for a fresh one (**D556**, Dv-22; the `claude-code` wire's
+    /// without this flag every request carrying one would close the process
+    /// and pay for a fresh one (**D556**, Dv-22; the `claude-code` wire's
     /// `remembered_ids`). The flag is the honest fix rather than a wire-side
     /// heuristic, because a replaced tail and a real rewind are
     /// indistinguishable by ids alone.
@@ -1032,8 +1033,8 @@ impl Message {
 
     /// The same message, marked as living in the request alone.
     ///
-    /// See [`Message::request_only`] for what that means and why exactly one
-    /// message class is built this way.
+    /// See [`Message::request_only`] for what that means and why a request-only
+    /// block is built this way.
     #[must_use]
     pub fn request_only_user(text: impl Into<String>) -> Self {
         Self { request_only: true, ..Self::user(text) }

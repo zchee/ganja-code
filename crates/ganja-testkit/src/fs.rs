@@ -49,6 +49,49 @@ pub unsafe fn redirect_xdg_data_home() -> TempDir {
     home
 }
 
+/// Replaces the credential store under `data_home` with one holding a single
+/// ChatGPT login filed under `openai` — the way `ganja auth login` wrote one
+/// before **D555** moved the seat to its own key.
+///
+/// Written as a file rather than through `auth::set_oauth`, because that
+/// function stores under the id it is given and the whole point of this
+/// fixture is the id it is *not* given any more: no supported way is left to
+/// produce this entry, which is exactly why a test has to. The path is
+/// `auth::store_path()`'s, and asserted to sit under `data_home`, so the
+/// caller must already have pointed `XDG_DATA_HOME` there; a store's layout
+/// is `auth`'s to know, and a fixture that could reach a real one is refused
+/// before it writes. The tokens are inert strings nothing presents.
+pub fn plant_pre_split_chatgpt_login(data_home: &Path) {
+    let path = ganja_core::auth::store_path().expect("the store has a path");
+    assert!(path.starts_with(data_home), "the fixture must not reach a real store: {path:?}");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the store directory is creatable");
+    }
+
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "openai": {
+                "type": "oauth",
+                "refresh": "rt-pre-split-fixture",
+                "access": "at-pre-split-fixture",
+                "expires": 4_102_444_800_000_u64,
+            }
+        }))
+        .expect("the fixture serializes"),
+    )
+    .expect("the fixture writes");
+
+    // The store refuses a credential file other users can read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("the fixture is made private");
+    }
+}
+
 /// The project a run of the shipped binary works in and the data home it
 /// stores under, both gone with the test.
 ///

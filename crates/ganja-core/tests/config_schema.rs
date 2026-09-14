@@ -461,59 +461,35 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          schema's closed StatuslineElement enum should refuse it too"
     );
 
-    // The near-misses of the one element P16 added (**D484**). `rate` itself
-    // rides the kitchen sink above; these pin that widening the enum by one
-    // name widened it by exactly one.
-    for near_miss in ["ratelimit", "rate-limit", "rates"] {
-        let mut sink: Value = kitchen_sink();
-        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
-        assert!(
-            !validator.is_valid(&sink),
-            "{near_miss:?} is not the name the loader accepts, and the schema must \
-             not accept it either"
-        );
-    }
-
-    // The same discipline for the element D524's segment grew into. `held`
-    // itself rides the kitchen sink above; these pin that this widening too
-    // was by exactly one name.
-    for near_miss in ["hold", "helds", "held-count"] {
-        let mut sink: Value = kitchen_sink();
-        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
-        assert!(
-            !validator.is_valid(&sink),
-            "{near_miss:?} is not the name the loader accepts, and the schema must \
-             not accept it either"
-        );
-    }
-
-    // And for W5's shared-task-list element, whose near-misses matter more
-    // than either of theirs: `tasks` is a real name for a different count,
-    // so a spelling that is neither is a config that meant one of the two
-    // and must be told it named nothing.
-    for near_miss in ["tasklist", "task_list", "tasks-list"] {
-        let mut sink: Value = kitchen_sink();
-        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
-        assert!(
-            !validator.is_valid(&sink),
-            "{near_miss:?} is not the name the loader accepts, and the schema must \
-             not accept it either"
-        );
-    }
-
-    // And for D557's own element. `deadline` itself rides the kitchen sink
-    // above; these pin the widening at exactly one name — and `timeout` is
-    // in the list on purpose, because it is the word somebody reaches for
-    // when they expect the engine to *cancel* something, which this element
-    // reports on and nothing in this build does.
-    for near_miss in ["deadlines", "dead-line", "timeout"] {
-        let mut sink: Value = kitchen_sink();
-        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
-        assert!(
-            !validator.is_valid(&sink),
-            "{near_miss:?} is not the name the loader accepts, and the schema must \
-             not accept it either"
-        );
+    // The near-misses of every element the enum grew by after it closed. Each
+    // element itself rides the kitchen sink above; these pin that every
+    // widening was by exactly one name.
+    let widenings = [
+        // The one element P16 added (**D484**).
+        ("rate", ["ratelimit", "rate-limit", "rates"]),
+        // The element D524's segment grew into.
+        ("held", ["hold", "helds", "held-count"]),
+        // **D548**'s shared-task-list element, whose near-misses matter more
+        // than the others': `tasks` is a real name for a different count, so a
+        // spelling that is neither is a config that meant one of the two and
+        // must be told it named nothing.
+        ("task-list", ["tasklist", "task_list", "tasks-list"]),
+        // **D557**'s own element. `timeout` is in the list on purpose, because
+        // it is the word somebody reaches for when they expect the engine to
+        // *cancel* something, which this element reports on and nothing in
+        // this build does.
+        ("deadline", ["deadlines", "dead-line", "timeout"]),
+    ];
+    for (element, near_misses) in widenings {
+        for near_miss in near_misses {
+            let mut sink: Value = kitchen_sink();
+            sink["tui"]["statusline"]["elements"] = json!([near_miss]);
+            assert!(
+                !validator.is_valid(&sink),
+                "{near_miss:?} is not the name the loader accepts ({element:?} is), and the \
+                 schema must not accept it either"
+            );
+        }
     }
 }
 

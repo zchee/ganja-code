@@ -201,6 +201,16 @@ impl PrivateServer {
     pub fn start_command(&self, pane_id: &str) -> String {
         self.run(&["display-message", "-p", "-t", pane_id, "#{pane_start_command}"])
     }
+
+    /// How many lines of scrollback a pane holds, as tmux itself counts them —
+    /// `0` for a history that was emptied rather than merely scrolled.
+    pub fn history_size(&self, pane: &str) -> usize {
+        let size = self.run(&["display-message", "-p", "-t", pane, "#{history_size}"]);
+
+        size.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("tmux answers `#{{history_size}}` with a count: {size:?}"))
+    }
 }
 
 impl Drop for PrivateServer {

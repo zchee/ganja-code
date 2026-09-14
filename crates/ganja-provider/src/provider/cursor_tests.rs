@@ -11,7 +11,7 @@ use super::{
     CursorProvider, CursorWire, DEFAULT_BASE_URL, ID, Provider as _, ProviderError, connect, proto,
 };
 use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
-use crate::protocol::FinishReason;
+use crate::protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState};
 use crate::provider::{ChatRequest, CredentialSource, NO_RESULT, ProviderEvent};
 use crate::tool::ToolDefinition;
 
@@ -550,7 +550,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
     let composed_bytes = composed.blobs[&composed_id].clone();
 
     let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
-    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let (answers, written) = futures::channel::mpsc::unbounded();
     let seeded = super::Duplex {
         answers,
         system: request.system.clone(),
@@ -564,15 +564,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
         Some(super::Bridge::new(Arc::clone(&held), key.clone())),
     );
 
-    body.unbounded_send(Ok(mcp_framed(
-        1,
-        proto::McpArgs::default()
-            .with_name("read")
-            .with_tool_name("read")
-            .with_tool_call_id("call-1")
-            .with_provider_identifier("ganja"),
-    )))
-    .expect("the body is open");
+    body.unbounded_send(Ok(mcp_framed(1, read_args("call-1")))).expect("the body is open");
     let paused: Vec<ProviderEvent> =
         tokio::time::timeout(Duration::from_secs(10), stream.collect())
             .await
@@ -582,24 +574,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
         "the call was bridged: {paused:?}"
     );
 
-    let mut resumed = request.clone();
-    let mut reply = crate::protocol::Message::assistant(&request.model);
-    reply.parts.push(crate::protocol::Part {
-        id: crate::protocol::PartId::ascending(),
-        body: crate::protocol::PartBody::Tool {
-            call_id: "call-1".to_owned(),
-            tool: "read".to_owned(),
-            state: crate::protocol::ToolState::Completed {
-                input: serde_json::json!({}),
-                output: "the file's contents".to_owned(),
-                title: "read".to_owned(),
-                metadata: serde_json::json!({}),
-                started: 0,
-                completed: 0,
-            },
-        },
-    });
-    resumed.messages.push(reply);
+    let resumed = answered(&request, "call-1", completed("the file's contents"));
     let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
         panic!("the result keys the held run");
     };
@@ -621,7 +596,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
         "a resumed run is not a failed one: {events:?}"
     );
 
-    let sent = sent(answered).await;
+    let sent = sent(written).await;
     assert_eq!(
         kv_answer(&sent, 9).as_deref(),
         Some(composed_bytes.as_slice()),
@@ -639,11 +614,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
 #[tokio::test]
 async fn a_keyed_hit_still_lacking_a_result_opens_a_run_naming_what_it_has_and_what_it_lacks() {
     let served = serve_run(finished("Carrying on."), false).await;
-    let provider = CursorProvider::at(
-        &served.base_url,
-        CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
-    )
-    .expect("loopback may carry a token");
+    let provider = provider_at(&served);
     let request = opening("auto");
     let key = super::bridge::Key::of(&request).expect("a request with a message keys");
 
@@ -671,42 +642,18 @@ async fn a_keyed_hit_still_lacking_a_result_opens_a_run_naming_what_it_has_and_w
 
     // The engine's next step, one call finished and one still pending.
     let mut partial = request.clone();
-    let mut reply = crate::protocol::Message::assistant(&request.model);
-    for (call_id, state) in [
-        (
-            "call-1",
-            crate::protocol::ToolState::Completed {
-                input: serde_json::json!({}),
-                output: "the finished one".to_owned(),
-                title: "read".to_owned(),
-                metadata: serde_json::json!({}),
-                started: 0,
-                completed: 0,
-            },
-        ),
-        ("call-2", crate::protocol::ToolState::Pending { input: None }),
-    ] {
-        reply.parts.push(crate::protocol::Part {
-            id: crate::protocol::PartId::ascending(),
-            body: crate::protocol::PartBody::Tool {
-                call_id: call_id.to_owned(),
-                tool: "read".to_owned(),
-                state,
-            },
+    let mut reply = Message::assistant(&request.model);
+    for (call_id, state) in
+        [("call-1", completed("the finished one")), ("call-2", ToolState::Pending { input: None })]
+    {
+        reply.parts.push(Part {
+            id: PartId::ascending(),
+            body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
         });
     }
     partial.messages.push(reply);
 
-    let events: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), async {
-        provider
-            .stream(partial.clone(), CancellationToken::new())
-            .await
-            .expect("a keyed hit without its results opens a fresh run")
-            .collect()
-            .await
-    })
-    .await
-    .expect("the fresh run reads to its end");
+    let events = through_provider(&provider, partial.clone()).await;
     assert_eq!(
         events,
         vec![
@@ -1145,6 +1092,60 @@ pub(super) fn read_args(call_id: &str) -> proto::McpArgs {
         .with_tool_name("read")
         .with_tool_call_id(call_id)
         .with_provider_identifier("ganja")
+}
+
+/// The same request one step later, with the assistant's tool part on it —
+/// what the engine hands back after running the call.
+pub(super) fn answered(request: &ChatRequest, call_id: &str, state: ToolState) -> ChatRequest {
+    let mut resumed = request.clone();
+    let mut reply = Message::assistant(&request.model);
+    reply.parts.push(Part {
+        id: PartId::ascending(),
+        body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
+    });
+    resumed.messages.push(reply);
+
+    resumed
+}
+
+/// A `read` that finished, having answered `output`.
+pub(super) fn completed(output: &str) -> ToolState {
+    ToolState::Completed {
+        input: serde_json::json!({}),
+        output: output.to_owned(),
+        title: "read".to_owned(),
+        metadata: serde_json::json!({}),
+        started: 0,
+        completed: 0,
+    }
+}
+
+/// The provider a recovery is driven through: the loopback `served` answers
+/// on, with a credential that is a value rather than a store.
+pub(super) fn provider_at(served: &Served) -> CursorProvider {
+    CursorProvider::at(
+        &served.base_url,
+        CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
+    )
+    .expect("loopback may carry a token")
+}
+
+/// One turn through `Provider::stream`, collected — bounded, because a
+/// recovery that hung would otherwise hang the suite.
+pub(super) async fn through_provider(
+    provider: &CursorProvider,
+    request: ChatRequest,
+) -> Vec<ProviderEvent> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .expect("the turn opens on the loopback")
+            .collect()
+            .await
+    })
+    .await
+    .expect("the turn ends rather than hanging")
 }
 
 /// A frame carrying one `mcp_args`, built from whatever the case is about.

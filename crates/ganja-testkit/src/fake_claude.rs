@@ -11,10 +11,11 @@
 //!
 //! A double that accepted everything would let a regression in the argv
 //! builder pass every suite. This one exits 1 on a missing `--verbose`, on
-//! any never-list token (`--resume` included), and on a `--permission-mode`
-//! value other than `manual`, each with the sentence the real CLI uses — so
-//! posture C is enforced by the double as well as by `argv_tests.rs`, in two
-//! independent places.
+//! the six never-list tokens it keeps its own copy of (`--resume` included),
+//! and on a `--permission-mode` value other than `manual`, each with the
+//! sentence the real CLI uses — so the held process's never-resume rule is
+//! enforced by the double as well as by `argv_tests.rs`, in two independent
+//! places.
 //!
 //! # Two entry points
 //!
@@ -28,7 +29,8 @@
 //!
 //! A **test-owned temporary artifact**: created under the test's own temp
 //! directory, read by that test alone, never committed. It is not one of the
-//! recording's replay fixtures and none of AC-2.1's scrub rules govern it.
+//! recording's replay fixtures, and none of the scrub rules for those govern
+//! it.
 //! One JSON object per process, appended — so a key that spawned twice leaves
 //! two lines and a test can count them.
 //!
@@ -48,7 +50,7 @@ pub const SCRIPT_ENV: &str = "GANJA_FAKE_CLAUDE_SCRIPT";
 /// Names the side file it appends its record to.
 pub const RECORD_ENV: &str = "GANJA_FAKE_CLAUDE_RECORD";
 
-/// Overrides what `--version` answers, ahead of the script's own field.
+/// Overrides what `--version` answers.
 ///
 /// A knob rather than a second script file: `from_env()` runs `--version` at
 /// construction, and a test that wanted a different answer for one case would
@@ -63,8 +65,8 @@ pub const VERSION_ENV: &str = "GANJA_FAKE_CLAUDE_VERSION";
 /// so this is the knob that makes that arm reachable at all.
 pub const STDERR_ENV: &str = "GANJA_FAKE_CLAUDE_STDERR";
 
-/// What the fake answers `--version` with unless a script or [`VERSION_ENV`]
-/// says otherwise.
+/// What the fake answers `--version` with unless [`VERSION_ENV`] says
+/// otherwise.
 pub const DEFAULT_VERSION: &str = "2.1.263 (Claude Code)";
 
 /// The spelling `system/init.model` carries on a fresh record.
@@ -92,6 +94,11 @@ pub struct Turn {
     /// `is_error: true` with `subtype: "success"` — and exits **1** on EOF,
     /// which is what makes the exit code the last result's `is_error`.
     pub refused: bool,
+    /// Whether this turn's `result` carries `is_error: true`, with nothing
+    /// else unusual about the turn: what a seat that cannot serve an asked
+    /// model, or a transient vendor error, ends a turn with. The fake then
+    /// exits **1** on EOF, as it does after a refusal.
+    pub errored: bool,
     /// A `system/model_fallback` naming this model, before the turn's blocks.
     pub fallback: Option<String>,
     /// `system` subtypes to emit and expect to be skipped.
@@ -141,9 +148,6 @@ pub struct Usage {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Script {
-    /// What `--version` answers. A script naming `2.1.262 (Claude Code)` is
-    /// how the floor refusal is driven.
-    pub version: Option<String>,
     /// The turns, in order. A `user` frame past the last one is answered by
     /// the last turn again, so a test need not script a turn it does not
     /// assert on.
@@ -170,6 +174,18 @@ pub struct Script {
     /// names beside it, of which two matter to a listing: `value` is the id a
     /// request may ask for and `displayName` is the label.
     pub models: Vec<(String, String)>,
+}
+
+impl Script {
+    /// What a process plays once earlier processes of its conversation have
+    /// played `played` of these turns: the rest, never those again.
+    #[must_use]
+    pub fn resumed_after(&self, played: usize) -> Self {
+        let mut script = self.clone();
+        script.turns = script.turns.split_off(played.min(script.turns.len()));
+
+        script
+    }
 }
 
 /// What one fake process saw, appended to the side file as one JSON line.
@@ -264,16 +280,9 @@ pub async fn main() -> ! {
     };
     let side = std::env::var(RECORD_ENV).ok().map(PathBuf::from);
 
-    let session_id = argv
-        .iter()
-        .position(|token| token == "--session-id")
-        .and_then(|at| argv.get(at + 1))
-        .cloned()
-        .unwrap_or_default();
-
     let mut record = Record {
         argv: argv.clone(),
-        session_id,
+        session_id: session_id(&argv),
         cwd: std::env::current_dir().unwrap_or_default().display().to_string(),
         env_present: WATCHED
             .iter()
@@ -286,8 +295,7 @@ pub async fn main() -> ! {
     // did not answer would fail every suite before a frame.
     if argv.iter().any(|token| token == "--version") {
         let named = std::env::var(VERSION_ENV).ok();
-        let version = named.as_deref().or(script.version.as_deref()).unwrap_or(DEFAULT_VERSION);
-        println!("{version}");
+        println!("{}", named.as_deref().unwrap_or(DEFAULT_VERSION));
         finish(&side, &mut record, 0);
     }
 
@@ -313,22 +321,19 @@ pub async fn main() -> ! {
     finish(&side, &mut record, code);
 }
 
-/// The exit code the argv earns, or [`None`] when it is acceptable.
+/// What the real CLI says refusing `argv`, or [`None`] when it is acceptable.
 ///
-/// Each sentence is the real CLI's, so a test reading stderr sees what a
-/// person would.
+/// Judged against this module's own lists, never the wire's, so a double that
+/// is not the re-exec'd binary refuses what the real CLI refuses too. Each
+/// sentence is the real CLI's, so a test reading one sees what a person would.
 #[must_use]
-pub fn refuse(argv: &[String]) -> Option<i32> {
+pub fn refusal(argv: &[String]) -> Option<String> {
     if !argv.iter().any(|token| token == "--verbose") {
-        eprintln!("{NEEDS_VERBOSE}");
-
-        return Some(1);
+        return Some(NEEDS_VERBOSE.to_owned());
     }
 
     if let Some(token) = argv.iter().find(|token| REFUSED_TOKENS.contains(&token.as_str())) {
-        eprintln!("error: unknown option '{token}'");
-
-        return Some(1);
+        return Some(format!("error: unknown option '{token}'"));
     }
 
     let mode =
@@ -336,15 +341,32 @@ pub fn refuse(argv: &[String]) -> Option<i32> {
     if let Some(mode) = mode
         && mode != "manual"
     {
-        eprintln!(
+        return Some(format!(
             "error: option '--permission-mode <mode>' argument '{mode}' is invalid. Allowed \
              choices are manual, acceptEdits, bypassPermissions, plan."
-        );
-
-        return Some(1);
+        ));
     }
 
     None
+}
+
+/// The exit code the argv earns, saying why on stderr, or [`None`] when it is
+/// acceptable.
+fn refuse(argv: &[String]) -> Option<i32> {
+    let sentence = refusal(argv)?;
+    eprintln!("{sentence}");
+
+    Some(1)
+}
+
+/// The record `argv` names after `--session-id`, or empty when it names none.
+#[must_use]
+pub fn session_id(argv: &[String]) -> String {
+    argv.iter()
+        .position(|token| token == "--session-id")
+        .and_then(|at| argv.get(at + 1))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Appends the record and exits.
@@ -357,7 +379,7 @@ fn finish(side: &Option<PathBuf>, record: &mut Record, code: i32) -> ! {
 }
 
 /// One JSON line per process, appended.
-pub fn append(side: Option<&Path>, record: &Record) {
+fn append(side: Option<&Path>, record: &Record) {
     use std::io::Write as _;
 
     let Some(side) = side else {
@@ -379,7 +401,8 @@ static SIGNALS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 /// The wire's own claim is that stdin EOF is the only orderly exit and the two
 /// signals are bounds nothing should reach. A fake that died on `SIGTERM`
 /// could not tell a test the difference between "no signal was sent" and "one
-/// was sent and worked", which is the whole thing AC-3.9 asserts.
+/// was sent and worked", which is the whole thing a test of the wire's
+/// endings asserts.
 fn install_signal_recorders() {
     for (name, kind) in [
         ("SIGTERM", tokio::signal::unix::SignalKind::terminate()),
@@ -396,15 +419,14 @@ fn install_signal_recorders() {
 }
 
 /// Notes that `name` arrived.
-pub fn signalled(name: &str) {
+fn signalled(name: &str) {
     if let Ok(mut signals) = SIGNALS.lock() {
         signals.push(name.to_owned());
     }
 }
 
 /// Every signal this process has received.
-#[must_use]
-pub fn signals() -> Vec<String> {
+fn signals() -> Vec<String> {
     SIGNALS.lock().map(|signals| signals.clone()).unwrap_or_default()
 }
 
@@ -424,6 +446,15 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    // Run 7's shape: an argv the CLI accepted at parse and refused once it
+    // started. It says its piece on stderr and exits 1 before `system/init`,
+    // as [`main`] does.
+    if let Some(sentence) = &script.exit_before_init {
+        eprintln!("{sentence}");
+
+        return 1;
+    }
+
     let mut fake = Fake {
         lines: tokio::io::BufReader::new(stdin).lines(),
         out: stdout,
@@ -432,14 +463,14 @@ where
         next_id: 1,
         next_rpc: 0,
         turn: 0,
-        refused_any: false,
+        errored_any: false,
         should_dial: false,
         queued: 0,
     };
 
     fake.run().await;
 
-    i32::from(fake.refused_any)
+    i32::from(fake.errored_any)
 }
 
 /// One fake process, mid-conversation.
@@ -451,7 +482,8 @@ struct Fake<'a, R, W> {
     next_id: u64,
     next_rpc: u64,
     turn: usize,
-    refused_any: bool,
+    /// Whether a `result` it sent carried `is_error`, which is its exit code.
+    errored_any: bool,
     should_dial: bool,
     queued: usize,
 }
@@ -463,15 +495,6 @@ where
 {
     /// Reads until stdin ends.
     async fn run(&mut self) {
-        // Run 7's shape: an argv the CLI accepted at parse and refused once
-        // it started. It says its piece on stderr and exits before
-        // `system/init`.
-        if let Some(sentence) = &self.script.exit_before_init {
-            eprintln!("{sentence}");
-
-            return;
-        }
-
         loop {
             let Some(frame) = self.recv().await else {
                 // Stdin EOF. A script may ignore it, so the wire's two signal
@@ -567,9 +590,6 @@ where
             // answered with the queue it did not have to clear.
             Some("interrupt") => {
                 self.answer(&request_id, &serde_json::json!({"still_queued": []})).await;
-            }
-            Some("get_usage") => {
-                self.answer(&request_id, &serde_json::json!({"subscription_type": "max"})).await;
             }
             _ => {
                 self.answer(&request_id, &serde_json::json!({})).await;
@@ -796,7 +816,7 @@ where
 
     /// The vendor safeguard refusing this turn.
     async fn refuse(&mut self) {
-        self.refused_any = true;
+        self.errored_any = true;
 
         let refused_uuid = self.mint();
         self.send(&serde_json::json!({
@@ -840,10 +860,11 @@ where
 
     /// The turn's own `result`.
     async fn result(&mut self, turn: &Turn) {
+        self.errored_any |= turn.errored;
         self.send(&serde_json::json!({
             "type": "result",
             "subtype": "success",
-            "is_error": false,
+            "is_error": turn.errored,
             "stop_reason": "end_turn",
             "result": turn.result,
             "usage": {

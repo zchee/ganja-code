@@ -205,7 +205,7 @@ fn a_claude_code_row_is_offered_the_five_efforts_the_cli_accepts() {
     // What that map becomes on the way out, so the roster and the argv are
     // pinned against each other rather than each against a literal.
     let named = synthesized["xhigh"]["effort"].as_str().expect("the name is a string");
-    let argv = crate::provider::claude_code::argv::Argv::conversation(
+    let argv = crate::provider::claude_code::argv::conversation(
         &crate::provider::claude_code::argv::Spawn {
             session_id: "0199ffff-0000-7000-8000-000000000000".to_owned(),
             model: crate::provider::claude_code::DEFAULT_MODEL.to_owned(),
@@ -236,16 +236,6 @@ fn a_claude_code_row_is_offered_the_five_efforts_the_cli_accepts() {
 fn only_a_wire_whose_efforts_are_its_own_answers_a_standalone_roster() {
     let own = standalone(crate::provider::claude_code::ID).expect("this wire's roster is its own");
 
-    assert_eq!(
-        own.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["high", "low", "max", "medium", "xhigh"],
-        "the CLI's own five, in the schema's sorted order"
-    );
-    assert_eq!(
-        serde_json::to_value(&own["max"]).expect("an entry serializes"),
-        json!({"effort": "max"}),
-        "and the same flat map the table produces, so a row arriving later changes nothing"
-    );
     assert_eq!(
         own,
         roster(&model(crate::provider::claude_code::ID, "default", 64_000)),

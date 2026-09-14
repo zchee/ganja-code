@@ -40,9 +40,9 @@ pub const DEFAULT_PROTOCOL: &str = "2025-11-25";
 pub const SERVER: &str = "ganja";
 
 /// One tool as `tools/list` declares it.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Tool {
+struct Tool {
     /// The registry name, bare.
     pub name: String,
     /// What the model reads to decide whether to call it.
@@ -62,34 +62,34 @@ impl From<&ToolDefinition> for Tool {
 }
 
 /// What `initialize` is answered with.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InitializeResult {
+struct InitializeResult {
     /// The version the CLI named, echoed.
     pub protocol_version: String,
     /// What this server does. Declaring `tools` is what makes the CLI ask for
-    /// a roster at all (W1a Q3.3), so an empty object here would be a server
-    /// nothing is ever called on.
+    /// a roster at all, so an empty object here would be a server nothing is
+    /// ever called on.
     pub capabilities: Capabilities,
     /// Who this server is.
     pub server_info: ServerInfo,
 }
 
 /// The one capability this server declares.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Capabilities {
+#[derive(Debug, Serialize)]
+struct Capabilities {
     /// Present, which is what makes the CLI ask for a roster at all.
     pub tools: ToolsCapability,
 }
 
 /// What this server says about its roster (`i5oi`).
-#[derive(Debug, Serialize, PartialEq)]
-pub struct ToolsCapability {
+#[derive(Debug, Serialize)]
+struct ToolsCapability {
     /// That the roster may change while the process lives, and that this side
     /// will say so with [`LIST_CHANGED`]. The CLI subscribes to that
-    /// notification only for a server declaring this (W1a Q3.9-3.10, read off
-    /// the bundle's code path), and the notification is the one way a live
-    /// process hears a roster that grew. **Unmeasured live**: no recorded run
+    /// notification only for a server declaring this (read off the bundle's
+    /// code path), and the notification is the one way a live process hears a
+    /// roster that grew. **Unmeasured live**: no recorded run
     /// declared it, so what the CLI does on receipt — re-list and advertise
     /// the new tools from its next request — is the bundle's reading and no
     /// frame's.
@@ -108,8 +108,8 @@ pub fn list_changed() -> serde_json::Value {
 }
 
 /// The name and version this server answers under.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct ServerInfo {
+#[derive(Debug, Serialize)]
+struct ServerInfo {
     /// [`SERVER`].
     pub name: String,
     /// This build's version.
@@ -117,8 +117,8 @@ pub struct ServerInfo {
 }
 
 /// What `tools/list` is answered with.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct ListToolsResult {
+#[derive(Debug, Serialize)]
+struct ListToolsResult {
     /// The request's roster, in the order the engine advertised it.
     pub tools: Vec<Tool>,
 }
@@ -128,10 +128,9 @@ pub struct ListToolsResult {
 #[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     /// The blocks the model reads. **One** on the allow path — the tool
-    /// part's output, byte-identical (rev 6, change 4): a second block
-    /// carrying a user's words is delivered and then named as injection in
-    /// the reply the person reads (M19 (b)), so an owed message rides the
-    /// next turn instead.
+    /// part's output, byte-identical: a second block carrying a user's words
+    /// is delivered and then named as injection in the reply the person reads
+    /// (M19 (b)), so an owed message rides the next turn instead.
     pub content: Vec<Content>,
     /// Whether the call failed.
     pub is_error: bool,
@@ -187,9 +186,9 @@ pub struct ToolCall {
 ///
 /// `tools/call` is not answered here: it is returned as [`Answer::Call`] for
 /// the bridge to resolve against the engine's own tool part, because nothing
-/// in this crate runs a tool.
+/// in this crate runs a tool. `serverInfo.version` is this build's own.
 #[must_use]
-pub fn answer(message: &serde_json::Value, tools: &[ToolDefinition], version: &str) -> Answer {
+pub fn answer(message: &serde_json::Value, tools: &[ToolDefinition]) -> Answer {
     let id = message["id"].clone();
     let method = message["method"].as_str().unwrap_or_default();
 
@@ -207,7 +206,7 @@ pub fn answer(message: &serde_json::Value, tools: &[ToolDefinition], version: &s
                     capabilities: Capabilities { tools: ToolsCapability { list_changed: true } },
                     server_info: ServerInfo {
                         name: SERVER.to_owned(),
-                        version: version.to_owned(),
+                        version: env!("CARGO_PKG_VERSION").to_owned(),
                     },
                 },
             ))

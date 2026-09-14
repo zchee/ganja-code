@@ -57,7 +57,7 @@
 
 use std::io::{self, IsTerminal as _, Read as _, Write};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
@@ -365,10 +365,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;
-    // And whatever the wire is holding on this machine (**D556**, Dv-14): a
-    // no-op for every provider but `claude-code`, which may be holding
-    // authenticated node runtimes that would otherwise outlive this process.
-    engine.shutdown_provider().await;
+    engine.shutdown_provider().await; // D556
 
     match outcome? {
         None => Ok(()),
@@ -418,14 +415,10 @@ async fn seed_deadline(engine: &Engine, until: Option<u64>) -> Result<()> {
 fn deadline_flag(argument: &str) -> Result<u64, String> {
     let until = ganja_tui::command::resolve_deadline(argument, SystemTime::now())?;
 
-    // The resolver already refuses an instant the wire cannot carry, so this
-    // arm is its contract restated rather than a case anybody meets; the
-    // sentence is there so that breaking that contract refuses a run instead
-    // of sending one a deadline nobody chose.
-    until
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since| u64::try_from(since.as_millis()).ok())
+    // A value parser hands clap a `u64`, so the arm the resolver's contract
+    // rules out still needs a sentence; it refuses a run rather than send one
+    // a deadline nobody chose.
+    ganja_tui::command::wire_millis(until)
         .ok_or_else(|| format!("{argument:?} names an instant a deadline cannot carry"))
 }
 

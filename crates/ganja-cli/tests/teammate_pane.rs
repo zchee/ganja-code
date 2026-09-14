@@ -170,23 +170,18 @@ impl Drop for Held {
 /// exactly as it does under the default `/bin/sh -s`.
 ///
 /// **D554**, on the same pane: the line wiped the pane before it exec'd, so
-/// nothing of the shell's is under the member's TUI. Two reads, one per
-/// half. The screen half is the `capture-pane -a` read — the visible primary
-/// rows `ganja` saved when it took the alternate screen, and only those,
-/// since tmux's `-a` cannot reach the history — holding no echoed `exec`
-/// and no `bash-` prompt. The history half is `#{history_size}`, which must
-/// be `0`: the alternate screen accumulates no history of its own, so that
-/// number is exactly the primary scrollback, and `ED 3` is what emptied it —
-/// drop `ED 3` from the head and `ED 2` alone pushes the prompt and the
-/// echoed line *into* that history, leaving the saved rows blank, so the
-/// `-a` read passes and only this half reddens (measured 2026-09-07 on
-/// next-3.8). Of the two screen matchers `exec ` is the assertion, present
-/// in every echo; `bash-` is a belt that holds only under bash's compiled-in
+/// nothing of the shell's is under the member's TUI — neither on the saved
+/// primary screen nor in its history. Only the history half catches a head
+/// without `ED 3`: drop it and `ED 2` alone pushes the prompt and the echoed
+/// line *into* the history, leaving the saved rows blank, so the screen read
+/// passes and only the history read reddens (measured 2026-09-07 on
+/// next-3.8). Of the two screen matchers `exec ` is the assertion, present in
+/// every echo; `bash-` is a belt that holds only under bash's compiled-in
 /// default prompt (`\s-\v\$ `), which a distribution's `/etc/bash.bashrc`
 /// replaces (Debian's does), so on such a runner it is vacuous and never
 /// wrong.
 #[test]
-fn a_configured_pane_shell_still_execs_the_launch_line() {
+fn a_configured_pane_shell_execs_the_launch_line_and_leaves_nothing_under_the_members_tui() {
     let (homes, script) = project();
     let config_home = homes.config_home();
     fs::create_dir_all(&config_home).expect("the config home is creatable");
@@ -229,7 +224,7 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     // find what the screen no longer shows.
     let history = tmux.history_size(&pane);
     assert_eq!(
-        history, "0",
+        history, 0,
         "the primary scrollback under the member's TUI holds {history} rows of the shell's; the \
          saved screen reads {residue:?}"
     );

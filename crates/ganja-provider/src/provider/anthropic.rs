@@ -211,19 +211,24 @@ impl AnthropicProvider {
     }
 }
 
+/// The media types the Messages API documents for `image` source blocks, plus
+/// the PDF its `document` block carries — read by this wire and by the
+/// claude-code one, whose CLI hands a user frame's blocks to the same API.
+pub(crate) const MESSAGES_API_MIMES: &[&str] =
+    &["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn id(&self) -> &str {
         ID
     }
 
-    /// The media types the Messages API documents for `image` source blocks,
-    /// plus the PDF its `document` block carries. Everything else — including
-    /// `image/avif`, which the attachment allowlist names but no block here
-    /// accepts — degrades to text at the engine rather than being sent as a
-    /// block the API would refuse.
+    /// The Messages API's own types, `MESSAGES_API_MIMES`. Everything else —
+    /// including `image/avif`, which the attachment allowlist names but no
+    /// block here accepts — degrades to text at the engine rather than being
+    /// sent as a block the API would refuse.
     fn accepts_attachment(&self, mime: &str) -> bool {
-        matches!(mime, "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf")
+        MESSAGES_API_MIMES.contains(&mime)
     }
 
     async fn stream(

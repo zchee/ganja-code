@@ -19,10 +19,11 @@ use std::fmt;
 use std::sync::Arc;
 
 // Beside the glob, and named rather than globbed because it is not part of
-// `provider`: `effort` sits at that crate's root, and exactly one door of it
-// is read here — [`effort::standalone`], the roster an uncataloged wire owns
-// outright (**D556**, Dv-16).
-pub use ganja_provider::effort;
+// `provider`: `effort` sits at that crate's root, and what this crate reads of
+// it is [`effort::standalone`] — the roster an uncataloged wire owns outright
+// (**D556**, Dv-16) — and the [`effort::Roster`] it returns. Crate-visible
+// only: no caller outside this crate reaches `effort` through here.
+pub(crate) use ganja_provider::effort;
 // The facade, and the only import this half needs of the other: a glob rather
 // than a list because the promise is that every path a caller already writes
 // still resolves, and a list is a promise that decays the next time a wire
@@ -192,7 +193,7 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 /// stored credential may name. Everyone else answers [`None`], and the catalog
 /// keeps describing them.
 ///
-/// Two providers answer, for opposite reasons:
+/// Three providers answer:
 ///
 /// - **cursor**, whose `GetUsableModels` listing is the only source its
 ///   uncataloged tier has. Live on every call, deliberately: upstream's cursor
@@ -208,13 +209,16 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 ///   back logged out exactly as they do logged in. `openai` is the platform,
 ///   which is the catalog's to describe, and answers [`None`] whatever is
 ///   stored beside it.
+/// - **`claude-code`**, one listing spawn of the CLI on this machine, with
+///   nothing marked current (`claude_code_models` says why).
 ///
 /// # Errors
 ///
-/// The inner [`ProviderError`] is the wire's own: `Auth` naming
+/// The inner [`ProviderError`] is the wire's own. For cursor: `Auth` naming
 /// `ganja auth login cursor` when no login is stored — the store is read
 /// before anything is dialled — and the transport, status and parse classes
-/// after that. The seat arm cannot fail; it reaches nothing.
+/// after that. For `claude-code`: the binary missing or below the floor, or
+/// the listing spawn failing. The seat arm cannot fail; it reaches nothing.
 pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, ProviderError>> {
     if !wire_lists_models(provider_id) {
         return None;

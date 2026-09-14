@@ -2154,7 +2154,8 @@ impl Engine {
     /// Idempotent and safe on a provider that holds nothing, like
     /// [`Engine::shutdown_mcp`] and [`Engine::shutdown_jobs`] — every wire but
     /// one inherits a default that does nothing at all. The `claude-code` wire
-    /// is the one that does not: it may be holding up to eight authenticated
+    /// is the one that does not: it may be holding up to
+    /// [`held::HELD_CAP`](crate::provider::claude_code::held::HELD_CAP) authenticated
     /// node runtimes and a scratch directory each, and a process that exits
     /// without calling this leaves them alive until their own idle bound
     /// closes them (**D556**, Dv-14).
@@ -4009,11 +4010,8 @@ impl Engine {
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
-            // Accepted while a turn streams, like the posture above and for a
-            // sharper version of its reason (**D557**): the turn being
-            // watched is exactly the one somebody setting a deadline wants
-            // hurried. Nothing is announced, because nothing polls an event
-            // for it — see [`Engine::deadline`].
+            // Taken while a turn streams, like the posture above, and
+            // announced by nothing (**D557**) — see the doc on the `deadline` field.
             Command::SetDeadline { until } => {
                 self.set_deadline(until.and_then(millis_after_epoch));
                 Ok(())
@@ -4400,12 +4398,8 @@ impl Engine {
         // files stay where the revert left them: starting a new conversation
         // is not asking for the last one's work back.
         *self.revert.lock().expect("the revert state is never poisoned") = None;
-        // A time budget belongs to the sitting that set it (**D557**), which
-        // is the one thing here that reads the *opposite* way from the
-        // permission posture two cells over: the posture is what this engine
-        // runs as and nobody asked for it back, where a deadline was somebody
-        // saying how long *this* piece of work had. Carrying it into the next
-        // conversation would hurry work nobody has budgeted yet.
+        // A time budget belongs to the sitting that set it, unlike the
+        // posture (**D557**) — see the doc on the `deadline` field.
         self.set_deadline(None);
         drop(turn);
 
@@ -5449,14 +5443,8 @@ impl Engine {
     }
 
     /// Records when this sitting's time budget runs out, or clears it
-    /// (**D557**).
-    ///
-    /// Takes hold at the **next step**, not the next turn: the block that
-    /// carries it is rebuilt from this cell every time a request is assembled,
-    /// so a deadline set while a turn streams reaches that turn.
-    ///
-    /// Nothing else happens. No event is sent — see [`Engine::deadline`] for
-    /// why there is none to send — and no turn, tool or prompt is touched.
+    /// (**D557**) — see the doc on the `deadline` field for when it takes hold and why
+    /// nothing is announced.
     fn set_deadline(&self, until: Option<std::time::SystemTime>) {
         *self.deadline.lock().expect("the deadline is never poisoned") = until;
     }
@@ -5527,20 +5515,20 @@ impl Engine {
             .await;
     }
 
-    /// Clears the selected effort when the active model's catalog row no
-    /// longer carries its name, returning whether it did — upstream clears at
-    /// the same boundary (`prompt.ts:654`). The caller owns announcing a
-    /// clear, because two of the three model-moving paths announce from an
-    /// async context this helper does not have.
+    /// Clears the selected effort when [`crate::provider::efforts_for`] no
+    /// longer carries its name for the active model — the catalog row's
+    /// variants, or the wire's own roster where there is no row — returning
+    /// whether it did; upstream clears at the same boundary (`prompt.ts:654`).
+    /// The caller owns announcing a clear, because two of the three
+    /// model-moving paths announce from an async context this helper does not
+    /// have.
     fn reconcile_effort(&self) -> bool {
         let mut active = self.active();
         let Some(name) = active.effort.as_ref() else {
             return false;
         };
         // The same one definition the door and the assembly read (**D556**,
-        // Dv-16): a model change that leaves the chosen effort unavailable
-        // clears it, and on a wire whose roster is its own rather than any
-        // model's, changing the model leaves the roster standing.
+        // Dv-16).
         if crate::provider::efforts_for(self.provider.id(), &active.model).contains_key(name) {
             return false;
         }
@@ -6363,16 +6351,6 @@ const fn sender_class_of(mode: subagent::SenderMode) -> teammate::inbound::Sende
     }
 }
 
-/// A sender's claimed reply address, kept only if it is a shape this build
-/// would ever open (**D534**): the `uds:` prefix stripped, then
-/// [`crate::tool::socket::vet_address`] — the same predicate the outbound
-/// crossing applies, one spelling — so a receipt's target is confined to a
-/// `.sock` in this uid's own `0700` directory before it is even recorded.
-///
-/// Vetted here, at admission, rather than at the post: an association held
-/// against an address nothing would ever open is a settlement that looks
-/// answerable and is not, and the honest answer is to keep no association at
-/// all. Refusals trace the reason and never the path (**AC-10**).
 /// The instant `millis` after the Unix epoch, or [`None`] when this platform
 /// cannot represent it (**D557**).
 ///
@@ -6387,6 +6365,16 @@ fn millis_after_epoch(millis: u64) -> Option<std::time::SystemTime> {
     std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(millis))
 }
 
+/// A sender's claimed reply address, kept only if it is a shape this build
+/// would ever open (**D534**): the `uds:` prefix stripped, then
+/// [`crate::tool::socket::vet_address`] — the same predicate the outbound
+/// crossing applies, one spelling — so a receipt's target is confined to a
+/// `.sock` in this uid's own `0700` directory before it is even recorded.
+///
+/// Vetted here, at admission, rather than at the post: an association held
+/// against an address nothing would ever open is a settlement that looks
+/// answerable and is not, and the honest answer is to keep no association at
+/// all. Refusals trace the reason and never the path (**AC-10**).
 fn vetted_reply_to(reply_to: Option<&str>) -> Option<PathBuf> {
     let address = reply_to?;
     let path = PathBuf::from(address.strip_prefix("uds:").unwrap_or(address));

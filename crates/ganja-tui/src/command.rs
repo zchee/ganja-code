@@ -929,11 +929,10 @@ pub fn resolve_deadline(argument: &str, now: SystemTime) -> Result<SystemTime, S
     // has no colon in it — and because the refusals differ: a clock time
     // may be well-formed and still be refused for being behind, which is
     // a sentence the span parser has no way to produce.
-    let until = if argument.contains(':') {
-        clock_deadline(argument, now)?
+    let until = if let Some((hours, minutes)) = argument.split_once(':') {
+        clock_deadline(argument, hours, minutes, now)?
     } else {
-        let span = parse_span(argument)
-            .ok_or_else(|| format!("`/deadline` did not understand {argument:?}"))?;
+        let span = parse_span(argument).ok_or_else(|| not_understood(argument))?;
         now.checked_add(span).ok_or_else(|| further_off(argument))?
     };
 
@@ -943,10 +942,26 @@ pub fn resolve_deadline(argument: &str, now: SystemTime) -> Result<SystemTime, S
     // went out as `until: None` — clearing the deadline somebody had just set
     // while the notice said it was set. One sentence for both ceilings,
     // because to whoever typed the number they are the same fact.
-    let carried = until
-        .duration_since(std::time::UNIX_EPOCH)
-        .is_ok_and(|since| u64::try_from(since.as_millis()).is_ok());
-    if carried { Ok(until) } else { Err(further_off(argument)) }
+    if wire_millis(until).is_some() { Ok(until) } else { Err(further_off(argument)) }
+}
+
+/// `at` as [`ganja_protocol::Command::SetDeadline`] spells an instant:
+/// milliseconds since the Unix epoch (**D557**), or [`None`] for an instant
+/// that cannot be one — before the epoch, or past `u64` milliseconds.
+///
+/// The one conversion, so [`resolve_deadline`]'s ceiling and both doors' sends
+/// are the same arithmetic. A caller holding an instant the resolver returned
+/// never meets the [`None`] arm, because the resolver refused exactly those.
+#[must_use]
+pub fn wire_millis(at: SystemTime) -> Option<u64> {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
+}
+
+/// A line whose shape this grammar has not got.
+fn not_understood(argument: &str) -> String {
+    format!("`/deadline` did not understand {argument:?}")
 }
 
 /// A span so large no deadline can name its end. Refused rather than clamped:
@@ -956,32 +971,35 @@ fn further_off(argument: &str) -> String {
     format!("{argument:?} is further off than this machine's clock reaches")
 }
 
-/// `HH:MM` resolved against `now`: today's local wall clock.
+/// `HH:MM` resolved against `now`: today's local wall clock, from the two
+/// halves either side of `argument`'s colon.
 ///
 /// Refused when it is already behind, and deliberately **not** rolled forward
 /// to tomorrow. Somebody typing `/deadline 09:00` at ten in the morning has
 /// almost certainly mistyped or misread the time; giving them a deadline
 /// twenty-three hours out would be a budget nobody chose, and the whole point
 /// of this feature is that the person chose it.
-fn clock_deadline(argument: &str, now: SystemTime) -> Result<SystemTime, String> {
-    let Some((hours, minutes)) = argument.split_once(':') else {
-        return Err(format!("`/deadline` did not understand {argument:?}"));
-    };
+fn clock_deadline(
+    argument: &str,
+    hours: &str,
+    minutes: &str,
+    now: SystemTime,
+) -> Result<SystemTime, String> {
     // The shapes first, on the text: one or two digits for the hour and
     // exactly two for the minute, so `10:0` and `10:000` are refused rather
     // than read as ten o'clock. `9:30` is allowed because people write it.
+    // Only a shaped pair is parsed, and one or two ASCII digits always fit an
+    // `i8`, so the parse never refuses anything the shape let through.
     let shaped = matches!(hours.len(), 1 | 2)
         && minutes.len() == 2
         && hours.bytes().chain(minutes.bytes()).all(|byte| byte.is_ascii_digit());
+    let Some((Ok(hour), Ok(minute))) = shaped.then(|| (hours.parse::<i8>(), minutes.parse::<i8>()))
+    else {
+        return Err(not_understood(argument));
+    };
     // Then the ranges, on the numbers. `24:00` and `10:60` get their own
     // sentence: they *are* clock times in shape, and what is wrong with them
     // is worth saying rather than folding into "did not understand".
-    let (Ok(hour), Ok(minute)) = (hours.parse::<i8>(), minutes.parse::<i8>()) else {
-        return Err(format!("`/deadline` did not understand {argument:?}"));
-    };
-    if !shaped {
-        return Err(format!("`/deadline` did not understand {argument:?}"));
-    }
     if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
         return Err(format!(
             "{argument:?} is not a clock time: the hours run 00 to 23 and the minutes 00 to 59"

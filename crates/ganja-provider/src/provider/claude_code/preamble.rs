@@ -54,7 +54,7 @@
 //! the whole conversation would go to the CLI twice in one paid frame.
 
 use crate::protocol::{Message, PartBody, Role, ToolState};
-use crate::provider::cursor::history::{CALL_INPUT_LIMIT, clamp};
+use crate::provider::clamp;
 
 /// The line a fresh record's preamble opens with.
 ///
@@ -309,9 +309,10 @@ fn tool_lines(tool: &str, state: &ToolState) -> Vec<String> {
 /// A message's text, the way every frame this wire writes renders one.
 ///
 /// Text parts joined with a blank line, and a `File` part degraded to its
-/// name: this wire carries no attachment, so a file the person attached is
-/// named rather than dropped — the model can at least ask about it, and a
-/// recorded limitation is better than a silence.
+/// name: its bytes ride only an owed message's own frame
+/// ([`super::attachments`]), so everywhere else it is named rather than
+/// dropped — the model can at least ask about it, and a recorded limitation is
+/// better than a silence.
 ///
 /// Every other part kind contributes nothing, each for its own reason —
 /// `Peer` is another agent's words, `Reasoning` is sealed for a wire that is
@@ -339,10 +340,6 @@ pub fn message_text(message: &Message) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
-
-/// The bound one rendered `[Tool Call]` input is cut at, re-exported so a
-/// reader of this module does not have to know it is cursor's.
-pub const INPUT_LIMIT: usize = CALL_INPUT_LIMIT;
 
 #[cfg(test)]
 #[path = "preamble_tests.rs"]

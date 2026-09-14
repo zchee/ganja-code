@@ -492,11 +492,14 @@ fn a_binary_mention_the_wire_cannot_carry_degrades_to_its_name() {
     let mut messages = message_mentioning("shot.png");
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
-    let text = messages[0].parts[0].as_text().expect("the part degraded to text");
-    assert!(text.contains("shot.png"), "the model learns the name: {text}");
-    assert!(
-        text.contains("image/png") && text.contains("does not carry"),
-        "and why the bytes are not there: {text}"
+    assert_eq!(
+        messages[0].parts[0].as_text(),
+        Some(
+            "<attached-file path=\"shot.png\" mime=\"image/png\">\n(attached by name only: \
+             this provider's wire does not carry image/png content)\n</attached-file>"
+        ),
+        "the part degraded to its name, its kind and why the bytes are not there: {:?}",
+        messages[0].parts[0]
     );
 }
 
@@ -1659,6 +1662,18 @@ fn the_deadline_block_past_the_instant_is_this_sentence_exactly() {
         "Deadline 22:30 passed 45s ago. Start nothing. In as few words as possible: what is done, \
          what is not, and the one next step for whoever continues."
     );
+}
+
+/// **D557.** An instant past the clock's range (year 9999) still earns the
+/// sentence, with a placeholder where the hour would be. Reachable from a
+/// keyboard: the wire carries any `u64` of millis and a typed `/deadline` span
+/// has no cap below that.
+#[test]
+fn a_deadline_past_the_clocks_range_still_says_what_is_left_under_a_placeholder_hour() {
+    let far = std::time::UNIX_EPOCH + Duration::from_secs(400_000_000_000);
+
+    let block = super::deadline_block(Ok(Duration::from_secs(60)), far);
+    assert!(block.starts_with("Deadline --:-- (1m0s left). "), "{block}");
 }
 
 /// **D557.** A span is the largest unit that is not zero and the next one
