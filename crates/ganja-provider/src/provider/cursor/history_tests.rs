@@ -322,7 +322,7 @@ fn a_message_holding_a_placeholder_row_composes_byte_identically_to_one_without_
         ToolState::Pending { input: None },
         errored(
             serde_json::json!({}),
-            "the model began this call but never sent it, so nothing ran",
+            "the model began this call, but it never reached a tool, so nothing ran",
         ),
         errored(serde_json::json!({}), "the call was cancelled"),
     ] {

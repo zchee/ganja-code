@@ -82,13 +82,16 @@ fn denied(rules: &[crate::permission::Rule]) -> String {
 const STRANDED: &str = "the provider failed before this call could run";
 
 /// What a placeholder row (**D559**) is closed with when nothing is left to
-/// name it: the wire announced the call as the model began it, and the step
-/// that could have carried it ended without it.
+/// name it: the wire announced the call as the model began it, and no start
+/// ever named it — either the server never sent the call, or the wire refused
+/// it before the engine could see it (a tool off the roster, another server's
+/// call, arguments it could not read). One sentence true of both, since the
+/// engine cannot tell them apart and nothing ran in either.
 ///
 /// Written for the person reading the transcript, and for nobody else — the
 /// one wire that sends [`COMPOSING`] leaves a row still carrying it out of
 /// every state it composes (`cursor/history`), so no model ever reads this.
-const UNSENT: &str = "the model began this call but never sent it, so nothing ran";
+const UNSENT: &str = "the model began this call, but it never reached a tool, so nothing ran";
 
 /// Upstream `tool/invalid.ts`: a call that cannot run is answered through the
 /// `invalid` tool, and this is the shape of its output.
@@ -3826,19 +3829,26 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 }
             }
             ProviderEvent::ToolCallStart { id, name } => {
-                // A second start for a call this step holds (**D559**). Under
-                // the same name it says nothing new. Under another it is a
-                // wire that learned the call's tool late — cursor announces a
-                // call as the model begins it, under `COMPOSING`, and names it
-                // only when the exec lands — so the **last name wins** and the
-                // call and its row are renamed in place. Nothing else about
-                // the call moves: its id, its part, its position in the
-                // message and its argument buffer all stay, and everything
-                // that reads the name — the permission gate, the hooks, what
-                // the transcript runs — reads it at `prepare` or later, which
-                // is after this.
+                // A second start for a call this step holds (**D559**). For a
+                // call held under `COMPOSING` it is a wire that learned the
+                // call's tool late — cursor announces a call as the model
+                // begins it and names it only when the exec lands — so the
+                // **last name wins** and the call and its row are renamed in
+                // place. Nothing else about the call moves: its id, its part,
+                // its position in the message and its argument buffer all
+                // stay, and everything that reads the name — the permission
+                // gate, the hooks, what the transcript runs — reads it at
+                // `prepare` or later, which is after this.
+                //
+                // A call already named is never renamed, whatever the second
+                // start says: that is a degenerate wire reusing one id for two
+                // calls (chat-completions' `""` on parallel calls, an
+                // anthropic block with no id), and renaming one real call to
+                // another's name — or back to `COMPOSING`, which would
+                // withhold it — would be worse than ignoring the start, which
+                // is what every wire got before D559.
                 if let Some(held) = calls.iter_mut().find(|call| call.id == id) {
-                    if held.name == name {
+                    if held.name != COMPOSING || name == COMPOSING {
                         tracing::debug!(id, "the provider started the same call twice");
                         continue;
                     }
@@ -5470,6 +5480,11 @@ async fn close_composing(turn: &Turn, assistant: &mut Message, outcome: Option<&
 
     let error = match outcome.map(|outcome| &outcome.reason) {
         Some(FinishReason::Failed) => STRANDED.to_owned(),
+        // Defence, not a path any turn takes today: `drive` completes only
+        // from a step that ran nothing, and `stream_step` has already closed
+        // every placeholder with `UNSENT` on that path. Kept so a completed
+        // turn that ever did reach here would close its row with the one
+        // sentence true of it, rather than as a cancel nobody made.
         Some(FinishReason::Completed) => UNSENT.to_owned(),
         Some(FinishReason::Cancelled) | None => ToolError::Cancelled.to_string(),
     };

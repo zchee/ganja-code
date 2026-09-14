@@ -777,6 +777,56 @@ async fn a_partial_arriving_after_its_own_exec_opens_no_row() {
     );
 }
 
+/// **D559.** A call whose partial opened its row and whose exec this client
+/// refuses is claimed at the refusal and named on the log there. Nothing
+/// more about it reaches the engine — no naming start, no argument, no end —
+/// so the engine closes the one row unrun; and because it was claimed, the
+/// turn's end does not list it beside the calls the server never sent.
+#[tokio::test]
+async fn an_announced_call_whose_exec_is_refused_is_claimed_and_named_at_the_refusal() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+
+    let mut body = framed(partial("toolu_X"));
+    body.extend(mcp_framed(
+        3,
+        proto::McpArgs::default()
+            .with_name("rm_minus_rf")
+            .with_tool_name("rm_minus_rf")
+            .with_tool_call_id("toolu_X")
+            .with_provider_identifier("ganja"),
+    ));
+    let (events, sent) = bridged_exec(body, roster()).await;
+
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::ToolCallStart {
+                id: "toolu_X".to_owned(),
+                name: crate::provider::COMPOSING.to_owned(),
+            },
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "one row, opened by the partial and never named"
+    );
+    let refused = sent
+        .iter()
+        .find_map(|message| message.exec_response.as_option())
+        .and_then(|response| response.mcp_result.as_option())
+        .expect("the exec was answered here, never bridged");
+    assert!(refused.tool_not_found.is_set(), "{refused:?}");
+
+    let logged = log.logged();
+    let named = logged
+        .lines()
+        .find(|line| line.contains("refused the exec of an announced tool call"))
+        .unwrap_or_else(|| panic!("the refusal names the announced call: {logged}"));
+    assert!(named.contains(r#"call="toolu_X""#), "{named}");
+    assert!(
+        !logged.contains("the turn ended with announced tool calls no exec claimed"),
+        "the refusal claimed the call, so the turn's end lists nothing: {logged}"
+    );
+}
+
 /// **AC-14c, the wire half.** A keyed hit still lacking one of its results
 /// opens a fresh Run — the held one stays held, which `bridge::tests`
 /// watches — and the run request that Run goes out with is a

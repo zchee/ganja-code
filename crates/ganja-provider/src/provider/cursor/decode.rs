@@ -97,9 +97,11 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// be a row that never resolves. The started and completed arms arrive with
 /// the exec and with its answer, and add nothing a row needs.
 ///
-/// An announced call no exec claims — the server ended the turn without it,
-/// or the exec was refused before the engine could see it — is named on the
-/// debug log when the turn ends; the engine is what closes its row.
+/// An announced call no exec claims — the server ended the turn without it —
+/// is named on the debug log when the turn ends; one whose exec this client
+/// refused is named when the refusal goes out, and claimed then. Either way
+/// no exec reaches the engine to name it, and the engine is what closes its
+/// row, unrun.
 ///
 /// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
 /// The two are the application and the protocol saying different things —
@@ -494,6 +496,26 @@ impl Mapping {
     /// nothing either.
     pub(super) fn claim(&mut self, call_id: &str) {
         self.announced.insert(call_id.to_owned(), true);
+    }
+
+    /// Marks `call_id` claimed by an exec this client answered with a
+    /// refusal, and names it on the debug log when a partial had opened its
+    /// row.
+    ///
+    /// A refused exec never reaches the pause, so without this its row would
+    /// wait through every later pause for a naming start that cannot come, and
+    /// `turn_ended` would list it beside the calls the server never sent.
+    /// Claimed all the same, for [`claim`](Self::claim)'s reason: a partial
+    /// arriving after the refusal opens nothing.
+    pub(super) fn refused(&mut self, call_id: &str) {
+        if self.announced.get(call_id) == Some(&false) {
+            tracing::debug!(
+                provider = ID,
+                call = call_id,
+                "refused the exec of an announced tool call; its row closes unrun"
+            );
+        }
+        self.claim(call_id);
     }
 
     /// Opens the row of a call `partial` says the model has begun (**D559**),

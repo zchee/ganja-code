@@ -803,6 +803,49 @@ fn a_turn_that_ends_with_an_announced_call_unclaimed_leaves_its_start_unanswered
     );
 }
 
+/// **D559.** The turn's end names, sorted, exactly the announced calls no
+/// exec claimed — each a `…` row the engine is about to close unrun. A call
+/// the pause handed the engine is not among them, and neither is one whose
+/// exec was refused: that one was named when the refusal went out, and a
+/// refusal for an id no partial announced names nothing.
+#[test]
+fn a_turn_that_ends_with_announced_calls_unclaimed_names_only_those_on_the_log() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let feed = |mapping: &mut Mapping, body: &[u8]| {
+        let mut splitter = connect::Splitter::default();
+        splitter.push(body);
+        let mut events = Vec::new();
+        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
+            assert!(mapping.frame(&frame, &mut events).is_none(), "no frame here is a question");
+        }
+
+        events
+    };
+    let mut mapping = Mapping::default();
+    for call_id in ["toolu_B", "toolu_A", "toolu_C", "toolu_D"] {
+        assert_eq!(feed(&mut mapping, &recorded_partial(call_id)), vec![composing(call_id)]);
+    }
+    mapping.claim("toolu_C");
+    mapping.refused("toolu_D");
+    mapping.refused("toolu_R");
+
+    assert!(feed(&mut mapping, &framed(turn_ended())).is_empty(), "a turn's end is no event");
+
+    let logged = log.logged();
+    let refusals: Vec<&str> = logged
+        .lines()
+        .filter(|line| line.contains("refused the exec of an announced tool call"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one announced call was refused: {logged}");
+    assert!(refusals[0].contains(r#"call="toolu_D""#), "{}", refusals[0]);
+
+    let ended = logged
+        .lines()
+        .find(|line| line.contains("the turn ended with announced tool calls no exec claimed"))
+        .unwrap_or_else(|| panic!("the unclaimed calls are named at the turn's end: {logged}"));
+    assert!(ended.contains(r#"calls=["toolu_A", "toolu_B"]"#), "{ended}");
+}
+
 /// An arm this build still does not model is still skipped, and still named
 /// in the skip log — the tool-call arms leaving that table took nothing else
 /// with them.

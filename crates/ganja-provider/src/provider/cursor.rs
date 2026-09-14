@@ -994,7 +994,7 @@ enum Exec {
 }
 
 /// Decides what one tool exec gets: ganja's own tool, or a refusal.
-fn exec(fold: &Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> Exec {
+fn exec(fold: &mut Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> Exec {
     let roster = fold.duplex.names();
 
     let (call_id, tool, input, answer) = match &ask.args {
@@ -1002,7 +1002,16 @@ fn exec(fold: &Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> Exec 
             Ok((call_id, arguments)) => {
                 (call_id, call.called().to_owned(), arguments, native::Answer::Mcp)
             }
-            Err(result) => return Exec::Answered(refused_mcp(&ask, *result)),
+            Err(result) => {
+                // A refused call never reaches the pause, so this is the one
+                // place its announced row can be claimed (**D559**). A
+                // preflight is no refusal: the real call follows it and names
+                // the row.
+                if !call.approval_only {
+                    fold.mapping.refused(&call.tool_call_id);
+                }
+                return Exec::Answered(refused_mcp(&ask, *result));
+            }
         },
         args => {
             let Some(bridged) = native::redirect(args, &roster) else {
@@ -1032,6 +1041,7 @@ fn exec(fold: &Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> Exec 
     let Some(bridge) = bridge.as_mut() else {
         return Exec::Answered(match answer {
             native::Answer::Mcp => {
+                fold.mapping.refused(&call_id);
                 request::refusal_answer_because(&ask, &request::unbridgeable_reason(&tool))
             }
             _ => request::refusal_answer(&ask),
