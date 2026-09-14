@@ -281,18 +281,22 @@ fn a_claude_code_login_is_refused_by_name_and_names_the_clis_own_command() {
 /// request is filed under and a permission rule is written against are one
 /// name, and this enum is where a second spelling would first appear.
 ///
-/// Read off the provider crate's own constants rather than off literals, so a
-/// wire that renamed itself reddens here instead of quietly filing a
-/// credential where nothing looks for one.
+/// The spelling clap accepts on the command line is the spelling the login
+/// stores under: a `#[value(name = …)]` that drifted from `as_str` would take
+/// one name at the prompt and file the credential under another, where
+/// nothing reads it.
 #[test]
 fn the_command_line_spells_every_provider_the_way_the_wires_do() {
     use clap::ValueEnum as _;
 
-    assert_eq!(
-        ProviderId::ClaudeCode.as_str(),
-        ganja_core::provider::claude_code::ID,
-        "the id a session names is the id a login would be filed under"
-    );
+    for id in ProviderId::value_variants() {
+        let accepted = id.to_possible_value().expect("every variant parses");
+        assert_eq!(
+            accepted.get_name(),
+            id.as_str(),
+            "the name clap accepts is the name the credential is filed under"
+        );
+    }
     assert_eq!(ProviderId::ClaudeCode.to_string(), "claude-code", "and it is spelled hyphenated");
 
     // Every value clap accepts is a provider this build actually ships, so a

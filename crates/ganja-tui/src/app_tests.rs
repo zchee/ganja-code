@@ -25,10 +25,10 @@ use ratatui::style::{Color, Modifier};
 use tempfile::TempDir;
 
 use super::{
-    App, BACKTRACK_HINT, Chooser, Cleared, DEADLINE_NOTICE, Dropdown, ESC_CHORD, FRAME, Help,
-    JoinHandle, ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, NOBODY_TO_STOP, Palette,
-    PendingDialog, Permission, RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE,
-    WireListing, permission_reply,
+    App, BACKTRACK_HINT, Chooser, Cleared, DEADLINE_NOTICE, Dropdown, ESC_CHORD, EVICTION_NOTICE,
+    FRAME, Help, JoinHandle, ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS,
+    NOBODY_TO_STOP, Palette, PendingDialog, Permission, RevertScope, Rewind, SLOW_TASK_READ,
+    TASK_READ_DEADLINE, WireListing, permission_reply,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -8005,10 +8005,8 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
     let mut app = app();
     app.run_command(command::Action::Help).await;
 
-    // Taller than it once was, because the roster this card lists gained
-    // `/teammate` (**D504**), then `/held` (**D524**), then `/rename`
-    // (**D527**), then `/deadline` (**D557**) — the card grows with the
-    // commands, which is what "the whole card" means.
+    // One row per help item, so the card grows with the roster this card
+    // lists — which is what "the whole card" means.
     let mut terminal = terminal(90, 44);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
@@ -11442,20 +11440,17 @@ async fn the_fresh_read_is_taken_once_per_distinct_token() {
     assert!(!fresh.holds(&app, "gone"), "a name never asked about is read now, and is not held");
 }
 
-/// A moment `seconds` from now, as the engine's command spells one.
-///
-/// Ahead or behind by construction rather than by waiting: the engine's slot
-/// holds a wall-clock instant, and putting one in the past *is* the overdue
-/// case — nothing sleeps and no runtime clock is paused.
-fn deadline_millis(seconds: i64) -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("this machine's clock is after the epoch");
+/// Sets the engine's deadline to [`ganja_testkit::deadline_millis`]`(seconds)`
+/// and hands back the milliseconds it sent, for a test that reads the instant
+/// back.
+async fn deadline_in(app: &App, seconds: i64) -> u64 {
+    let until = ganja_testkit::deadline_millis(seconds);
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(until) })
+        .await
+        .expect("a deadline is taken in every state, an instant already behind included");
 
-    u64::try_from(now.as_millis())
-        .expect("the epoch fits a u64 of millis")
-        .checked_add_signed(seconds * 1000)
-        .expect("the moment is representable")
+    until
 }
 
 /// **D557, AC-D4.** The notice is written on the one edge where the instant
@@ -11464,17 +11459,11 @@ fn deadline_millis(seconds: i64) -> u64 {
 async fn the_deadline_notice_is_written_on_the_passing_edge_and_only_then() {
     let mut app = app();
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(300)) })
-        .await
-        .expect("a deadline is taken in every state");
+    deadline_in(&app, 300).await;
     app.poll_deadline();
     assert_eq!(app.status.notice(), None, "a budget still ahead says nothing");
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) })
-        .await
-        .expect("an instant already behind is taken like any other");
+    deadline_in(&app, -40).await;
     app.poll_deadline();
     assert_eq!(
         app.status.notice(),
@@ -11499,9 +11488,8 @@ async fn the_deadline_notice_is_written_on_the_passing_edge_and_only_then() {
 #[tokio::test]
 async fn clearing_a_deadline_takes_its_notice_down_but_not_somebody_else_s() {
     let mut app = app();
-    let passed = ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) };
 
-    app.engine.send(passed.clone()).await.expect("an instant already behind is taken");
+    deadline_in(&app, -40).await;
     app.poll_deadline();
     assert_eq!(app.status.notice(), Some(DEADLINE_NOTICE));
 
@@ -11513,7 +11501,7 @@ async fn clearing_a_deadline_takes_its_notice_down_but_not_somebody_else_s() {
     );
 
     // Again, but with another writer's sentence standing when the clear lands.
-    app.engine.send(passed).await.expect("an instant already behind is taken");
+    deadline_in(&app, -40).await;
     app.poll_deadline();
     app.status.set_notice(Some("an MCP server is out of reach".to_owned()));
     app.set_deadline(None).await;
@@ -11531,10 +11519,7 @@ async fn clearing_a_deadline_takes_its_notice_down_but_not_somebody_else_s() {
 async fn a_fresh_deadline_re_arms_the_passing_edge() {
     let mut app = app();
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) })
-        .await
-        .expect("an instant already behind is taken");
+    deadline_in(&app, -40).await;
     app.poll_deadline();
     assert_eq!(app.status.notice(), Some(DEADLINE_NOTICE));
 
@@ -11548,10 +11533,7 @@ async fn a_fresh_deadline_re_arms_the_passing_edge() {
         app.status.notice()
     );
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-1)) })
-        .await
-        .expect("an instant already behind is taken");
+    deadline_in(&app, -1).await;
     app.poll_deadline();
     assert_eq!(
         app.status.notice(),
@@ -11560,8 +11542,31 @@ async fn a_fresh_deadline_re_arms_the_passing_edge() {
     );
 }
 
-/// **D557.** A bare `/deadline` answers what is set, and says so plainly when
-/// nothing is — it changes nothing either way.
+/// **D557.** A typed `/deadline` hands the engine the instant it resolved, at
+/// the wire's millisecond grain — not merely a notice saying one was set.
+#[tokio::test]
+async fn a_deadline_line_hands_the_engine_the_instant_it_named() {
+    let mut app = app();
+    let named = std::time::SystemTime::now() + std::time::Duration::from_secs(300);
+    let millis = named
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("this machine's clock is after the epoch")
+        .as_millis();
+
+    app.run_deadline_line(command::Deadline::Set(named)).await;
+
+    assert_eq!(
+        app.engine.deadline(),
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_millis(u64::try_from(millis).expect("fits a u64"))
+        ),
+        "the engine holds the instant the line named"
+    );
+}
+
+/// **D557.** A bare `/deadline` answers what is set — what is left, or how far
+/// over — and says so plainly when nothing is; it changes nothing either way.
 #[tokio::test]
 async fn a_bare_deadline_line_says_what_is_set() {
     let mut app = app();
@@ -11570,16 +11575,21 @@ async fn a_bare_deadline_line_says_what_is_set() {
     assert_eq!(app.status.notice(), Some("no deadline"));
     assert_eq!(app.engine.deadline(), None, "asking sets nothing");
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(300)) })
-        .await
-        .expect("a deadline is taken in every state");
+    deadline_in(&app, 300).await;
     app.run_deadline_line(command::Deadline::Show).await;
     assert!(
         app.status
             .notice()
             .is_some_and(|said| said.starts_with("deadline: ") && said.ends_with(" left")),
         "got {:?}",
+        app.status.notice()
+    );
+
+    deadline_in(&app, -40).await;
+    app.run_deadline_line(command::Deadline::Show).await;
+    assert!(
+        app.status.notice().is_some_and(|said| said.starts_with("deadline: overdue ")),
+        "an instant already behind is said as how far over, got {:?}",
         app.status.notice()
     );
 }
@@ -11589,12 +11599,8 @@ async fn a_bare_deadline_line_says_what_is_set() {
 #[tokio::test]
 async fn a_refused_deadline_line_disturbs_nothing_that_was_already_set() {
     let mut app = app();
-    let until = deadline_millis(300);
+    let until = deadline_in(&app, 300).await;
 
-    app.engine
-        .send(ganja_protocol::Command::SetDeadline { until: Some(until) })
-        .await
-        .expect("a deadline is taken in every state");
     app.run_deadline_line(command::Deadline::Refused("nope. /deadline …".to_owned())).await;
 
     assert_eq!(app.status.notice(), Some("nope. /deadline …"));
@@ -11603,4 +11609,140 @@ async fn a_refused_deadline_line_disturbs_nothing_that_was_already_set() {
         Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(until)),
         "the budget that was running is untouched"
     );
+}
+
+/// A provider whose served model and last eviction are whatever a test put in
+/// its two cells — the two facts the app polls off a wire (**D556**) — with
+/// every turn the fake's.
+#[derive(Default)]
+struct Polled {
+    fake: FakeProvider,
+    served: std::sync::Mutex<Option<ganja_core::provider::ServedModel>>,
+    evicted: std::sync::Mutex<Option<ganja_core::provider::Eviction>>,
+}
+
+/// In the shape `async_trait` desugars to, for `DialogAsker`'s reason: this
+/// crate does not depend on that macro.
+impl ganja_core::provider::Provider for Polled {
+    fn id(&self) -> &str {
+        ganja_core::provider::Provider::id(&self.fake)
+    }
+
+    fn stream<'a, 'b>(
+        &'a self,
+        request: ganja_core::provider::ChatRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Streamed> + Send + 'b>>
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        ganja_core::provider::Provider::stream(&self.fake, request, cancel)
+    }
+
+    fn served_model(&self) -> Option<ganja_core::provider::ServedModel> {
+        self.served.lock().expect("the cell is not poisoned").clone()
+    }
+
+    fn last_eviction(&self) -> Option<ganja_core::provider::Eviction> {
+        self.evicted.lock().expect("the cell is not poisoned").clone()
+    }
+}
+
+/// What [`Polled::stream`]'s future resolves to.
+type Streamed = Result<
+    BoxStream<'static, ganja_core::provider::ProviderEvent>,
+    ganja_core::provider::ProviderError,
+>;
+
+/// An app over a [`Polled`] provider, and the provider, for the test to steer.
+fn polled_app() -> (App, Arc<Polled>) {
+    let polled = Arc::new(Polled::default());
+    let engine = Engine::new(
+        Arc::clone(&polled) as Arc<dyn ganja_core::provider::Provider>,
+        fake::MODEL,
+        Arc::new(ganja_tool::Registry::new(Vec::new())),
+        ganja_permission::Permissions::default(),
+    );
+
+    (App::new(engine, None, Themes::builtin()), polled)
+}
+
+/// **D556.** The eviction notice is written on the `None → Some` edge, left
+/// alone on `Some → Some`, and taken down on `Some → None` — and only while it
+/// is still the sentence standing, so another writer's survives the takedown.
+#[tokio::test]
+async fn the_eviction_notice_follows_the_wires_three_edges() {
+    let (mut app, polled) = polled_app();
+    let evict = |key: Option<&str>| {
+        *polled.evicted.lock().expect("the cell is not poisoned") =
+            key.map(|key| ganja_core::provider::Eviction { key: key.to_owned() });
+    };
+
+    app.poll_eviction();
+    assert_eq!(app.status.notice(), None, "a wire that evicted nothing says nothing");
+
+    evict(Some("first"));
+    app.poll_eviction();
+    assert_eq!(app.status.notice(), Some(EVICTION_NOTICE), "None → Some writes the sentence");
+
+    app.status.set_notice(Some("an MCP server is out of reach".to_owned()));
+    evict(Some("second"));
+    app.poll_eviction();
+    assert_eq!(
+        app.status.notice(),
+        Some("an MCP server is out of reach"),
+        "Some → Some is the same sentence, so nothing is written over the other writer's"
+    );
+
+    evict(None);
+    app.poll_eviction();
+    assert_eq!(
+        app.status.notice(),
+        Some("an MCP server is out of reach"),
+        "Some → None takes down its own sentence only"
+    );
+
+    evict(Some("third"));
+    app.poll_eviction();
+    evict(None);
+    app.poll_eviction();
+    assert_eq!(app.status.notice(), None, "Some → None takes its own sentence down");
+}
+
+/// **D556.** The served model reaches the bar only while no delegated child is
+/// in flight: a child moves the provider-wide reading, so the bar is handed
+/// [`None`] while one runs — redrawn once on the change, and not again while
+/// nothing moves.
+#[tokio::test]
+async fn the_served_model_is_withheld_from_the_bar_while_a_child_runs() {
+    let (mut app, polled) = polled_app();
+    let reading = ganja_core::provider::ServedModel {
+        requested: "default".to_owned(),
+        served: "claude-opus-5[1m]".to_owned(),
+    };
+    *polled.served.lock().expect("the cell is not poisoned") = Some(reading.clone());
+
+    app.poll_served_model();
+    assert_eq!(app.served_model, Some(reading.clone()), "no child, so the reading is shown");
+
+    task_part(
+        &mut app,
+        ToolState::Running {
+            input: serde_json::json!({"description": "find the parser", "subagent_type": "explore"}),
+            metadata: serde_json::json!({"toolcalls": 1}),
+            started: 0,
+        },
+    )
+    .await;
+    assert_eq!(app.chat.running_tasks(), 1, "the premise: a delegated child is in flight");
+
+    app.dirty = false;
+    app.poll_served_model();
+    assert_eq!(app.served_model, None, "a running child withholds the reading from the bar");
+    assert!(app.dirty, "and the change is redrawn");
+
+    app.dirty = false;
+    app.poll_served_model();
+    assert!(!app.dirty, "a tick that changed nothing redraws nothing");
 }

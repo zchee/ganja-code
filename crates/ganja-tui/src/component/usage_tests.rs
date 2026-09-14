@@ -223,10 +223,6 @@ fn the_duration_row_formats_compactly_and_only_over_a_measured_duration() {
 /// **D556.** The `Served model:` row renders both spellings where a wire
 /// reports them, and no row at all where none does — the honest-absence rule
 /// the two window sections already keep.
-///
-/// This panel is where the served model *always* is: the status bar draws it
-/// only for a `tui.statusline` roster naming `model`, so on a default bar
-/// this is the one surface that carries it (rev 8, A6-M1 (c)).
 #[test]
 fn the_served_model_row_names_both_spellings_and_is_absent_without_one() {
     let screen = rendered(

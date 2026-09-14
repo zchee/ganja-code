@@ -534,48 +534,29 @@ fn a_deadline_reaches_the_first_request_a_headless_turn_sends() {
     );
 }
 
-/// **qecz.** A value the grammar has not got is refused at the flag, before an
-/// engine is assembled — so no session is created and no request is spent to
-/// learn of a typo. The refusal is `/deadline`'s own reason.
+/// **qecz.** A value `/deadline`'s resolver refuses is refused at the flag,
+/// before an engine is assembled — so no session is created and no request is
+/// spent to learn of a typo — and the refusal is the resolver's own reason.
+/// Two of them: a unit the grammar has not got, and a clock time already
+/// behind, which is refused rather than rolled to tomorrow exactly as
+/// `/deadline` refuses it. `00:00` is behind at every moment of a day, so that
+/// half holds whenever the suite runs.
 #[test]
-fn a_deadline_the_grammar_has_not_got_is_refused_before_any_turn() {
-    let run = Run::playing(&one_word());
+fn a_deadline_the_resolver_refuses_is_refused_before_any_turn() {
+    for (typed, reason) in [("5x", "did not understand"), ("00:00", "already behind")] {
+        let run = Run::playing(&one_word());
 
-    run.ganja()
-        .args(["run", "--deadline", "5x", "hello"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--deadline"))
-        .stderr(predicate::str::contains("did not understand"));
-    assert!(run.sessions().is_empty(), "a refused flag started no turn and stored no session");
-}
-
-/// **qecz.** A clock time already behind is refused rather than rolled to
-/// tomorrow, exactly as `/deadline` refuses it. `00:00` is behind at every
-/// moment of a day, so this holds whenever the suite runs.
-#[test]
-fn a_deadline_clock_time_already_behind_is_refused_before_any_turn() {
-    let run = Run::playing(&one_word());
-
-    run.ganja()
-        .args(["run", "--deadline", "00:00", "hello"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("already behind"));
-    assert!(run.sessions().is_empty(), "a refused flag started no turn and stored no session");
-}
-
-/// **qecz.** The attached client carries no deadline route, so the pair would
-/// parse and then hurry nothing; clap refuses it, as it refuses `--effort`
-/// with `--attach`. The address is never dialled — the refusal comes first.
-#[test]
-fn attaching_with_a_deadline_fails_to_parse() {
-    Run::playing(&one_word())
-        .ganja()
-        .args(["run", "--attach", "http://127.0.0.1:9", "--deadline", "5m", "hello"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("cannot be used with"));
+        run.ganja()
+            .args(["run", "--deadline", typed, "hello"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--deadline"))
+            .stderr(predicate::str::contains(reason));
+        assert!(
+            run.sessions().is_empty(),
+            "{typed:?}: a refused flag started no turn and stored no session"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

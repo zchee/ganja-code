@@ -73,7 +73,7 @@ use crate::component::rewind::Rewind;
 use crate::component::search::HistorySearch;
 use crate::component::sessions::{self, Sessions};
 use crate::component::skill_menu::SkillMenu;
-use crate::component::status::{Activity, Status, Todos, Totals};
+use crate::component::status::{Activity, Status, Todos, Totals, budget_left};
 use crate::component::themes::ThemeList;
 use crate::component::{context, effort, held, mcp, plugin, team, usage};
 use crate::escrepair::EscRepair;
@@ -95,23 +95,6 @@ fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
-}
-
-/// `until` as [`Command::SetDeadline`] spells one: milliseconds since the Unix
-/// epoch (**D557**), or [`None`] for an instant that cannot be one.
-///
-/// [`now_millis`]'s conversion for an arbitrary instant rather than for now,
-/// and the failure is handled the other way round: that one is stamping a
-/// record and a zero is a usable answer, where this one is naming a moment and
-/// a wrong number would be a deadline nobody chose. Only an instant before the
-/// epoch or past `u64` milliseconds fails, neither of which a clock reading
-/// plus a typed span reaches — so the [`None`] arm is a refusal to guess
-/// rather than a case anybody meets.
-fn epoch_millis(until: SystemTime) -> Option<u64> {
-    until
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| u64::try_from(since.as_millis()).ok())
 }
 
 /// The incumbent's own collision re-scan runs at most this often (**S1**,
@@ -240,12 +223,7 @@ const SLOW_TASK_READ: &str =
 /// is not a session id and that nothing outside the wire can map back to a
 /// conversation, so a sentence carrying one would be a fact the reader cannot
 /// use. The wire's own log line names the key it evicted, which is where
-/// somebody debugging one looks (rev 8, C-L4).
-///
-/// Taken down with [`Status::clear_notice_if`] rather than an unconditional
-/// clear, `SLOW_TASK_READ`'s precedent above: the slot is one and unowned, and
-/// a sentence another writer put there in the meantime has no second place to
-/// appear.
+/// somebody debugging one looks.
 const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next turn opens without the assistant's earlier \
      replies";
 
@@ -257,11 +235,6 @@ const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next tur
 /// changed at this instant is one thing: the block every request carries
 /// switched to its second wording, so the model is now being asked to wrap up.
 /// Saying exactly that is what tells somebody whether to intervene.
-///
-/// Taken down with [`Status::clear_notice_if`] rather than an unconditional
-/// clear, [`EVICTION_NOTICE`]'s precedent and for its reason: the slot is one
-/// and unowned, and a sentence another writer put there has no second place to
-/// appear.
 const DEADLINE_NOTICE: &str = "deadline passed; the model has been told to wrap up";
 
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
@@ -993,27 +966,20 @@ pub struct App {
     /// The plan buckets the bar last showed, kept for [`App::poll_rates`]'s
     /// reason on the sibling set (**D485**).
     plans: Vec<ganja_core::provider::PlanWindow>,
-    /// What the vendor last said it served, kept for the same reason again
-    /// (**D556**) — a tick that finds it unmoved touches nothing.
-    ///
-    /// The **gated** reading — what the bar is actually showing, after the
-    /// delegated-children rule ([`App::poll_served_model`]) — so that a tick
-    /// which only started or finished a child redraws once and a tick that
-    /// changed neither redraws not at all.
+    /// What the vendor last said it served, as the bar is showing it
+    /// (**D556**): the gated reading [`App::poll_served_model`] compares each
+    /// tick against.
     served_model: Option<ganja_core::provider::ServedModel>,
-    /// The eviction the bar last reacted to (**D556**), so the notice is
-    /// written on the `None → Some` edge and taken down on the `Some → None`
-    /// one rather than rewritten every tick.
+    /// The eviction the bar last reacted to (**D556**), for
+    /// [`App::poll_eviction`]'s edges.
     last_eviction: Option<ganja_core::provider::Eviction>,
     /// Whether the deadline this bar last drew had already gone by
-    /// (**D557**), so [`DEADLINE_NOTICE`] is written on the one edge where it
-    /// goes from ahead to behind rather than on every tick after it.
+    /// (**D557**), for [`App::poll_deadline`]'s edge; [`None`] is a session
+    /// with no deadline set.
     ///
     /// The *state*, not the instant: what this guards is a transition, and
     /// keeping the instant would mean recomputing the comparison here as well
-    /// as in the segment. [`None`] is a session with no deadline set, which is
-    /// what makes clearing one and setting a fresh one arm the edge again —
-    /// the two hops are `Some(true) → None → Some(false)`.
+    /// as in the segment.
     deadline_passed: Option<bool>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
@@ -2059,9 +2025,9 @@ impl App {
     /// child shares the provider (`session.rs`'s child selection), so a
     /// subagent running on an agent with a model of its own moves it — and
     /// pairing that with the root's chosen model would draw a divergence
-    /// nobody has (rev 8, C-L4). While children are running the bar is handed
-    /// [`None`] and draws the chosen model alone, which is what it drew before
-    /// this key existed.
+    /// nobody has. While children are running the bar is handed [`None`] and
+    /// draws the chosen model alone, which is what it drew before this key
+    /// existed.
     ///
     /// What is cached is the **gated** value — what the bar is showing —
     /// rather than the raw reading, so a tick that only started or finished a
@@ -2074,24 +2040,18 @@ impl App {
         }
 
         self.served_model = shown.clone();
-        self.status.set_served_model(shown.as_ref());
+        self.status.set_served_model(shown.as_ref().map(|shown| shown.served.as_str()));
         self.dirty = true;
     }
 
     /// Puts [`EVICTION_NOTICE`] up when a wire closes a held process for being
     /// idle, and takes it down when that conversation opens again (**D556**).
     ///
-    /// Written on the `None → Some` edge and cleared on the `Some → None` one,
-    /// which is exactly the gap the wire holds the slot across: from the
-    /// eviction to the fresh record's spawn. Both edges rather than a rewrite
-    /// every tick, so a sentence somebody else wrote in between survives a
-    /// tick that changed nothing.
-    ///
-    /// The takedown is [`Status::clear_notice_if`], never
-    /// `set_notice(None)` — `SLOW_TASK_READ`'s precedent, and the reason is
-    /// the same: the slot is one and unowned, so clearing it unconditionally
-    /// would wipe whatever a later writer put there, and that sentence has no
-    /// second place to appear.
+    /// Written on the `None → Some` edge and taken down, through
+    /// [`Status::clear_notice_if`], on the `Some → None` one — exactly the gap
+    /// the wire holds the slot across, from the eviction to the fresh record's
+    /// spawn. Both edges rather than a rewrite every tick, so a sentence
+    /// somebody else wrote in between survives a tick that changed nothing.
     fn poll_eviction(&mut self) {
         let live = self.engine.last_eviction();
         if live == self.last_eviction {
@@ -2121,10 +2081,8 @@ impl App {
     /// is why the state it compares against is kept here.
     ///
     /// Clearing or replacing a deadline takes the sentence back down through
-    /// [`Status::clear_notice_if`], never `set_notice(None)`: the slot is one
-    /// and unowned, so an unconditional clear would wipe whatever a later
-    /// writer put there — `SLOW_TASK_READ`'s and [`EVICTION_NOTICE`]'s
-    /// precedent.
+    /// [`Status::clear_notice_if`], and the edge re-arms: the state hops
+    /// `Some(true) → None → Some(false)`.
     fn poll_deadline(&mut self) {
         let deadline = self.engine.deadline();
         let passed = deadline.map(|until| until <= SystemTime::now());
@@ -2789,7 +2747,7 @@ impl App {
     async fn run_deadline_line(&mut self, line: command::Deadline) {
         match line {
             command::Deadline::Set(until) => {
-                self.set_deadline(epoch_millis(until)).await;
+                self.set_deadline(command::wire_millis(until)).await;
                 // Straight from what was asked rather than from a read-back:
                 // the engine takes this without answering, so there is nothing
                 // to read back yet, and the next tick's `poll_deadline` is
@@ -2809,12 +2767,7 @@ impl App {
             // last thing this frontend sent it.
             command::Deadline::Show => {
                 let said = match self.engine.deadline() {
-                    Some(until) => match until.duration_since(SystemTime::now()) {
-                        Ok(left) => format!("deadline: {} left", spell_duration(left)),
-                        Err(behind) => {
-                            format!("deadline: overdue {}", spell_duration(behind.duration()))
-                        }
-                    },
+                    Some(until) => format!("deadline: {}", budget_left(until, SystemTime::now())),
                     None => "no deadline".to_owned(),
                 };
                 self.status.set_notice(Some(said));
@@ -5548,7 +5501,7 @@ impl App {
     /// The wire wins where it answers, and that is now a decision rather than
     /// an accident of an empty table: cursor has no catalog rows to lose, but a
     /// ChatGPT seat's provider has plenty and its offering is still the pinned
-    /// six (**D476**) — offering a session the vendor's whole catalog would
+    /// roster (**D476**) — offering a session the vendor's whole catalog would
     /// list models its own backend refuses. `wire_lists_models` is the seam's
     /// own decision asked synchronously, because this opens a dialog or spawns
     /// a fetch and cannot await to find out which.

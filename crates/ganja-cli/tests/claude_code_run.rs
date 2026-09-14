@@ -1,12 +1,16 @@
-//! `ganja run` on the `claude-code` wire, end to end through the **real**
-//! binary (**D556**, AC-4.7).
+//! The `claude-code` wire (**D556**), driven through a test binary that doubles
+//! as the `claude` CLI the wire spawns.
 //!
-//! Three processes, and that is the point: this test binary spawns the shipped
+//! Three of the four cases run the **real** binary — `ganja run` twice, `ganja
+//! models` once — and so three processes: this test binary spawns the shipped
 //! `ganja`, which selects the wire, which spawns *this binary again* as the
-//! `claude` CLI. Every seam a person's own invocation crosses is crossed here
-//! — the environment, `provider::select`'s floor check, the argv builder, the
-//! child's stdio — and none of it reaches a live `claude`, because the binary
-//! at the end of it is the fake.
+//! CLI. Every seam a person's own invocation crosses is crossed there — the
+//! environment, `provider::select`'s floor check, the argv builder, the child's
+//! stdio — and none of it reaches a live `claude`, because the binary at the
+//! end of it is the fake. The fourth case drives `provider::select` in-process,
+//! with no `ganja` at all; it lives here rather than beside `select` in
+//! `ganja-core` because the selection's `--version` probe and the process it
+//! holds need a binary that re-execs as the fake, and this one does.
 //!
 //! `harness = false` for the reason `ganja-provider`'s spawn suite has it: the
 //! `main` below checks `GANJA_FAKE_CLAUDE_SCRIPT` first and re-execs itself as
@@ -18,6 +22,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use ganja_testkit::Homes;
 use ganja_testkit::fake_claude::{self, Call, Script, Turn, Usage};
 use serde_json::Value;
 
@@ -37,12 +42,25 @@ const SAID: &str = "looking";
 /// What its `result` reports, so the closing row is identifiable.
 const ANSWERED: &str = "found them";
 
-/// The four cases this binary holds.
-const CASES: [&str; 4] = [
-    "a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json",
-    "a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence",
-    "ganja_models_claude_code_lists_the_seats_own_roster_under_its_notice",
-    "a_selection_hands_the_configured_idle_bound_to_the_wire",
+/// The four cases this binary holds, each name beside the function it runs,
+/// so a case added here is dispatched by the same row that lists it.
+const CASES: [(&str, fn()); 4] = [
+    (
+        "a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json",
+        a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json,
+    ),
+    (
+        "a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence",
+        a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence,
+    ),
+    (
+        "ganja_models_claude_code_lists_the_seats_own_roster_under_its_notice",
+        ganja_models_claude_code_lists_the_seats_own_roster_under_its_notice,
+    ),
+    (
+        "a_selection_hands_the_configured_idle_bound_to_the_wire",
+        a_selection_hands_the_configured_idle_bound_to_the_wire,
+    ),
 ];
 
 fn main() {
@@ -59,16 +77,16 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--list") {
         if !args.iter().any(|arg| arg == "--ignored") {
-            for case in CASES {
-                println!("{case}: test");
+            for (name, _) in CASES {
+                println!("{name}: test");
             }
         }
 
         return;
     }
     let filter = args.iter().find(|arg| !arg.starts_with('-'));
-    let selected: Vec<&str> =
-        CASES.into_iter().filter(|case| filter.is_none_or(|name| name == case)).collect();
+    let selected: Vec<(&str, fn())> =
+        CASES.into_iter().filter(|(name, _)| filter.is_none_or(|wanted| wanted == name)).collect();
     if selected.is_empty() {
         println!("running 0 tests");
 
@@ -76,20 +94,9 @@ fn main() {
     }
 
     println!("running {} tests", selected.len());
-    for case in &selected {
-        match *case {
-            "a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json" => {
-                a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json();
-            }
-            "a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence" => {
-                a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence();
-            }
-            "ganja_models_claude_code_lists_the_seats_own_roster_under_its_notice" => {
-                ganja_models_claude_code_lists_the_seats_own_roster_under_its_notice();
-            }
-            _ => a_selection_hands_the_configured_idle_bound_to_the_wire(),
-        }
-        println!("test {case} ... ok");
+    for (name, case) in &selected {
+        case();
+        println!("test {name} ... ok");
     }
     println!("test result: ok. {} passed; 0 failed; 0 ignored", selected.len());
 }
@@ -171,9 +178,7 @@ fn a_headless_run_on_the_claude_code_wire_streams_its_turn_as_json() {
 /// `ganja run`'s exit.
 fn a_cli_that_refuses_its_own_argv_fails_the_run_with_the_clis_own_sentence() {
     // Run 7's own shape, which is the recording's name for exactly this: an
-    // argv the CLI accepts at parse and refuses once it has started. The
-    // sentence is the CLI's own — what it says when `--print` and
-    // `--output-format=stream-json` arrive without `--verbose`.
+    // argv the CLI accepts at parse and refuses once it has started.
     let refusing =
         Script { exit_before_init: Some(fake_claude::NEEDS_VERBOSE.to_owned()), ..answering() };
     let run = Run::playing(&refusing);
@@ -217,45 +222,38 @@ fn answering() -> Script {
 
 /// A project directory with its own homes, and the script the fake CLI plays.
 struct Run {
-    project: tempfile::TempDir,
-    data: tempfile::TempDir,
+    homes: Homes,
 }
 
 impl Run {
     fn playing(script: &Script) -> Self {
-        let run = Self {
-            project: tempfile::TempDir::new().expect("a temporary directory"),
-            data: tempfile::TempDir::new().expect("a temporary directory"),
-        };
+        let run = Self { homes: Homes::new() };
         std::fs::write(run.script(), serde_json::to_string(script).expect("a script serializes"))
             .expect("the script is writable");
         // Something for the scripted `glob` to find, so the tool answers with
         // a result rather than with an empty listing.
-        std::fs::write(run.project.path().join("main.rs"), "fn main() {}\n")
+        std::fs::write(run.homes.project().join("main.rs"), "fn main() {}\n")
             .expect("the fixture file is writable");
 
         run
     }
 
     fn script(&self) -> PathBuf {
-        self.project.path().join("script.json")
+        self.homes.project().join("script.json")
     }
 
     /// An invocation of the shipped binary, with every home pinned to this
-    /// run's own directories — `run.rs`'s rule, and for its reason: a
-    /// `default_provider` in a developer's real config would otherwise decide
-    /// provider selection itself.
+    /// run's own directories through [`Homes::pin`] — a `default_provider` in
+    /// a developer's real config, or their cached catalog, would otherwise
+    /// decide what the run selects and how the wire's borrowed row sizes it.
     fn ganja(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+        self.homes.pin(&mut command, &self.script());
         command
-            .current_dir(self.project.path())
-            .env("XDG_DATA_HOME", self.data.path())
-            .env("HOME", self.data.path())
-            .env("XDG_CONFIG_HOME", self.data.path().join("config"))
-            .env_remove("GANJA_CONFIG_HOME")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_MODEL")
+            // The pin selects the `fake` provider and hands it a script; this
+            // run selects the wire instead, whose fake is the CLI below.
             .env("GANJA_PROVIDER", ganja_core::provider::claude_code::ID)
+            .env_remove("GANJA_FAKE_SCRIPT")
             // **This binary is the CLI.** Absolute, which the wire requires of
             // an override, and a path that re-execs as the fake the moment it
             // sees the script variable below.

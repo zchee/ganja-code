@@ -288,17 +288,7 @@ pub struct Status {
     /// effort segment, so this arrives by its own setter.
     model: Option<String>,
     /// What the vendor said it actually served, when a wire says (**D556**),
-    /// as the app last polled it off `Engine::served_model` **while no
-    /// delegated child was in flight**.
-    ///
-    /// Only the vendor's spelling is kept, not the pair the accessor hands
-    /// back: the requested half is ganja's own word for the same thing the
-    /// `model` element already draws, so keeping it would be a second copy
-    /// that could disagree with the first. The reading is dropped rather than
-    /// stored while `running_tasks` is non-zero, because the served model is
-    /// provider-wide and a child on an agent with a model of its own moves it
-    /// — pairing that with the root's chosen model would draw a divergence
-    /// nobody has (rev 8, C-L4).
+    /// as `App::poll_served_model` last handed it over.
     served_model: Option<String>,
     /// `(estimated tokens, window)` for the `context` meter, absent until the
     /// app polls `Engine::context_estimate` — and kept absent for an
@@ -383,23 +373,13 @@ impl Status {
         self.model = model;
     }
 
-    /// Records what the vendor said it served, for the `model` element's
-    /// second half (**D556**).
+    /// Records the vendor's spelling of the model it served, for the `model`
+    /// element's second half (**D556**).
     ///
-    /// Takes the whole [`ganja_core::provider::ServedModel`] and keeps the
-    /// vendor's spelling alone.
-    /// [`None`] — every wire that reports nothing, and every reading taken
-    /// while a delegated child is in flight — leaves the element drawing the
-    /// chosen model by itself, which is what every session before this key
-    /// existed drew.
-    ///
-    /// The two spellings are never compared to decide whether to draw the
-    /// pair: `requested` is ganja's word and `served` is the vendor's, so they
-    /// differ almost always and mean nothing by it. What is compared is
-    /// `served` against the model the bar was told to name, which is the only
-    /// pair a reader could otherwise think disagreed.
-    pub fn set_served_model(&mut self, served: Option<&ganja_core::provider::ServedModel>) {
-        self.served_model = served.map(|served| served.served.clone());
+    /// [`None`] leaves the element drawing the chosen model by itself, which
+    /// is what every session before this key existed drew.
+    pub fn set_served_model(&mut self, served: Option<&str>) {
+        self.served_model = served.map(str::to_owned);
     }
 
     /// Records `(estimated tokens, window)` for the `context` meter, or
@@ -926,16 +906,9 @@ impl Status {
             // states worth telling apart are "you have time" and "you are
             // over", and a segment that vanished at expiry would look exactly
             // like one nobody set.
-            StatuslineElement::Deadline => self.deadline.and_then(|until| {
-                let now = SystemTime::now();
-
-                // `duration_since` already answers both halves: `Ok` with what
-                // is left, `Err` carrying the span it went the other way by.
-                match until.duration_since(now) {
-                    Ok(left) => plain(format!("{} left", spell_duration(left))),
-                    Err(behind) => plain(format!("overdue {}", spell_duration(behind.duration()))),
-                }
-            }),
+            StatuslineElement::Deadline => {
+                self.deadline.and_then(|until| plain(budget_left(until, SystemTime::now())))
+            }
             // Spend where its width is predictable, and the notice after
             // it: the notice is the one segment with no length limit.
             StatuslineElement::Tokens => {
@@ -950,11 +923,11 @@ impl Status {
                 ];
                 // The served spelling rides behind it only where the vendor
                 // named something else (**D556**) — `Model: default (served:
-                // claude-opus-5[1m])`. Compared against the model this bar was
-                // told to name rather than against the accessor's `requested`
-                // half: that half is the same fact in ganja's own spelling, so
-                // comparing it would draw the pair on every wire that reports
-                // one, saying nothing.
+                // claude-opus-5[1m])` — compared against the model this bar
+                // was told to name, never against the wire's `requested`
+                // spelling: that is ganja's own word for the same fact, so the
+                // pair would draw on every wire that reports one, saying
+                // nothing.
                 if let Some(served) = self.served_model.as_ref().filter(|served| **served != model)
                 {
                     spans.push(Span::styled(format!(" (served: {served})"), theme.dim));
@@ -1069,6 +1042,20 @@ impl Status {
         let phase = self.since.elapsed().as_millis() / SPINNER_PERIOD.as_millis();
 
         SPINNER[usize::try_from(phase).unwrap_or(0) % SPINNER.len()]
+    }
+}
+
+/// What is left of a time budget ending at `until`, read at `now` (**D557**):
+/// `4m30s left`, or `overdue 45s` once the instant has gone by.
+///
+/// The `deadline` segment and a bare `/deadline`'s answer both say this, so the
+/// two cannot drift into two sentences about one clock.
+pub(crate) fn budget_left(until: SystemTime, now: SystemTime) -> String {
+    // `duration_since` already answers both halves: `Ok` with what is left,
+    // `Err` carrying the span it went the other way by.
+    match until.duration_since(now) {
+        Ok(left) => format!("{} left", spell_duration(left)),
+        Err(behind) => format!("overdue {}", spell_duration(behind.duration())),
     }
 }
 

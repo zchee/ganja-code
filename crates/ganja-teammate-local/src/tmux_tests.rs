@@ -119,7 +119,6 @@ fn a_launch_line_wipes_then_quotes_what_needs_it_and_refuses_a_nul() {
     // `ED 2`, `ED 3`, `CUP`, as the bytes a shell's `printf` decodes them
     // from — and nothing else, so a fallback is one edit of one constant.
     assert_eq!(LAUNCH_HEAD, "printf '\\033[2J\\033[3J\\033[H'; ");
-    assert!(LAUNCH_HEAD.ends_with("; "), "the head is a command of its own before the exec");
 
     let exec = super::exec_line(binary, &argv)
         .expect("no NUL rides these words")
@@ -365,12 +364,12 @@ async fn a_launch_line_leaves_nothing_of_the_shells_on_the_screen_or_in_the_hist
         let rows = format!("i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo {banner}-$i; done");
         at.type_line(&pane.id, OsStr::new(&rows)).await.expect("the shell hears its banner");
         eventually("the banner to overflow into the history", async || {
-            let size = server.run(&["display-message", "-p", "-t", &pane.id, "#{history_size}"]);
+            let size = server.history_size(&pane.id);
             let all = screen_and_history(&server, &pane.id);
-            if all.contains(&banner) && size.trim() != "0" {
+            if all.contains(&banner) && size != 0 {
                 Ok(())
             } else {
-                Err(format!("history_size={} shown={all:?}", size.trim()))
+                Err(format!("history_size={size} shown={all:?}"))
             }
         })
         .await;
@@ -408,8 +407,8 @@ async fn a_launch_line_leaves_nothing_of_the_shells_on_the_screen_or_in_the_hist
             );
         }
         assert_eq!(
-            server.run(&["display-message", "-p", "-t", &pane.id, "#{history_size}"]).trim(),
-            "0",
+            server.history_size(&pane.id),
+            0,
             "{shell:?}: the scrollback was emptied, not merely scrolled"
         );
     }
@@ -614,7 +613,10 @@ async fn a_pane_kept_on_exit_stays_readable_after_its_process_dies() {
         !shown.lines().any(|line| line == "refused by the vendor"),
         "the top row was scrolled off by the dead notice: {shown:?}"
     );
-    let whole = at.capture_with_history(&pane.id).await.expect("the history reads too");
+    let whole = at
+        .capture_with_history(&pane.id, crate::shim_tui::LAST_WORDS_HISTORY)
+        .await
+        .expect("the history reads too");
     assert!(
         whole.lines().any(|line| line == "refused by the vendor"),
         "and the history still holds it: {whole:?}"

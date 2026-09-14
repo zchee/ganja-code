@@ -1,3 +1,4 @@
+use clap::Parser as _;
 use ganja_protocol::{
     Event, FinishReason, Message, MessageId, Part, PartBody, PartId, Role, SessionId, ToolState,
     Usage,
@@ -451,8 +452,6 @@ fn millis(now: std::time::SystemTime) -> u64 {
 /// value is somewhere in the window this parse took, five minutes on.
 #[test]
 fn a_deadline_span_is_resolved_at_the_flag_to_that_far_from_now() {
-    use clap::Parser as _;
-
     let before = millis(std::time::SystemTime::now());
     let parsed = Flags::try_parse_from(["run", "--deadline", "5m", "hello"])
         .unwrap_or_else(|error| panic!("a span the grammar takes parses: {error}"));
@@ -469,8 +468,6 @@ fn a_deadline_span_is_resolved_at_the_flag_to_that_far_from_now() {
 /// the engine nothing about it.
 #[test]
 fn a_run_without_the_flag_holds_no_deadline() {
-    use clap::Parser as _;
-
     let parsed = Flags::try_parse_from(["run", "hello"]).expect("a plain run parses");
     assert_eq!(parsed.run.deadline, None);
 }
@@ -482,8 +479,6 @@ fn a_run_without_the_flag_holds_no_deadline() {
 /// so a leading `-` reaches the value parser rather than clap's flag reading.
 #[test]
 fn a_deadline_the_grammar_has_not_got_is_refused_at_the_flag() {
-    use clap::Parser as _;
-
     for typed in ["5x", "-1m", "0s", "5m5m", "25:00", "10:0", "00:00", "off", "soon", ""] {
         let Err(error) = Flags::try_parse_from(["run", &format!("--deadline={typed}"), "hello"])
         else {
@@ -509,8 +504,6 @@ fn a_deadline_the_grammar_has_not_got_is_refused_at_the_flag() {
 /// the pair is refused, as `--effort` with `--attach` is.
 #[test]
 fn attaching_with_a_deadline_fails_to_parse() {
-    use clap::Parser as _;
-
     let Err(error) = Flags::try_parse_from([
         "run",
         "--attach",

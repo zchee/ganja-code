@@ -706,14 +706,10 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_does_have() {
     assert!(!stored_at(&data).exists(), "no refused invocation may leave a credential behind");
 }
 
-/// A second login against one provider discards the first, and the only place
-/// anybody can be warned about it is here.
-///
-/// **D555** took the sharp version of this away — a ChatGPT login and an OpenAI
-/// key used to share the `openai` entry, so each silently took the other — and
-/// what is left is worth reporting for the reason it always was: a login is not
-/// additive. Both halves are here: a same-kind replacement warns, and the two
-/// ids do **not** reach each other.
+/// A second login against one provider discards the first — a login is not
+/// additive — and the only place anybody can be warned about it is here. This
+/// pins both halves: a same-kind replacement warns, and the vendor's two ids
+/// (**D555**) do **not** reach each other.
 #[test]
 fn a_login_says_what_it_replaces_and_the_two_openai_ids_do_not_replace_each_other() {
     let gate = Gate::closed();
@@ -766,6 +762,39 @@ fn a_login_says_what_it_replaces_and_the_two_openai_ids_do_not_replace_each_othe
         "oauth",
         "and the seat's login is still not in the way of it"
     );
+}
+
+/// The replacement warning across kinds: Copilot offers a device login and a
+/// key under one id, so a key stored over the device login replaces an OAuth
+/// credential, and says so by that login's tail.
+#[test]
+fn a_key_over_an_oauth_login_says_it_replaces_the_oauth_credential() {
+    let issuer = unblocked();
+    let data = data();
+
+    let device = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "github-copilot", "--deployment", "public"])
+        .output()
+        .expect("the binary runs");
+    assert!(
+        device.status.success(),
+        "the device login should have run: {}",
+        String::from_utf8_lossy(&device.stderr)
+    );
+    assert_eq!(stored(&data)["github-copilot"]["type"], "oauth");
+
+    let keyed = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "github-copilot", "--key", "ghp-replacing-4466"])
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&keyed.stderr).into_owned();
+
+    assert!(keyed.status.success(), "a key is a Copilot login too: {said}");
+    assert!(
+        said.contains("replaces the oauth credential") && said.contains("****7731"),
+        "storing a key over a login has to name the login it overwrites: {said}"
+    );
+    assert_eq!(stored(&data)["github-copilot"]["type"], "api");
 }
 
 /// **AC-0.8**, the offering half: which logins each of the vendor's two ids

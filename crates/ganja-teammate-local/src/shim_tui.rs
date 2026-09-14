@@ -83,15 +83,9 @@
 //! a marker counts only on a row **below** the launch line's own, or, on a
 //! screen that row is gone from, only once `#{pane_current_command}` no
 //! longer answers what it did before the line was typed
-//! ([`composer_shown`](crate::shim_tui::composer_shown)). Since **D554** the
-//! launch row is on screen only between the shell's echo of it and the
-//! shell running the line's head — [`tmux::LAUNCH_HEAD`], which wipes the
-//! pane a moment after Enter, before the `exec` — so the
-//! screen a poll sees is the wiped one and the second door is the door,
-//! as it already was for a CLI that clears its own screen; a CLI that is a
-//! script under a same-named shell, which never changes that name, now
-//! waits the whole ceiling and is pasted unsubmitted (the recorded cost;
-//! no shipped CLI is that shape). The
+//! ([`composer_shown`](crate::shim_tui::composer_shown), which owns both
+//! doors and what the line's own head, [`tmux::LAUNCH_HEAD`] since **D554**,
+//! does to them). The
 //! one way a launch line hands the pane back to a shell that would prompt
 //! again, a failed `exec`, is closed by the line's own `|| exit`
 //! ([`LAUNCH_TAIL`](crate::shim_tui::LAUNCH_TAIL)), which turns it
@@ -741,9 +735,8 @@ enum Ready {
 /// What the readiness poll holds a capture against, fixed before the launch
 /// line is typed — the two facts [`composer_shown`] asks its caller for.
 struct Watch {
-    /// `exec <binary>` as the shell echoes it: the launch line's own row —
-    /// on screen only until the line's head wipes it (**D554**), which is
-    /// why the second witness below is the one most polls are judged by.
+    /// `exec <binary>` as the shell echoes it: the launch line's own row, the
+    /// first of [`composer_shown`]'s two doors.
     needle: String,
     /// What the pane's foreground was called while the shell was the only
     /// thing in it — the name that has to change before a marker on a screen
@@ -1114,10 +1107,11 @@ impl ShimTui {
                         // scrolls the top row off the screen, and since D554
                         // that row is the CLI's first line rather than the
                         // launch line's echo (`capture_with_history`).
-                        let words = match server.capture_with_history(&pane.id).await {
-                            Ok(shown) => last_words(&shown),
-                            Err(_) => None,
-                        };
+                        let words =
+                            match server.capture_with_history(&pane.id, LAST_WORDS_HISTORY).await {
+                                Ok(shown) => last_words(&shown),
+                                Err(_) => None,
+                            };
                         return Ready::Died(words);
                     }
                     Some(listed) if !pane.is(listed) => return Ready::Lost,
@@ -1166,7 +1160,10 @@ impl ShimTui {
                             return Ready::Seen;
                         }
                         Ok(_) => {
-                            let words = match server.capture_with_history(&pane.id).await {
+                            let words = match server
+                                .capture_with_history(&pane.id, LAST_WORDS_HISTORY)
+                                .await
+                            {
                                 Ok(fresh) => last_words(&fresh),
                                 Err(_) => last_words(&shown),
                             };
@@ -1289,16 +1286,7 @@ impl TeammateBackend for ShimTui {
             cli,
             "a TUI pane was launched"
         );
-        // The line itself, at `debug`: its head wipes the screen it was
-        // echoed on (D554), so the log is where a launch stays diagnosable.
-        // No secret rides it — the flags are the driver's pinned floors and
-        // the binary a path; credentials travel in the environment (D502).
-        tracing::debug!(
-            teammate = spec.name.as_str(),
-            pane = pane.id,
-            line = %line.to_string_lossy(),
-            "the launch line typed into the TUI pane"
-        );
+        tmux::trace_launch_line(spec.name.as_str(), &pane.id, &line);
 
         let readiness = match self.wait_ready(&server, &pane, &watch).await {
             Ready::Seen => Readiness::Seen,
@@ -1682,15 +1670,12 @@ impl TuiRunner {
         let cli = backend_name(self.handle.backend);
         let pane = self.handle.pane().id.clone();
         let words = match how {
-            // With the history for consistency with the two readiness-side
-            // reads; unpinned, because a pane that ran long enough to reach
-            // this watch has more rows than `LAST_WORDS_LINES` and its top
-            // row — the one the dead notice scrolls off — never enters the
-            // block.
-            Gone::Dead => match self.handle.server().capture_with_history(&pane).await {
-                Ok(captured) => last_words(&captured),
-                Err(_) => None,
-            },
+            Gone::Dead => {
+                match self.handle.server().capture_with_history(&pane, LAST_WORDS_HISTORY).await {
+                    Ok(captured) => last_words(&captured),
+                    Err(_) => None,
+                }
+            }
             Gone::Recycled => None,
         };
         tracing::info!(
@@ -2204,8 +2189,8 @@ pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, T
 ///
 /// After the head rather than from the line's first byte, because the head
 /// is what a matched row would never be *followed* by: [`tmux::LAUNCH_HEAD`]
-/// wipes the screen the echo is on the moment the shell runs it (**D554**),
-/// so the row this names is on screen only between the echo and that wipe.
+/// wipes the screen the echo is on the moment the shell runs it (**D554**;
+/// what that leaves a poll is [`composer_shown`]'s to say).
 /// Composed by [`tmux::exec_line`], the same function the typed line's own
 /// tail is, so the two cannot spell the `exec` differently.
 ///

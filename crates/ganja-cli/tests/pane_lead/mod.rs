@@ -728,8 +728,8 @@ impl Tmux {
     /// whose TUI is up this number is exactly what a person finds by
     /// scrolling up — the half of a shell's residue
     /// [`Tmux::saved_primary_screen`] cannot see.
-    pub fn history_size(&self, pane: &str) -> String {
-        self.server.run(&["display-message", "-p", "-t", pane, "#{history_size}"]).trim().to_owned()
+    pub fn history_size(&self, pane: &str) -> usize {
+        self.server.history_size(pane)
     }
 
     /// Types `text` into `pane` literally and submits it, in one `send-keys` —

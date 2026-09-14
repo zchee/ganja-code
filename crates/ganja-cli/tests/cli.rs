@@ -691,7 +691,7 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 }
 
 /// A ChatGPT seat's roster is the binary's, not the table's (**D476**), so
-/// `models chatgpt` prints the pinned six and a header that says pinned — the
+/// `models chatgpt` prints the pinned roster and a header that says pinned — the
 /// wording is the whole point, because cursor's "live from the wire;
 /// uncataloged" would be false twice over about this list.
 ///

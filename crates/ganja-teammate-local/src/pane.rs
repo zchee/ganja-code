@@ -500,17 +500,7 @@ impl GanjaPane {
                     pane = pane.id,
                     "a teammate's pane was launched"
                 );
-                // The line itself, at `debug`: its head wipes the screen it
-                // was echoed on (D554), so the log is where a launch stays
-                // diagnosable. No secret rides it — the flags are this
-                // module's own constants and the binary is `current_exe()`;
-                // credentials travel in the environment, never argv (D502).
-                tracing::debug!(
-                    teammate = spec.name.as_str(),
-                    pane = pane.id,
-                    line = %line.to_string_lossy(),
-                    "the launch line typed into the teammate's pane"
-                );
+                tmux::trace_launch_line(spec.name.as_str(), &pane.id, line);
             }
             Err(error) => {
                 tracing::warn!(
