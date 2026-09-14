@@ -861,9 +861,13 @@ async fn a_compaction_is_a_new_key_that_starts_from_nothing() {
 
     // A compaction replaces `messages[0]`, so the key moves — and the new key
     // reads its own binding, which does not exist, rather than the old key's
-    // refusal.
-    turn(&provider, request(vec![assistant("s1", "Summary so far: …"), user("m9", "carry on")], 1))
-        .await;
+    // refusal. The summary carries the engine's mark, as a minted one does
+    // (`ruto`).
+    let summary = crate::protocol::Message {
+        compaction_summary: true,
+        ..assistant("s1", "Summary so far: …")
+    };
+    turn(&provider, request(vec![summary, user("m9", "carry on")], 1)).await;
 
     assert_eq!(cli.count(), 2, "a new key spawns rather than inheriting a streak");
     let opened = &cli.record(1).user_frames[0];

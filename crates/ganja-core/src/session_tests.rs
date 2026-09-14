@@ -428,6 +428,7 @@ fn resolving_a_mention_is_not_a_read() {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }];
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
@@ -452,6 +453,7 @@ fn message_mentioning(path: &str) -> Vec<Message> {
         model: None,
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }]
 }
 

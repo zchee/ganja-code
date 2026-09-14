@@ -3149,6 +3149,11 @@ async fn compact_if_needed(
         .unwrap_or_else(|| estimate_tokens(text.chars().count()));
 
     let mut summary = Message::assistant(turn.model.clone());
+    // Marked here, where the engine knows what it is minting, so a wire that
+    // carries a summary forward reads the mark rather than inferring it from
+    // where the message sits (`ruto`). Set before the save, so the stored row
+    // carries it too.
+    summary.compaction_summary = true;
     summary.parts.push(Part::text(text));
     summary.usage = usage;
     summary.complete();

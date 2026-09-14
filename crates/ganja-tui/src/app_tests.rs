@@ -6933,6 +6933,7 @@ fn replied(texts: &[&str]) -> Message {
         model: Some(fake::MODEL.to_owned()),
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }
 }
 

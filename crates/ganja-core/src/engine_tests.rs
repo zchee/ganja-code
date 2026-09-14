@@ -507,6 +507,10 @@ async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_sum
         })
         .expect("the summary enters the transcript");
     assert_eq!(summary.parts.first().and_then(Part::as_text), Some(SUMMARY));
+    assert!(
+        summary.compaction_summary,
+        "minted marked, so a wire promotes it by the mark and never by position (`ruto`)"
+    );
     assert_eq!(
         engine.current_session().and_then(|info| info.summary).as_ref(),
         Some(&summary.id),
@@ -521,8 +525,74 @@ async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_sum
     let transcript = reread.load_transcript(&session).expect("the transcript reads");
     assert!(
         transcript.iter().any(|message| message.id == summary.id
-            && message.parts.first().and_then(Part::as_text) == Some(SUMMARY)),
-        "the stored transcript holds the summary: {transcript:?}"
+            && message.parts.first().and_then(Part::as_text) == Some(SUMMARY)
+            && message.compaction_summary),
+        "the stored transcript holds the summary, mark and all: {transcript:?}"
+    );
+}
+
+/// `ruto`'s backfill. A session compacted before the mark existed stores its
+/// summary unmarked, and a wire now promotes only what is marked — so the one
+/// seam that cuts a resumed window at the record's summary marks the head it
+/// cut at. The record, not the position, is what names it.
+#[tokio::test]
+async fn a_resumed_window_marks_the_summary_its_record_names_though_the_row_predates_the_mark() {
+    const UNSIZED: &str = "a-model-no-catalog-row-answers";
+
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta("carrying on".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let seen = Arc::clone(&provider.seen);
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let storage = Storage::open(directory.path().join("storage"));
+    let session = ganja_testkit::seed_session(&storage, 0);
+    ganja_testkit::seed_message(&storage, &session, &Message::user("before the compaction"));
+    // Stored the way a build before the mark stored it: an assistant message
+    // carrying the summary's words, and nothing saying what it is.
+    let mut summary = Message::assistant(UNSIZED);
+    summary.parts.push(Part::text("## Objective\n- find the thing"));
+    summary.complete();
+    assert!(!summary.compaction_summary, "the row predates the mark");
+    ganja_testkit::seed_message(&storage, &session, &summary);
+    ganja_testkit::seed_message(&storage, &session, &Message::user("after the compaction"));
+    let mut info = storage.load_info(&session).expect("the record reads").expect("it exists");
+    info.summary = Some(summary.id.clone());
+    storage.save_info(&info).expect("the record names its summary");
+
+    let engine = Engine::persistent(
+        provider,
+        UNSIZED,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        storage,
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&session).await.expect("the session loads");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "next".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    let messages = &requests.first().expect("the turn asked the provider").messages;
+    assert_eq!(
+        messages.first().map(|head| (&head.id, head.compaction_summary)),
+        Some((&summary.id, true)),
+        "the window opens at the summary the record names, marked: {messages:?}"
+    );
+    assert!(
+        messages[1..].iter().all(|message| !message.compaction_summary),
+        "and nothing after it is: {messages:?}"
     );
 }
 

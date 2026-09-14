@@ -103,6 +103,7 @@ fn message(id: &str, parts: Vec<Part>) -> Message {
         model: Some("canned".to_owned()),
         usage: Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }),
         request_only: false,
+        compaction_summary: false,
     }
 }
 

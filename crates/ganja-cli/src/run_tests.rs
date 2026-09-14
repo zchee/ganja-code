@@ -56,6 +56,7 @@ fn assistant() -> Message {
         model: Some("canned".to_owned()),
         usage: None,
         request_only: false,
+        compaction_summary: false,
     }
 }
 

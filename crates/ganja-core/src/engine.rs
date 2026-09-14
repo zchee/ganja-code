@@ -3745,11 +3745,22 @@ impl Engine {
                 }
             },
         };
-        let window: Vec<Message> = transcript[start..]
+        let mut window: Vec<Message> = transcript[start..]
             .iter()
             .filter(|message| message.role == Role::User || message.has_content())
             .cloned()
             .collect();
+        // The head this cut at is the summary the record names, so it is
+        // marked as one (`ruto`): a row minted since the mark already is, and
+        // one compacted before it is backfilled here, the one seam that knows
+        // which message the record meant. A head that is anything else — a
+        // lost summary's full transcript, a summary with no words that the
+        // filter dropped — is left alone.
+        if let (Some(summary), Some(head)) = (&info.summary, window.first_mut())
+            && head.id == *summary
+        {
+            head.compaction_summary = true;
+        }
 
         *self.history.lock().await = window;
         // A resumed conversation has read nothing yet in this process: what
