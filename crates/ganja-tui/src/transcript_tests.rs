@@ -177,6 +177,36 @@ fn a_tool_call_carries_its_input_and_output() {
     assert!(rendered.contains("\n**Output:**\n```\none line\n```\n"), "got: {rendered}");
 }
 
+/// **D562** draws a settled `todowrite` as a count on the pane; the copy is
+/// where the list is read, so every task the call wrote reaches it, whatever
+/// state it is in, and the pane's count does not. The output is empty, so
+/// the tasks can have come only from the call's input.
+#[test]
+fn a_settled_todowrite_hands_the_copy_every_task_it_wrote() {
+    let tasks =
+        ["port cell.slang", "port graphics.slang", "port bgimage.slang", "port the old shim"];
+    let parts = [completed(
+        "todowrite",
+        serde_json::json!({"todos": [
+            {"content": tasks[0], "status": "completed", "priority": "high"},
+            {"content": tasks[1], "status": "in_progress", "priority": "high"},
+            {"content": tasks[2], "status": "pending", "priority": "medium"},
+            {"content": tasks[3], "status": "cancelled", "priority": "low"},
+        ]}),
+        "[]",
+    )];
+
+    let rendered = format(&session(None), &[(Role::Assistant, &parts[..], None)]);
+
+    for task in tasks {
+        assert!(rendered.contains(task), "the copy carries {task:?}: {rendered}");
+    }
+    assert!(
+        !rendered.contains("4 todos"),
+        "the pane's count is drawn, never copied in the list's place: {rendered}"
+    );
+}
+
 /// A tool the *provider* ran belongs in a copy of the conversation too
 /// (**D489**): a reply built on a search, copied without the search, is a
 /// reply whose source vanished.

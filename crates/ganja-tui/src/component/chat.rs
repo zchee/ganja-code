@@ -2179,7 +2179,8 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
             // A todo list answers with a count of where it stands, and the
             // list itself is the working strip's to draw; see [`TODO_TOOL`].
             // The tool's own `N todos` title goes with the JSON it titled — it
-            // counts only what is left, where this row counts every state.
+            // counts every task not completed, cancelled ones included, where
+            // this row counts each state on its own.
             if tool == TODO_TOOL
                 && let Some(summary) = todo_summary(input)
             {

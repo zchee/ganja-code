@@ -1242,33 +1242,6 @@ fn a_single_todo_is_counted_in_the_singular() {
     );
 }
 
-/// The row is a count on screen only: the part the call left — which is
-/// what `/copy` and the Ctrl+T inspector read — still carries every task.
-#[test]
-fn a_counted_todowrite_still_hands_the_copy_every_task() {
-    let mut chat = Chat::default();
-    let mut reply = Message::assistant("canned");
-    reply.parts.push(Part {
-        id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool {
-            call_id: "call_1".to_owned(),
-            tool: "todowrite".to_owned(),
-            state: todo_call(todos()),
-        },
-    });
-    chat.start_message(reply);
-
-    let messages = chat.messages();
-    let (_, parts, _) = messages[0];
-    let Some(PartBody::Tool { state: ToolState::Completed { input, .. }, .. }) =
-        parts.iter().map(|part| &part.body).find(|body| matches!(body, PartBody::Tool { .. }))
-    else {
-        panic!("the entry keeps the call: {parts:?}");
-    };
-
-    assert_eq!(input["todos"], todos(), "the copy reads the whole list, not the count");
-}
-
 /// Each state is told by its box and by how the row is painted: the one
 /// being worked on stands out, and the two nobody will work on again are
 /// struck through. Since **D562** that checklist is the working strip's.
@@ -1348,6 +1321,50 @@ fn a_todowrite_whose_list_cannot_be_read_keeps_the_ordinary_preview() {
                 .iter()
                 .any(|line| line.contains(super::TODO_OPEN) || line.contains(super::TODO_DONE)),
             "nothing is drawn as a checklist it is not: {lines:?}"
+        );
+    }
+}
+
+/// The strip's half of that agreement: a list the call's row cannot draw is
+/// one the working line cannot hang a checklist off either, because both read
+/// it through one [`super::todo_items`] — a strip parsing on its own would
+/// draw boxes under a call whose row shows the raw preview.
+#[test]
+fn a_todowrite_whose_list_cannot_be_read_hangs_no_checklist_under_the_working_line() {
+    for todos in [
+        serde_json::json!("all of them"),
+        serde_json::json!([]),
+        serde_json::json!([{"status": "pending"}]),
+    ] {
+        let mut chat = Chat::default();
+        chat.start_message(Message::user("port the shaders"));
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "todowrite".to_owned(),
+                state: todo_call(todos.clone()),
+            },
+        });
+        chat.start_message(reply);
+        chat.set_working(Some(Working {
+            started: Instant::now(),
+            turn: 1,
+            output_tokens: 0,
+            compaction: None,
+        }));
+
+        let running = strip(&mut chat, 60);
+
+        assert_eq!(
+            running.len(),
+            1,
+            "the strip is the working line alone for {todos}: {running:?}"
+        );
+        assert!(
+            running[0].contains("\u{2026} ("),
+            "and that line is the working line for {todos}: {running:?}"
         );
     }
 }

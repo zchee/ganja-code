@@ -1103,6 +1103,40 @@ async fn a_session_a_command_started_is_titled_by_the_line_typed_rather_than_the
     );
 }
 
+/// The clip a fallback title takes of the typed line is positional: its first
+/// fifty characters, spec included, so a long spec leaves little or none of
+/// the task in a fallback title. Accepted as the cost of keeping the line as
+/// typed — the fallback is only what the fake provider and a failed title
+/// request get — and pinned so that trade is a decision rather than an
+/// accident.
+#[tokio::test]
+async fn a_long_command_line_is_clipped_to_its_first_fifty_characters_spec_included() {
+    let (_dir, storage) = store();
+    let engine = persistent(
+        Arc::new(FakeProvider::new("on it", Duration::from_millis(1))),
+        fake::MODEL,
+        storage.clone(),
+    )
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::RunCommand {
+            name: "team".to_owned(),
+            args: "3:critic,2:executor --backend claude,codex port the config loader".to_owned(),
+        })
+        .await
+        .expect("an idle engine runs the command");
+    drain(&mut events).await;
+
+    let sid = engine.current_session().expect("the command created a session").id;
+    assert_eq!(
+        stored_info(&storage, &sid).title.as_deref(),
+        Some("/team 3:critic,2:executor --backend claude,codex p"),
+        "the first fifty characters of the typed line, spec and all"
+    );
+}
+
 /// The same rule on the other fallback route: a provider that is asked for a
 /// title and fails to answer falls back to the typed line too, while the title
 /// request itself still carries the whole message.

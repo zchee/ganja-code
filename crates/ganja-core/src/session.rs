@@ -2104,7 +2104,8 @@ fn fake_title_skips_the_request(turn: &Turn) -> bool {
 }
 
 /// The title a session falls back to: the first [`FALLBACK_TITLE_CHARS`]
-/// characters of its first prompt, cut on a character boundary by
+/// characters of its first prompt, or of the line typed when a command
+/// opened it ([`title_source`]), cut on a character boundary by
 /// construction.
 async fn fallback_title(turn: &Turn) -> String {
     let history = turn.history.lock().await;
@@ -2136,7 +2137,8 @@ fn clip_title(prompt: &str) -> String {
 /// needs doing. Spec: upstream `packages/opencode/src/session/prompt.ts`
 /// (`ensureTitle`) — a toolless request to the provider's cheapest
 /// chat-capable catalog model, falling back to the session model, and any
-/// failure falls back to the clipped first prompt.
+/// failure falls back to the clipped first prompt, or to the clipped line
+/// typed when a command opened the session ([`title_source`]).
 ///
 /// Detached on purpose: the task never holds the turn slot, so the next
 /// prompt is never waiting on bookkeeping. The title is storage-only in P4 —
