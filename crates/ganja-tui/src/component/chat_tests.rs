@@ -1081,11 +1081,12 @@ fn todos() -> serde_json::Value {
     ])
 }
 
-/// **The checklist screenshot.** A settled `todowrite` answers with the list
-/// itself — a box per task, the first on the elbow and the rest hanging
-/// under it — and never with the JSON the list travelled in.
+/// **The noisy-checklist screenshot (D562).** A settled `todowrite` answers
+/// with one row counting its list — how long it is and how many tasks stand
+/// in each state — and never with the list itself, which is the working
+/// strip's to draw, nor with the JSON the list travelled in.
 #[test]
-fn a_settled_todowrite_draws_its_list_as_a_checklist() {
+fn a_settled_todowrite_draws_one_row_counting_its_list() {
     let lines = tool_call("todowrite", todo_call(todos()));
     let drawn: Vec<&str> =
         lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
@@ -1094,21 +1095,83 @@ fn a_settled_todowrite_draws_its_list_as_a_checklist() {
         drawn,
         vec![
             "\u{25cf} Todowrite(todos: [\u{2026}])",
-            "  \u{23bf} \u{2612} port cell.slang",
-            "    \u{2610} port graphics.slang",
-            "    \u{2610} port bgimage.slang",
-            "    \u{2612} port the old shim",
+            "  \u{23bf} 4 todos \u{b7} 1 done \u{b7} 1 in progress \u{b7} 1 open \u{b7} 1 cancelled",
         ],
         "got {lines:?}"
     );
 }
 
-/// Each state is told by its box and by how the row is painted: the one
-/// being worked on stands out, and the two nobody will work on again are
-/// struck through.
+/// The count names only the states some task is in: the screenshot's own
+/// list — seven tasks, one done, one in hand — reads as exactly that, with
+/// no `0 cancelled` padding the row, and an unfamiliar status is counted as
+/// open, the way the checklist draws it.
 #[test]
-fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
-    let theme = Theme::default();
+fn a_todo_count_leaves_out_a_state_no_task_is_in() {
+    let tests: [(&str, serde_json::Value, &str); 3] = [
+        (
+            "the screenshot's list",
+            serde_json::json!([
+                {"content": "read the workspace", "status": "completed"},
+                {"content": "read the leaf crates", "status": "in_progress"},
+                {"content": "read the middle crates", "status": "pending"},
+                {"content": "read the engine", "status": "pending"},
+                {"content": "read the frontends", "status": "pending"},
+                {"content": "read the tests and CI", "status": "pending"},
+                {"content": "explain it all", "status": "pending"},
+            ]),
+            "7 todos \u{b7} 1 done \u{b7} 1 in progress \u{b7} 5 open",
+        ),
+        (
+            "a list nobody has started",
+            serde_json::json!([
+                {"content": "one", "status": "pending"},
+                {"content": "two", "status": "pending"},
+            ]),
+            "2 todos \u{b7} 2 open",
+        ),
+        (
+            "a status the tool never wrote",
+            serde_json::json!([
+                {"content": "one", "status": "completed"},
+                {"content": "two", "status": "blocked"},
+                {"content": "three"},
+            ]),
+            "3 todos \u{b7} 1 done \u{b7} 2 open",
+        ),
+    ];
+
+    for (name, todos, expected) in tests {
+        let lines = tool_call("todowrite", todo_call(todos));
+
+        assert!(
+            lines.iter().any(|line| *line == format!("  \u{23bf} {expected}")),
+            "{name}: expected the row {expected:?}, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains(" 0 ")),
+            "{name}: a state no task is in is left out, got {lines:?}"
+        );
+    }
+}
+
+/// One task is `1 todo`, not `1 todos`.
+#[test]
+fn a_single_todo_is_counted_in_the_singular() {
+    let lines = tool_call(
+        "todowrite",
+        todo_call(serde_json::json!([{"content": "ship it", "status": "in_progress"}])),
+    );
+
+    assert!(
+        lines.iter().any(|line| line == "  \u{23bf} 1 todo \u{b7} 1 in progress"),
+        "got {lines:?}"
+    );
+}
+
+/// The row is a count on screen only: the part the call left — which is
+/// what `/copy` and the Ctrl+T inspector read — still carries every task.
+#[test]
+fn a_counted_todowrite_still_hands_the_copy_every_task() {
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
     reply.parts.push(Part {
@@ -1121,13 +1184,50 @@ fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
     });
     chat.start_message(reply);
 
-    let area = Rect::new(0, 0, 60, 10);
-    let mut buffer = Buffer::empty(area);
-    chat.render(area, &mut buffer, &theme);
+    let messages = chat.messages();
+    let (_, parts, _) = messages[0];
+    let Some(PartBody::Tool { state: ToolState::Completed { input, .. }, .. }) =
+        parts.iter().map(|part| &part.body).find(|body| matches!(body, PartBody::Tool { .. }))
+    else {
+        panic!("the entry keeps the call: {parts:?}");
+    };
 
-    // Row 0 is the header, so the four tasks follow in the order written;
-    // column 6 is the first column of each row's own words, past the
-    // marker columns and the box.
+    assert_eq!(input["todos"], todos(), "the copy reads the whole list, not the count");
+}
+
+/// Each state is told by its box and by how the row is painted: the one
+/// being worked on stands out, and the two nobody will work on again are
+/// struck through. Since **D562** that checklist is the working strip's.
+#[test]
+fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
+    let theme = Theme::default();
+    let mut chat = Chat::default();
+    chat.start_message(Message::user("port the shaders"));
+    let mut reply = Message::assistant("canned");
+    reply.parts.push(Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "call_1".to_owned(),
+            tool: "todowrite".to_owned(),
+            state: todo_call(todos()),
+        },
+    });
+    chat.start_message(reply);
+    chat.set_working(Some(Working {
+        started: Instant::now(),
+        turn: 1,
+        output_tokens: 0,
+        compaction: None,
+    }));
+
+    let height = chat.lay_out_working(60, &theme);
+    let area = Rect::new(0, 0, 60, height);
+    let mut buffer = Buffer::empty(area);
+    chat.render_working(area, &mut buffer);
+
+    // Row 0 is the working line, so the four tasks follow in the order
+    // written; column 6 is the first column of each row's own words, past
+    // the marker columns and the box.
     let done = buffer[(6, 1)].style();
     let in_hand = buffer[(6, 2)].style();
     let pending = buffer[(6, 3)].style();
@@ -1178,12 +1278,13 @@ fn a_todowrite_whose_list_cannot_be_read_keeps_the_ordinary_preview() {
     }
 }
 
-/// **The checklist screenshot's other half.** While a turn runs, its newest
-/// list hangs under the working line in the strip pinned above the
-/// composer; when the turn settles the strip goes, and the call's own rows
-/// stay where they are.
+/// **The checklist screenshot's other half.** While a turn runs, the
+/// newest list a settled `todowrite` wrote hangs under the working line in
+/// the strip pinned above the composer — the only checklist on screen since
+/// **D562**, the call's own row counting it instead. When the turn settles
+/// the strip goes, and the count stays where it is.
 #[test]
-fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
+fn the_working_strip_is_the_only_checklist_a_settled_todowrite_draws() {
     let mut chat = Chat::default();
     chat.start_message(Message::user("port the shaders"));
     let mut reply = Message::assistant("canned");
@@ -1217,7 +1318,11 @@ fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
         !transcript.iter().any(|line| line.contains("\u{2026} (")),
         "the transcript itself no longer carries the line: {transcript:?}"
     );
-    assert_eq!(boxes(&transcript), 4, "the call's own rows stay in the transcript: {transcript:?}");
+    let counted = |lines: &[String]| {
+        lines.iter().any(|line| line.starts_with("  \u{23bf} 4 todos \u{b7} 1 done"))
+    };
+    assert_eq!(boxes(&transcript), 0, "the transcript draws no copy of the list: {transcript:?}");
+    assert!(counted(&transcript), "the call's own row counts it instead: {transcript:?}");
     assert!(
         running.first().is_some_and(|line| line.contains("\u{2026} (")),
         "the strip opens on the working line, got {running:?}"
@@ -1225,18 +1330,16 @@ fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
     assert_eq!(boxes(&running), 4, "and carries this turn's list: {running:?}");
     assert_eq!(
         running[1], "  \u{23bf} \u{2612} port cell.slang",
-        "the copy hangs off the working line's own elbow: {running:?}"
+        "the list hangs off the working line's own elbow: {running:?}"
     );
 
     chat.set_working(None);
     let settled = strip(&mut chat, 60);
+    let after = rendered(&mut chat, area);
 
     assert!(settled.is_empty(), "a settled turn leaves no strip: {settled:?}");
-    assert_eq!(
-        boxes(&rendered(&mut chat, area)),
-        4,
-        "and the transcript keeps the rows it already drew"
-    );
+    assert!(counted(&after), "the transcript keeps the count it already drew: {after:?}");
+    assert_eq!(boxes(&after), 0, "and gains no checklist in the strip's place: {after:?}");
 }
 
 /// The copy under the working line is *this* turn's: a plan the last turn

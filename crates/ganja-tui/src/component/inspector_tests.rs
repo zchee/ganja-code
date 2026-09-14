@@ -114,6 +114,48 @@ fn the_transcript_tab_matches_the_copy_renderer_for_the_same_part() {
     assert!(expected.contains("mcp__docs__search"), "the fixture should exercise a real mcp id");
 }
 
+/// **D562.** The transcript pane counts a settled `todowrite` rather than
+/// drawing its list, and this tab is where a reader who wants the list goes:
+/// every task the call wrote is here, whatever state it is in.
+#[test]
+fn the_transcript_tab_shows_every_task_a_counted_todowrite_wrote() {
+    let tasks =
+        ["port cell.slang", "port graphics.slang", "port bgimage.slang", "port the old shim"];
+    let mut reply = Message::assistant("canned");
+    reply.parts.push(Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "call_1".to_owned(),
+            tool: "todowrite".to_owned(),
+            state: ToolState::Completed {
+                input: serde_json::json!({"todos": [
+                    {"content": tasks[0], "status": "completed", "priority": "high"},
+                    {"content": tasks[1], "status": "in_progress", "priority": "high"},
+                    {"content": tasks[2], "status": "pending", "priority": "medium"},
+                    {"content": tasks[3], "status": "cancelled", "priority": "low"},
+                ]}),
+                output: "[]".to_owned(),
+                title: "3 todos".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 1,
+            },
+        },
+    });
+    let messages = [(Role::Assistant, reply.parts.as_slice(), None)];
+    let session = session(Some("inspector fixture"));
+    let (events, usages) = (VecDeque::new(), VecDeque::new());
+    let feed = feed(Some(&session), &messages, &events, &usages);
+
+    // Tall enough to hold the whole document: the tab opens pinned to its
+    // tail, and the first task sits near its top.
+    let screen = render_in(&mut Inspector::new(), Rect { height: 80, ..AREA }, &feed);
+
+    for task in tasks {
+        assert!(screen.contains(task), "{task:?} is readable on the transcript tab:\n{screen}");
+    }
+}
+
 #[test]
 fn the_transcript_tab_names_a_session_that_has_not_saved_anything_yet() {
     let (events, usages) = (VecDeque::new(), VecDeque::new());

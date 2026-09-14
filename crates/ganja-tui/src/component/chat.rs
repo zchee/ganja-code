@@ -38,8 +38,12 @@
 //! word. Two later screenshots (2026-08-14) pin two more results the same way:
 //! a `read` of a **directory** answers with `Listed N entries` rather than the
 //! envelope it writes for the model, and a `todowrite` answers with the
-//! checklist itself — `\u{2610}`/`\u{2612}` a row each — drawn both on the call's
-//! own row and, while the turn is still running, under the working line.
+//! checklist itself — `\u{2610}`/`\u{2612}` a row each — drawn, while the turn is
+//! still running, under the working line. The call's own row drew that list
+//! too until **D562** (2026-09-15): a model that rewrites its list after every
+//! step filled the transcript with copies of it, so the row now counts the
+//! list — `7 todos \u{b7} 1 done \u{b7} 1 in progress \u{b7} 5 open` — and the
+//! strip is the only checklist on screen.
 //!
 //! Three more screenshots (2026-08-15) pin the strip and the verdicts: the
 //! working line and the checklist under it sit in a strip **pinned above the
@@ -1200,9 +1204,11 @@ impl Chat {
     /// Bounded to the current turn by walking back only as far as the prompt
     /// that started it — a plan the previous turn wrote is not what this one is
     /// working through, and a stale list under a live clock is the one reading
-    /// that would be false. Settled calls only, so the rows under the working
-    /// line and the rows on the call's own transcript row are the same rows
-    /// from the same source.
+    /// that would be false. Settled calls only, so the list under the working
+    /// line is the one the call's own transcript row counted: the same input,
+    /// read by the same [`todo_items`]. Since **D562** this is the only place
+    /// the list is drawn; the transcript row says how far through it the turn
+    /// has got ([`todo_summary`]).
     fn working_todos(&self, theme: &Theme) -> Vec<(String, Style)> {
         self.shown()
             .iter()
@@ -1676,8 +1682,15 @@ const READ_TOOL: &str = "read";
 /// A todo list is the one tool output that is *for the person*: the model
 /// already knows what it wrote, and what a reader wants is the plan, not the
 /// JSON the plan travelled in. It is short by construction — the tool's own
-/// prompt keeps it so — which is why it is the one preview here that is never
-/// clamped.
+/// prompt keeps it so — which is why the checklist is never clamped.
+///
+/// It is drawn in one place: the working strip, while the turn runs. The
+/// call's own transcript row counts it instead (**D562**, 2026-09-15, the
+/// `docs/screenshots/todo-write-noisy.png` screenshot): a model rewrites its
+/// list after every step, and a transcript that drew each rewrite whole held
+/// N copies of a plan of which only the newest was true. The count is
+/// ganja's own choice — opencode draws the list on the call, and so does
+/// Claude Code, which has no pinned strip to draw it in instead.
 const TODO_TOOL: &str = "todowrite";
 
 /// What leads a task still to be done, and one that will not be done again.
@@ -1914,8 +1927,7 @@ fn read_summary(metadata: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// The checklist a `todowrite` call draws: one row per task, its box telling
-/// where the task has got to (**D487**).
+/// The tasks a `todowrite` call carries, each as its content and its status.
 ///
 /// Read off the call's **input** rather than its output, for the reason
 /// [`read_args`] reads the input: the list is structured there — `todos` of
@@ -1928,18 +1940,31 @@ fn read_summary(metadata: &serde_json::Value) -> Option<String> {
 /// empty, an element without content, an input that is not the tool's at all —
 /// and then the call keeps the preview every other tool's result has, which at
 /// least shows what really arrived. A checklist with no rows would be a `⎿`
-/// pointing at nothing.
-fn todo_rows(input: &serde_json::Value, theme: &Theme) -> Option<Vec<(String, Style)>> {
+/// pointing at nothing. The strip's checklist ([`todo_rows`]) and the call
+/// row's count ([`todo_summary`]) both read the list through here, so the two
+/// cannot disagree about which lists they draw (**D562**).
+fn todo_items(input: &serde_json::Value) -> Option<Vec<(&str, Option<&str>)>> {
     let todos = input.get("todos")?.as_array().filter(|todos| !todos.is_empty())?;
 
     todos
         .iter()
         .map(|todo| {
-            let content = field(todo, "content")?;
+            Some((field(todo, "content")?, todo.get("status").and_then(serde_json::Value::as_str)))
+        })
+        .collect()
+}
+
+/// The checklist the working strip draws for a `todowrite` call: one row per
+/// task, its box telling where the task has got to (**D487**; the only
+/// checklist on screen since **D562**).
+fn todo_rows(input: &serde_json::Value, theme: &Theme) -> Option<Vec<(String, Style)>> {
+    let rows = todo_items(input)?
+        .into_iter()
+        .map(|(content, status)| {
             // An unfamiliar status is a task nobody has said is finished, so it
             // draws as one still open rather than as an error the row cannot
             // show anyway.
-            let (box_glyph, style) = match todo.get("status").and_then(serde_json::Value::as_str) {
+            let (box_glyph, style) = match status {
                 Some("completed" | "cancelled") => {
                     (TODO_DONE, theme.dim.add_modifier(Modifier::CROSSED_OUT))
                 }
@@ -1947,9 +1972,50 @@ fn todo_rows(input: &serde_json::Value, theme: &Theme) -> Option<Vec<(String, St
                 _ => (TODO_OPEN, theme.fg),
             };
 
-            Some((format!("{box_glyph} {content}"), style))
+            (format!("{box_glyph} {content}"), style)
         })
-        .collect()
+        .collect();
+
+    Some(rows)
+}
+
+/// The one row a settled `todowrite` call answers with in the transcript
+/// (**D562**): how long the list is, then how many of its tasks stand in each
+/// of `ganja_tool::todo`'s four states — `7 todos · 1 done · 1 in progress ·
+/// 5 open` — in the order a task moves through them, a state no task is in
+/// left out.
+///
+/// `open` is `pending`, spelled the way [`TODO_OPEN`] draws it, and it takes
+/// an unfamiliar status too, for the reason [`todo_rows`] draws one as an open
+/// box. `cancelled` is counted on its own even though the checklist strikes
+/// it like a finished task: a count that folded it into `done` would claim
+/// work nobody did.
+fn todo_summary(input: &serde_json::Value) -> Option<String> {
+    let items = todo_items(input)?;
+    let (mut done, mut in_progress, mut open, mut cancelled) = (0_usize, 0_usize, 0_usize, 0_usize);
+    for (_, status) in &items {
+        match status {
+            Some("completed") => done += 1,
+            Some("in_progress") => in_progress += 1,
+            Some("cancelled") => cancelled += 1,
+            _ => open += 1,
+        }
+    }
+
+    let mut summary = format!(
+        "{count} todo{plural}",
+        count = items.len(),
+        plural = if items.len() == 1 { "" } else { "s" }
+    );
+    for (count, state) in
+        [(done, "done"), (in_progress, "in progress"), (open, "open"), (cancelled, "cancelled")]
+    {
+        if count > 0 {
+            summary.push_str(&format!(" \u{b7} {count} {state}"));
+        }
+    }
+
+    Some(summary)
 }
 
 /// The rows a result lays out as: the first behind the `⎿` when nothing has
@@ -2094,13 +2160,14 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
 
                 return rows;
             }
-            // A todo list answers with the list; see [`TODO_TOOL`]. The tool's
-            // own `N todos` title goes with the JSON it titled — the rows say
-            // how much is left, and say it in the words the model wrote.
+            // A todo list answers with a count of where it stands, and the
+            // list itself is the working strip's to draw; see [`TODO_TOOL`].
+            // The tool's own `N todos` title goes with the JSON it titled — it
+            // counts only what is left, where this row counts every state.
             if tool == TODO_TOOL
-                && let Some(todos) = todo_rows(input, theme)
+                && let Some(summary) = todo_summary(input)
             {
-                rows.extend(result_rows(todos, false));
+                rows.push(Row::new(RESULT, summary, theme.dim));
 
                 return rows;
             }
