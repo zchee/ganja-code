@@ -2,8 +2,8 @@ use buffa::Message as _;
 
 use super::super::{connect, proto};
 use super::{
-    Ask, ContextAsk, ExecArgs, ExecAsk, FinishReason, KvAsk, KvOp, Mapping, ProviderError,
-    ProviderEvent, model_list, verdict,
+    Ask, COMPOSING, ContextAsk, ExecArgs, ExecAsk, FinishReason, KvAsk, KvOp, Mapping,
+    ProviderError, ProviderEvent, model_list, verdict,
 };
 
 /// An exec request carrying one args arm by number, the way a kind this
@@ -502,10 +502,12 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
 /// The three tool-call arms, sent the way the server sends them and read the
 /// way this build now does: each decodes into a field of its own — field 7 is
 /// no longer an unknown the skip log reports — carrying every member the
-/// descriptor gives it at the number it gives it, and none of them is yet an
-/// event. The turn goes on past all three to its own text and finish.
+/// descriptor gives it at the number it gives it. Only the partial becomes an
+/// event, the `COMPOSING` start that opens the call's row (**D559**); the
+/// started and completed arms hand the session nothing, and the turn goes on
+/// past all three to its own text and finish.
 #[test]
-fn each_tool_call_update_decodes_into_its_own_field_and_hands_the_session_nothing() {
+fn each_tool_call_update_decodes_into_its_own_field_and_only_the_partial_is_an_event() {
     let tool_call = mcp_write_tool_call();
     let partial = [
         delimited(1, b"call-1"),
@@ -529,10 +531,11 @@ fn each_tool_call_update_decodes_into_its_own_field_and_hands_the_session_nothin
     assert_eq!(
         events,
         vec![
+            ProviderEvent::ToolCallStart { id: "call-1".to_owned(), name: COMPOSING.to_owned() },
             ProviderEvent::TextDelta("written".to_owned()),
             ProviderEvent::Finish(FinishReason::Completed),
         ],
-        "the tool-call arms hand the session nothing yet"
+        "the partial opens the row, and the started and completed arms add nothing"
     );
 
     let update = |arm: u32, payload: &[u8]| {
@@ -639,7 +642,11 @@ fn a_tool_call_update_is_logged_by_its_ids_and_its_tool_and_never_by_its_argumen
             .concat(),
     ));
 
-    assert!(mapped(&body, false).is_empty(), "no update here is an event");
+    assert_eq!(
+        mapped(&body, false),
+        vec![ProviderEvent::ToolCallStart { id: "call-1".to_owned(), name: COMPOSING.to_owned() }],
+        "the mcp partial announces its call; the absent one and the started arm say nothing"
+    );
 
     let logged = log.logged();
     assert!(!logged.contains("CANARY"), "argument text reached the log: {logged}");
@@ -682,6 +689,118 @@ fn a_tool_call_update_is_logged_by_its_ids_and_its_tool_and_never_by_its_argumen
         lines[2]
     );
     assert!(!lines[2].contains("mcp_"), "a native arm has no mcp members: {}", lines[2]);
+}
+
+/// A partial the way the recording logged every one of them (**D559**): the
+/// call's id, the model's own, an `mcp_tool_call` holding nothing that names
+/// the tool, and no argument text at all.
+fn recorded_partial(call_id: &str) -> Vec<u8> {
+    update_frame(
+        7,
+        &[
+            delimited(1, call_id.as_bytes()),
+            delimited(2, &delimited(15, &[])),
+            delimited(4, b"158c75d8-1-7cdy"),
+        ]
+        .concat(),
+    )
+}
+
+/// The start a partial opens a call's row with.
+fn composing(call_id: &str) -> ProviderEvent {
+    ProviderEvent::ToolCallStart { id: call_id.to_owned(), name: COMPOSING.to_owned() }
+}
+
+/// **D559.** A partial on the bridged channel opens its call's row the moment
+/// it arrives, under `COMPOSING` and the call's own id — and only once: a
+/// second partial for an id already announced says nothing, while a second
+/// call's partial, arriving while the first is still open (the recording's
+/// read and grep), opens a row of its own.
+#[test]
+fn a_partial_on_the_bridged_channel_opens_its_calls_row_once_per_id() {
+    let mut body = recorded_partial("toolu_A");
+    body.extend(recorded_partial("toolu_A"));
+    body.extend(recorded_partial("toolu_B"));
+
+    assert_eq!(mapped(&body, false), vec![composing("toolu_A"), composing("toolu_B")]);
+}
+
+/// **D559.** Every partial that does not name a call the bridge could claim
+/// announces nothing: no `tool_call`, one holding nothing, a native arm (no
+/// native partial has been seen live, and the redirect mints its own id, so
+/// nothing would ever claim the row), an arm this build does not model, and
+/// an `mcp_tool_call` with no id — or an empty one — to key the row on.
+#[test]
+fn a_partial_that_names_no_bridged_call_announces_nothing() {
+    let mcp = delimited(2, &delimited(15, &[]));
+    let unannounced = [
+        [delimited(1, b"call-absent")].concat(),
+        [delimited(1, b"call-empty"), delimited(2, b"")].concat(),
+        [delimited(1, b"call-shell"), delimited(2, &delimited(1, b""))].concat(),
+        [delimited(1, b"call-edit"), delimited(2, &delimited(12, b""))].concat(),
+        [delimited(1, b"call-delete"), delimited(2, &delimited(3, b""))].concat(),
+        [delimited(1, b""), mcp.clone()].concat(),
+        mcp,
+    ];
+
+    for partial in unannounced {
+        let events = mapped(&update_frame(7, &partial), false);
+        assert!(events.is_empty(), "{partial:?} announced {events:?}");
+    }
+}
+
+/// **D559.** An id an exec has claimed is never announced again — whether a
+/// partial opened its row first or the exec came with no partial at all
+/// (cursor's own read-before-write). A late partial for it would reach the
+/// engine as `COMPOSING` for a call already named, and the last name winning
+/// would turn a real call back into a placeholder the engine will not run.
+#[test]
+fn an_id_an_exec_has_claimed_is_never_announced_again() {
+    let mapping_of = |mapping: &mut Mapping, body: &[u8]| {
+        let mut splitter = connect::Splitter::default();
+        splitter.push(body);
+        let mut events = Vec::new();
+        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
+            assert!(mapping.frame(&frame, &mut events).is_none(), "a partial is not a question");
+        }
+
+        events
+    };
+    let mut mapping = Mapping::default();
+
+    assert_eq!(mapping_of(&mut mapping, &recorded_partial("toolu_A")), vec![composing("toolu_A")]);
+    mapping.claim("toolu_A");
+    assert!(
+        mapping_of(&mut mapping, &recorded_partial("toolu_A")).is_empty(),
+        "announced, then claimed: a repeat opens nothing"
+    );
+
+    mapping.claim("toolu_R");
+    assert!(
+        mapping_of(&mut mapping, &recorded_partial("toolu_R")).is_empty(),
+        "bridged with no partial, then partialled: nothing either"
+    );
+}
+
+/// **D559.** A turn the server ends with an announced call no exec claimed
+/// hands the session that call's start and nothing more about it — no second
+/// start naming it, no argument, no end — which is exactly what the engine
+/// closes a placeholder row unrun on. The reply around it still arrives.
+#[test]
+fn a_turn_that_ends_with_an_announced_call_unclaimed_leaves_its_start_unanswered() {
+    let mut body = recorded_partial("toolu_A");
+    body.extend(framed(text("On second thought, no.")));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+
+    assert_eq!(
+        mapped(&body, false),
+        vec![
+            composing("toolu_A"),
+            ProviderEvent::TextDelta("On second thought, no.".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]
+    );
 }
 
 /// An arm this build still does not model is still skipped, and still named

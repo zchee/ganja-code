@@ -604,6 +604,179 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
     );
 }
 
+/// A call's partial the way the recording saw every one (**D559**): its id
+/// and an `mcp_tool_call` holding nothing that names the tool.
+fn partial(call_id: &str) -> proto::Update {
+    proto::Update {
+        partial_tool_call: buffa::MessageField::some(proto::PartialToolCall {
+            call_id: Some(call_id.to_owned()),
+            tool_call: buffa::MessageField::some(proto::ToolCall {
+                mcp_tool_call: buffa::MessageField::some(proto::McpToolCall::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Every `ToolCallStart` in `events`, as `(id, name)`.
+fn starts(events: &[ProviderEvent]) -> Vec<(&str, &str)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStart { id, name } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **D559, one step.** A partial and the exec that follows it reach the
+/// engine as two starts under one id — the partial's `call_id` is the exec's
+/// `tool_call_id`, the correlation the recording measured — the first under
+/// `COMPOSING` the moment the partial arrives, the second under the real name
+/// with the whole argument object and the end behind it. The engine reads the
+/// pair as a rename of the one row the partial opened.
+#[tokio::test]
+async fn a_partial_and_its_exec_reach_the_engine_as_two_starts_under_one_id_the_second_named() {
+    let mut body = framed(partial("toolu_A"));
+    body.extend(mcp_framed(1, read_args("toolu_A")));
+    let (events, _) = bridged_exec(body, roster()).await;
+
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::ToolCallStart {
+                id: "toolu_A".to_owned(),
+                name: crate::provider::COMPOSING.to_owned(),
+            },
+            ProviderEvent::ToolCallStart { id: "toolu_A".to_owned(), name: "read".to_owned() },
+            ProviderEvent::ToolCallDelta { id: "toolu_A".to_owned(), json: "{}".to_owned() },
+            ProviderEvent::ToolCallEnd { id: "toolu_A".to_owned() },
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]
+    );
+}
+
+/// **D559, across a pause** — the recorded write. Its partial arrived, then
+/// cursor's own read paused the step with the write still being composed, and
+/// the write's exec came only after that read was answered and the Run read
+/// on. The first step hands the engine the write's placeholder beside the
+/// read; the resumed Run hands it the write's naming start and nothing that
+/// would open the row a second time, because the announcement is the fold's
+/// and the fold is what the pause carried.
+#[tokio::test]
+async fn a_call_announced_before_another_exec_is_named_by_its_own_exec_after_the_pause() {
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _written) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        chunks,
+        cancel.clone(),
+        super::Duplex::for_tests(answers, roster()),
+        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
+    );
+
+    let mut first = framed(partial("toolu_W"));
+    first.extend(mcp_framed(74, read_args("toolu_R")));
+    body.unbounded_send(Ok(first)).expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream rather than hanging it");
+    assert_eq!(
+        starts(&paused),
+        vec![("toolu_W", crate::provider::COMPOSING), ("toolu_R", "read")],
+        "the write's row opened, and the step paused on the read: {paused:?}"
+    );
+    assert!(
+        !paused.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallEnd { id } | ProviderEvent::ToolCallDelta { id, .. }
+                if id == "toolu_W"
+        )),
+        "nothing the engine could run arrived for the write: {paused:?}"
+    );
+
+    let resumed = answered(&request, "toolu_R", completed("the file's contents"));
+    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
+        panic!("the read's result keys the held run");
+    };
+    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+    body.unbounded_send(Ok(mcp_framed(2, read_args("toolu_W")))).expect("the body is open");
+    let named: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), stream.collect())
+        .await
+        .expect("the write's exec pauses the resumed run");
+
+    assert_eq!(
+        named,
+        vec![
+            ProviderEvent::ToolCallStart { id: "toolu_W".to_owned(), name: "read".to_owned() },
+            ProviderEvent::ToolCallDelta { id: "toolu_W".to_owned(), json: "{}".to_owned() },
+            ProviderEvent::ToolCallEnd { id: "toolu_W".to_owned() },
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "the write is named under the id its partial announced, and announced once"
+    );
+}
+
+/// **D559.** An exec the pause handed the engine is claimed by that pause,
+/// partial or none — so a partial that turns up for the same id after the Run
+/// resumed opens no row. One would reach the engine as `COMPOSING` for a
+/// call it has already named and run; the recording saw one partial per call
+/// and none after its exec, and this is what keeps a server that sent one
+/// from turning a finished call back into a placeholder.
+#[tokio::test]
+async fn a_partial_arriving_after_its_own_exec_opens_no_row() {
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _written) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        chunks,
+        cancel.clone(),
+        super::Duplex::for_tests(answers, roster()),
+        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
+    );
+    body.unbounded_send(Ok(mcp_framed(74, read_args("toolu_R")))).expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream rather than hanging it");
+    assert_eq!(starts(&paused), vec![("toolu_R", "read")], "{paused:?}");
+
+    let resumed = answered(&request, "toolu_R", completed("the file's contents"));
+    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
+        panic!("the read's result keys the held run");
+    };
+    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+    let mut tail = framed(partial("toolu_R"));
+    tail.extend(framed(text("Read it.")));
+    tail.extend(framed(turn_ended()));
+    tail.extend(end_stream("{}"));
+    body.unbounded_send(Ok(tail)).expect("the body is open");
+    drop(body);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("the resumed run reads to its end");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Read it.".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]
+    );
+}
+
 /// **AC-14c, the wire half.** A keyed hit still lacking one of its results
 /// opens a fresh Run — the held one stays held, which `bridge::tests`
 /// watches — and the run request that Run goes out with is a

@@ -70,7 +70,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::{ID, proto, request};
 use crate::protocol::{Message, MessageId, PartBody, Role, ToolState};
-use crate::provider::{ChatRequest, NO_RESULT, clamp};
+use crate::provider::{COMPOSING, ChatRequest, NO_RESULT, clamp};
 
 /// What the run request asks the agent to do, decided by the request's own
 /// shape.
@@ -207,7 +207,10 @@ pub fn compose(request: &ChatRequest) -> Composed {
 /// server-tool parts, another wire's sealed reasoning, peer envelopes, step
 /// markers, patches — plus `File`, both arms. Anthropic sends an attachment
 /// as an image or document block; a root entry has no measured JSON shape
-/// for one, so the arm is a recorded limitation rather than a guess.
+/// for one, so the arm is a recorded limitation rather than a guess. And one
+/// tool part: a row still named
+/// [`COMPOSING`](crate::provider::COMPOSING) (**D559**), call and result
+/// both.
 pub(super) fn entries(request: &ChatRequest) -> History<'_> {
     let messages = request.messages.as_slice();
 
@@ -350,6 +353,12 @@ enum Piece<'a> {
 fn pieces(message: &Message) -> impl Iterator<Item = Piece<'_>> {
     message.parts.iter().filter_map(|part| match &part.body {
         PartBody::Text { text } => Some(Piece::Text(text)),
+        // A placeholder row (**D559**): a call the model began that no exec
+        // ever named. Its call would be a tool called `…` and its result the
+        // sentence the engine closed it with, which was written for the
+        // person reading the transcript — so neither half is composed, and
+        // the state reads as if the row had never been drawn.
+        PartBody::Tool { tool, .. } if tool == COMPOSING => None,
         PartBody::Tool { tool, state, .. } => Some(Piece::Call { tool, state }),
         // `File` with content is an attachment anthropic sends as a block; one
         // without is a reference resolved into text before a request is

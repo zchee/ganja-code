@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 use super::super::proto;
 use super::{Action, Composed, compose, derived, newest_user_run, newest_user_text};
 use crate::protocol::{Message, Part, PartBody, PartId, ToolState, Usage};
-use crate::provider::{CALL_INPUT_LIMIT, ChatRequest};
+use crate::provider::{CALL_INPUT_LIMIT, COMPOSING, ChatRequest};
 
 /// A conversation whose current turn opens at `turn_start`, under the system
 /// prompt every request here carries.
@@ -297,6 +297,60 @@ fn a_message_carrying_only_parts_a_wire_never_sends_leaves_no_trace_in_the_state
     assert!(composed.turns.is_empty(), "no turn, no step");
     assert!(composed.blobs.is_empty(), "no blob");
     assert_eq!(composed.action, Action::User { text: "Hello?".to_owned() });
+}
+
+/// **D559.** A placeholder row never reaches the model. Whatever state it is
+/// in — still open across a pause, closed unrun by the engine, or closed by a
+/// cancel — a message holding one composes to exactly the bytes the same
+/// message composes to without it: the same root ids, the same turns, the
+/// same store, blob for blob. Its call would be a tool called `…`, and its
+/// result a sentence written for the person reading the transcript.
+#[test]
+fn a_message_holding_a_placeholder_row_composes_byte_identically_to_one_without_it() {
+    let prompt = Message::user("Read a.rs, then write b.rs.");
+    let without = reply(
+        "Looking.",
+        vec![call(
+            "toolu_R",
+            "read",
+            completed(serde_json::json!({ "path": "a.rs" }), "fn a() {}"),
+        )],
+    );
+    let later = Message::user("Well?");
+
+    for state in [
+        ToolState::Pending { input: None },
+        errored(
+            serde_json::json!({}),
+            "the model began this call but never sent it, so nothing ran",
+        ),
+        errored(serde_json::json!({}), "the call was cancelled"),
+    ] {
+        // A clone keeps every message id, so any difference is the row's; and
+        // it goes in ahead of the read, where the recorded write's row opened.
+        let mut with = without.clone();
+        with.parts.insert(1, call("toolu_W", COMPOSING, state.clone()));
+
+        let composed_with = compose(&request(vec![prompt.clone(), with, later.clone()], 2));
+        let composed_without =
+            compose(&request(vec![prompt.clone(), without.clone(), later.clone()], 2));
+
+        assert_eq!(composed_with.root, composed_without.root, "{state:?}");
+        assert_eq!(composed_with.turns, composed_without.turns, "{state:?}");
+        assert_eq!(composed_with.blobs, composed_without.blobs, "{state:?}");
+        assert_eq!(composed_with.action, composed_without.action, "{state:?}");
+        assert_eq!(composed_with.conversation_id, composed_without.conversation_id);
+        assert_eq!(composed_with.clamped_calls, composed_without.clamped_calls);
+        let rendered: Vec<String> = composed_with
+            .blobs
+            .values()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect();
+        assert!(
+            !rendered.iter().any(|blob| blob.contains(COMPOSING)),
+            "no blob names the placeholder: {rendered:?}"
+        );
+    }
 }
 
 /// **AC-4, the unit half.** A request with nothing before its newest run —

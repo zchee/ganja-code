@@ -15,7 +15,7 @@ use ganja_core::protocol::{
     Command, Event, FinishReason, PartBody, PermissionId, PermissionMode, PermissionReply, Role,
     ToolState, Usage,
 };
-use ganja_core::provider::{ChatRequest, ProviderError, ProviderEvent};
+use ganja_core::provider::{COMPOSING, ChatRequest, ProviderError, ProviderEvent};
 use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
 use ganja_core::{Engine, EngineError};
 use ganja_testkit::{BlockingTool, RecorderTool, ScriptedProvider, drain};
@@ -925,5 +925,410 @@ async fn a_provider_failure_mid_loop_strands_the_buffered_call() {
     assert!(
         error.as_deref().is_some_and(|error| error.contains("connection reset")),
         "the failure explains itself, got {error:?}"
+    );
+}
+
+/// The tool name every part event for `call_id` carried, in order — what a
+/// frontend redraws a row's heading from.
+fn names_of(events: &[Event], call_id: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PartStarted { part, .. } | Event::PartUpdated { part, .. } => match &part.body {
+                PartBody::Tool { call_id: id, tool, .. } if id == call_id => Some(tool.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The error the last part event for `call_id` closed it with, if it did.
+fn closed_with(events: &[Event], call_id: &str) -> Option<String> {
+    events.iter().rev().find_map(|event| match event {
+        Event::PartUpdated { part, .. } => match &part.body {
+            PartBody::Tool { call_id: id, state: ToolState::Error { error, .. }, .. }
+                if id == call_id =>
+            {
+                Some(error.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// The tool parts of `request`'s last message, as `(call id, tool)`.
+fn tool_names(request: &ChatRequest) -> Vec<(&str, &str)> {
+    request
+        .messages
+        .last()
+        .expect("the request carries messages")
+        .parts
+        .iter()
+        .filter_map(|part| match &part.body {
+            PartBody::Tool { call_id, tool, .. } => Some((call_id.as_str(), tool.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **D559.** A call a wire announced under `COMPOSING` and then named in the
+/// same step is **one** row, renamed in place: one `PartStarted` under `…`,
+/// one `PartUpdated` carrying the real name, and the call runs under that
+/// name. Everything that reads the name reads it at `prepare` or later, after
+/// the rename — which this pins through the permission gate: the dialog asks
+/// about `shell`, never about `…` — and the transcript the next request
+/// carries holds the real name too.
+#[tokio::test]
+async fn a_call_announced_before_it_is_named_is_renamed_in_place_and_runs_under_its_name() {
+    let step_one = vec![
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: COMPOSING.to_owned() },
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "shell".to_owned() },
+        ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: r#"{"key":"a"}"#.to_owned() },
+        ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
+        ProviderEvent::Finish(FinishReason::Completed),
+    ];
+    let (provider, requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
+    );
+    let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let (id, mut seen) = until_permission(&mut events).await;
+    let Some(Event::PermissionRequested { call_id, tool, .. }) = seen.last() else {
+        panic!("the drain stops on the request");
+    };
+    assert_eq!(call_id, "call_1");
+    assert_eq!(tool, "shell", "the gate reads the name the rename left");
+
+    engine
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is always accepted");
+    seen.extend(drain(&mut events).await);
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "started:user",
+            "started:assistant",
+            "part:step_start",
+            "part:tool_pending:call_1",
+            // The rename: the row the placeholder opened, redrawn.
+            "updated:pending:call_1",
+            // And the arguments completing, as on every wire.
+            "updated:pending:call_1",
+            "part:step_finish:0/0",
+            "perm_requested:shell",
+            "perm_replied:once",
+            "updated:running:call_1",
+            "updated:completed:call_1",
+            "part:step_start",
+            "part:step_finish:0/0",
+            "finished:completed",
+        ],
+        "one row, renamed once"
+    );
+    assert_eq!(
+        names_of(&seen, "call_1"),
+        vec![COMPOSING, "shell", "shell", "shell", "shell"],
+        "the row opened as the placeholder and every event after the rename names the tool"
+    );
+    assert_eq!(
+        *calls.lock().expect("the call log is never poisoned"),
+        vec![serde_json::json!({"key": "a"})],
+        "the call ran once, under the name the rename gave it"
+    );
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    assert_eq!(tool_names(&requests[1]), vec![("call_1", "shell")], "and the transcript names it");
+}
+
+/// **D559, the other half of the rule.** A second start under the name the
+/// call already has says nothing new, so it draws nothing: one row, and the
+/// only update before it runs is the one its arguments completing earns.
+#[tokio::test]
+async fn a_second_start_under_the_same_name_changes_nothing() {
+    let step_one = vec![
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
+        ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: r#"{"key":"a"}"#.to_owned() },
+        ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
+        ProviderEvent::Finish(FinishReason::Completed),
+    ];
+    let (provider, _requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
+    );
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "started:user",
+            "started:assistant",
+            "part:step_start",
+            "part:tool_pending:call_1",
+            "updated:pending:call_1",
+            "part:step_finish:0/0",
+            "updated:running:call_1",
+            "updated:completed:call_1",
+            "part:step_start",
+            "part:step_finish:0/0",
+            "finished:completed",
+        ]
+    );
+    assert_eq!(calls.lock().expect("the call log is never poisoned").len(), 1);
+}
+
+/// **D559, across a pause** — the recorded write, in the engine's terms. A
+/// call is announced; another call is complete on the same step, which ends
+/// with the placeholder still unnamed. That row is **withheld**, not run —
+/// `…` is no tool — and stays open in the message, which the next request
+/// carries it in; the next step names it, and it is the same row that is
+/// renamed and run there, never a second part for the same id and never an
+/// unknown-tool error.
+#[tokio::test]
+async fn a_call_announced_across_a_pause_keeps_its_row_and_runs_on_the_step_that_names_it() {
+    let mut step_one =
+        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
+    step_one.push(ProviderEvent::Finish(FinishReason::Completed));
+    let mut step_two = call("call_w", "lookup", r#"{"key":"w"}"#);
+    step_two.push(ProviderEvent::Finish(FinishReason::Completed));
+    let step_three = vec![
+        ProviderEvent::TextDelta("done".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ];
+    let (provider, requests) =
+        ScriptedProvider::strict("step-scripted", vec![step_one, step_two, step_three]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "started:user",
+            "started:assistant",
+            "part:step_start",
+            "part:tool_pending:call_w",
+            "part:tool_pending:call_r",
+            "updated:pending:call_r",
+            "part:step_finish:0/0",
+            // Only the call that was named runs; the placeholder waits.
+            "updated:running:call_r",
+            "updated:completed:call_r",
+            "part:step_start",
+            // The same row, renamed by the step that names it...
+            "updated:pending:call_w",
+            "updated:pending:call_w",
+            "part:step_finish:0/0",
+            // ...and run there.
+            "updated:running:call_w",
+            "updated:completed:call_w",
+            "part:step_start",
+            "part:text",
+            "delta:done",
+            "part:step_finish:0/0",
+            "finished:completed",
+        ],
+        "one row for the announced call, run on the step that named it"
+    );
+    assert_eq!(
+        *calls.lock().expect("the call log is never poisoned"),
+        vec![serde_json::json!({"key": "r"}), serde_json::json!({"key": "w"})],
+        "each call ran once, and nothing ran under the placeholder"
+    );
+
+    let requests = requests.lock().expect("the request log is never poisoned");
+    assert_eq!(requests.len(), 3, "one request per step");
+    assert_eq!(
+        tool_names(&requests[1]),
+        vec![("call_w", COMPOSING), ("call_r", "lookup")],
+        "the step that names it is asked with the row still open in the message"
+    );
+    assert!(
+        matches!(
+            tool_states(&requests[1]).first(),
+            Some(("call_w", ToolState::Pending { input: None }))
+        ),
+        "withheld, not run: {:?}",
+        tool_states(&requests[1])
+    );
+    assert_eq!(
+        tool_names(&requests[2]),
+        vec![("call_w", "lookup"), ("call_r", "lookup")],
+        "and afterwards the transcript holds it once, named"
+    );
+    assert!(
+        tool_states(&requests[2])
+            .iter()
+            .all(|(_, state)| matches!(state, ToolState::Completed { .. })),
+        "no call closed as an error: {:?}",
+        tool_states(&requests[2])
+    );
+}
+
+/// **D559.** A call announced and never named — the stream ended without it
+/// — is closed unrun on the step that ended, with a sentence of its own for
+/// the person reading the transcript, and the turn finishes as the model
+/// meant it to. Nothing runs, and no second request is spent on it.
+#[tokio::test]
+async fn a_call_announced_and_never_named_is_closed_unrun_when_the_stream_ends() {
+    let (provider, requests) = ScriptedProvider::strict(
+        "step-scripted",
+        vec![vec![
+            ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() },
+            ProviderEvent::TextDelta("On second thought, no.".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ]],
+    );
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "started:user",
+            "started:assistant",
+            "part:step_start",
+            "part:tool_pending:call_w",
+            "part:text",
+            "delta:On second thought, no.",
+            "updated:error:call_w",
+            "part:step_finish:0/0",
+            "finished:completed",
+        ]
+    );
+    assert_eq!(
+        closed_with(&seen, "call_w").as_deref(),
+        Some("the model began this call but never sent it, so nothing ran")
+    );
+    assert_eq!(names_of(&seen, "call_w"), vec![COMPOSING, COMPOSING], "never named, never renamed");
+    assert!(calls.lock().expect("the call log is never poisoned").is_empty());
+    assert_eq!(requests.lock().expect("the request log is never poisoned").len(), 1);
+}
+
+/// **D559.** A cancel that lands while the engine runs the call a step paused
+/// on — the placeholder beside it withheld, one of no step's calls at that
+/// moment — still closes the placeholder, cancelled. A turn never ends with
+/// one open, so a new turn never inherits one.
+#[tokio::test]
+async fn cancelling_while_an_announced_call_waits_across_a_pause_closes_it_cancelled() {
+    let mut step_one =
+        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
+    step_one.push(ProviderEvent::Finish(FinishReason::Completed));
+    let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one]);
+    let (entered, mut wait_entered) = tokio::sync::mpsc::channel(1);
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![BlockingTool::with_entry_signal(
+            "lookup",
+            "waits to be cancelled",
+            entered,
+        )])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    wait_entered.recv().await.expect("the named call should start executing");
+    engine.send(Command::CancelTurn).await.expect("an executing engine accepts a cancel");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(shapes.last().expect("events arrived"), "finished:cancelled");
+    assert_eq!(closed_with(&seen, "call_r").as_deref(), Some("the call was cancelled"));
+    assert_eq!(
+        closed_with(&seen, "call_w").as_deref(),
+        Some("the call was cancelled"),
+        "the withheld placeholder is closed with the turn: {shapes:?}"
+    );
+    let finished = shapes.iter().position(|shape| shape == "finished:cancelled");
+    let closed = shapes.iter().rposition(|shape| shape == "updated:error:call_w");
+    assert!(closed < finished, "closed before the finish that ends the turn: {shapes:?}");
+}
+
+/// **D559.** A provider that dies on the step after a pause strands the
+/// placeholder that step inherited, exactly as it strands any call of its
+/// own: the step seeded it, so the step's interruption closes it.
+#[tokio::test]
+async fn a_provider_failure_on_the_step_after_a_pause_strands_the_announced_call() {
+    let mut step_one =
+        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
+    step_one.push(ProviderEvent::Finish(FinishReason::Completed));
+    let step_two =
+        vec![ProviderEvent::Failed(ProviderError::Transport("connection reset".to_owned()))];
+    let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    assert_eq!(
+        &shapes[shapes.len() - 3..],
+        ["part:step_start", "updated:error:call_w", "finished:failed"],
+        "the inherited row is closed by the step that died: {shapes:?}"
+    );
+    assert_eq!(
+        closed_with(&seen, "call_w").as_deref(),
+        Some("the provider failed before this call could run")
+    );
+    assert_eq!(
+        *calls.lock().expect("the call log is never poisoned"),
+        vec![serde_json::json!({"key": "r"})],
+        "only the named call ever ran"
     );
 }

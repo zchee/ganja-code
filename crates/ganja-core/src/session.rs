@@ -54,7 +54,7 @@ use crate::protocol::{
     QuestionAnswer, QuestionId, QuestionInfo, QuestionOption, QuestionSource, Role, ToolState,
     Usage, now,
 };
-use crate::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use crate::provider::{COMPOSING, ChatRequest, Provider, ProviderError, ProviderEvent};
 use crate::storage::{SessionId, SessionInfo, Storage, StorageError};
 use crate::tool::{
     Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, send_message,
@@ -80,6 +80,15 @@ fn denied(rules: &[crate::permission::Rule]) -> String {
 /// that dies never leaves a parsed-but-unstarted call behind. Here calls run
 /// after the stream ends, and a part that opened `Pending` has to close.
 const STRANDED: &str = "the provider failed before this call could run";
+
+/// What a placeholder row (**D559**) is closed with when nothing is left to
+/// name it: the wire announced the call as the model began it, and the step
+/// that could have carried it ended without it.
+///
+/// Written for the person reading the transcript, and for nobody else — the
+/// one wire that sends [`COMPOSING`] leaves a row still carrying it out of
+/// every state it composes (`cursor/history`), so no model ever reads this.
+const UNSENT: &str = "the model began this call but never sent it, so nothing ran";
 
 /// Upstream `tool/invalid.ts`: a call that cannot run is answered through the
 /// `invalid` tool, and this is the shape of its output.
@@ -1921,6 +1930,9 @@ pub(crate) async fn run_turn(turn: Turn) {
         TurnKind::Shell { command } => drive_shell(&turn, command.clone()).await,
         TurnKind::Compact => drive_compact(&turn).await,
     };
+    // Before the message is complete, stored or pushed onto history: a
+    // placeholder row is this turn's to close, whichever way it ended.
+    close_composing(&turn, &mut assistant, outcome.as_ref()).await;
     let completed = assistant.complete();
 
     // A turn that died before its first fragment leaves nothing worth sending
@@ -3711,7 +3723,13 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     // engine treated usage before the loop existed: providers accumulate
     // internally and report complete counts.
     let mut usage: Option<Usage> = None;
-    let mut calls: Vec<BufferedCall> = Vec::new();
+    // Not empty on every step (**D559**): a placeholder an earlier step of
+    // this message withheld is still waiting for the start that names it, and
+    // that start arrives on this step's stream. Seeding it here is what lets
+    // the rename below find it — and what lets every interruption below close
+    // it with the rest, since a withheld row is a call of this step until
+    // something names it or nothing can.
+    let mut calls: Vec<BufferedCall> = composing(assistant);
 
     /// Closes the buffered calls and hands back the interruption, so every
     /// early exit below stays one expression.
@@ -3808,8 +3826,40 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 }
             }
             ProviderEvent::ToolCallStart { id, name } => {
-                if calls.iter().any(|call| call.id == id) {
-                    tracing::debug!(id, "the provider started the same call twice");
+                // A second start for a call this step holds (**D559**). Under
+                // the same name it says nothing new. Under another it is a
+                // wire that learned the call's tool late — cursor announces a
+                // call as the model begins it, under `COMPOSING`, and names it
+                // only when the exec lands — so the **last name wins** and the
+                // call and its row are renamed in place. Nothing else about
+                // the call moves: its id, its part, its position in the
+                // message and its argument buffer all stay, and everything
+                // that reads the name — the permission gate, the hooks, what
+                // the transcript runs — reads it at `prepare` or later, which
+                // is after this.
+                if let Some(held) = calls.iter_mut().find(|call| call.id == id) {
+                    if held.name == name {
+                        tracing::debug!(id, "the provider started the same call twice");
+                        continue;
+                    }
+                    let Some(renamed) = rename_tool(assistant, &held.part_id, name.clone()) else {
+                        continue;
+                    };
+                    held.name = name;
+                    turn.persist_part(assistant, &renamed);
+
+                    if let ControlFlow::Break(stop) = deliver(
+                        turn,
+                        Event::PartUpdated {
+                            session_id: turn.session_id.clone(),
+                            message_id: assistant.id.clone(),
+                            part: renamed,
+                        },
+                    )
+                    .await
+                    {
+                        interrupt!(stop, &ToolError::Cancelled.to_string());
+                    }
                     continue;
                 }
 
@@ -4017,6 +4067,23 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             }
         }
     };
+
+    // A call still named `COMPOSING` was begun and never named (**D559**),
+    // so it is withheld from `prepare`: `…` is no tool, and running it would
+    // write an unknown-tool error into the transcript and then open a second
+    // part for the same id when the name did arrive. What happens to it
+    // turns on whether this step hands the engine anything to run. If it
+    // does, the wire paused for another call — the recording's write, whose
+    // partial came 0.6 s before cursor's own read and whose exec came 51 s
+    // after — and the row stays open, `Pending` in this message, for the
+    // next step to seed. If it does not, the stream is over and nothing will
+    // name it, so it is closed unrun here.
+    let unnamed: Vec<BufferedCall> = calls.extract_if(.., |call| call.name == COMPOSING).collect();
+    if calls.is_empty() {
+        for call in &unnamed {
+            close_unresolved(turn, assistant, call, UNSENT).await;
+        }
+    }
 
     // The request is over: mark what it spent, upstream's `step-finish` part.
     // The marker is born complete, so this is the one append whose
@@ -5356,6 +5423,79 @@ async fn close_unresolved(turn: &Turn, assistant: &mut Message, call: &BufferedC
             })
             .await;
     }
+}
+
+/// The calls of `assistant` a wire began and has not named (**D559**): tool
+/// parts still `Pending` with no input and named [`COMPOSING`], as the calls
+/// a step buffers.
+///
+/// Read off the message rather than kept beside it, because the message is
+/// what every step of a turn shares: a row one step withheld is found by the
+/// next without a second copy of the fact that could disagree with the part.
+fn composing(assistant: &Message) -> Vec<BufferedCall> {
+    assistant
+        .parts
+        .iter()
+        .filter_map(|part| match &part.body {
+            PartBody::Tool { call_id, tool, state: ToolState::Pending { input: None } }
+                if tool == COMPOSING =>
+            {
+                Some(BufferedCall {
+                    id: call_id.clone(),
+                    name: tool.clone(),
+                    json: String::new(),
+                    part_id: part.id.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Closes every placeholder row a turn is ending with (**D559**), unrun.
+///
+/// The steps close theirs where they can — an interruption through
+/// [`fail_buffered`], a stream that ended with nothing to run through
+/// [`UNSENT`] — but a row withheld across a pause is not one of any step's
+/// calls while the engine runs the call that paused it, so a cancel there, or
+/// a steer boundary that stops the turn, would otherwise leave it `Pending`
+/// for the next turn to inherit. This runs once, where every turn ends, and
+/// is what makes "a new turn never holds one" a rule rather than a hope. The
+/// sentence follows how the turn ended.
+async fn close_composing(turn: &Turn, assistant: &mut Message, outcome: Option<&Outcome>) {
+    let left = composing(assistant);
+    if left.is_empty() {
+        return;
+    }
+
+    let error = match outcome.map(|outcome| &outcome.reason) {
+        Some(FinishReason::Failed) => STRANDED.to_owned(),
+        Some(FinishReason::Completed) => UNSENT.to_owned(),
+        Some(FinishReason::Cancelled) | None => ToolError::Cancelled.to_string(),
+    };
+    for call in &left {
+        close_unresolved(turn, assistant, call, &error).await;
+    }
+}
+
+/// Renames the tool part `part_id` to `tool`, returning the part as it now
+/// stands for the event that reports it, or [`None`] when there is no such
+/// part.
+///
+/// Only the name moves. A part renamed after it closed would claim a closed
+/// call ran as something it did not, so a terminal part is left as it is —
+/// [`set_tool_state`]'s rule, for the same reason.
+fn rename_tool(assistant: &mut Message, part_id: &PartId, tool: String) -> Option<Part> {
+    let part = assistant.parts.iter_mut().find(|part| part.id == *part_id)?;
+    let PartBody::Tool { tool: current, state, .. } = &mut part.body else {
+        return None;
+    };
+    if matches!(state, ToolState::Completed { .. } | ToolState::Error { .. }) {
+        return None;
+    }
+    *current = tool;
+
+    Some(part.clone())
 }
 
 /// Replaces the state of the tool part `part_id`, returning the part as it

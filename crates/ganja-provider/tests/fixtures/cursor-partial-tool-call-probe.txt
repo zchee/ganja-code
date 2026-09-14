@@ -1,0 +1,151 @@
+# Whether cursor's partial_tool_call can open a tool call's row before the
+# call's exec arrives: whether a partial names its tool, which id the exec
+# that follows repeats, and how the partials, the execs and the tool-call
+# updates interleave across a turn's steps.
+#
+# The recording D559 is built on (bead ganja-code-gzkn;
+# .omc/handoffs/2026-09-15-cursor-partial-tool-call.md, "W1 result and the
+# recording"). One live turn against api2.cursor.sh, run by the user: no lane
+# and no lead ran one, and nothing here was read out of auth.json. What the
+# wire itself said is in the run's own debug log; the line numbers below are
+# that file's. The log was grepped for the three credential markers (a bearer
+# prefix, a key prefix, a JWT header) before a line of this was written: zero
+# hits over :46000-:47200.
+#
+# Recorded by: W1's own debug lines, no scaffolding. decode.rs's
+#              `a tool-call update` (one per partial_tool_call = 7,
+#              tool_call_started = 2 and tool_call_completed = 3), cursor.rs's
+#              `bridging an exec to a ganja tool` (carrying W1's exec_id) and
+#              bridge.rs's `answering a bridged exec from the engine's result`.
+#              The lines under "the lines" are verbatim copies of those three
+#              families and of nothing else in the log.
+# Build:  ganja-code 0.1.0; ./target/release/ganja rebuilt from ddf8e45 (W1,
+#         "provider: measure cursor's tool-call updates before announcing a
+#         call"). At that build the three arms decode and log, and no
+#         ProviderEvent comes from any of them: a call still reached the
+#         engine through its exec alone.
+# Date:   2026-09-14, 16:28:51 - 16:29:53 UTC for the lines below; the
+#         session ran to 16:31 (2026-09-15 01:28 - 01:31 JST; the log file is
+#         named by the local date).
+# Log:    ~/.local/share/ganja/log/ganja.2026-09-15.log; the recording is
+#         :46221-:47100, and the session's own lines run on to :52053.
+# Server: api2.cursor.sh.
+# Turn:   one prompt. The model called a `bash`, then a ~150-line `write`, then
+#         a `read` and a `grep` in one step. Commands, paths and file content
+#         are tool-argument values and are not recorded here.
+#
+# NO ERROR OF ANY KIND WAS PRODUCED BY THE TURN. Over :46221-:47100 there is
+# no ERROR or WARN line, no connect error, no failed exchange and no closed
+# request body, and every one of the five bridged execs was answered
+# `outcome="ran"`.
+#
+# This directory's rule holds: no token, no tool-argument value and no reply
+# text. What a line below carries is ids, arm names, tool names, exec numbers
+# and one byte count.
+
+== the lines ==
+# Verbatim, in log order, each prefixed with its line number in the log.
+46221:2026-09-14T16:28:51.306130Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="partial_tool_call (7)" call="toolu_01P3LQky6KSxkL6jbbq4QXUp" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-0-me83" tool_call="mcp_tool_call (15)" args_bytes=0
+46239:2026-09-14T16:28:52.117648Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_started (2)" call="toolu_01P3LQky6KSxkL6jbbq4QXUp" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-0-me83" tool_call="mcp_tool_call (15)" mcp_name="bash" mcp_tool_name="bash" mcp_call="toolu_01P3LQky6KSxkL6jbbq4QXUp" mcp_provider="ganja"
+46240:2026-09-14T16:28:52.117669Z DEBUG ganja_provider::provider::cursor: bridging an exec to a ganja tool provider="cursor" exec=1 exec_id="d17eb764-7ca7-45e4-a161-78c570af6b89" kind="mcp_args" tool="bash" call="toolu_01P3LQky6KSxkL6jbbq4QXUp"
+46242:2026-09-14T16:28:52.351057Z DEBUG ganja_provider::provider::cursor::bridge: answering a bridged exec from the engine's result provider="cursor" exec=1 tool="bash" outcome="ran"
+46246:2026-09-14T16:28:52.541674Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_completed (3)" call="toolu_01P3LQky6KSxkL6jbbq4QXUp" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-0-me83" tool_call="mcp_tool_call (15)" mcp_name="bash" mcp_tool_name="bash" mcp_call="toolu_01P3LQky6KSxkL6jbbq4QXUp" mcp_provider="ganja"
+46255:2026-09-14T16:28:56.053328Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="partial_tool_call (7)" call="toolu_013Au3Gabh9awJnhjydmiyAh" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-1-7cdy" tool_call="mcp_tool_call (15)" args_bytes=0
+46284:2026-09-14T16:28:56.677636Z DEBUG ganja_provider::provider::cursor: bridging an exec to a ganja tool provider="cursor" exec=74 kind="mcp_args" tool="read" call="toolu_01Wze28gPstv4a9cDhfyCYDE"
+46300:2026-09-14T16:28:56.732234Z DEBUG ganja_provider::provider::cursor::bridge: answering a bridged exec from the engine's result provider="cursor" exec=74 tool="read" outcome="ran"
+47054:2026-09-14T16:29:47.308677Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_started (2)" call="toolu_013Au3Gabh9awJnhjydmiyAh" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-1-7cdy" tool_call="mcp_tool_call (15)" mcp_name="write" mcp_tool_name="write" mcp_call="toolu_013Au3Gabh9awJnhjydmiyAh" mcp_provider="ganja"
+47055:2026-09-14T16:29:47.308692Z DEBUG ganja_provider::provider::cursor: bridging an exec to a ganja tool provider="cursor" exec=2 exec_id="d69284f0-046c-4dad-a84b-10a34e56ff24" kind="mcp_args" tool="write" call="toolu_013Au3Gabh9awJnhjydmiyAh"
+47058:2026-09-14T16:29:47.434286Z DEBUG ganja_provider::provider::cursor::bridge: answering a bridged exec from the engine's result provider="cursor" exec=2 tool="write" outcome="ran"
+47059:2026-09-14T16:29:47.629257Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_completed (3)" call="toolu_013Au3Gabh9awJnhjydmiyAh" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-1-7cdy" tool_call="mcp_tool_call (15)" mcp_name="write" mcp_tool_name="write" mcp_call="toolu_013Au3Gabh9awJnhjydmiyAh" mcp_provider="ganja"
+47066:2026-09-14T16:29:51.751836Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="partial_tool_call (7)" call="toolu_013TGHWS6cU2r3AzzFbRGXpe" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" args_bytes=0
+47073:2026-09-14T16:29:52.414850Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_started (2)" call="toolu_013TGHWS6cU2r3AzzFbRGXpe" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" mcp_name="read" mcp_tool_name="read" mcp_call="toolu_013TGHWS6cU2r3AzzFbRGXpe" mcp_provider="ganja"
+47074:2026-09-14T16:29:52.414853Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="partial_tool_call (7)" call="toolu_01DehKBDvdB5ucXsJLLbfy1q" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" args_bytes=0
+47075:2026-09-14T16:29:52.414860Z DEBUG ganja_provider::provider::cursor: bridging an exec to a ganja tool provider="cursor" exec=3 exec_id="65c278af-c09d-4136-b97c-936c26c10004" kind="mcp_args" tool="read" call="toolu_013TGHWS6cU2r3AzzFbRGXpe"
+47077:2026-09-14T16:29:52.542571Z DEBUG ganja_provider::provider::cursor::bridge: answering a bridged exec from the engine's result provider="cursor" exec=3 tool="read" outcome="ran"
+47085:2026-09-14T16:29:52.749850Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_completed (3)" call="toolu_013TGHWS6cU2r3AzzFbRGXpe" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" mcp_name="read" mcp_tool_name="read" mcp_call="toolu_013TGHWS6cU2r3AzzFbRGXpe" mcp_provider="ganja"
+47091:2026-09-14T16:29:52.989507Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_started (2)" call="toolu_01DehKBDvdB5ucXsJLLbfy1q" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" mcp_name="grep" mcp_tool_name="grep" mcp_call="toolu_01DehKBDvdB5ucXsJLLbfy1q" mcp_provider="ganja"
+47092:2026-09-14T16:29:52.989525Z DEBUG ganja_provider::provider::cursor: bridging an exec to a ganja tool provider="cursor" exec=4 exec_id="472d7bd5-e6d5-4ea7-b690-37393ab26d4d" kind="mcp_args" tool="grep" call="toolu_01DehKBDvdB5ucXsJLLbfy1q"
+47094:2026-09-14T16:29:53.117549Z DEBUG ganja_provider::provider::cursor::bridge: answering a bridged exec from the engine's result provider="cursor" exec=4 tool="grep" outcome="ran"
+47097:2026-09-14T16:29:53.316682Z DEBUG ganja_provider::provider::cursor::decode: a tool-call update provider="cursor" update="tool_call_completed (3)" call="toolu_01DehKBDvdB5ucXsJLLbfy1q" model_call="158c75d8-d0d0-4f8a-8e4f-aa0059fe1af3-2-x4n1" tool_call="mcp_tool_call (15)" mcp_name="grep" mcp_tool_name="grep" mcp_call="toolu_01DehKBDvdB5ucXsJLLbfy1q" mcp_provider="ganja"
+
+== per call ==
+# Condensed from the lines above. `step` is the model_call_id's middle
+# counter; "partial -> exec" is how long the call was being composed with
+# nothing on screen at ddf8e45.
+#
+#  call (cursor call_id)            tool   step  partial        started        exec              answered       completed      partial -> exec
+#  toolu_01P3LQky6KSxkL6jbbq4QXUp  bash   0     16:28:51.306   16:28:52.118   exec=1  :52.118   :52.351        :52.542         0.81 s
+#  toolu_013Au3Gabh9awJnhjydmiyAh  write  1     16:28:56.053   16:29:47.309   exec=2  :47.309   :47.434        :47.629        51.26 s
+#  toolu_01Wze28gPstv4a9cDhfyCYDE  read   -     (none)         (none)         exec=74 16:28:56.678  :56.732     (none)          -
+#  toolu_013TGHWS6cU2r3AzzFbRGXpe  read   2     16:29:51.752   16:29:52.415   exec=3  :52.415   :52.543        :52.750         0.66 s
+#  toolu_01DehKBDvdB5ucXsJLLbfy1q  grep   2     16:29:52.415   16:29:52.990   exec=4  :52.990   :53.118        :53.317         0.57 s
+
+== what it settles ==
+# 1. One partial per call, at the start of the call's generation, and never
+#    again. The write's partial is :46255 (16:28:56.053); its next update is
+#    tool_call_started at :47054, 51.26 s later, in the same instant as its
+#    exec (:47055, 15 us after). The span between holds no update for the
+#    write at all.
+# 2. args_text_delta is empty on every partial: `args_bytes=0` on all four
+#    (:46221, :46255, :47066, :47074). There is no argument text to stream
+#    or to render from this arm.
+# 3. The partial carries the exec's id. Each partial's `call` is the id its
+#    exec is bridged under (`call=` on the bridging line, which is
+#    McpArgs.tool_call_id) and the `mcp_call` its own started line reports.
+#    `model_call` is `<uuid>-<step>-<4 chars>`, and it is the model step's id
+#    rather than the call's: the read and the grep share `-2-x4n1`
+#    (:47066, :47074). ExecRequest.exec_id is a separate uuid.
+# 4. The partial does not name the tool. Every partial reports
+#    `tool_call="mcp_tool_call (15)"` with no mcp_name, mcp_tool_name,
+#    mcp_call or mcp_provider: the McpToolCall is present and names nothing.
+#    The name first appears on tool_call_started, which arrives with the exec.
+#    So at the moment a row could appear, the wire knows that an mcp call is
+#    being composed and which id it will carry, not which tool it is.
+# 5. Two calls in one step: the grep's partial (:47074, 16:29:52.414853)
+#    arrived between the read's started (:47073, .414850) and the read's exec
+#    (:47075, .414860), before the read was answered (:47077, .542571). The
+#    grep's own exec came after that answer (:47092, .989525), so the read's
+#    step ended while the grep was still being composed.
+# 6. Every call was mcp_tool_call: no native arm appears on any update, and
+#    every exec is kind="mcp_args". Native partials stay unmeasured.
+# 7. One exec had no partial, no started, no completed and no exec_id:
+#    exec=74, a `read` (:46284, 16:28:56.677636), 0.62 s after the write's
+#    partial and 50.63 s before the write's exec. That is cursor's own
+#    read-before-write, bridged as if the model had asked (bead
+#    ganja-code-quc2). It paused the write's step, so the write too was
+#    still being composed when a step ended. There is no partial to announce
+#    it from.
+
+== what D559 does with it ==
+# The row opens on the partial and is renamed when the exec lands: the same
+# id (3) under the real name, since the partial has no name to give (4).
+# Only an mcp partial announces (6). What a person sees, at the recorded
+# times. A rename lands when the exec's step ends, which is the exec's own
+# time plus the bridge's 50 ms gather window:
+#
+#   bash   `● …` from 16:28:51.306, `● Bash(…)` from the exec at 16:28:52.118
+#   write  `● …` from 16:28:56.053. The read cursor asked for at 16:28:56.678
+#          ends that step, and the engine runs only the read; the write's row
+#          stays open, withheld and not run (7). `● Write(…)` from the exec
+#          at 16:29:47.309: 51.26 s of a visible row where ddf8e45 showed the
+#          working line alone.
+#   read   `● …` from 16:29:51.752, `● Read(…)` from the exec at 16:29:52.415
+#   grep   `● …` from 16:29:52.415. The read's step ends with it still
+#          composing (5); `● Grep(…)` from the exec at 16:29:52.990.
+#
+# Two of the four announced calls, the write and the grep, cross a step
+# boundary before they are named. That is why the engine withholds a row
+# still named `…` from `prepare`, keeps it open in the message while the
+# step ran something, and renames it in place on whichever step names it,
+# rather than renaming only within one step.
+
+== what this recording does NOT settle ==
+# - What a native partial carries (shell_tool_call, read_tool_call, ...).
+#   None was seen, so a native partial announces nothing.
+# - Whether cursor ever sends a second partial for a call, or a partial after
+#   its exec. None was seen. The wire announces an id once and never after an
+#   exec claimed it, so either would be harmless.
+# - An exec whose McpArgs.tool_call_id is empty. None was seen. The wire mints
+#   an id for one, which no partial could have announced, so a row a partial
+#   opened for it would be closed unrun when the turn ends.
+# - Why exec=74 carried no exec_id (bead ganja-code-quc2).

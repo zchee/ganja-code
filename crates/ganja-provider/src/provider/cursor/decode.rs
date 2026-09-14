@@ -9,12 +9,13 @@
 //! reaches the session while the server is still talking.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use buffa::Message as _;
 
 use super::{ID, connect, proto};
 use crate::protocol::FinishReason;
-use crate::provider::{ProviderError, ProviderEvent};
+use crate::provider::{COMPOSING, ProviderError, ProviderEvent};
 
 /// The models the listing served, in the server's order.
 ///
@@ -78,15 +79,27 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// "why is the reply shorter than the server's" is answered — by arm, not
 /// by guesswork.
 ///
-/// **The three tool-call arms are read, and not yet acted on.**
+/// **A partial announces the call it begins; the exec names it (D559).**
 /// `partial_tool_call`, `tool_call_started` and `tool_call_completed` decode
-/// into fields of their own, and each becomes one debug line naming its ids,
-/// the tool its `tool_call` carries and — for a partial — how long the
-/// argument text is, but no event (bead `ganja-code-gzkn`). What an
-/// announcement would rest on — whether an early partial names its tool at
-/// all, and which id the exec that follows will carry — is what that line is
-/// there to measure, so until a live run has said, a cursor tool call still
-/// reaches the session through its exec alone, exactly as before.
+/// into fields of their own, and each still becomes one debug line naming its
+/// ids, the tool its `tool_call` carries and — for a partial — how long the
+/// argument text is. One of them is also an event. The recording
+/// (`tests/fixtures/cursor-partial-tool-call-probe.txt`) measured one partial
+/// per call, at the moment the model begins it, carrying the `call_id` the
+/// exec's `McpArgs.tool_call_id` will repeat — and an `mcp_tool_call` whose
+/// args are empty, so nothing that names the tool. So a partial whose
+/// `tool_call` is `mcp_tool_call` opens the call's row as a
+/// [`ProviderEvent::ToolCallStart`] named [`COMPOSING`], once per id, and the
+/// stream layer's pause names it when the exec arrives — the same id under
+/// the real name, which the engine reads as a rename. A partial whose
+/// `tool_call` is absent, empty or a native arm announces nothing: no native
+/// partial has been seen live, and a row for a call nothing correlates would
+/// be a row that never resolves. The started and completed arms arrive with
+/// the exec and with its answer, and add nothing a row needs.
+///
+/// An announced call no exec claims — the server ended the turn without it,
+/// or the exec was refused before the engine could see it — is named on the
+/// debug log when the turn ends; the engine is what closes its row.
 ///
 /// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
 /// The two are the application and the protocol saying different things —
@@ -102,6 +115,19 @@ pub(super) struct Mapping {
     /// The server marked the turn ended, so the reply is complete with or
     /// without the terminator.
     ended: bool,
+    /// Every call id this Run has announced or bridged, and whether an exec
+    /// has claimed it yet.
+    ///
+    /// Many rather than one slot, because a second call's partial can arrive
+    /// while the first call's exec is still gathering (the recording's read
+    /// and grep); here, in the fold, because a pause carries the fold across
+    /// steps and a call announced before one exec can be claimed by an exec
+    /// that arrives steps later. And kept after the claim, because an id
+    /// announced twice would reach the engine as a start under `COMPOSING`
+    /// for a call it has already named — the last name winning, a real call
+    /// renamed back into a placeholder the engine will not run. The recording
+    /// saw one partial per call; this is what makes a second one harmless.
+    announced: HashMap<String, bool>,
 }
 
 /// A mid-stream question the server waits on, carried up to the stream
@@ -386,6 +412,7 @@ impl Mapping {
                 partial.tool_call.as_option(),
                 Some(partial.args_text_delta.as_ref().map_or(0, Vec::len)),
             );
+            self.announce(partial, events);
         } else if let Some(started) = update.tool_call_started.as_option() {
             tool_call_update(
                 "tool_call_started (2)",
@@ -404,6 +431,22 @@ impl Mapping {
             );
         } else if update.turn_ended.is_set() {
             self.ended = true;
+            let mut unclaimed: Vec<&str> = self
+                .announced
+                .iter()
+                .filter(|(_, claimed)| !**claimed)
+                .map(|(call_id, _)| call_id.as_str())
+                .collect();
+            if !unclaimed.is_empty() {
+                // Named, because each is a `…` row the engine is about to close
+                // unrun, and the next person to ask why reads this line first.
+                unclaimed.sort_unstable();
+                tracing::debug!(
+                    provider = ID,
+                    calls = ?unclaimed,
+                    "the turn ended with announced tool calls no exec claimed"
+                );
+            }
         } else if update.heartbeat.is_set() {
             // Liveness, carrying nothing.
         } else {
@@ -440,6 +483,40 @@ impl Mapping {
         events.push(ProviderEvent::Failed(ProviderError::Transport(
             "the response body ended before the exchange finished".to_owned(),
         )));
+    }
+
+    /// Marks `call_id` claimed: its exec has named it.
+    ///
+    /// Called by the pause for every exec it hands the engine, whether or not
+    /// a partial announced it — a call with no partial (cursor's own
+    /// read-before-write, recorded with no update at all) is recorded as
+    /// claimed all the same, so a partial arriving after its exec announces
+    /// nothing either.
+    pub(super) fn claim(&mut self, call_id: &str) {
+        self.announced.insert(call_id.to_owned(), true);
+    }
+
+    /// Opens the row of a call `partial` says the model has begun (**D559**),
+    /// once per id and never for an id this Run has already seen — see
+    /// [`Mapping`] for why only an `mcp_tool_call` does.
+    ///
+    /// A partial with no id has nothing an exec could claim it by, so it
+    /// announces nothing either.
+    fn announce(&mut self, partial: &proto::PartialToolCall, events: &mut Vec<ProviderEvent>) {
+        let Some(call_id) = partial.call_id.as_deref().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let bridged_channel =
+            partial.tool_call.as_option().is_some_and(|tool_call| tool_call.mcp_tool_call.is_set());
+        if !bridged_channel || self.announced.contains_key(call_id) {
+            return;
+        }
+        self.announced.insert(call_id.to_owned(), false);
+
+        events.push(ProviderEvent::ToolCallStart {
+            id: call_id.to_owned(),
+            name: COMPOSING.to_owned(),
+        });
     }
 }
 
@@ -657,8 +734,10 @@ fn exec_kind(exec: &proto::ExecRequest) -> String {
     }
 }
 
-/// Reads one tool-call update into a debug line, and into nothing else —
-/// [`Mapping`] says why no event leaves here yet.
+/// Reads one tool-call update into a debug line. The one event any of them
+/// produces — a partial's announcement — is [`Mapping::announce`]'s, which
+/// keeps this line a measurement of what arrived rather than of what was
+/// done with it.
 ///
 /// `args_bytes` is a partial's argument text by length only, because that
 /// text is the model's output: the thinking delta logs `bytes` and never

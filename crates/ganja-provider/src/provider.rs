@@ -361,6 +361,24 @@ fn steps(parts: &[Part]) -> impl Iterator<Item = &[Part]> {
     parts.split(|part| matches!(part.body, PartBody::StepStart))
 }
 
+/// The name a wire gives a call it knows is being composed and cannot name
+/// yet (**D559**): a [`ProviderEvent::ToolCallStart`] carrying it opens the
+/// call's row the moment the model begins the call, and a later
+/// `ToolCallStart` for the same id names it.
+///
+/// A placeholder, never a tool — `…` is no registry name — and the engine
+/// never runs a call that still carries it: such a call is held across a
+/// step that paused for another call, renamed in place when its naming start
+/// arrives, and closed unrun when nothing will name it. Its whole life is one
+/// assistant message inside one turn. A wire that composes history as text
+/// leaves such a part out entirely, call and result, because whatever closed
+/// it is a sentence for the person reading the transcript, not for a model.
+///
+/// Only cursor sends it: its `partial_tool_call` carries the id the exec will
+/// carry and nothing that names the tool
+/// (`tests/fixtures/cursor-partial-tool-call-probe.txt`).
+pub const COMPOSING: &str = "\u{2026}";
+
 /// Something a provider reported while answering.
 ///
 /// The tool variants let a wire report calls without reshaping the trait; the
@@ -404,10 +422,15 @@ pub enum ProviderEvent {
     /// starts a thought of its own; a break with nothing open says nothing.
     ReasoningBreak,
     /// The model started calling a tool.
+    ///
+    /// A second start for an id already open, under a different name, names
+    /// that call rather than opening another: the first may carry
+    /// [`COMPOSING`], from a wire that learns a call's tool only after the
+    /// call began.
     ToolCallStart {
         /// Correlates the call's fragments and its result.
         id: String,
-        /// Tool being called.
+        /// Tool being called, or [`COMPOSING`] while the wire cannot yet say.
         name: String,
     },
     /// The next fragment of a tool call's JSON arguments.
