@@ -1454,7 +1454,8 @@ impl ::buffa::ExtensionSet for AgentConversationTurn {
 /// One step of a turn (index.js@6105443): the assistant's text. The oneof's
 /// tool_call = 2 and thinking_message = 3 arms are not modelled: the reference
 /// writes neither (a tool result is an assistant-text step prefixed
-/// `[Tool Result]`, proxy.ts:793), and a typed tool_call is a 70-arm oneof
+/// `[Tool Result]`, proxy.ts:793), and a typed tool_call is the sixty-seven-arm
+/// ToolCall oneof — modelled below only as far as the update arms read it —
 /// whose inner shapes nothing has measured.
 #[derive(Clone, PartialEq, Default)]
 pub struct ConversationStep {
@@ -2490,14 +2491,36 @@ impl ::buffa::ExtensionSet for ServerMessage {
 /// The updates a one-shot text turn must understand. heartbeat = 13 was
 /// LIVE-OBSERVED (`6a 00` inside the recorded frame); text_delta = 1
 /// (agent_pb.ts:3160), thinking_delta = 4 (:3195) and turn_ended = 14
-/// (:3258) are plugin-derived. The tool-call, summary, token and step arms
-/// of the plugin's oneof are deliberately absent — an update carrying only
-/// fields this build does not model decodes to an empty Update and is
-/// skipped, named by number from its unknown fields.
+/// (:3258) are plugin-derived.
+///
+/// The three tool-call arms beside them — tool_call_started = 2 (:3181),
+/// tool_call_completed = 3 (:3188) and partial_tool_call = 7 (:3167), the same
+/// three numbers in the shipped client's oneof (index.js@6183301) — are
+/// modelled so that a live run can say what they carry (bead
+/// `ganja-code-gzkn`, announcing a tool call while its arguments stream):
+/// decode.rs reads each into one debug line and hands the session nothing from
+/// it yet. The partials are what a 25 KB `write` sent for some 200 seconds
+/// before its exec arrived, and until the exec a cursor turn had nothing to
+/// show for them.
+///
+/// The tool_call_delta, summary, token and step arms of the plugin's oneof are
+/// still absent — an update carrying only fields this build does not model
+/// decodes to an empty Update and is skipped, named by number from its
+/// unknown fields.
 #[derive(Clone, PartialEq, Default)]
 pub struct Update {
     /// Field 1: `text_delta`
     pub text_delta: ::buffa::MessageField<TextDelta, ::buffa::Inline<TextDelta>>,
+    /// Field 2: `tool_call_started`
+    pub tool_call_started: ::buffa::MessageField<
+        ToolCallStarted,
+        ::buffa::Inline<ToolCallStarted>,
+    >,
+    /// Field 3: `tool_call_completed`
+    pub tool_call_completed: ::buffa::MessageField<
+        ToolCallCompleted,
+        ::buffa::Inline<ToolCallCompleted>,
+    >,
     /// Field 4: `thinking_delta`
     pub thinking_delta: ::buffa::MessageField<
         ThinkingDelta,
@@ -2507,6 +2530,11 @@ pub struct Update {
     pub thinking_completed: ::buffa::MessageField<
         ThinkingCompleted,
         ::buffa::Inline<ThinkingCompleted>,
+    >,
+    /// Field 7: `partial_tool_call`
+    pub partial_tool_call: ::buffa::MessageField<
+        PartialToolCall,
+        ::buffa::Inline<PartialToolCall>,
     >,
     /// Field 13: `heartbeat`
     pub heartbeat: ::buffa::MessageField<Heartbeat, ::buffa::Inline<Heartbeat>>,
@@ -2519,8 +2547,11 @@ impl ::core::fmt::Debug for Update {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("Update")
             .field("text_delta", &self.text_delta)
+            .field("tool_call_started", &self.tool_call_started)
+            .field("tool_call_completed", &self.tool_call_completed)
             .field("thinking_delta", &self.thinking_delta)
             .field("thinking_completed", &self.thinking_completed)
+            .field("partial_tool_call", &self.partial_tool_call)
             .field("heartbeat", &self.heartbeat)
             .field("turn_ended", &self.turn_ended)
             .finish()
@@ -2561,6 +2592,22 @@ impl ::buffa::Message for Update {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.tool_call_started.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.tool_call_started.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.tool_call_completed.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.tool_call_completed.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         if self.thinking_delta.is_set() {
             let __slot = __cache.reserve();
             let inner_size = self.thinking_delta.compute_size(__cache);
@@ -2572,6 +2619,14 @@ impl ::buffa::Message for Update {
         if self.thinking_completed.is_set() {
             let __slot = __cache.reserve();
             let inner_size = self.thinking_completed.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.partial_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.partial_tool_call.compute_size(__cache);
             __cache.set(__slot, inner_size);
             size
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -2611,6 +2666,22 @@ impl ::buffa::Message for Update {
             );
             self.text_delta.write_to(__cache, buf);
         }
+        if self.tool_call_started.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.tool_call_started.write_to(__cache, buf);
+        }
+        if self.tool_call_completed.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.tool_call_completed.write_to(__cache, buf);
+        }
         if self.thinking_delta.is_set() {
             ::buffa::types::put_len_delimited_header(
                 4u32,
@@ -2626,6 +2697,14 @@ impl ::buffa::Message for Update {
                 buf,
             );
             self.thinking_completed.write_to(__cache, buf);
+        }
+        if self.partial_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                7u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.partial_tool_call.write_to(__cache, buf);
         }
         if self.heartbeat.is_set() {
             ::buffa::types::put_len_delimited_header(
@@ -2667,6 +2746,28 @@ impl ::buffa::Message for Update {
                     ctx,
                 )?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.tool_call_started.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.tool_call_completed.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             4u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -2685,6 +2786,17 @@ impl ::buffa::Message for Update {
                 )?;
                 ::buffa::Message::merge_length_delimited(
                     self.thinking_completed.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            7u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.partial_tool_call.get_or_insert_default(),
                     buf,
                     ctx,
                 )?;
@@ -2720,8 +2832,11 @@ impl ::buffa::Message for Update {
     }
     fn clear(&mut self) {
         self.text_delta = ::buffa::MessageField::none();
+        self.tool_call_started = ::buffa::MessageField::none();
+        self.tool_call_completed = ::buffa::MessageField::none();
         self.thinking_delta = ::buffa::MessageField::none();
         self.thinking_completed = ::buffa::MessageField::none();
+        self.partial_tool_call = ::buffa::MessageField::none();
         self.heartbeat = ::buffa::MessageField::none();
         self.turn_ended = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
@@ -3202,6 +3317,1197 @@ impl ::buffa::Message for TurnEnded {
 }
 impl ::buffa::ExtensionSet for TurnEnded {
     const PROTO_FQN: &'static str = "ganja.cursor.v1.TurnEnded";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The server announcing a tool call the model has finished generating: the
+/// plugin's ToolCallStartedUpdate (agent_pb.ts:2814) — call_id = 1 (:2816),
+/// tool_call = 2 (:2821) and model_call_id = 3 (:2828), which the descriptor
+/// says "groups tool calls that originate from the same model provider call".
+/// The shipped client declares the same three (index.js@6169305). On the live
+/// `write` it arrived after the partials and just before the exec that ran the
+/// tool.
+#[derive(Clone, PartialEq, Default)]
+pub struct ToolCallStarted {
+    /// Field 1: `call_id`
+    pub call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `tool_call`
+    pub tool_call: ::buffa::MessageField<ToolCall, ::buffa::Inline<ToolCall>>,
+    /// Field 3: `model_call_id`
+    pub model_call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ToolCallStarted {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ToolCallStarted")
+            .field("call_id", &self.call_id)
+            .field("tool_call", &self.tool_call)
+            .field("model_call_id", &self.model_call_id)
+            .finish()
+    }
+}
+impl ToolCallStarted {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallStarted";
+}
+impl ToolCallStarted {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.call_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::model_call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_model_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.model_call_id = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(ToolCallStarted);
+impl ::buffa::MessageName for ToolCallStarted {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ToolCallStarted";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCallStarted";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallStarted";
+}
+impl ::buffa::Message for ToolCallStarted {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if let Some(ref v) = self.model_call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.call_id {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.tool_call.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.model_call_id {
+            ::buffa::types::put_string_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.call_id.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .model_call_id
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.call_id = ::core::option::Option::None;
+        self.tool_call = ::buffa::MessageField::none();
+        self.model_call_id = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ToolCallStarted {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ToolCallStarted";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The same three members, on the plugin's ToolCallCompletedUpdate
+/// (agent_pb.ts:2842-2858) and the shipped client's (index.js@6169861).
+#[derive(Clone, PartialEq, Default)]
+pub struct ToolCallCompleted {
+    /// Field 1: `call_id`
+    pub call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `tool_call`
+    pub tool_call: ::buffa::MessageField<ToolCall, ::buffa::Inline<ToolCall>>,
+    /// Field 3: `model_call_id`
+    pub model_call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ToolCallCompleted {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ToolCallCompleted")
+            .field("call_id", &self.call_id)
+            .field("tool_call", &self.tool_call)
+            .field("model_call_id", &self.model_call_id)
+            .finish()
+    }
+}
+impl ToolCallCompleted {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallCompleted";
+}
+impl ToolCallCompleted {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.call_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::model_call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_model_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.model_call_id = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(ToolCallCompleted);
+impl ::buffa::MessageName for ToolCallCompleted {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ToolCallCompleted";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCallCompleted";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallCompleted";
+}
+impl ::buffa::Message for ToolCallCompleted {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if let Some(ref v) = self.model_call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.call_id {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.tool_call.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.model_call_id {
+            ::buffa::types::put_string_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.call_id.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .model_call_id
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.call_id = ::core::option::Option::None;
+        self.tool_call = ::buffa::MessageField::none();
+        self.model_call_id = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ToolCallCompleted {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ToolCallCompleted";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The server streaming a tool call's arguments while the model is still
+/// writing them: the plugin's PartialToolCallUpdate (agent_pb.ts:2902) —
+/// call_id = 1 (:2904), tool_call = 2 (:2909), args_text_delta = 3 (:2916) and
+/// model_call_id = 4 (:2923). The shipped client declares the same four
+/// (index.js@6171001).
+///
+/// args_text_delta is spelled `bytes` where both descriptors say `string`. The
+/// two are the same length-delimited field on the wire, but only a string is
+/// UTF-8-checked as it decodes, and a failed check fails the whole server
+/// message — and the turn with it — over an arm that, before it was modelled,
+/// sat in the unknown fields and could fail nothing. The descriptor's own note
+/// on the member ("Aggregated args text so far … May be incomplete until final
+/// tool call") promises a fragment, not a whole character, and nothing here
+/// reads the text anyway: decode.rs logs its length, never its content, because
+/// the content is the model's output.
+#[derive(Clone, PartialEq, Default)]
+pub struct PartialToolCall {
+    /// Field 1: `call_id`
+    pub call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `tool_call`
+    pub tool_call: ::buffa::MessageField<ToolCall, ::buffa::Inline<ToolCall>>,
+    /// Field 3: `args_text_delta`
+    pub args_text_delta: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 4: `model_call_id`
+    pub model_call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PartialToolCall {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PartialToolCall")
+            .field("call_id", &self.call_id)
+            .field("tool_call", &self.tool_call)
+            .field("args_text_delta", &self.args_text_delta)
+            .field("model_call_id", &self.model_call_id)
+            .finish()
+    }
+}
+impl PartialToolCall {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.PartialToolCall";
+}
+impl PartialToolCall {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.call_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::args_text_delta`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_args_text_delta(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.args_text_delta = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::model_call_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_model_call_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.model_call_id = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(PartialToolCall);
+impl ::buffa::MessageName for PartialToolCall {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "PartialToolCall";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.PartialToolCall";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.PartialToolCall";
+}
+impl ::buffa::Message for PartialToolCall {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if let Some(ref v) = self.args_text_delta {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.model_call_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.call_id {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.tool_call.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.args_text_delta {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+        }
+        if let Some(ref v) = self.model_call_id {
+            ::buffa::types::put_string_field(4u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.call_id.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self
+                        .args_text_delta
+                        .get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .model_call_id
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.call_id = ::core::option::Option::None;
+        self.tool_call = ::buffa::MessageField::none();
+        self.args_text_delta = ::core::option::Option::None;
+        self.model_call_id = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PartialToolCall {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.PartialToolCall";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// Which tool an update is about: the plugin's ToolCall oneof `tool`
+/// (agent_pb.ts:1139), flattened like every oneof here. Of its thirty-two arms
+/// (sixty-seven in the shipped client's, index.js@6096987), the modelled ones
+/// are those a call this client bridges can arrive on: mcp_tool_call = 15
+/// (:1216), and the arms of the tools the native redirect table
+/// (cursor/native.rs) stands in for — shell_tool_call = 1 (:1146),
+/// grep_tool_call = 5 (:1167), read_tool_call = 8 (:1174), ls_tool_call = 13
+/// (:1202), fetch_tool_call = 24 (:1279), and the shipped client's
+/// web_fetch_tool_call = 37 (index.js@6099141), which the plugin predates.
+/// Every other arm stays an unknown field, and decode.rs names it by number.
+///
+/// **There is no write arm.** Neither descriptor has one: the exec channel's
+/// write_args = 3 has no ToolCall counterpart, and 2, 6, 7 and 11 are unused
+/// in both oneofs, while the one arm named for writing (pi_write_tool_call =
+/// 64) belongs to a family this build models none of. Which arm a `write`
+/// streams under is therefore a question a live run answers, not this file.
+/// edit_tool_call = 12 (:1195) is modelled as the likeliest candidate, not as
+/// a known one, and glob_tool_call = 4 (:1160) for the matching reason: the
+/// exec channel has no glob kind, so which exec a glob becomes is unmeasured.
+#[derive(Clone, PartialEq, Default)]
+pub struct ToolCall {
+    /// Field 1: `shell_tool_call`
+    pub shell_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 4: `glob_tool_call`
+    pub glob_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 5: `grep_tool_call`
+    pub grep_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 8: `read_tool_call`
+    pub read_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 12: `edit_tool_call`
+    pub edit_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 13: `ls_tool_call`
+    pub ls_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 15: `mcp_tool_call`
+    pub mcp_tool_call: ::buffa::MessageField<McpToolCall, ::buffa::Inline<McpToolCall>>,
+    /// Field 24: `fetch_tool_call`
+    pub fetch_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    /// Field 37: `web_fetch_tool_call`
+    pub web_fetch_tool_call: ::buffa::MessageField<
+        NativeToolCall,
+        ::buffa::Inline<NativeToolCall>,
+    >,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ToolCall {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ToolCall")
+            .field("shell_tool_call", &self.shell_tool_call)
+            .field("glob_tool_call", &self.glob_tool_call)
+            .field("grep_tool_call", &self.grep_tool_call)
+            .field("read_tool_call", &self.read_tool_call)
+            .field("edit_tool_call", &self.edit_tool_call)
+            .field("ls_tool_call", &self.ls_tool_call)
+            .field("mcp_tool_call", &self.mcp_tool_call)
+            .field("fetch_tool_call", &self.fetch_tool_call)
+            .field("web_fetch_tool_call", &self.web_fetch_tool_call)
+            .finish()
+    }
+}
+impl ToolCall {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCall";
+}
+::buffa::impl_default_instance!(ToolCall);
+impl ::buffa::MessageName for ToolCall {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ToolCall";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCall";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCall";
+}
+impl ::buffa::Message for ToolCall {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if self.shell_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.shell_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.glob_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.glob_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.grep_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.grep_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.read_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.read_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.edit_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.edit_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.ls_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.ls_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.mcp_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.mcp_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.fetch_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.fetch_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.web_fetch_tool_call.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.web_fetch_tool_call.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.shell_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.shell_tool_call.write_to(__cache, buf);
+        }
+        if self.glob_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                4u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.glob_tool_call.write_to(__cache, buf);
+        }
+        if self.grep_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                5u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.grep_tool_call.write_to(__cache, buf);
+        }
+        if self.read_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                8u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.read_tool_call.write_to(__cache, buf);
+        }
+        if self.edit_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                12u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.edit_tool_call.write_to(__cache, buf);
+        }
+        if self.ls_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                13u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.ls_tool_call.write_to(__cache, buf);
+        }
+        if self.mcp_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                15u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.mcp_tool_call.write_to(__cache, buf);
+        }
+        if self.fetch_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                24u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.fetch_tool_call.write_to(__cache, buf);
+        }
+        if self.web_fetch_tool_call.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                37u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.web_fetch_tool_call.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.shell_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.glob_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.grep_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            8u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.read_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            12u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.edit_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            13u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.ls_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            15u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.mcp_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            24u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.fetch_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            37u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.web_fetch_tool_call.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.shell_tool_call = ::buffa::MessageField::none();
+        self.glob_tool_call = ::buffa::MessageField::none();
+        self.grep_tool_call = ::buffa::MessageField::none();
+        self.read_tool_call = ::buffa::MessageField::none();
+        self.edit_tool_call = ::buffa::MessageField::none();
+        self.ls_tool_call = ::buffa::MessageField::none();
+        self.mcp_tool_call = ::buffa::MessageField::none();
+        self.fetch_tool_call = ::buffa::MessageField::none();
+        self.web_fetch_tool_call = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ToolCall {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ToolCall";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// A call on the client-declared roster: the plugin's McpToolCall
+/// (agent_pb.ts:393) narrowed to args = 1 (:395), which is the very McpArgs the
+/// exec channel's mcp_args = 11 carries — the shipped client types both from
+/// one module (index.js@6369871). Its name, tool_name, tool_call_id and
+/// provider_identifier say whose call this is. result = 2 (:400) and the
+/// shipped client's description = 3 (index.js@5995393) are not modelled: the
+/// answer to a bridged call is ganja's to write, not an update's to read.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpToolCall {
+    /// Field 1: `args`
+    pub args: ::buffa::MessageField<McpArgs, ::buffa::Inline<McpArgs>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpToolCall {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpToolCall").field("args", &self.args).finish()
+    }
+}
+impl McpToolCall {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolCall";
+}
+::buffa::impl_default_instance!(McpToolCall);
+impl ::buffa::MessageName for McpToolCall {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpToolCall";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpToolCall";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolCall";
+}
+impl ::buffa::Message for McpToolCall {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if self.args.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.args.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.args.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.args.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.args.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.args = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpToolCall {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpToolCall";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The native arms, fieldless on purpose and shared. Each is an args = 1 /
+/// result = 2 pair in the descriptor (ShellToolCall at agent_pb.ts:12441,
+/// ReadToolCall at :9368, EditToolCall at :6165, …), and presence is the whole
+/// of what this build reads from one: which tool the model is generating a call
+/// for. Protobuf carries no type names, so one empty message behind eight arms
+/// is byte-identical to eight, and whatever each arm carries survives decoding
+/// as unknown fields.
+#[derive(Clone, PartialEq, Default)]
+pub struct NativeToolCall {
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for NativeToolCall {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("NativeToolCall").finish()
+    }
+}
+impl NativeToolCall {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.NativeToolCall";
+}
+::buffa::impl_default_instance!(NativeToolCall);
+impl ::buffa::MessageName for NativeToolCall {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "NativeToolCall";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.NativeToolCall";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.NativeToolCall";
+}
+impl ::buffa::Message for NativeToolCall {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for NativeToolCall {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.NativeToolCall";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -17971,7 +19277,8 @@ pub mod __buffa {
         /// One step of a turn (index.js@6105443): the assistant's text. The oneof's
         /// tool_call = 2 and thinking_message = 3 arms are not modelled: the reference
         /// writes neither (a tool result is an assistant-text step prefixed
-        /// `[Tool Result]`, proxy.ts:793), and a typed tool_call is a 70-arm oneof
+        /// `[Tool Result]`, proxy.ts:793), and a typed tool_call is the sixty-seven-arm
+        /// ToolCall oneof — modelled below only as far as the update arms read it —
         /// whose inner shapes nothing has measured.
         #[derive(Clone, Debug, Default)]
         pub struct ConversationStepView<'a> {
@@ -20225,15 +21532,35 @@ pub mod __buffa {
         /// The updates a one-shot text turn must understand. heartbeat = 13 was
         /// LIVE-OBSERVED (`6a 00` inside the recorded frame); text_delta = 1
         /// (agent_pb.ts:3160), thinking_delta = 4 (:3195) and turn_ended = 14
-        /// (:3258) are plugin-derived. The tool-call, summary, token and step arms
-        /// of the plugin's oneof are deliberately absent — an update carrying only
-        /// fields this build does not model decodes to an empty Update and is
-        /// skipped, named by number from its unknown fields.
+        /// (:3258) are plugin-derived.
+        ///
+        /// The three tool-call arms beside them — tool_call_started = 2 (:3181),
+        /// tool_call_completed = 3 (:3188) and partial_tool_call = 7 (:3167), the same
+        /// three numbers in the shipped client's oneof (index.js@6183301) — are
+        /// modelled so that a live run can say what they carry (bead
+        /// `ganja-code-gzkn`, announcing a tool call while its arguments stream):
+        /// decode.rs reads each into one debug line and hands the session nothing from
+        /// it yet. The partials are what a 25 KB `write` sent for some 200 seconds
+        /// before its exec arrived, and until the exec a cursor turn had nothing to
+        /// show for them.
+        ///
+        /// The tool_call_delta, summary, token and step arms of the plugin's oneof are
+        /// still absent — an update carrying only fields this build does not model
+        /// decodes to an empty Update and is skipped, named by number from its
+        /// unknown fields.
         #[derive(Clone, Debug, Default)]
         pub struct UpdateView<'a> {
             /// Field 1: `text_delta`
             pub text_delta: ::buffa::MessageFieldView<
                 super::super::__buffa::view::TextDeltaView<'a>,
+            >,
+            /// Field 2: `tool_call_started`
+            pub tool_call_started: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallStartedView<'a>,
+            >,
+            /// Field 3: `tool_call_completed`
+            pub tool_call_completed: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallCompletedView<'a>,
             >,
             /// Field 4: `thinking_delta`
             pub thinking_delta: ::buffa::MessageFieldView<
@@ -20242,6 +21569,10 @@ pub mod __buffa {
             /// Field 5: `thinking_completed`
             pub thinking_completed: ::buffa::MessageFieldView<
                 super::super::__buffa::view::ThinkingCompletedView<'a>,
+            >,
+            /// Field 7: `partial_tool_call`
+            pub partial_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::PartialToolCallView<'a>,
             >,
             /// Field 13: `heartbeat`
             pub heartbeat: ::buffa::MessageFieldView<
@@ -20314,6 +21645,56 @@ pub mod __buffa {
                             }
                         }
                     }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.tool_call_started.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.tool_call_started = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ToolCallStartedView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.tool_call_completed.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.tool_call_completed = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ToolCallCompletedView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     4u32 => {
                         ::buffa::encoding::check_wire_type(
                             tag,
@@ -20357,6 +21738,31 @@ pub mod __buffa {
                             None => {
                                 view.thinking_completed = ::buffa::MessageFieldView::set(
                                     <super::super::__buffa::view::ThinkingCompletedView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    7u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.partial_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.partial_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::PartialToolCallView as ::buffa::MessageView>::decode_view_ctx(
                                         sub,
                                         __sub_ctx,
                                     )?,
@@ -20446,6 +21852,24 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    tool_call_started: match self.tool_call_started.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ToolCallStarted,
+                                ::buffa::Inline<super::super::ToolCallStarted>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    tool_call_completed: match self.tool_call_completed.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ToolCallCompleted,
+                                ::buffa::Inline<super::super::ToolCallCompleted>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     thinking_delta: match self.thinking_delta.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<
@@ -20460,6 +21884,15 @@ pub mod __buffa {
                             ::buffa::MessageField::<
                                 super::super::ThinkingCompleted,
                                 ::buffa::Inline<super::super::ThinkingCompleted>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    partial_tool_call: match self.partial_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::PartialToolCall,
+                                ::buffa::Inline<super::super::PartialToolCall>,
                             >::some(v.to_owned_from_source(__buffa_src)?)
                         }
                         None => ::buffa::MessageField::none(),
@@ -20504,6 +21937,22 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
+                if self.tool_call_started.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.tool_call_started.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.tool_call_completed.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.tool_call_completed.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
                 if self.thinking_delta.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.thinking_delta.compute_size(__cache);
@@ -20515,6 +21964,14 @@ pub mod __buffa {
                 if self.thinking_completed.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.thinking_completed.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.partial_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.partial_tool_call.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -20555,6 +22012,22 @@ pub mod __buffa {
                     );
                     self.text_delta.write_to(__cache, buf);
                 }
+                if self.tool_call_started.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.tool_call_started.write_to(__cache, buf);
+                }
+                if self.tool_call_completed.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.tool_call_completed.write_to(__cache, buf);
+                }
                 if self.thinking_delta.is_set() {
                     ::buffa::types::put_len_delimited_header(
                         4u32,
@@ -20570,6 +22043,14 @@ pub mod __buffa {
                         buf,
                     );
                     self.thinking_completed.write_to(__cache, buf);
+                }
+                if self.partial_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        7u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.partial_tool_call.write_to(__cache, buf);
                 }
                 if self.heartbeat.is_set() {
                     ::buffa::types::put_len_delimited_header(
@@ -20689,6 +22170,24 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().text_delta
             }
+            /// Field 2: `tool_call_started`
+            #[must_use]
+            pub fn tool_call_started(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallStartedView<'_>,
+            > {
+                &self.0.reborrow().tool_call_started
+            }
+            /// Field 3: `tool_call_completed`
+            #[must_use]
+            pub fn tool_call_completed(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallCompletedView<'_>,
+            > {
+                &self.0.reborrow().tool_call_completed
+            }
             /// Field 4: `thinking_delta`
             #[must_use]
             pub fn thinking_delta(
@@ -20706,6 +22205,15 @@ pub mod __buffa {
                 super::super::__buffa::view::ThinkingCompletedView<'_>,
             > {
                 &self.0.reborrow().thinking_completed
+            }
+            /// Field 7: `partial_tool_call`
+            #[must_use]
+            pub fn partial_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::PartialToolCallView<'_>,
+            > {
+                &self.0.reborrow().partial_tool_call
             }
             /// Field 13: `heartbeat`
             #[must_use]
@@ -21836,6 +23344,2293 @@ pub mod __buffa {
         impl ::buffa::HasMessageView for super::super::TurnEnded {
             type View<'a> = TurnEndedView<'a>;
             type ViewHandle = TurnEndedOwnedView;
+        }
+        /// The server announcing a tool call the model has finished generating: the
+        /// plugin's ToolCallStartedUpdate (agent_pb.ts:2814) — call_id = 1 (:2816),
+        /// tool_call = 2 (:2821) and model_call_id = 3 (:2828), which the descriptor
+        /// says "groups tool calls that originate from the same model provider call".
+        /// The shipped client declares the same three (index.js@6169305). On the live
+        /// `write` it arrived after the partials and just before the exec that ran the
+        /// tool.
+        #[derive(Clone, Debug, Default)]
+        pub struct ToolCallStartedView<'a> {
+            /// Field 1: `call_id`
+            pub call_id: ::core::option::Option<&'a str>,
+            /// Field 2: `tool_call`
+            pub tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'a>,
+            >,
+            /// Field 3: `model_call_id`
+            pub model_call_id: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ToolCallStartedView<'a> {
+            type Owned = super::super::ToolCallStarted;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.model_call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::ToolCallStarted,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::ToolCallStarted,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ToolCallStarted {
+                    call_id: self.call_id.map(|s| s.to_string()),
+                    tool_call: match self.tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ToolCall,
+                                ::buffa::Inline<super::super::ToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    model_call_id: self.model_call_id.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ToolCallStartedView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if let Some(ref v) = self.model_call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.call_id {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if self.tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.tool_call.write_to(__cache, buf);
+                }
+                if let Some(ref v) = self.model_call_id {
+                    ::buffa::types::put_string_field(3u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ToolCallStartedView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ToolCallStarted";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCallStarted";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallStarted";
+        }
+        ::buffa::impl_default_view_instance!(ToolCallStartedView);
+        ::buffa::impl_view_reborrow!(ToolCallStartedView);
+        /** Self-contained, `'static` owned view of a `ToolCallStarted` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ToolCallStartedView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ToolCallStartedView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ToolCallStartedOwnedView(
+            ::buffa::OwnedView<ToolCallStartedView<'static>>,
+        );
+        impl ToolCallStartedOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallStartedOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallStartedOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ToolCallStarted,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallStartedOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ToolCallStartedView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ToolCallStartedView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ToolCallStarted {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `call_id`
+            #[must_use]
+            pub fn call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().call_id
+            }
+            /// Field 2: `tool_call`
+            #[must_use]
+            pub fn tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'_>,
+            > {
+                &self.0.reborrow().tool_call
+            }
+            /// Field 3: `model_call_id`
+            #[must_use]
+            pub fn model_call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().model_call_id
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ToolCallStartedView<'static>>>
+        for ToolCallStartedOwnedView {
+            fn from(inner: ::buffa::OwnedView<ToolCallStartedView<'static>>) -> Self {
+                ToolCallStartedOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ToolCallStartedOwnedView>
+        for ::buffa::OwnedView<ToolCallStartedView<'static>> {
+            fn from(wrapper: ToolCallStartedOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ToolCallStartedView<'static>>>
+        for ToolCallStartedOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ToolCallStartedView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ToolCallStarted {
+            type View<'a> = ToolCallStartedView<'a>;
+            type ViewHandle = ToolCallStartedOwnedView;
+        }
+        /// The same three members, on the plugin's ToolCallCompletedUpdate
+        /// (agent_pb.ts:2842-2858) and the shipped client's (index.js@6169861).
+        #[derive(Clone, Debug, Default)]
+        pub struct ToolCallCompletedView<'a> {
+            /// Field 1: `call_id`
+            pub call_id: ::core::option::Option<&'a str>,
+            /// Field 2: `tool_call`
+            pub tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'a>,
+            >,
+            /// Field 3: `model_call_id`
+            pub model_call_id: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ToolCallCompletedView<'a> {
+            type Owned = super::super::ToolCallCompleted;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.model_call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::ToolCallCompleted,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::ToolCallCompleted,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ToolCallCompleted {
+                    call_id: self.call_id.map(|s| s.to_string()),
+                    tool_call: match self.tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ToolCall,
+                                ::buffa::Inline<super::super::ToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    model_call_id: self.model_call_id.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ToolCallCompletedView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if let Some(ref v) = self.model_call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.call_id {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if self.tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.tool_call.write_to(__cache, buf);
+                }
+                if let Some(ref v) = self.model_call_id {
+                    ::buffa::types::put_string_field(3u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ToolCallCompletedView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ToolCallCompleted";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCallCompleted";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCallCompleted";
+        }
+        ::buffa::impl_default_view_instance!(ToolCallCompletedView);
+        ::buffa::impl_view_reborrow!(ToolCallCompletedView);
+        /** Self-contained, `'static` owned view of a `ToolCallCompleted` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ToolCallCompletedView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ToolCallCompletedView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ToolCallCompletedOwnedView(
+            ::buffa::OwnedView<ToolCallCompletedView<'static>>,
+        );
+        impl ToolCallCompletedOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallCompletedOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallCompletedOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ToolCallCompleted,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallCompletedOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ToolCallCompletedView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ToolCallCompletedView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ToolCallCompleted {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `call_id`
+            #[must_use]
+            pub fn call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().call_id
+            }
+            /// Field 2: `tool_call`
+            #[must_use]
+            pub fn tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'_>,
+            > {
+                &self.0.reborrow().tool_call
+            }
+            /// Field 3: `model_call_id`
+            #[must_use]
+            pub fn model_call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().model_call_id
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ToolCallCompletedView<'static>>>
+        for ToolCallCompletedOwnedView {
+            fn from(inner: ::buffa::OwnedView<ToolCallCompletedView<'static>>) -> Self {
+                ToolCallCompletedOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ToolCallCompletedOwnedView>
+        for ::buffa::OwnedView<ToolCallCompletedView<'static>> {
+            fn from(wrapper: ToolCallCompletedOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ToolCallCompletedView<'static>>>
+        for ToolCallCompletedOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ToolCallCompletedView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ToolCallCompleted {
+            type View<'a> = ToolCallCompletedView<'a>;
+            type ViewHandle = ToolCallCompletedOwnedView;
+        }
+        /// The server streaming a tool call's arguments while the model is still
+        /// writing them: the plugin's PartialToolCallUpdate (agent_pb.ts:2902) —
+        /// call_id = 1 (:2904), tool_call = 2 (:2909), args_text_delta = 3 (:2916) and
+        /// model_call_id = 4 (:2923). The shipped client declares the same four
+        /// (index.js@6171001).
+        ///
+        /// args_text_delta is spelled `bytes` where both descriptors say `string`. The
+        /// two are the same length-delimited field on the wire, but only a string is
+        /// UTF-8-checked as it decodes, and a failed check fails the whole server
+        /// message — and the turn with it — over an arm that, before it was modelled,
+        /// sat in the unknown fields and could fail nothing. The descriptor's own note
+        /// on the member ("Aggregated args text so far … May be incomplete until final
+        /// tool call") promises a fragment, not a whole character, and nothing here
+        /// reads the text anyway: decode.rs logs its length, never its content, because
+        /// the content is the model's output.
+        #[derive(Clone, Debug, Default)]
+        pub struct PartialToolCallView<'a> {
+            /// Field 1: `call_id`
+            pub call_id: ::core::option::Option<&'a str>,
+            /// Field 2: `tool_call`
+            pub tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'a>,
+            >,
+            /// Field 3: `args_text_delta`
+            pub args_text_delta: ::core::option::Option<&'a [u8]>,
+            /// Field 4: `model_call_id`
+            pub model_call_id: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for PartialToolCallView<'a> {
+            type Owned = super::super::PartialToolCall;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.args_text_delta = Some(
+                            ::buffa::types::borrow_bytes(&mut cur)?,
+                        );
+                    }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.model_call_id = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::PartialToolCall,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::PartialToolCall,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::PartialToolCall {
+                    call_id: self.call_id.map(|s| s.to_string()),
+                    tool_call: match self.tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ToolCall,
+                                ::buffa::Inline<super::super::ToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    args_text_delta: self.args_text_delta.map(|b| (b).to_vec()),
+                    model_call_id: self.model_call_id.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for PartialToolCallView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if let Some(ref v) = self.args_text_delta {
+                    size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.model_call_id {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.call_id {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if self.tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.tool_call.write_to(__cache, buf);
+                }
+                if let Some(ref v) = self.args_text_delta {
+                    ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+                }
+                if let Some(ref v) = self.model_call_id {
+                    ::buffa::types::put_string_field(4u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for PartialToolCallView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "PartialToolCall";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.PartialToolCall";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.PartialToolCall";
+        }
+        ::buffa::impl_default_view_instance!(PartialToolCallView);
+        ::buffa::impl_view_reborrow!(PartialToolCallView);
+        /** Self-contained, `'static` owned view of a `PartialToolCall` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`PartialToolCallView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`PartialToolCallView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct PartialToolCallOwnedView(
+            ::buffa::OwnedView<PartialToolCallView<'static>>,
+        );
+        impl PartialToolCallOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    PartialToolCallOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    PartialToolCallOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::PartialToolCall,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    PartialToolCallOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`PartialToolCallView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &PartialToolCallView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::PartialToolCall {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `call_id`
+            #[must_use]
+            pub fn call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().call_id
+            }
+            /// Field 2: `tool_call`
+            #[must_use]
+            pub fn tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ToolCallView<'_>,
+            > {
+                &self.0.reborrow().tool_call
+            }
+            /// Field 3: `args_text_delta`
+            #[must_use]
+            pub fn args_text_delta(&self) -> ::core::option::Option<&'_ [u8]> {
+                self.0.reborrow().args_text_delta
+            }
+            /// Field 4: `model_call_id`
+            #[must_use]
+            pub fn model_call_id(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().model_call_id
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<PartialToolCallView<'static>>>
+        for PartialToolCallOwnedView {
+            fn from(inner: ::buffa::OwnedView<PartialToolCallView<'static>>) -> Self {
+                PartialToolCallOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<PartialToolCallOwnedView>
+        for ::buffa::OwnedView<PartialToolCallView<'static>> {
+            fn from(wrapper: PartialToolCallOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<PartialToolCallView<'static>>>
+        for PartialToolCallOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<PartialToolCallView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::PartialToolCall {
+            type View<'a> = PartialToolCallView<'a>;
+            type ViewHandle = PartialToolCallOwnedView;
+        }
+        /// Which tool an update is about: the plugin's ToolCall oneof `tool`
+        /// (agent_pb.ts:1139), flattened like every oneof here. Of its thirty-two arms
+        /// (sixty-seven in the shipped client's, index.js@6096987), the modelled ones
+        /// are those a call this client bridges can arrive on: mcp_tool_call = 15
+        /// (:1216), and the arms of the tools the native redirect table
+        /// (cursor/native.rs) stands in for — shell_tool_call = 1 (:1146),
+        /// grep_tool_call = 5 (:1167), read_tool_call = 8 (:1174), ls_tool_call = 13
+        /// (:1202), fetch_tool_call = 24 (:1279), and the shipped client's
+        /// web_fetch_tool_call = 37 (index.js@6099141), which the plugin predates.
+        /// Every other arm stays an unknown field, and decode.rs names it by number.
+        ///
+        /// **There is no write arm.** Neither descriptor has one: the exec channel's
+        /// write_args = 3 has no ToolCall counterpart, and 2, 6, 7 and 11 are unused
+        /// in both oneofs, while the one arm named for writing (pi_write_tool_call =
+        /// 64) belongs to a family this build models none of. Which arm a `write`
+        /// streams under is therefore a question a live run answers, not this file.
+        /// edit_tool_call = 12 (:1195) is modelled as the likeliest candidate, not as
+        /// a known one, and glob_tool_call = 4 (:1160) for the matching reason: the
+        /// exec channel has no glob kind, so which exec a glob becomes is unmeasured.
+        #[derive(Clone, Debug, Default)]
+        pub struct ToolCallView<'a> {
+            /// Field 1: `shell_tool_call`
+            pub shell_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 4: `glob_tool_call`
+            pub glob_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 5: `grep_tool_call`
+            pub grep_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 8: `read_tool_call`
+            pub read_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 12: `edit_tool_call`
+            pub edit_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 13: `ls_tool_call`
+            pub ls_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 15: `mcp_tool_call`
+            pub mcp_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::McpToolCallView<'a>,
+            >,
+            /// Field 24: `fetch_tool_call`
+            pub fetch_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            /// Field 37: `web_fetch_tool_call`
+            pub web_fetch_tool_call: ::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ToolCallView<'a> {
+            type Owned = super::super::ToolCall;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.shell_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.shell_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.glob_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.glob_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.grep_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.grep_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    8u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.read_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.read_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    12u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.edit_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.edit_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    13u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.ls_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.ls_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    15u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.mcp_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.mcp_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::McpToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    24u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.fetch_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.fetch_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    37u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.web_fetch_tool_call.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.web_fetch_tool_call = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::NativeToolCallView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::ToolCall, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::ToolCall, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ToolCall {
+                    shell_tool_call: match self.shell_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    glob_tool_call: match self.glob_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    grep_tool_call: match self.grep_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    read_tool_call: match self.read_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    edit_tool_call: match self.edit_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    ls_tool_call: match self.ls_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    mcp_tool_call: match self.mcp_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::McpToolCall,
+                                ::buffa::Inline<super::super::McpToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    fetch_tool_call: match self.fetch_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    web_fetch_tool_call: match self.web_fetch_tool_call.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::NativeToolCall,
+                                ::buffa::Inline<super::super::NativeToolCall>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ToolCallView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if self.shell_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.shell_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.glob_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.glob_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.grep_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.grep_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.read_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.read_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.edit_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.edit_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.ls_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.ls_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.mcp_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.mcp_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.fetch_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.fetch_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.web_fetch_tool_call.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.web_fetch_tool_call.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.shell_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.shell_tool_call.write_to(__cache, buf);
+                }
+                if self.glob_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        4u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.glob_tool_call.write_to(__cache, buf);
+                }
+                if self.grep_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        5u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.grep_tool_call.write_to(__cache, buf);
+                }
+                if self.read_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        8u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.read_tool_call.write_to(__cache, buf);
+                }
+                if self.edit_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        12u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.edit_tool_call.write_to(__cache, buf);
+                }
+                if self.ls_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        13u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.ls_tool_call.write_to(__cache, buf);
+                }
+                if self.mcp_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        15u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.mcp_tool_call.write_to(__cache, buf);
+                }
+                if self.fetch_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        24u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.fetch_tool_call.write_to(__cache, buf);
+                }
+                if self.web_fetch_tool_call.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        37u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.web_fetch_tool_call.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ToolCallView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ToolCall";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ToolCall";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ToolCall";
+        }
+        ::buffa::impl_default_view_instance!(ToolCallView);
+        ::buffa::impl_view_reborrow!(ToolCallView);
+        /** Self-contained, `'static` owned view of a `ToolCall` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ToolCallView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ToolCallView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ToolCallOwnedView(::buffa::OwnedView<ToolCallView<'static>>);
+        impl ToolCallOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ToolCall,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ToolCallOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ToolCallView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ToolCallView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ToolCall {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `shell_tool_call`
+            #[must_use]
+            pub fn shell_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().shell_tool_call
+            }
+            /// Field 4: `glob_tool_call`
+            #[must_use]
+            pub fn glob_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().glob_tool_call
+            }
+            /// Field 5: `grep_tool_call`
+            #[must_use]
+            pub fn grep_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().grep_tool_call
+            }
+            /// Field 8: `read_tool_call`
+            #[must_use]
+            pub fn read_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().read_tool_call
+            }
+            /// Field 12: `edit_tool_call`
+            #[must_use]
+            pub fn edit_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().edit_tool_call
+            }
+            /// Field 13: `ls_tool_call`
+            #[must_use]
+            pub fn ls_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().ls_tool_call
+            }
+            /// Field 15: `mcp_tool_call`
+            #[must_use]
+            pub fn mcp_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::McpToolCallView<'_>,
+            > {
+                &self.0.reborrow().mcp_tool_call
+            }
+            /// Field 24: `fetch_tool_call`
+            #[must_use]
+            pub fn fetch_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().fetch_tool_call
+            }
+            /// Field 37: `web_fetch_tool_call`
+            #[must_use]
+            pub fn web_fetch_tool_call(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::NativeToolCallView<'_>,
+            > {
+                &self.0.reborrow().web_fetch_tool_call
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ToolCallView<'static>>>
+        for ToolCallOwnedView {
+            fn from(inner: ::buffa::OwnedView<ToolCallView<'static>>) -> Self {
+                ToolCallOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ToolCallOwnedView>
+        for ::buffa::OwnedView<ToolCallView<'static>> {
+            fn from(wrapper: ToolCallOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ToolCallView<'static>>>
+        for ToolCallOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ToolCallView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ToolCall {
+            type View<'a> = ToolCallView<'a>;
+            type ViewHandle = ToolCallOwnedView;
+        }
+        /// A call on the client-declared roster: the plugin's McpToolCall
+        /// (agent_pb.ts:393) narrowed to args = 1 (:395), which is the very McpArgs the
+        /// exec channel's mcp_args = 11 carries — the shipped client types both from
+        /// one module (index.js@6369871). Its name, tool_name, tool_call_id and
+        /// provider_identifier say whose call this is. result = 2 (:400) and the
+        /// shipped client's description = 3 (index.js@5995393) are not modelled: the
+        /// answer to a bridged call is ganja's to write, not an update's to read.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpToolCallView<'a> {
+            /// Field 1: `args`
+            pub args: ::buffa::MessageFieldView<
+                super::super::__buffa::view::McpArgsView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpToolCallView<'a> {
+            type Owned = super::super::McpToolCall;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.args.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.args = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::McpArgsView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::McpToolCall,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::McpToolCall,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpToolCall {
+                    args: match self.args.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::McpArgs,
+                                ::buffa::Inline<super::super::McpArgs>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpToolCallView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if self.args.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.args.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.args.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.args.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpToolCallView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpToolCall";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpToolCall";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolCall";
+        }
+        ::buffa::impl_default_view_instance!(McpToolCallView);
+        ::buffa::impl_view_reborrow!(McpToolCallView);
+        /** Self-contained, `'static` owned view of a `McpToolCall` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpToolCallView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpToolCallView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpToolCallOwnedView(::buffa::OwnedView<McpToolCallView<'static>>);
+        impl McpToolCallOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolCallOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolCallOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpToolCall,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolCallOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpToolCallView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpToolCallView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpToolCall {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `args`
+            #[must_use]
+            pub fn args(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::McpArgsView<'_>,
+            > {
+                &self.0.reborrow().args
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpToolCallView<'static>>>
+        for McpToolCallOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpToolCallView<'static>>) -> Self {
+                McpToolCallOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpToolCallOwnedView>
+        for ::buffa::OwnedView<McpToolCallView<'static>> {
+            fn from(wrapper: McpToolCallOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpToolCallView<'static>>>
+        for McpToolCallOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpToolCallView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpToolCall {
+            type View<'a> = McpToolCallView<'a>;
+            type ViewHandle = McpToolCallOwnedView;
+        }
+        /// The native arms, fieldless on purpose and shared. Each is an args = 1 /
+        /// result = 2 pair in the descriptor (ShellToolCall at agent_pb.ts:12441,
+        /// ReadToolCall at :9368, EditToolCall at :6165, …), and presence is the whole
+        /// of what this build reads from one: which tool the model is generating a call
+        /// for. Protobuf carries no type names, so one empty message behind eight arms
+        /// is byte-identical to eight, and whatever each arm carries survives decoding
+        /// as unknown fields.
+        #[derive(Clone, Debug, Default)]
+        pub struct NativeToolCallView<'a> {
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for NativeToolCallView<'a> {
+            type Owned = super::super::NativeToolCall;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::NativeToolCall,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::NativeToolCall,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::NativeToolCall {
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for NativeToolCallView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for NativeToolCallView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "NativeToolCall";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.NativeToolCall";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.NativeToolCall";
+        }
+        ::buffa::impl_default_view_instance!(NativeToolCallView);
+        ::buffa::impl_view_reborrow!(NativeToolCallView);
+        /** Self-contained, `'static` owned view of a `NativeToolCall` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`NativeToolCallView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`NativeToolCallView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct NativeToolCallOwnedView(
+            ::buffa::OwnedView<NativeToolCallView<'static>>,
+        );
+        impl NativeToolCallOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    NativeToolCallOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    NativeToolCallOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::NativeToolCall,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    NativeToolCallOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`NativeToolCallView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &NativeToolCallView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::NativeToolCall {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<NativeToolCallView<'static>>>
+        for NativeToolCallOwnedView {
+            fn from(inner: ::buffa::OwnedView<NativeToolCallView<'static>>) -> Self {
+                NativeToolCallOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<NativeToolCallOwnedView>
+        for ::buffa::OwnedView<NativeToolCallView<'static>> {
+            fn from(wrapper: NativeToolCallOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<NativeToolCallView<'static>>>
+        for NativeToolCallOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<NativeToolCallView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::NativeToolCall {
+            type View<'a> = NativeToolCallView<'a>;
+            type ViewHandle = NativeToolCallOwnedView;
         }
         /// A request the server makes mid-stream and waits on before generating: the
         /// minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an
@@ -44728,6 +48523,30 @@ pub use self::__buffa::view::HeartbeatOwnedView;
 pub use self::__buffa::view::TurnEndedView;
 #[doc(inline)]
 pub use self::__buffa::view::TurnEndedOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallStartedView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallStartedOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallCompletedView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallCompletedOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PartialToolCallView;
+#[doc(inline)]
+pub use self::__buffa::view::PartialToolCallOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallView;
+#[doc(inline)]
+pub use self::__buffa::view::ToolCallOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolCallView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolCallOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::NativeToolCallView;
+#[doc(inline)]
+pub use self::__buffa::view::NativeToolCallOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ExecRequestView;
 #[doc(inline)]

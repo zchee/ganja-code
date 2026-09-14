@@ -191,7 +191,8 @@ message AgentConversationTurn {
 // One step of a turn (index.js@6105443): the assistant's text. The oneof's
 // tool_call = 2 and thinking_message = 3 arms are not modelled: the reference
 // writes neither (a tool result is an assistant-text step prefixed
-// `[Tool Result]`, proxy.ts:793), and a typed tool_call is a 70-arm oneof
+// `[Tool Result]`, proxy.ts:793), and a typed tool_call is the sixty-seven-arm
+// ToolCall oneof — modelled below only as far as the update arms read it —
 // whose inner shapes nothing has measured.
 message ConversationStep {
   AssistantMessage assistant_message = 1;
@@ -262,14 +263,29 @@ message ServerMessage {
 // The updates a one-shot text turn must understand. heartbeat = 13 was
 // LIVE-OBSERVED (`6a 00` inside the recorded frame); text_delta = 1
 // (agent_pb.ts:3160), thinking_delta = 4 (:3195) and turn_ended = 14
-// (:3258) are plugin-derived. The tool-call, summary, token and step arms
-// of the plugin's oneof are deliberately absent — an update carrying only
-// fields this build does not model decodes to an empty Update and is
-// skipped, named by number from its unknown fields.
+// (:3258) are plugin-derived.
+//
+// The three tool-call arms beside them — tool_call_started = 2 (:3181),
+// tool_call_completed = 3 (:3188) and partial_tool_call = 7 (:3167), the same
+// three numbers in the shipped client's oneof (index.js@6183301) — are
+// modelled so that a live run can say what they carry (bead
+// `ganja-code-gzkn`, announcing a tool call while its arguments stream):
+// decode.rs reads each into one debug line and hands the session nothing from
+// it yet. The partials are what a 25 KB `write` sent for some 200 seconds
+// before its exec arrived, and until the exec a cursor turn had nothing to
+// show for them.
+//
+// The tool_call_delta, summary, token and step arms of the plugin's oneof are
+// still absent — an update carrying only fields this build does not model
+// decodes to an empty Update and is skipped, named by number from its
+// unknown fields.
 message Update {
   TextDelta text_delta = 1;
+  ToolCallStarted tool_call_started = 2;
+  ToolCallCompleted tool_call_completed = 3;
   ThinkingDelta thinking_delta = 4;
   ThinkingCompleted thinking_completed = 5;
+  PartialToolCall partial_tool_call = 7;
   Heartbeat heartbeat = 13;
   TurnEnded turn_ended = 14;
 }
@@ -298,6 +314,100 @@ message Heartbeat {}
 
 // Fieldless in the plugin too (agent_pb.ts:3085): the turn's clean end.
 message TurnEnded {}
+
+// The server announcing a tool call the model has finished generating: the
+// plugin's ToolCallStartedUpdate (agent_pb.ts:2814) — call_id = 1 (:2816),
+// tool_call = 2 (:2821) and model_call_id = 3 (:2828), which the descriptor
+// says "groups tool calls that originate from the same model provider call".
+// The shipped client declares the same three (index.js@6169305). On the live
+// `write` it arrived after the partials and just before the exec that ran the
+// tool.
+message ToolCallStarted {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  string model_call_id = 3;
+}
+
+// The same three members, on the plugin's ToolCallCompletedUpdate
+// (agent_pb.ts:2842-2858) and the shipped client's (index.js@6169861).
+message ToolCallCompleted {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  string model_call_id = 3;
+}
+
+// The server streaming a tool call's arguments while the model is still
+// writing them: the plugin's PartialToolCallUpdate (agent_pb.ts:2902) —
+// call_id = 1 (:2904), tool_call = 2 (:2909), args_text_delta = 3 (:2916) and
+// model_call_id = 4 (:2923). The shipped client declares the same four
+// (index.js@6171001).
+//
+// args_text_delta is spelled `bytes` where both descriptors say `string`. The
+// two are the same length-delimited field on the wire, but only a string is
+// UTF-8-checked as it decodes, and a failed check fails the whole server
+// message — and the turn with it — over an arm that, before it was modelled,
+// sat in the unknown fields and could fail nothing. The descriptor's own note
+// on the member ("Aggregated args text so far … May be incomplete until final
+// tool call") promises a fragment, not a whole character, and nothing here
+// reads the text anyway: decode.rs logs its length, never its content, because
+// the content is the model's output.
+message PartialToolCall {
+  string call_id = 1;
+  ToolCall tool_call = 2;
+  bytes args_text_delta = 3;
+  string model_call_id = 4;
+}
+
+// Which tool an update is about: the plugin's ToolCall oneof `tool`
+// (agent_pb.ts:1139), flattened like every oneof here. Of its thirty-two arms
+// (sixty-seven in the shipped client's, index.js@6096987), the modelled ones
+// are those a call this client bridges can arrive on: mcp_tool_call = 15
+// (:1216), and the arms of the tools the native redirect table
+// (cursor/native.rs) stands in for — shell_tool_call = 1 (:1146),
+// grep_tool_call = 5 (:1167), read_tool_call = 8 (:1174), ls_tool_call = 13
+// (:1202), fetch_tool_call = 24 (:1279), and the shipped client's
+// web_fetch_tool_call = 37 (index.js@6099141), which the plugin predates.
+// Every other arm stays an unknown field, and decode.rs names it by number.
+//
+// **There is no write arm.** Neither descriptor has one: the exec channel's
+// write_args = 3 has no ToolCall counterpart, and 2, 6, 7 and 11 are unused
+// in both oneofs, while the one arm named for writing (pi_write_tool_call =
+// 64) belongs to a family this build models none of. Which arm a `write`
+// streams under is therefore a question a live run answers, not this file.
+// edit_tool_call = 12 (:1195) is modelled as the likeliest candidate, not as
+// a known one, and glob_tool_call = 4 (:1160) for the matching reason: the
+// exec channel has no glob kind, so which exec a glob becomes is unmeasured.
+message ToolCall {
+  NativeToolCall shell_tool_call = 1;
+  NativeToolCall glob_tool_call = 4;
+  NativeToolCall grep_tool_call = 5;
+  NativeToolCall read_tool_call = 8;
+  NativeToolCall edit_tool_call = 12;
+  NativeToolCall ls_tool_call = 13;
+  McpToolCall mcp_tool_call = 15;
+  NativeToolCall fetch_tool_call = 24;
+  NativeToolCall web_fetch_tool_call = 37;
+}
+
+// A call on the client-declared roster: the plugin's McpToolCall
+// (agent_pb.ts:393) narrowed to args = 1 (:395), which is the very McpArgs the
+// exec channel's mcp_args = 11 carries — the shipped client types both from
+// one module (index.js@6369871). Its name, tool_name, tool_call_id and
+// provider_identifier say whose call this is. result = 2 (:400) and the
+// shipped client's description = 3 (index.js@5995393) are not modelled: the
+// answer to a bridged call is ganja's to write, not an update's to read.
+message McpToolCall {
+  McpArgs args = 1;
+}
+
+// The native arms, fieldless on purpose and shared. Each is an args = 1 /
+// result = 2 pair in the descriptor (ShellToolCall at agent_pb.ts:12441,
+// ReadToolCall at :9368, EditToolCall at :6165, …), and presence is the whole
+// of what this build reads from one: which tool the model is generating a call
+// for. Protobuf carries no type names, so one empty message behind eight arms
+// is byte-identical to eight, and whatever each arm carries survives decoding
+// as unknown fields.
+message NativeToolCall {}
 
 // A request the server makes mid-stream and waits on before generating: the
 // minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an

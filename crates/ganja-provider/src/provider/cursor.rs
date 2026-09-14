@@ -1028,9 +1028,14 @@ fn exec(fold: &Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> Exec 
         });
     };
 
+    // `exec_id` rides beside the call id so this line can be read against the
+    // tool-call updates `decode.rs` logs: an announcement made ahead of the
+    // exec has to key on whichever of their ids the exec repeats (bead
+    // `ganja-code-gzkn`).
     tracing::debug!(
         provider = ID,
         exec = ask.id,
+        exec_id = ask.exec_id.as_deref(),
         kind = ask.kind,
         tool,
         call = call_id,

@@ -93,6 +93,48 @@ fn exec_framed(exec: proto::ExecRequest) -> Vec<u8> {
     connect::envelope(&message.encode_to_vec())
 }
 
+/// One length-delimited field the way the wire spells it: the tag (the
+/// number, wire type 2) and the length as varints, then the payload. Built by
+/// hand rather than by the generated types, so decoding it pins the number
+/// `cursor.proto` gives a member against the descriptor instead of agreeing
+/// with whatever the generated code would have encoded.
+fn delimited(number: u32, payload: &[u8]) -> Vec<u8> {
+    let length = u64::try_from(payload.len()).expect("a test payload fits");
+    let mut field = Vec::new();
+    for mut value in [(u64::from(number) << 3) | 2, length] {
+        while value >= 0x80 {
+            field.push(u8::try_from(value & 0x7f).expect("seven bits fit a byte") | 0x80);
+            value >>= 7;
+        }
+        field.push(u8::try_from(value).expect("under 0x80 fits a byte"));
+    }
+    field.extend_from_slice(payload);
+
+    field
+}
+
+/// A data frame holding one update whose only arm is `arm`, spelled byte by
+/// byte: `interaction_update = 1` around the arm's own field.
+fn update_frame(arm: u32, payload: &[u8]) -> Vec<u8> {
+    connect::envelope(&delimited(1, &delimited(arm, payload)))
+}
+
+/// The `tool_call` a declared `write` streams under on the bridge's own
+/// channel: `mcp_tool_call = 15` around `McpToolCall.args = 1`, around
+/// `McpArgs`' name = 1, tool_call_id = 3, provider_identifier = 4 and
+/// tool_name = 5.
+fn mcp_write_tool_call() -> Vec<u8> {
+    let args = [
+        delimited(1, b"write"),
+        delimited(3, b"toolu_01"),
+        delimited(4, b"ganja"),
+        delimited(5, b"write"),
+    ]
+    .concat();
+
+    delimited(15, &delimited(1, &args))
+}
+
 /// Runs `body` through the real splitter and one [`Mapping`], the way
 /// the live fold does; `eof` says whether the body then ended.
 fn mapped(body: &[u8], eof: bool) -> Vec<ProviderEvent> {
@@ -455,6 +497,208 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
     assert_eq!(super::update_arm(8), "token_delta (8)");
     assert_eq!(super::update_arm(16), "step_started (16)");
     assert_eq!(super::update_arm(42), "field 42");
+}
+
+/// The three tool-call arms, sent the way the server sends them and read the
+/// way this build now does: each decodes into a field of its own — field 7 is
+/// no longer an unknown the skip log reports — carrying every member the
+/// descriptor gives it at the number it gives it, and none of them is yet an
+/// event. The turn goes on past all three to its own text and finish.
+#[test]
+fn each_tool_call_update_decodes_into_its_own_field_and_hands_the_session_nothing() {
+    let tool_call = mcp_write_tool_call();
+    let partial = [
+        delimited(1, b"call-1"),
+        delimited(2, &tool_call),
+        delimited(3, b"{\"filePath\":"),
+        delimited(4, b"model-1"),
+    ]
+    .concat();
+    let announced =
+        [delimited(1, b"call-1"), delimited(2, &tool_call), delimited(3, b"model-1")].concat();
+
+    let mut body = update_frame(7, &partial);
+    body.extend(update_frame(2, &announced));
+    body.extend(update_frame(3, &announced));
+    body.extend(framed(text("written")));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+
+    let (events, asks) = mapped_asks(&body, false);
+    assert!(asks.is_empty(), "an update is not a question: {asks:?}");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("written".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "the tool-call arms hand the session nothing yet"
+    );
+
+    let update = |arm: u32, payload: &[u8]| {
+        let update =
+            proto::ServerMessage::decode_from_slice(&delimited(1, &delimited(arm, payload)))
+                .expect("the server message decodes")
+                .interaction_update
+                .expect("it carries an update");
+        assert!(
+            update.__buffa_unknown_fields.is_empty(),
+            "arm {arm} decodes into its field, so it can never reach the skip log"
+        );
+
+        update
+    };
+
+    let decoded = update(7, &partial);
+    let partial = decoded.partial_tool_call.as_option().expect("partial_tool_call = 7");
+    assert_eq!(partial.call_id.as_deref(), Some("call-1"));
+    assert_eq!(partial.model_call_id.as_deref(), Some("model-1"));
+    assert_eq!(partial.args_text_delta.as_deref(), Some(&b"{\"filePath\":"[..]));
+    let args = partial
+        .tool_call
+        .as_option()
+        .and_then(|tool_call| tool_call.mcp_tool_call.as_option())
+        .and_then(|call| call.args.as_option())
+        .expect("mcp_tool_call = 15 carries McpToolCall.args = 1");
+    assert_eq!(args.name.as_deref(), Some("write"));
+    assert_eq!(args.tool_call_id.as_deref(), Some("toolu_01"));
+    assert_eq!(args.provider_identifier.as_deref(), Some("ganja"));
+    assert_eq!(args.tool_name.as_deref(), Some("write"));
+
+    let decoded = update(2, &announced);
+    let started = decoded.tool_call_started.as_option().expect("tool_call_started = 2");
+    assert_eq!(started.call_id.as_deref(), Some("call-1"));
+    assert_eq!(started.model_call_id.as_deref(), Some("model-1"));
+    assert_eq!(super::tool_call_arm(started.tool_call.as_option()), "mcp_tool_call (15)");
+
+    let decoded = update(3, &announced);
+    let completed = decoded.tool_call_completed.as_option().expect("tool_call_completed = 3");
+    assert_eq!(completed.call_id.as_deref(), Some("call-1"));
+    assert_eq!(completed.model_call_id.as_deref(), Some("model-1"));
+    assert_eq!(super::tool_call_arm(completed.tool_call.as_option()), "mcp_tool_call (15)");
+}
+
+/// What a tool call carries is named at every arm this build models, by the
+/// descriptor's own spelling and the number the bytes arrived on; any other
+/// arm by its number alone; and a tool call that is missing, or present and
+/// holding nothing, says which — the two answers the live run's first
+/// question turns on.
+#[test]
+fn a_tool_calls_arm_is_named_by_the_descriptor_by_its_number_or_as_missing() {
+    let arm = |tool_call: &[u8]| {
+        let decoded = proto::ToolCall::decode_from_slice(tool_call).expect("a tool call decodes");
+        super::tool_call_arm(Some(&decoded)).into_owned()
+    };
+
+    for (number, named) in [
+        (1, "shell_tool_call (1)"),
+        (4, "glob_tool_call (4)"),
+        (5, "grep_tool_call (5)"),
+        (8, "read_tool_call (8)"),
+        (12, "edit_tool_call (12)"),
+        (13, "ls_tool_call (13)"),
+        (24, "fetch_tool_call (24)"),
+        (37, "web_fetch_tool_call (37)"),
+    ] {
+        // A native arm's own args and result are unknown fields inside it,
+        // which is why a payload nobody models still names the arm.
+        assert_eq!(arm(&delimited(number, &delimited(1, b"opaque args"))), named);
+    }
+    assert_eq!(arm(&mcp_write_tool_call()), "mcp_tool_call (15)");
+
+    // delete_tool_call = 3 is a real arm this build does not model.
+    assert_eq!(arm(&delimited(3, b"")), "field 3");
+    assert_eq!(arm(&[]), "empty");
+    assert_eq!(super::tool_call_arm(None), "absent");
+}
+
+/// The debug line is the measurement W1 exists for, so what it says is pinned:
+/// the ids, which tool, and a partial's argument text **by length only** —
+/// that text is the model's output, and a canary in it must never reach the
+/// log. The mcp members appear only on a call that is one, and the length only
+/// on the arm that has argument text.
+#[test]
+fn a_tool_call_update_is_logged_by_its_ids_and_its_tool_and_never_by_its_argument_text() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let canary = "{\"content\":\"CANARY-the-models-own-argument-text";
+
+    let mut body = update_frame(
+        7,
+        &[
+            delimited(1, b"call-1"),
+            delimited(2, &mcp_write_tool_call()),
+            delimited(3, canary.as_bytes()),
+            delimited(4, b"model-1"),
+        ]
+        .concat(),
+    );
+    body.extend(update_frame(7, &[delimited(1, b"call-2"), delimited(3, b"CANARY")].concat()));
+    body.extend(update_frame(
+        2,
+        &[delimited(1, b"call-3"), delimited(2, &delimited(12, b"")), delimited(3, b"model-3")]
+            .concat(),
+    ));
+
+    assert!(mapped(&body, false).is_empty(), "no update here is an event");
+
+    let logged = log.logged();
+    assert!(!logged.contains("CANARY"), "argument text reached the log: {logged}");
+    let lines: Vec<&str> =
+        logged.lines().filter(|line| line.contains("a tool-call update")).collect();
+    assert_eq!(lines.len(), 3, "one line per update: {logged}");
+
+    let mcp_partial = format!("args_bytes={}", canary.len());
+    for expected in [
+        r#"update="partial_tool_call (7)""#,
+        r#"call="call-1""#,
+        r#"model_call="model-1""#,
+        r#"tool_call="mcp_tool_call (15)""#,
+        r#"mcp_name="write""#,
+        r#"mcp_tool_name="write""#,
+        r#"mcp_call="toolu_01""#,
+        r#"mcp_provider="ganja""#,
+        &mcp_partial,
+    ] {
+        assert!(lines[0].contains(expected), "missing {expected}: {}", lines[0]);
+    }
+
+    for expected in [r#"call="call-2""#, r#"tool_call="absent""#, "args_bytes=6"] {
+        assert!(lines[1].contains(expected), "missing {expected}: {}", lines[1]);
+    }
+    assert!(!lines[1].contains("model_call="), "an id the server never sent: {}", lines[1]);
+    assert!(!lines[1].contains("mcp_"), "no mcp call, no mcp members: {}", lines[1]);
+
+    for expected in [
+        r#"update="tool_call_started (2)""#,
+        r#"call="call-3""#,
+        r#"model_call="model-3""#,
+        r#"tool_call="edit_tool_call (12)""#,
+    ] {
+        assert!(lines[2].contains(expected), "missing {expected}: {}", lines[2]);
+    }
+    assert!(
+        !lines[2].contains("args_bytes"),
+        "a started update has no argument text: {}",
+        lines[2]
+    );
+    assert!(!lines[2].contains("mcp_"), "a native arm has no mcp members: {}", lines[2]);
+}
+
+/// An arm this build still does not model is still skipped, and still named
+/// in the skip log — the tool-call arms leaving that table took nothing else
+/// with them.
+#[test]
+fn an_update_carrying_only_an_unmodelled_arm_is_still_logged_as_skipped() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+
+    // token_delta = 8 (agent_pb.ts:3216) holding TokenDeltaUpdate.tokens = 42.
+    let events = mapped(&update_frame(8, &[0x08, 0x2a]), false);
+    assert!(events.is_empty(), "{events:?}");
+
+    let logged = log.logged();
+    assert!(logged.contains("skipped an update this build does not model"), "{logged}");
+    assert!(logged.contains("token_delta (8)"), "{logged}");
+    assert!(!logged.contains("a tool-call update"), "{logged}");
 }
 
 /// The kind a live turn really died on: `shell_stream_args`, field 14 of

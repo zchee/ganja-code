@@ -8,6 +8,8 @@
 //! EndStream frame, mapped one frame at a time by [`Mapping`] so the reply
 //! reaches the session while the server is still talking.
 
+use std::borrow::Cow;
+
 use buffa::Message as _;
 
 use super::{ID, connect, proto};
@@ -67,14 +69,24 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// set fails the turn with its field number on it — the exec channel's
 /// no-hang discipline, applied to the second channel the server waits on.
 ///
-/// Updates this build does not model — the tool-call, summary, token and
-/// step arms, and whole server messages outside the update, exec and kv
+/// Updates this build does not model — the tool-call delta, summary, token
+/// and step arms, and whole server messages outside the update, exec and kv
 /// channels — are skipped, not failed: the server adds arms between client
 /// versions, and a turn that died on one would make every addition a
 /// breaking change. A skipped update is logged at debug with its set field
 /// numbers named where the plugin's descriptor knows them, which is where
 /// "why is the reply shorter than the server's" is answered — by arm, not
 /// by guesswork.
+///
+/// **The three tool-call arms are read, and not yet acted on.**
+/// `partial_tool_call`, `tool_call_started` and `tool_call_completed` decode
+/// into fields of their own, and each becomes one debug line naming its ids,
+/// the tool its `tool_call` carries and — for a partial — how long the
+/// argument text is, but no event (bead `ganja-code-gzkn`). What an
+/// announcement would rest on — whether an early partial names its tool at
+/// all, and which id the exec that follows will carry — is what that line is
+/// there to measure, so until a live run has said, a cursor tool call still
+/// reaches the session through its exec alone, exactly as before.
 ///
 /// **`turn_ended` is noted; the verdict waits for the EndStream frame.**
 /// The two are the application and the protocol saying different things —
@@ -366,6 +378,30 @@ impl Mapping {
             // last block, where the loop finds nothing open and says
             // nothing.
             events.push(ProviderEvent::ReasoningBreak);
+        } else if let Some(partial) = update.partial_tool_call.as_option() {
+            tool_call_update(
+                "partial_tool_call (7)",
+                partial.call_id.as_deref(),
+                partial.model_call_id.as_deref(),
+                partial.tool_call.as_option(),
+                Some(partial.args_text_delta.as_ref().map_or(0, Vec::len)),
+            );
+        } else if let Some(started) = update.tool_call_started.as_option() {
+            tool_call_update(
+                "tool_call_started (2)",
+                started.call_id.as_deref(),
+                started.model_call_id.as_deref(),
+                started.tool_call.as_option(),
+                None,
+            );
+        } else if let Some(completed) = update.tool_call_completed.as_option() {
+            tool_call_update(
+                "tool_call_completed (3)",
+                completed.call_id.as_deref(),
+                completed.model_call_id.as_deref(),
+                completed.tool_call.as_option(),
+                None,
+            );
         } else if update.turn_ended.is_set() {
             self.ended = true;
         } else if update.heartbeat.is_set() {
@@ -621,20 +657,88 @@ fn exec_kind(exec: &proto::ExecRequest) -> String {
     }
 }
 
+/// Reads one tool-call update into a debug line, and into nothing else —
+/// [`Mapping`] says why no event leaves here yet.
+///
+/// `args_bytes` is a partial's argument text by length only, because that
+/// text is the model's output: the thinking delta logs `bytes` and never
+/// words for the same reason. The mcp members are the ones the bridge itself
+/// decides on (`McpCall::called`, `tool_call_id`, `provider_identifier`), so
+/// the line can be read against the exec that follows it; each is omitted
+/// when absent rather than printed empty.
+fn tool_call_update(
+    update: &str,
+    call_id: Option<&str>,
+    model_call_id: Option<&str>,
+    tool_call: Option<&proto::ToolCall>,
+    args_bytes: Option<usize>,
+) {
+    let mcp = tool_call
+        .and_then(|tool_call| tool_call.mcp_tool_call.as_option())
+        .and_then(|call| call.args.as_option());
+
+    tracing::debug!(
+        provider = ID,
+        update,
+        call = call_id,
+        model_call = model_call_id,
+        tool_call = ?tool_call_arm(tool_call),
+        mcp_name = mcp.and_then(|args| args.name.as_deref()),
+        mcp_tool_name = mcp.and_then(|args| args.tool_name.as_deref()),
+        mcp_call = mcp.and_then(|args| args.tool_call_id.as_deref()),
+        mcp_provider = mcp.and_then(|args| args.provider_identifier.as_deref()),
+        args_bytes,
+        "a tool-call update"
+    );
+}
+
+/// Names what a tool-call update's `tool_call` carries — the first thing a
+/// live run has to say about one: `absent` when the update sent none,
+/// `empty` when it sent the message holding nothing, a modelled arm by its
+/// descriptor name and number, and any other arm by number alone, which is
+/// still enough to go derive, the way [`update_arm`] reports a number its
+/// table lacks.
+fn tool_call_arm(tool_call: Option<&proto::ToolCall>) -> Cow<'static, str> {
+    let Some(tool_call) = tool_call else {
+        return Cow::Borrowed("absent");
+    };
+
+    let modelled = [
+        (tool_call.shell_tool_call.is_set(), "shell_tool_call (1)"),
+        (tool_call.glob_tool_call.is_set(), "glob_tool_call (4)"),
+        (tool_call.grep_tool_call.is_set(), "grep_tool_call (5)"),
+        (tool_call.read_tool_call.is_set(), "read_tool_call (8)"),
+        (tool_call.edit_tool_call.is_set(), "edit_tool_call (12)"),
+        (tool_call.ls_tool_call.is_set(), "ls_tool_call (13)"),
+        (tool_call.mcp_tool_call.is_set(), "mcp_tool_call (15)"),
+        (tool_call.fetch_tool_call.is_set(), "fetch_tool_call (24)"),
+        (tool_call.web_fetch_tool_call.is_set(), "web_fetch_tool_call (37)"),
+    ];
+    if let Some((_, named)) = modelled.into_iter().find(|(set, _)| *set) {
+        return Cow::Borrowed(named);
+    }
+
+    match tool_call.__buffa_unknown_fields.iter().next() {
+        Some(field) => Cow::Owned(format!("field {}", field.number)),
+        None => Cow::Borrowed("empty"),
+    }
+}
+
 /// Names a skipped update's arm the way the plugin's descriptor does.
 ///
 /// The table is the plugin's InteractionUpdate oneof (agent_pb.ts:3160-
-/// :3272); the arms this build models — text_delta = 1, thinking_delta = 4,
-/// heartbeat = 13, turn_ended = 14 — never reach it, because a modeled arm
-/// decodes into its field rather than into the unknowns. A number outside
-/// the table is a server newer than the descriptor, reported as itself —
-/// still enough to go derive.
+/// :3272) minus the arms this build models — text_delta = 1,
+/// tool_call_started = 2, tool_call_completed = 3, thinking_delta = 4,
+/// thinking_completed = 5, partial_tool_call = 7, heartbeat = 13 and
+/// turn_ended = 14 — which never reach it, because a modelled arm decodes into
+/// its field rather than into the unknowns. That is why the three tool-call
+/// numbers left the table when their arms were modelled (bead
+/// `ganja-code-gzkn`) rather than staying to name something that can no
+/// longer arrive here. A number outside the table is a server newer than the
+/// descriptor, reported as itself — still enough to go derive.
 fn update_arm(number: u32) -> String {
     let named = match number {
-        2 => "tool_call_started",
-        3 => "tool_call_completed",
         6 => "user_message_appended",
-        7 => "partial_tool_call",
         8 => "token_delta",
         9 => "summary",
         10 => "summary_started",
