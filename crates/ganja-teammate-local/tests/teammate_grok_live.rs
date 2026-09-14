@@ -6,22 +6,25 @@
 //! and proves nothing about the vendor. The four questions here can only be
 //! answered by a real one:
 //!
-//! 1. **Gating — can a grok teammate work at all under the pinned posture, and
-//!    what does an unapproved tool ask cost?** The ordinary path for a
-//!    read-and-answer teammate is reading, so if reads raise asks then a grok
-//!    teammate cancels essentially every turn and the row ships as
-//!    not-recommended.
+//! 1. **Gating — can a grok teammate implement under the pinned posture, and
+//!    what does an unapproved tool ask cost?** Under **D560**'s floor
+//!    (`--sandbox workspace --permission-mode acceptEdits`, 2026-09-15) the
+//!    ordinary path is reading and then editing the working tree, so the
+//!    ladder asks both, asks what still raises an ask — a shell command that
+//!    writes, inside the tree as much as outside it — and asks what that ask
+//!    costs a headless turn.
 //! 2. **Does `--resume <uuid>` compose with `--prompt-file`?** Both are
 //!    documented single-turn doors; their combination is not.
-//! 3. **Drift.** Is the sandbox still applied on the resume line, and does
-//!    `--permission-mode dontAsk` still take the cancel arm on the one request
-//!    that still asks at 1.0.7 — a shell write the sandbox would deny — rather
-//!    than having been wired into the permission engine?
+//! 3. **Drift.** Is the sandbox still applied on the resume line, and does the
+//!    request that still asks at 1.0.31 — a shell command that writes — still
+//!    take the cancel arm headless, rather than having been wired into a
+//!    deny-and-continue?
 //! 4. **The network bound** (bead `ganja-code-vaz`): the one clause of the
 //!    bound sentence that shipped unmeasured. Arm (d) asks a shell `curl` to
 //!    reach a public host and asserts the `200`, so "may send them anywhere"
-//!    stays the literal fact it was measured to be on 2026-08-20 rather than
-//!    the over-disclosure it shipped as.
+//!    stays the literal fact it was measured to be on 2026-08-20 (and again on
+//!    2026-09-15 under `workspace`) rather than the over-disclosure it shipped
+//!    as.
 //!
 //! So this file is `#[ignore]`d **and** inert unless `GANJA_LIVE_TEST=1`, the
 //! two-lock shape `tests/live.rs` and `teammate_codex_live.rs` already use for
@@ -34,8 +37,8 @@
 //! # Why the four questions are one ladder rather than four tests
 //!
 //! Questions 2 and 3 are questions *about the resume line*, and question 1's
-//! own instrument is a resume: (a) reads, and (b), (b2), (b3), (c) and (d)
-//! each resume (a)'s conversation — the network arm for the same reason the
+//! own instrument is a resume: (a) reads, and (b), (b2), (b3), (b4), (c), (d)
+//! and (e) each resume (a)'s conversation — the network arm for the same reason the
 //! shell arm does, since a measurement of what this posture permits belongs
 //! on the line the posture is pinned on. Splitting them into four test
 //! functions would mean spending three more conversations to re-measure the
@@ -54,11 +57,19 @@
 //! mailbox is exactly the seam that turns a stream into one sentence. The last
 //! test in this file drives the whole chain instead, so both are witnessed.
 //!
+//! # Where the ladder stands
+//!
+//! The working tree is a directory under `~/.cache/ganja/probes/` rather than a
+//! temporary one, and on purpose: every grok profile keeps temp writable, so a
+//! working tree under temp would let (b)'s write land for the wrong reason and
+//! the arm would measure nothing about `workspace`.
+//!
 //! # The precondition this machine failed, until 2026-08-20
 //!
 //! `--sandbox read-only` installs a write-deny hook that **refuses a symlinked
 //! `GROK_HOME`**, and refuses to start rather than run with its protections
-//! missing. The machine this was written on had `~/.grok` symlinked, so every
+//! missing. That vendor's source applies the same hook to `workspace`, so the
+//! precondition stands under **D560**'s floor too. The machine this was written on had `~/.grok` symlinked, so every
 //! grok turn there refused — correctly, and as
 //! [`shim::Failure::Exit`](ganja_teammate_local::shim::Failure) mail naming the
 //! vendor's own sentence. The probe is therefore run with a `HOME` whose
@@ -97,8 +108,8 @@ fn enabled() -> bool {
 
 /// Whether this machine can apply the pinned profile at all.
 ///
-/// A symlinked grok home makes `--sandbox read-only` refuse to start, so a run
-/// under one would measure that refusal and nothing else.
+/// A symlinked grok home makes the pinned profile's write-deny hook refuse to
+/// start, so a run under one would measure that refusal and nothing else.
 fn home_is_real() -> bool {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let grok = home.join(".grok");
@@ -281,9 +292,9 @@ fn collect_results(value: &serde_json::Value, found: &mut Vec<String>) {
 /// on a failed assertion alike — and its parent with it if that left the
 /// parent empty.
 ///
-/// The outside-the-set arms below put their target under a person's cache
-/// directory, and a probe that leaves its own directory behind there is a
-/// probe that lied about cleaning up; a *file* left behind is a different
+/// The working tree and the outside-the-set arms' target both sit under a
+/// person's cache directory, and a probe that leaves its own directory behind
+/// there is a probe that lied about cleaning up; a *file* left behind is a different
 /// thing, and is exactly what those arms assert against before this runs.
 struct RemoveOnDrop(PathBuf);
 
@@ -326,11 +337,23 @@ async fn run(cwd: &std::path::Path, text: &str, session: Option<&str>) -> Ran {
     }
 }
 
-/// The gating ladder: viability, the cost of an unapproved ask, the resume
-/// composition, the two drift questions, and the network bound.
+/// A directory of this run's own under `~/.cache/ganja/probes/`, outside every
+/// path grok's profiles keep writable by default.
+fn probe_directory(label: &str) -> RemoveOnDrop {
+    let directory = PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
+        .join(".cache/ganja/probes")
+        .join(format!("grok-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a probe directory under the user's cache");
+
+    RemoveOnDrop(directory)
+}
+
+/// The gating ladder: viability, what edits and what asks, the cost of an
+/// unapproved ask, the resume composition, the two drift questions, and the
+/// network bound.
 #[tokio::test]
 #[ignore = "spends somebody's grok quota; needs GANJA_LIVE_TEST=1"]
-async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs() {
+async fn what_a_workspace_grok_teammate_can_do_and_what_an_unapproved_ask_costs() {
     if !enabled() {
         eprintln!("GANJA_LIVE_TEST is not set; this test is inert");
 
@@ -338,14 +361,15 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     }
     assert!(
         home_is_real(),
-        "$HOME/.grok is a symlink (or absent), and `--sandbox read-only` refuses to start under \
-         one — run this with a HOME whose .grok is a real directory, or the ladder measures that \
+        "$HOME/.grok is a symlink (or absent), and the pinned profile refuses to start under one \
+         — run this with a HOME whose .grok is a real directory, or the ladder measures that \
          refusal rather than anything about a turn"
     );
 
-    let work = ganja_testkit::temp_dir();
+    let work = probe_directory("work");
+    let work = work.0.as_path();
     std::fs::write(
-        work.path().join("NOTES.txt"),
+        work.join("NOTES.txt"),
         "The probe workspace holds exactly three facts.\nOne: it is a workspace.\nTwo: it is \
          temporary.\nThree: it has three facts.\n",
     )
@@ -359,12 +383,9 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // did-the-mechanism-run guard the abort arms carry: a turn that completes
     // without calling a read tool at all would otherwise ship the optimistic
     // sentence on an observation produced without the mechanism.
-    let read = run(
-        work.path(),
-        "Summarize NOTES.txt in your current working directory. Read it first.",
-        None,
-    )
-    .await;
+    let read =
+        run(work, "Summarize NOTES.txt in your current working directory. Read it first.", None)
+            .await;
     read.record("(a) pure read");
     let session = read
         .stdout
@@ -392,19 +413,15 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // beside `--prompt-file` is a composition neither door's own documentation
     // covers, and a turn that answers on it is what says the two compose.
     //
-    // The cwd is inside the profile's writable temp set — that profile denies
-    // writes *except* under `~/.grok` and temp — so the kernel is deliberately
-    // **not** the thing that would stop this write. At 1.0.6 the permission
-    // layer stopped it with an ask the composed `dontAsk` answered as a
-    // cancel. **At 1.0.7 nothing stops it**: the write is performed, unasked,
-    // and the turn completes — measured 2026-08-20 and recorded in
-    // `fixtures/grok-posture-probe.txt`'s re-probe block. That is the drift
-    // the 1.0.6 ladder's "must be a cancel" equality existed to catch, and it
-    // caught it; this arm now asserts 1.0.7's answer **on disk**, where a
-    // model's "WROTE" proves nothing.
-    let target = work.path().join("PROBE_WROTE.txt");
+    // The cwd is the working tree and nothing else writable — not temp, not
+    // `~/.grok` — so what lets this write land is `workspace` itself, and
+    // what lets it land **unasked** is `acceptEdits`. Both are **D560**'s
+    // floor, measured on 1.0.31 and recorded in
+    // `fixtures/grok-posture-probe.txt`'s D560 block; asserted **on disk**,
+    // where a model's "WROTE" proves nothing.
+    let target = work.join("PROBE_WROTE.txt");
     let write = run(
-        work.path(),
+        work,
         "Create a file named PROBE_WROTE.txt in your current working directory containing the \
          single word WROTE. Then reply with exactly WROTE if you created it, or exactly REFUSED \
          if you could not.",
@@ -426,9 +443,9 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     assert_eq!(
         write.stop_reason().as_deref(),
         Some("end_turn"),
-        "at 1.0.7 a write the sandbox permits is performed unasked and the turn completes; a \
-         cancel here is 1.0.6's permission layer back, and the posture docs' account of what \
-         asks need re-deciding again: {}",
+        "under D560's floor a write tool in the working tree is performed unasked and the turn \
+         completes; a cancel here means acceptEdits no longer covers grok's own file tools, and \
+         the posture docs' account of what asks needs re-deciding: {}",
         write.stdout
     );
     let written = std::fs::read_to_string(&target).unwrap_or_default();
@@ -443,28 +460,22 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
 
     // ---- (b2) The write turn OUTSIDE the writable set. ----------------------
     //
-    // The bound clause itself — "writes denied outside ~/.grok and temp" —
-    // measured at the kernel: the write tool is refused with the OS's own
+    // The bound clause itself — "writes in the working tree, ~/.grok and temp
+    // only" — measured at the kernel: the write tool is refused with the OS's own
     // EPERM, and no file appears. What the model does *next* is its own
     // choice (one run answered REFUSED and stopped, another fell back to a
     // shell write), so the stop reason is not asserted here; the shell
     // fallback is forced deterministically in (b3). The target sits under
-    // the user's cache directory rather than a second temp path (temp is
-    // writable by design) or the repo cwd (where the recording measured it,
-    // and where a test may not drop probe files): a location the recording
-    // did not probe, so this ladder's own first runs on 2026-08-20 measured
-    // it — refused at the kernel, no file, and the shell write beside it
-    // cancelled — and `grok-posture-probe.txt`'s re-probe block names it. If
-    // the sandbox ever let it through, the stray file is the evidence and the
-    // assertion is what reports it; the directory itself goes on every exit.
-    let outside = std::path::PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
-        .join(".cache/ganja/probes")
-        .join(format!("grok-outside-write-{}", std::process::id()));
-    std::fs::create_dir_all(&outside).expect("a probe directory under the user's cache");
-    let _outside_guard = RemoveOnDrop(outside.clone());
-    let outside_target = outside.join("PROBE_OUTSIDE.txt");
+    // the user's cache directory, a sibling of the working tree rather than a
+    // temp path (temp is writable by design) — the location the D560 block
+    // names as <outside>, refused at the kernel, no file, and the shell write
+    // beside it cancelled. If the sandbox ever let it through, the stray file
+    // is the evidence and the assertion is what reports it; the directory
+    // itself goes on every exit.
+    let outside = probe_directory("outside");
+    let outside_target = outside.0.join("PROBE_OUTSIDE.txt");
     let outside_write = run(
-        work.path(),
+        work,
         &format!(
             "Use your file-writing tool (not the shell) to create a file at {} containing the \
              single word WROTE. Then reply with exactly WROTE if you created it, or exactly \
@@ -488,8 +499,8 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     );
     assert!(
         !leaked_by_tool,
-        "the read-only floor let a write outside ~/.grok and temp through — the bound sentence \
-         is false: {}",
+        "the workspace floor let a write outside the working tree, ~/.grok and temp through — \
+         the bound sentence is false: {}",
         outside_write.stdout
     );
     // What stopped it has to be in a tool result — the kernel's own refusal
@@ -506,18 +517,15 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
         outside_write.stdout
     );
 
-    // ---- (b3) The shell write OUTSIDE the writable set: the ask that remains.
+    // ---- (b3) The shell write OUTSIDE the writable set: an ask that remains.
     //
-    // At 1.0.7 this is the one request in this ladder that still *asks* — a
-    // shell command whose write the sandbox would deny — and headless the
-    // composed `dontAsk` answers the ask as a cancel ("User cancelled the
-    // execution for tool `run_terminal_command`"), ending the turn. This is
-    // the measurement the bound sentence's last clause rests on now: "a tool
-    // request that needs one ends the turn". Forced through an explicit shell
-    // instruction so the arm does not depend on the model choosing a
-    // fallback.
+    // A shell command that writes still *asks* under `acceptEdits`, and
+    // headless the ask is answered as a cancel ("User cancelled the execution
+    // for tool `run_terminal_command`"), ending the turn. Forced through an
+    // explicit shell instruction so the arm does not depend on the model
+    // choosing a fallback.
     let shell_write = run(
-        work.path(),
+        work,
         &format!(
             "Run exactly this shell command and nothing else: printf WROTE > {} . Then reply \
              with exactly what happened.",
@@ -531,28 +539,62 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     let _ = std::fs::remove_file(&outside_target);
     assert!(
         !leaked_by_shell,
-        "a shell write outside ~/.grok and temp went through — the bound sentence is false: {}",
+        "a shell write outside the writable set went through — the bound sentence is false: {}",
         shell_write.stdout
     );
     assert_eq!(
         shell_write.stop_reason().as_deref(),
         Some("cancelled"),
-        "the shell write outside the writable set is the request that still asks, and headless \
-         the composed dontAsk cancels it — this turn ended some other way: {}",
+        "a shell write outside the writable set still asks, and headless the ask cancels the \
+         turn — this turn ended some other way: {}",
         shell_write.stdout
+    );
+
+    // ---- (b4) The shell write INSIDE the working tree: the ask the sentence
+    // ends on.
+    //
+    // The sandbox would permit this write — (b) wrote into the same directory
+    // — and it still asks: under `acceptEdits` a shell command that writes is
+    // an ask wherever it writes, and 1.0.31 answered it the same way under
+    // `dontAsk`, so it is that vendor's command classifier rather than the
+    // mode. This is the measurement the bound sentence's last clause rests on:
+    // "a shell write asks, which ends the turn".
+    let shell_inside = run(
+        work,
+        "Run exactly this shell command and nothing else: mkdir -p build && printf WROTE > \
+         build/SHELL_WROTE.txt . Then reply with exactly what happened.",
+        Some(&session),
+    )
+    .await;
+    shell_inside.record("(b4) shell write inside the working tree, on the resume line");
+    let built = work.join("build");
+    assert_eq!(
+        shell_inside.stop_reason().as_deref(),
+        Some("cancelled"),
+        "a shell write inside the working tree asks under acceptEdits and headless the ask \
+         cancels the turn; a completed turn here means the sentence's last clause is \
+         over-disclosing and must be re-decided: {}",
+        shell_inside.stdout
+    );
+    assert!(
+        !built.exists(),
+        "a cancelled shell write left its directory behind, so the ask was not what stopped it: \
+         {}",
+        shell_inside.stdout
     );
 
     // ---- (c) The bash-shaped turn. -----------------------------------------
     //
-    // A sandbox-permitted shell command. At 1.0.6 the permission layer asked
-    // and the ask cancelled the turn; at 1.0.7 it runs unasked (measured, the
-    // re-probe block). Asserted on the command's own output **in a tool
+    // A shell command that writes nothing — (b4)'s opposite number. At 1.0.6
+    // the permission layer asked and the ask cancelled the turn; since 1.0.7
+    // it runs unasked (measured, the re-probe block, and again on 1.0.31 under
+    // D560's floor). Asserted on the command's own output **in a tool
     // result** rather than on the stop reason alone, so a version that
     // denies-and-continues cannot pass as "ran" — and the output token is
     // spelled so that neither the prompt nor the call's own arguments carry
     // it, because a stream-wide `contains` would find it in both.
     let bash = run(
-        work.path(),
+        work,
         "Run exactly this shell command: printf 'probe-%s\\n' ran — and reply with exactly what \
          it printed.",
         Some(&session),
@@ -562,7 +604,7 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     assert_eq!(
         bash.stop_reason().as_deref(),
         Some("end_turn"),
-        "at 1.0.7 a sandbox-permitted shell command runs unasked; a cancel here is the 1.0.6 \
+        "a shell command that writes nothing runs unasked; a cancel here is the 1.0.6 \
          permission layer back: {}",
         bash.stdout
     );
@@ -583,7 +625,7 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // leave the sentence over-disclosing again, or a quietly removed one
     // under-disclosing.
     let network = run(
-        work.path(),
+        work,
         "Run the shell command `curl -sS -o /dev/null -w \"%{http_code}\" --max-time 10 \
          https://example.com` and reply with exactly what it printed, or exactly BLOCKED if it \
          could not run or failed.",
@@ -612,6 +654,34 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
         network.stdout
     );
 
+    // ---- (e) The edit turn. ------------------------------------------------
+    //
+    // What `acceptEdits` is composed for: grok's own edit tool changing a file
+    // in the working tree, with no ask. Asserted on disk.
+    let edit = run(
+        work,
+        "Use your file-editing tool (not the shell) to replace the word WROTE with EDITED in \
+         PROBE_WROTE.txt in your current working directory. Then reply with exactly EDITED if \
+         you did, or exactly REFUSED if you could not.",
+        Some(&session),
+    )
+    .await;
+    edit.record("(e) edit tool inside the working tree, on the resume line");
+    assert_eq!(
+        edit.stop_reason().as_deref(),
+        Some("end_turn"),
+        "an edit in the working tree asked under acceptEdits, which is the one thing that mode \
+         is composed to prevent: {}",
+        edit.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap_or_default().trim(),
+        "EDITED",
+        "the edit was performed — a completed turn that changed nothing would be a version that \
+         denies-and-continues: {}",
+        edit.stdout
+    );
+
     // ---- Assertion 3a, drift: is the sandbox still read on a resume? -------
     //
     // Turn-free, and it is the only honest instrument for this: a refusal that
@@ -619,7 +689,7 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // the thing to measure is the refusal. That vendor records the profile a
     // conversation started under and refuses a resume asking for a *different*
     // one — which can only happen if the resume line's `--sandbox` is read.
-    let spec = spec(work.path());
+    let spec = spec(work);
     let launch = shim::prepare(&Grok::new(), &spec, None).expect("a grok on PATH");
     let conflicting = launch
         .command(&[
@@ -659,10 +729,12 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
         ("b", write.took),
         ("b2", outside_write.took),
         ("b3", shell_write.took),
+        ("b4", shell_inside.took),
         ("c", bash.took),
         ("d", network.took),
+        ("e", edit.took),
     ];
-    let longest = turns.iter().map(|(_, took)| *took).max().expect("six turns");
+    let longest = turns.iter().map(|(_, took)| *took).max().expect("eight turns");
     eprintln!(
         "grok probe wall-clock: {}; twice the longest is {:.1}s, so the shipped deadline is \
          max(15m, that)",
@@ -677,18 +749,14 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // ---- The decided consequence. ------------------------------------------
     //
     // Asserted last because it is a statement about the write turns together,
-    // and it is the shape the 1.0.7 re-probe decided: the bound is the
-    // **sandbox's**, not the permission layer's. The one write inside the
-    // profile's writable set landed — (b) read it back — and neither the write
-    // tool nor a shell put a byte outside that set, whichever of the two asked
-    // or was refused on the way. At 1.0.6 this line read "the write must not
-    // have happened", because the permission layer cancelled every write; a
-    // ladder that still said so would fail against the very version its arms
-    // above were rewritten for.
+    // and it is the shape **D560** decided: a grok teammate implements. The
+    // file tools wrote and edited in the working tree — (b) and (e) read it
+    // back — and neither the write tool nor a shell put a byte outside the
+    // writable set, whichever of the two asked or was refused on the way.
     assert!(
         target.exists() && !leaked_by_tool && !leaked_by_shell,
-        "the posture row's bound did not hold together: inside-the-set write landed = {}, \
-         write tool leaked outside = {leaked_by_tool}, shell leaked outside = {leaked_by_shell}",
+        "the posture row's bound did not hold together: working-tree write landed = {}, write \
+         tool leaked outside = {leaked_by_tool}, shell leaked outside = {leaked_by_shell}",
         target.exists()
     );
 }

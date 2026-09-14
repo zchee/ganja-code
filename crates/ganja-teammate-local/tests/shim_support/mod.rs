@@ -743,8 +743,8 @@ printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '{"type":"turn.started"}\n'
 printf '{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"thinking is not mail"}}\n'
 case "$args:$prompt" in
-  *'sandbox_mode="read-only"'*WRITE*)
-    printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"refused: the sandbox is read-only"}}\n'
+  *'sandbox_mode="workspace-write"'*OUTSIDE*)
+    printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"refused: operation not permitted outside the working tree"}}\n'
     printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
     exit 0 ;;
 esac
@@ -771,9 +771,11 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n
 /// exits 1 **before reading the prompt file**, which is the order the real one
 /// refuses in: the sandbox is applied at process entry, before the headless
 /// branch is even computed. Its `cancel` mode prints what a probed 1.0.6
-/// printed for a turn whose tool ask nothing approved: the tool named in the
-/// partial stream, then a terminal `result` carrying `stop_reason: "cancelled"`
-/// and a one-word `errors: ["cancelled"]`, on a **zero** exit.
+/// printed for a turn whose tool ask nothing approved, and 1.0.31 still prints
+/// under **D560**'s floor for a shell command that writes: the tool
+/// (`run_terminal_command`) named in the partial stream, then a terminal
+/// `result` carrying `stop_reason: "cancelled"` and a one-word
+/// `errors: ["cancelled"]`, on a **zero** exit.
 const GROK: &str = r#"#!/bin/sh
 log='@LOG@'
 mode='@MODE@'
@@ -814,10 +816,10 @@ esac
 
 id="$resume"
 if [ -z "$id" ]; then id="$session"; fi
-printf '{"type":"system","subtype":"init","session_id":"%s","apiKeySource":"oauth","model":"grok-4.6","permissionMode":"dontAsk"}\n' "$id"
+printf '{"type":"system","subtype":"init","session_id":"%s","apiKeySource":"oauth","model":"grok-4.6","permissionMode":"acceptEdits"}\n' "$id"
 
 if [ "$mode" = "cancel" ]; then
-  printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"write"}}}\n'
+  printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_terminal_command"}}}\n'
   printf '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["cancelled"],"stop_reason":"cancelled","num_turns":1}\n'
   exit 0
 fi
@@ -825,9 +827,9 @@ fi
 printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}\n'
 printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking is not mail"}}}\n'
 case "$sandbox:$text" in
-  read-only:*WRITE*)
-    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"refused: the sandbox is read-only"}],"stop_reason":"end_turn"}}\n'
-    printf '{"type":"result","subtype":"success","is_error":false,"result":"refused: the sandbox is read-only","stop_reason":"end_turn"}\n'
+  workspace:*OUTSIDE*)
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"refused: operation not permitted outside the working tree"}],"stop_reason":"end_turn"}}\n'
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"refused: operation not permitted outside the working tree","stop_reason":"end_turn"}\n'
     exit 0 ;;
 esac
 printf '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answered"}}}\n'

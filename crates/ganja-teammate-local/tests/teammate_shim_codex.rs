@@ -154,7 +154,7 @@ async fn every_turn_carries_the_pinned_posture_and_the_second_resumes_the_first(
     let turns = cli.turns();
     for argv in &turns {
         assert!(
-            argv.contains(r#"-c sandbox_mode="read-only""#),
+            argv.contains(r#"-c sandbox_mode="workspace-write""#),
             "the sandbox override, quotes included: {argv}"
         );
         assert!(
@@ -169,12 +169,12 @@ async fn every_turn_carries_the_pinned_posture_and_the_second_resumes_the_first(
         }
     }
     assert!(
-        turns[0].contains("-s read-only"),
+        turns[0].contains("-s workspace-write"),
         "the documented flag rides the first turn: {}",
         turns[0]
     );
     assert!(
-        !turns[1].contains("-s read-only"),
+        !turns[1].contains("-s workspace-write"),
         "and never the resume, which has no such flag: {}",
         turns[1]
     );
@@ -440,5 +440,31 @@ fn the_codex_posture_sentence_is_the_one_its_probe_recorded() {
     assert!(
         shim::spawn_lines(ganja_protocol::team::MemberBackend::Codex)[0].ends_with(recorded),
         "the ring line a spawn writes carries the measured sentence too"
+    );
+}
+
+/// **D560.** The floor this driver composes is the floor its recording measured
+/// a codex turn *writing* under — so moving the floor again cannot ship without
+/// a new recording, and the recording cannot describe a floor nobody composes.
+///
+/// Read off the vendor's own rollout line in the D560 block rather than off the
+/// prose around it: that line is what codex said the turn ran under.
+#[test]
+fn the_floor_codex_composes_is_the_one_its_probe_measured_writing_under() {
+    let block = PROBE
+        .split("---- D560 re-probe")
+        .nth(1)
+        .expect("the recording carries the D560 measurement block");
+    let rollout =
+        format!(r#""sandbox_policy":{{"type":"{}""#, ganja_teammate_local::codex::SANDBOX_VALUE);
+
+    assert!(block.contains(&rollout), "the rollout recorded the composed floor: {rollout}");
+    assert!(
+        block.contains("outcome: PERFORMED"),
+        "and a turn under it wrote in the working tree, which is the floor's whole point"
+    );
+    assert!(
+        block.contains("outcome: DENIED"),
+        "and was still refused outside it, which is the floor being a floor"
     );
 }

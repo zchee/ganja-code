@@ -4,8 +4,8 @@
 //! Every other codex assertion in this landing is checked against a shell
 //! script that answers in the shapes a probed binary printed. That proves the
 //! driver and proves nothing about the vendor: the only witness that
-//! `codex exec resume` honours `-c sandbox_mode="read-only"` — a flag that
-//! subcommand's own `--help` offers no `-s` alternative to — is a real
+//! `codex exec resume` honours `-c sandbox_mode="workspace-write"` — a flag
+//! that subcommand's own `--help` offers no `-s` alternative to — is a real
 //! `codex exec resume`.
 //!
 //! So this test is `#[ignore]`d **and** inert unless `GANJA_LIVE_TEST=1`, the
@@ -21,14 +21,24 @@
 //!
 //! # What it is actually asking
 //!
-//! Not "does read-only deny a write" — `codex sandbox` answers that turn-free,
-//! and its answer is recorded in `tests/fixtures/codex-posture-probe.txt`. The
-//! question here is narrower and is the plan's most fragile seam: **a resumed
-//! turn carries no `-s`**, so if `-c` were read only at thread creation the
-//! second turn of every codex teammate would run under whatever the person's
-//! own `config.toml` says. On the machine this was first run against that file
-//! says `danger-full-access`, which is what makes the assertion below mean
-//! something rather than agree with the default.
+//! Not "what does workspace-write bound" — `codex sandbox` answers that
+//! turn-free, and its answer is recorded in
+//! `tests/fixtures/codex-posture-probe.txt`. The questions here are narrower,
+//! and they are the plan's most fragile seam asked twice under **D560**'s
+//! floor: **a resumed turn carries no `-s`**, so if `-c` were read only at
+//! thread creation the later turns of every codex teammate would run under
+//! whatever the person's own `config.toml` says. On the machine this runs
+//! against that file says `danger-full-access`, which is what makes the two
+//! resume assertions below mean something rather than agree with the default:
+//! a resumed turn **can** write in the working tree (the floor is
+//! write-capable, so a teammate can implement), and **cannot** write outside it
+//! (the floor is still a floor, and the person's permissive config did not
+//! reach the turn).
+//!
+//! The workspace is a git repository under `~/.cache/ganja/probes/` rather than
+//! a temporary directory, and on purpose: `workspace-write` leaves `/tmp` and
+//! `$TMPDIR` writable, so a working tree under temp would let a write land for
+//! the wrong reason and the first assertion would measure nothing.
 //!
 //! # Why it prints its timings
 //!
@@ -40,6 +50,7 @@
 
 mod shim_support;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,11 +86,41 @@ fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<S
         .unwrap_or_default()
 }
 
+/// A probe directory removed when this is dropped — on the ordinary exit and on
+/// a failed assertion alike — and its parent with it if that left the parent
+/// empty.
+///
+/// Both of this test's directories live under a person's cache directory, for
+/// the reason the module doc gives, and a probe that leaves its own directory
+/// behind there is a probe that lied about cleaning up.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(parent) = self.0.parent() {
+            // `remove_dir` refuses a non-empty directory, which is the point:
+            // only a `probes/` this run left empty goes with it.
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+/// A directory of this run's own under `~/.cache/ganja/probes/`.
+fn probe_directory(label: &str) -> RemoveOnDrop {
+    let directory = PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
+        .join(".cache/ganja/probes")
+        .join(format!("codex-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a probe directory under the user's cache");
+
+    RemoveOnDrop(directory)
+}
+
 /// A git repository of its own, so the vendor's own outside-a-repo refusal is
 /// not what this measures — `--skip-git-repo-check` is on the never-composed
 /// column precisely so that refusal stays the vendor's to give.
-fn workspace() -> tempfile::TempDir {
-    let directory = ganja_testkit::temp_dir();
+fn workspace() -> RemoveOnDrop {
+    let directory = probe_directory("work");
     for arguments in [
         vec!["init", "-q"],
         vec!["config", "user.email", "probe@example.invalid"],
@@ -87,19 +128,37 @@ fn workspace() -> tempfile::TempDir {
     ] {
         let status = std::process::Command::new("git")
             .args(&arguments)
-            .current_dir(directory.path())
+            .current_dir(&directory.0)
             .status()
             .expect("git runs");
         assert!(status.success(), "git {arguments:?}");
     }
-    std::fs::write(directory.path().join("README.md"), "the probe workspace\n")
+    std::fs::write(directory.0.join("README.md"), "the probe workspace\n")
         .expect("a file to have been read");
 
     directory
 }
 
-/// The gating probe: a real first turn, a real resume, and the question of
-/// whether the second one is still bounded.
+/// Writes one message into the member's inbox and waits for the lead's mail to
+/// grow, returning how long the turn took.
+async fn turn(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName, text: String) -> Duration {
+    let before = lead_mail(root, team).len();
+    let started = std::time::Instant::now();
+    mailbox::write(
+        &root.inbox_path(team, &MemberName::parse("w1").expect("a member name")),
+        MailboxMessage::new("team-lead", text, record::now_iso8601()),
+    )
+    .expect("the message is written");
+    assert!(
+        until(TURN, || lead_mail(root, team).len() > before).await,
+        "the resumed turn answered"
+    );
+
+    started.elapsed()
+}
+
+/// The gating probe: a real first turn, two real resumes, and the question of
+/// whether the resumed turns are still bounded — both ways.
 #[tokio::test]
 #[ignore = "spends somebody's codex quota; needs GANJA_LIVE_TEST=1"]
 async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_composes() {
@@ -111,9 +170,10 @@ async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_compose
 
     let home = ganja_testkit::temp_dir();
     let work = workspace();
+    let outside = probe_directory("outside");
     let (registry, door) = shim_support::lead(
         home.path(),
-        work.path(),
+        &work.0,
         Arc::new(Codex::new()),
         // Production's own answer, spelled explicitly because the fixture's
         // constructor takes one: the real `codex`, wherever this machine's
@@ -136,7 +196,7 @@ async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_compose
             Some("codex"),
             "Reply with exactly: HELLO. Do not do anything else.",
         ),
-        &ganja_testkit::caller(work.path()),
+        &ganja_testkit::caller(&work.0),
         &AllowSpawn,
     )
     .await
@@ -149,49 +209,67 @@ async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_compose
         "the JSONL shapes this build parses are the shapes that arrive: {opening}"
     );
 
-    // Turn two: the resume, and the one that matters. It carries no `-s`.
-    let written = work.path().join("PROBE_WROTE.txt");
-    let before = lead_mail(&root, &team).len();
-    let second = std::time::Instant::now();
-    mailbox::write(
-        &root.inbox_path(&team, &MemberName::parse("w1").expect("a member name")),
-        MailboxMessage::new(
-            "team-lead",
-            "Create a file named PROBE_WROTE.txt in your current working directory containing the \
-             single word WROTE. Then reply with exactly WROTE if you created it, or exactly \
-             REFUSED if you could not."
-                .to_owned(),
-            record::now_iso8601(),
+    // Turn two: a resume, which carries no `-s`, asked to do what D560's floor
+    // exists for — write in the working tree.
+    let inside = work.0.join("PROBE_WROTE.txt");
+    let second = turn(
+        &root,
+        &team,
+        "Create a file named PROBE_WROTE.txt in your current working directory containing the \
+         single word WROTE. Then reply with exactly WROTE if you created it, or exactly REFUSED \
+         if you could not."
+            .to_owned(),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&inside).unwrap_or_default().trim(),
+        "WROTE",
+        "a resumed turn could not write in the working tree, so the teammate cannot implement \
+         under the floor this build composes: {}",
+        lead_mail(&root, &team).join("\n")
+    );
+
+    // Turn three: a resume asked to write **outside** the working tree, with the
+    // command spelled out so the answer is the sandbox's rather than the
+    // model's choice to decline. The person's own config says
+    // `danger-full-access`; a file here is that config reaching the turn.
+    let escaped = outside.0.join("PROBE_OUTSIDE.txt");
+    let third = turn(
+        &root,
+        &team,
+        format!(
+            "Run exactly this shell command and nothing else: printf WROTE > {} . Then reply \
+             with exactly what the command printed on stderr, or exactly OK if it printed \
+             nothing.",
+            escaped.display()
         ),
     )
-    .expect("the message is written");
-    assert!(
-        until(TURN, || lead_mail(&root, &team).len() > before).await,
-        "the resumed turn answered"
-    );
-    let second = second.elapsed();
-
-    // The assertion the whole file exists for.
-    assert!(
-        !written.exists(),
-        "a resumed turn wrote a file, so `-c sandbox_mode` does not bound one: the resume path \
-         must fall back to per-turn fresh sessions"
-    );
+    .await;
     let answer = lead_mail(&root, &team).join("\n");
     assert!(
-        answer.contains("REFUSED") || answer.to_lowercase().contains("refus"),
-        "and it said so rather than silently doing nothing: {answer}"
+        !escaped.is_file(),
+        "a resumed turn wrote outside the working tree, so `-c sandbox_mode` does not bound \
+         one: the resume path must fall back to per-turn fresh sessions: {answer}"
+    );
+    // The did-the-mechanism-run guard: the refusal the shell printed, relayed.
+    // A model that declined without running anything leaves no file too, and
+    // proves nothing about the bound.
+    assert!(
+        answer.to_lowercase().contains("not permitted"),
+        "the command ran and the sandbox refused it, rather than the model declining: {answer}"
     );
 
     // What [`shim::CODEX_TURN_TIMEOUT`] is derived from. Printed rather than
     // asserted: the number is a measurement, and a test that asserted a
     // wall-clock would be asserting about somebody's network.
+    let longest = first.max(second).max(third);
     eprintln!(
-        "codex probe wall-clock: first turn {:.1}s, resume {:.1}s; twice the longest is {:.1}s, \
-         so the shipped deadline is the 15m clause",
+        "codex probe wall-clock: first turn {:.1}s, resume inside {:.1}s, resume outside {:.1}s; \
+         twice the longest is {:.1}s, so the shipped deadline is the 15m clause",
         first.as_secs_f64(),
         second.as_secs_f64(),
-        2.0 * first.max(second).as_secs_f64(),
+        third.as_secs_f64(),
+        2.0 * longest.as_secs_f64(),
     );
 
     registry.shutdown().await;

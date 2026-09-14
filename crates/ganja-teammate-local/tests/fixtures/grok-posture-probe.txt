@@ -1,5 +1,8 @@
 # What `--sandbox read-only --permission-mode dontAsk` actually bounds, and what
-# an unapproved tool ask costs a turn — measured rather than inferred.
+# an unapproved tool ask costs a turn — measured rather than inferred — and, in
+# the D560 block at the end, the same questions for `--sandbox workspace
+# --permission-mode acceptEdits`, the floor since 2026-09-15. The sentence line
+# at the very end is the current one.
 #
 # This file is the *recording* AC-27 compares the shipped posture sentence
 # against, and AC-29 derives grok's per-turn deadline from. It exists so that
@@ -195,7 +198,102 @@ wall-clock: 6.8s
 # 1.0.6's ask used to wedge it. The live ladder (`teammate_grok_live.rs`)
 # asserts 1.0.7's answers; a 1.0.6 binary now fails it, by design.
 #
-# The sentence those answers add up to, in D508 Principle 6's shape — what the
-# posture bounds, what the read it grants enables, then what an ask costs.
-# Everything after "sentence: " on the next line is the assertion.
-sentence: sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no network bound (macOS) — may read any file you can, including credentials, and may send them anywhere; reading takes no approval, and a tool request that needs one ends the turn
+# The sentence those answers added up to, in D508 Principle 6's shape — what
+# the posture bounds, what the read it grants enables, then what an ask costs.
+# Superseded by D560 below and kept as the record of what shipped from
+# 2026-08-20:
+#
+#   sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no network bound (macOS) — may read any file you can, including credentials, and may send them anywhere; reading takes no approval, and a tool request that needs one ends the turn
+#
+# ---- D560 re-probe, 2026-09-15 (UTC 2026-09-14T17:42Z-17:58Z), the floor moved
+# to `--sandbox workspace --permission-mode acceptEdits` on a user directive
+# (bead ganja-code-easd: every teammate backend implements; bead
+# ganja-code-n0e0 makes the read-only choice per agent later). Binary: grok
+# 1.0.31 (b44e0bc0a8e0) [alpha]; ~/.grok a real directory, and its
+# config.toml still sets `[ui] yolo = true` and `permission_mode =
+# "always-approve"`, so every ask below fired against a config that would
+# have approved it. The probe workspace was <cwd>, a fresh git repository
+# under ~/.cache/ganja/probes/, OUTSIDE temp on purpose — temp and ~/.grok are
+# writable under every grok profile, so a cwd under temp could not tell a
+# workspace write from a temp write — and <outside> a sibling directory of it.
+# Each headless turn ran the shipped argv shape: the first `--prompt-file <0600
+# file> --session-id <uuid> --sandbox workspace --permission-mode acceptEdits
+# --output-format streaming-messages-json --include-partial-messages`, every
+# later one `--resume <that uuid> --prompt-file <file> --permission-mode
+# acceptEdits --sandbox workspace` and the same output flags.
+#
+# Headless, one conversation (f0fbc7c3-2a5d-4aff-9c44-eea70e998d06):
+#
+#   (a)  17:42:07Z  write tool inside <cwd>, first turn
+#        tool `write` settled "Wrote file successfully"; stop_reason end_turn,
+#        answer WROTE; the file is on disk holding WROTE. No ask. 24s.
+#   (b2) 17:42:52Z  write tool into <outside>, resume
+#        tool `write` -> "IO Error: Operation not permitted (os error 1)"; no
+#        file; stop_reason end_turn, answer REFUSED. 30s.
+#   (b3) 17:43:22Z  shell `printf WROTE > <outside>/PROBE_OUTSIDE.txt`, resume
+#        ASKED: "User cancelled the execution for tool `run_terminal_command`",
+#        stop_reason cancelled, errors ["cancelled"]; no file. 14s.
+#   (b4) 17:43:36Z  shell `mkdir -p build && printf WROTE > build/SHELL_WROTE.txt`
+#        INSIDE <cwd>, resume
+#        ASKED, identically: cancelled, no directory created. 7s.
+#        This is the clause the shipped sentence ends on: under acceptEdits a
+#        shell command that writes asks even where the sandbox would permit
+#        the write, and headless that ask ends the turn.
+#   (c)  17:44:00Z  shell `printf 'probe-%s\n' ran`, resume
+#        ran, no ask; the tool result reads "exit: 0 / probe-ran"; end_turn. 9s.
+#   (d)  17:44:09Z  shell `curl -sS -o /dev/null -w "%{http_code}" --max-time 10 https://example.com`, resume
+#        ran, no ask; the tool result reads "exit: 0 / 200"; end_turn. 69s.
+#        No network bound, as at 1.0.7.
+#   (e)  17:45:18Z  edit tool inside <cwd>, resume
+#        `hashline_read` then `hashline_edit` settled; the file now holds
+#        EDITED; end_turn. No ask. 14s.
+#
+# Control, a second fresh conversation under `--permission-mode dontAsk` (same
+# sandbox), to learn whether (b4)'s ask is acceptEdits' doing:
+#
+#   (x1) 17:45:55Z  the same in-<cwd> shell write: ASKED and cancelled, no
+#        directory. 9s.
+#   (x2) 17:46:04Z  write tool inside <cwd>: performed, no ask. 9s.
+#
+#   So on 1.0.31 the two modes answer these two asks identically; the shell
+#   ask is grok's own command classifier, not the mode. acceptEdits is
+#   composed because it is the mode whose name says what the grant is.
+#
+# The vendor's own event log (~/.grok/sessions/sandbox-events.jsonl) recorded
+# nine ProfileApplied lines for these nine launches, identical in the fields
+# that matter, and one FsViolation (b2's write):
+#
+#   {"event_type":"ProfileApplied","profile":"workspace",
+#    "platform":"macos/seatbelt","enforced":true,"restrict_network":false,
+#    "read_write_paths":["<cwd>","<grok home>","/tmp","/var/tmp","/private/tmp",
+#                        "/private/var/tmp","/private/var/folders","$TMPDIR"]}
+#
+# Turn-free, 17:46:45Z:
+#
+# - resume under a different profile: "error: cannot resume this session under
+#   sandbox profile 'read-only' — it was created with 'workspace'. Omit
+#   --sandbox to resume with 'read-only', or start a new session to use
+#   'read-only'." exit 1 — so the resume line's `--sandbox` is still read and
+#   checked, and repeating the floor is still the only spelling that passes.
+# - `--sandbox workspac`: "Custom sandbox profile 'workspac' not found" then
+#   "could not apply the 'workspac' sandbox profile", exit 1 — the typo
+#   hazard the byte-string pin exists for, as at 1.0.6.
+# - `--sandbox workspace` with an unreadable prompt file: reaches "Failed to
+#   read '/nonexistent/never-read.txt'" — the profile applied.
+#
+# The TUI (the pane door, D512), `grok --sandbox workspace --permission-mode
+# acceptEdits` in a tmux pane in <cwd>, recorded in grok-tui-probe.txt: the
+# composer reached, the status line read `sandbox:workspace`, the write tool
+# wrote unasked, an in-<cwd> shell write raised grok's own approval prompt
+# and landed on "Yes, proceed", an approved shell write into <outside> was
+# refused with "operation not permitted", and a rejection ended the turn.
+#
+# The sentence those answers add up to, in the same shape — what the posture
+# bounds, what the read and the write it grants enable, then what an ask costs
+# on the headless door. The write rider is agy's (Dv-7): these writes never
+# pass through ganja's own tool calls, so they are outside the snapshot chain
+# /undo walks. "(macOS)" is dropped from the network clause because the
+# `workspace` profile has no network switch on any platform; measured here on
+# macOS, over-disclosure elsewhere at worst. Everything after "sentence: " on
+# the next line is the assertion.
+sentence: sandbox=workspace: writes in the working tree, ~/.grok and temp only, whole-disk read, no network bound — may read any file you can, including credentials, send them anywhere, and edit files outside the snapshot chain /undo walks; a shell write asks, which ends the turn

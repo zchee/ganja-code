@@ -45,7 +45,7 @@ fn argv(session: Option<&str>) -> Vec<String> {
 fn a_first_turn_states_the_posture_twice_and_takes_its_prompt_on_stdin() {
     // Byte for byte, and the two `-c` tokens include their quotes: `-c`'s
     // own help parses the value as TOML and falls back to a literal, so
-    // `sandbox_mode="read-only"` is a TOML string where the unquoted
+    // `sandbox_mode="workspace-write"` is a TOML string where the unquoted
     // spelling is a bare word that happens to work.
     assert_eq!(
         argv(None),
@@ -55,9 +55,9 @@ fn a_first_turn_states_the_posture_twice_and_takes_its_prompt_on_stdin() {
             "--enable",
             "send_async_message",
             "-s",
-            "read-only",
+            "workspace-write",
             "-c",
-            "sandbox_mode=\"read-only\"",
+            "sandbox_mode=\"workspace-write\"",
             "-c",
             "approval_policy=\"never\"",
             "--color",
@@ -82,7 +82,7 @@ fn a_resume_turn_carries_the_posture_without_the_flag_resume_does_not_have() {
             "--enable",
             "send_async_message",
             "-c",
-            "sandbox_mode=\"read-only\"",
+            "sandbox_mode=\"workspace-write\"",
             "-c",
             "approval_policy=\"never\"",
             "-",

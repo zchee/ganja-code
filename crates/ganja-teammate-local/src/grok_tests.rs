@@ -59,9 +59,9 @@ fn a_first_turn_mints_the_conversation_it_is_creating() {
             "/tmp/ganja-shim-xyz/prompt.txt",
             "--session-id",
             "--sandbox",
-            "read-only",
+            "workspace",
             "--permission-mode",
-            "dontAsk",
+            "acceptEdits",
             "--output-format",
             "streaming-messages-json",
             "--include-partial-messages",
@@ -101,9 +101,9 @@ fn a_resume_turn_names_the_conversation_and_repeats_the_posture() {
             "--prompt-file",
             "/tmp/ganja-shim-xyz/prompt.txt",
             "--permission-mode",
-            "dontAsk",
+            "acceptEdits",
             "--sandbox",
-            "read-only",
+            "workspace",
             "--output-format",
             "streaming-messages-json",
             "--include-partial-messages",
@@ -119,20 +119,20 @@ fn a_resume_turn_names_the_conversation_and_repeats_the_posture() {
 fn the_sandbox_value_is_the_exact_byte_string_the_builtin_answers_to() {
     // `--sandbox` is unvalidated at clap, so an unrecognized value becomes
     // a *custom* profile that fails to load and hard-exits the child.
-    // Measured on 1.0.6: `read_only` refuses naming `'read_only'`, where
-    // `readonly` normalizes and refuses naming `'read-only'`. This is the
-    // spelling that neither.
-    assert_eq!(SANDBOX_VALUE, "read-only");
+    // Measured on 1.0.31 (D560): `workspac` refuses naming `'workspac'` as
+    // a custom profile that was never defined, the way 1.0.6 refused
+    // `read_only`. This is the spelling the built-in answers to.
+    assert_eq!(SANDBOX_VALUE, "workspace");
     for session in [None, Some("01998ad0-0000-7000-8000-000000000000")] {
         let argv = argv(session);
         assert_eq!(
             value(&argv, "--sandbox").as_deref(),
-            Some("read-only"),
+            Some("workspace"),
             "the bound is pinned on every turn: {argv:?}"
         );
         assert_eq!(
             value(&argv, "--permission-mode").as_deref(),
-            Some("dontAsk"),
+            Some("acceptEdits"),
             "and the mode beside it: {argv:?}"
         );
     }
@@ -251,7 +251,7 @@ fn a_cancelled_turn_says_so_in_words_and_keeps_the_conversation() {
     // to start.
     let stdout = [
             r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"write"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"run_terminal_command"}}}"#,
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["cancelled"],"stop_reason":"cancelled","num_turns":1}"#,
         ]
         .join("\n");
@@ -260,11 +260,15 @@ fn a_cancelled_turn_says_so_in_words_and_keeps_the_conversation() {
     let refused = reply.refused.expect("and it says why there is no answer");
 
     assert!(refused.contains("cancelled this turn"), "{refused}");
-    assert!(refused.contains("`write`"), "and which tool: {refused}");
+    assert!(refused.contains("`run_terminal_command`"), "and which tool: {refused}");
     assert!(
-        refused.contains("Reading takes no approval"),
-        "and what still works, which is the whole of what a grok teammate is \
-             for: {refused}"
+        refused.contains("Reading and editing files with grok's own tools take no approval"),
+        "and what still works under D560's floor, which is most of what a grok teammate \
+             is for: {refused}"
+    );
+    assert!(
+        refused.contains("a shell command that writes does"),
+        "and what does not, which is what cancelled this turn: {refused}"
     );
     assert_eq!(reply.session.as_deref(), Some("s-1"));
     assert!(reply.messages.is_empty(), "{:?}", reply.messages);
@@ -395,7 +399,7 @@ fn tui() -> Vec<String> {
 #[test]
 fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
     // Byte for byte against the recording, binary included — and the
-    // `read-only` bytes matter here for the reason the headless test
+    // `workspace` bytes matter here for the reason the headless test
     // states: `--sandbox` is unvalidated at clap, so a near-spelling is a
     // custom profile that fails to load.
     let recorded = recorded_launch();
@@ -404,13 +408,14 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
 
     assert_eq!(*binary, BINARY);
     assert_eq!(tui(), floors);
-    // The flags parsed on both recordings: under a symlinked home what
-    // happened next was the vendor's refusal, not a parse error — the
-    // outcome a pane is meant to keep in front of a person — and under a
-    // real one the composer.
+    // The flags parsed on every recording: under D508's floor and a
+    // symlinked home what happened next was the vendor's refusal, not a
+    // parse error — the outcome a pane is meant to keep in front of a
+    // person — under a real one the composer, and under **D560**'s floor,
+    // which is the `launch:` line above, the composer again.
     let outcomes: Vec<&str> =
         TUI_PROBE.lines().filter(|line| line.trim_start().starts_with("outcome (")).collect();
-    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
     // Keyed on what each recording says about the home rather than on
     // position, so a third recording fails this loudly instead of
     // shifting which line answers which question.
@@ -422,8 +427,14 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
         .iter()
         .find(|line| line.contains("a real directory"))
         .expect("the real-home recording");
+    let current = outcomes
+        .iter()
+        .find(|line| line.contains("the D560 floor"))
+        .expect("the recording of the floor this build composes");
     assert!(symlinked.contains("flags parse;"), "{symlinked}");
     assert!(real.contains("composer reached"), "{real}");
+    assert!(current.contains("composer reached"), "{current}");
+    assert!(current.contains(&format!("sandbox:{SANDBOX_VALUE}")), "{current}");
     let refusal = TUI_PROBE
         .lines()
         .find_map(|line| line.strip_prefix("error: "))

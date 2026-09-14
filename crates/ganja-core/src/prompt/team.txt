@@ -255,6 +255,16 @@ not exist.
   in messages, and record their progress on this list yourself.
 - **codex**, **grok** and **agy** members hold no ganja tools at all. Push work
   to them by message and read their answers the same way.
+- Every backend can write in the working tree, so any member can take a
+  team-exec stage. What the three foreign CLIs still cannot do is their own
+  sandbox's: **codex** writes nowhere outside the working tree and temp, cannot
+  commit (its `.git` is read-only to it) and has no network. **grok** edits
+  files with its own tools unasked, but a shell command that writes asks
+  first — in its pane the user answers, headless the ask ends its turn — so
+  work that is mostly builds and scripts is better given to another member.
+  **agy** can write anywhere the user can. No foreign CLI's writes are in the
+  snapshots `/undo` restores, so review what they changed before building on
+  it.
 
 ## One thing to expect
 

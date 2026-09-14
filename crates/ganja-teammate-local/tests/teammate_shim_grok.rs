@@ -158,8 +158,9 @@ async fn a_first_turn_mints_a_uuid_and_the_second_resumes_that_same_one() {
 /// exact byte string, and no never-composed spelling reaches either line.
 ///
 /// The byte-exactness is not fussiness. `--sandbox` is unvalidated at clap and
-/// an unrecognized value becomes a *custom* profile: `read_only` would be
-/// looked up as somebody's own profile, fail to load, and hard-exit the child.
+/// an unrecognized value becomes a *custom* profile: `workspac` would be
+/// looked up as somebody's own profile, fail to load, and hard-exit the child
+/// (measured on 1.0.31 for **D560**, as `read_only` was on 1.0.6).
 #[tokio::test]
 async fn every_turn_carries_the_pinned_posture_and_none_carries_an_escape() {
     let home = ganja_testkit::temp_dir();
@@ -180,12 +181,12 @@ async fn every_turn_carries_the_pinned_posture_and_none_carries_an_escape() {
     let turns = cli.records("argv");
     assert_eq!(turns.len(), 2, "a first turn and a resume: {turns:?}");
     for argv in &turns {
-        assert!(argv.contains("--sandbox read-only"), "the bound, spelled exactly: {argv}");
+        assert!(argv.contains("--sandbox workspace "), "the bound, spelled exactly: {argv}");
         assert!(
-            !argv.contains("--sandbox read_only"),
-            "the spelling that would become a custom profile: {argv}"
+            !argv.contains("--sandbox read-only"),
+            "D508's floor, which D560 moved off every turn: {argv}"
         );
-        assert!(argv.contains("--permission-mode dontAsk"), "and the mode beside it: {argv}");
+        assert!(argv.contains("--permission-mode acceptEdits"), "and the mode beside it: {argv}");
         assert!(
             argv.contains("--output-format streaming-messages-json"),
             "on the wire this build reads: {argv}"
@@ -204,9 +205,9 @@ async fn every_turn_carries_the_pinned_posture_and_none_carries_an_escape() {
     registry.shutdown().await;
 }
 
-/// **AC-15**'s label half, and **D508(a)**'s correction in both directions: the
-/// composed `--permission-mode dontAsk` is asserted *present and described by
-/// what it does*, never as an approval axis of the grant.
+/// **AC-15**'s label half, as **D560** measured it: the composed
+/// `--permission-mode acceptEdits` is asserted *present and described by what
+/// it does* — including the ask it does not silence — never by its name alone.
 ///
 /// The sentence lives in one place — [`shim::GROK_MODE_LINE`] — and both the
 /// ring and this assertion read it, so a wording change is a change to what a
@@ -215,15 +216,15 @@ async fn every_turn_carries_the_pinned_posture_and_none_carries_an_escape() {
 fn the_composed_permission_mode_is_labelled_with_what_it_actually_does() {
     let line = shim::GROK_MODE_LINE;
 
-    assert!(line.contains("dontAsk composed"), "{line}");
-    assert!(line.contains("selects neither yolo nor auto"), "what it does: {line}");
+    assert!(line.contains("acceptEdits composed"), "{line}");
+    assert!(line.contains("grok's file tools edit unasked"), "what it does: {line}");
     assert!(
-        line.contains("suppresses a config-level always-approve for this launch"),
+        line.contains("a config-level always-approve does not reach this launch"),
         "and against what: {line}"
     );
     assert!(
-        line.contains("not an approval-policy axis at the probed version"),
-        "and what it is not: {line}"
+        line.contains("a shell command that writes still asks, which ends a headless turn"),
+        "and what it does not do, which is what costs a turn: {line}"
     );
     // It rides the ring of a grok spawn and of no other backend's.
     let lines = shim::spawn_lines(ganja_protocol::team::MemberBackend::Grok);
@@ -437,7 +438,7 @@ async fn an_unapproved_tool_ask_ends_the_turn_with_mail_naming_the_tool() {
         mail.contains("grok cancelled this turn on an unapproved tool request"),
         "in the words the plan decided this consequence ships in: {mail}"
     );
-    assert!(mail.contains("`write`"), "and which tool it stopped on: {mail}");
+    assert!(mail.contains("`run_terminal_command`"), "and which tool it stopped on: {mail}");
     assert!(mail.contains("still running"), "and that the teammate is still there: {mail}");
     // And never the sentence a parse failure gets: this build read the stream
     // exactly, and a refusal that reads as garbage output is a refusal nobody
@@ -725,5 +726,30 @@ fn the_grok_deadline_is_the_value_its_own_probes_derived() {
         shim::GROK_TURN_TIMEOUT.as_secs(),
         derived.as_secs(),
         "the larger of fifteen minutes and twice the longest turn recorded ({longest}s)"
+    );
+}
+
+/// **D560.** The floor this driver composes is the floor its recording measured
+/// a grok turn *writing* under — both flags, read off the vendor's own event
+/// log line and the launch shape the D560 block names, so moving the floor
+/// again cannot ship without a new recording.
+#[test]
+fn the_floor_grok_composes_is_the_one_its_probe_measured_writing_under() {
+    let block = PROBE
+        .split("---- D560 re-probe")
+        .nth(1)
+        .expect("the recording carries the D560 measurement block");
+    let event = format!(r#""profile":"{}""#, ganja_teammate_local::grok::SANDBOX_VALUE);
+    let mode = format!("--permission-mode {}", ganja_teammate_local::grok::PERMISSION_MODE);
+
+    assert!(block.contains(&event), "grok's own event log recorded the composed profile: {event}");
+    assert!(block.contains(&mode), "and the probe ran under the composed mode: {mode}");
+    assert!(
+        block.contains("the file is on disk holding WROTE. No ask."),
+        "and a turn under both wrote in the working tree unasked, the floor's whole point"
+    );
+    assert!(
+        block.contains("\"IO Error: Operation not permitted (os error 1)\"; no"),
+        "and was refused outside it at the kernel, which is the floor being a floor"
     );
 }

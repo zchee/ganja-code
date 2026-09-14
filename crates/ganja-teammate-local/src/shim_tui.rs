@@ -390,21 +390,23 @@ const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in acce
      file edits auto-approved";
 
 /// What a grok pane adds after [`HEARD_BACK`], **measured**
-/// (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7 recording) — and the one
-/// row that has to *contradict* its own bound sentence on purpose.
+/// (`tests/fixtures/grok-tui-probe.txt`, the **D560** recording on 1.0.31) —
+/// and the one row that has to *contradict* its own bound sentence on
+/// purpose.
 ///
-/// [`posture_line`](ganja_core::teammate::posture_line)'s grok row ends "a tool
-/// request that needs one ends the turn", which is the headless door's
+/// [`posture_line`](ganja_core::teammate::posture_line)'s grok row ends "a
+/// shell write asks, which ends the turn", which is the headless door's
 /// measurement and still true there. In the TUI the same flags do something
-/// else: the write tool is blocked outright by the sandbox, and when grok
-/// then proposes a shell command the TUI raises its **own** three-option
-/// approval prompt to the person — `--permission-mode dontAsk` silences
-/// nothing on this door — and a rejection is what ends the turn. Approving
-/// does not widen the floor: an approved shell write into the working
-/// directory was still denied by `read-only`, and no file appeared. So this
-/// row says who answers an ask here, that the bound holds against their yes,
-/// and that only their no ends the turn — the three facts a person reading
-/// the bound row beside it would otherwise get wrong.
+/// else with the same ask: grok's own file tools still write in the working
+/// tree unasked, but when it wants a shell command that writes, the TUI raises
+/// its **own** approval prompt to the person, and only a rejection ends the
+/// turn (*"Turn cancelled because a permission was denied"*). Approving does
+/// not widen the floor: an approved shell write into the working tree landed,
+/// and an approved one outside it was refused with `operation not permitted`
+/// and wrote nothing. So this row says who answers an ask here, that the bound
+/// holds against their yes, and that only their no ends the turn — the three
+/// facts a person reading the bound row beside it would otherwise get wrong —
+/// and closes on what the composed mode buys a pane.
 ///
 /// It is also the one row whose shape is inverted — the ask first, the
 /// "its own TUI in a tmux pane beside you" preamble the other two open on
@@ -416,13 +418,12 @@ const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in acce
 /// kind that may fall off that edge (ruling 15's HIGH-2); grok's ask is the
 /// fact a person has to act on — a pane that is waiting for them — so it is
 /// the twenty characters that survive, and `ganja-tui`'s render test asserts
-/// they do at 80x24. Before the probe reached a composer this row claimed
-/// none of that (the lead's ruling 5 for P28, written when grok refused to
-/// start on this machine); the recording now holds it, and a recording
-/// outranks a ruling written without one.
-const PANE_GROK: &str = "grok asks you in the pane before a tool that needs approval; read-only \
+/// they do at 80x24. D508's floor wrote the same row for `read-only` against
+/// the 1.0.7 recording (the write tool blocked, an approved write still
+/// denied); D560 re-measured every clause rather than carrying one over.
+const PANE_GROK: &str = "grok asks you in the pane before a shell command that writes; workspace \
      holds against your yes and only your no ends the turn; its own TUI in a tmux pane beside \
-     you — dontAsk silences nothing";
+     you — acceptEdits: its file edits run unasked";
 
 /// The sentence a shim pane adds to its posture, per CLI (**D512**).
 ///

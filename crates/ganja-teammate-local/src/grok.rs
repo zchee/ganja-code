@@ -4,7 +4,9 @@
 //! another vendor's agent as one, so every sentence here is ganja's own, and
 //! the vendor surface it is written against is the binary itself — `grok 1.0.6
 //! (24c70bc7ffdd) [alpha]`, probed on this machine rather than read out of a
-//! source clone that is one version behind what a person has installed.
+//! source clone that is one version behind what a person has installed, and
+//! re-probed against `grok 1.0.31 (b44e0bc0a8e0)` when **D560** moved the
+//! floor.
 //!
 //! This module is the **words**, and only the words: which flags go on a
 //! command line and what a finished child's stdout meant. When a turn starts,
@@ -63,33 +65,51 @@
 //!
 //! # The posture, and why the flags are in this order
 //!
-//! `--sandbox read-only` is the bound and `--permission-mode dontAsk` is
-//! defence-in-depth beside it, so the launch line reads the way the posture
-//! works. Neither is decoration:
+//! **D560** (2026-09-15, amending D508(a), bead `ganja-code-easd`): every
+//! teammate backend implements, so a grok teammate writes in the working tree
+//! it was spawned in. `--sandbox workspace` is the bound and
+//! `--permission-mode acceptEdits` is the mode beside it, so the launch line
+//! reads the way the posture works. Whether a *given* teammate should instead
+//! be read-only is a per-agent decision bead `ganja-code-n0e0` will make; until
+//! then the floor is the backend's, and it is this one. Neither flag is
+//! decoration:
 //!
 //! - **The sandbox is applied at process entry**, before the interactive
 //!   branch is even computed, so it holds on a headless turn. It is composed on
 //!   the resume line too, and there it both pins and passes: that vendor
 //!   refuses a resume requesting a *different* profile rather than silently
 //!   applying it, so repeating the same one is the only spelling that does
-//!   both.
-//! - **`--permission-mode dontAsk` is not an approval axis at this version**
-//!   and it is not inert either — see [`GROK_MODE_LINE`](crate::shim::GROK_MODE_LINE),
-//!   which is the sentence
-//!   the ring carries. What it does is select neither `yolo` nor `auto` for
-//!   this launch, which suppresses a config-level always-approve. That is
-//!   measurable rather than argued, and it was measured: this machine's own
+//!   both. `workspace` is one of that vendor's five built-in profiles
+//!   (`workspace`, `devbox`, `read-only`, `strict`, `off`): whole-disk read,
+//!   writes in the workspace, the grok home and temp, and no network switch.
+//!   Measured on 1.0.31 rather than read off the profile table — the vendor's
+//!   own `sandbox-events.jsonl` recorded `"profile":"workspace"`,
+//!   `"enforced":true` on `macos/seatbelt` and those writable paths for every
+//!   probe launch, and a write outside them was refused with the OS's own
+//!   `Operation not permitted`.
+//! - **`--permission-mode acceptEdits` is what lets grok's own file tools
+//!   edit unasked**, on both doors — measured, a `write` and a `hashline_edit`
+//!   inside the working tree each ran with no ask, headless and in the TUI.
+//!   [`GROK_MODE_LINE`](crate::shim::GROK_MODE_LINE) is the sentence the ring
+//!   carries. An explicit mode also does what D508 measured one doing: it
+//!   selects neither `yolo` nor `auto` for this launch, so a config-level
+//!   always-approve does not reach it — this machine's own
 //!   `~/.grok/config.toml` sets `[ui] yolo = true` and
-//!   `permission_mode = "always-approve"`, and the composed launch still took
-//!   the cancel arm.
+//!   `permission_mode = "always-approve"`, and the composed launch still
+//!   raised an ask for a shell command. **What the mode does not reach is the
+//!   shell**: a shell command that writes — inside the working tree as much as
+//!   outside it — still asks, and it asked identically under `dontAsk`
+//!   (measured, 1.0.31), so the ask is that vendor's command classifier rather
+//!   than the mode. Headless, an ask cancels the turn; in a pane, the person
+//!   answers it.
 //!
-//! **The `read-only` spelling is pinned as a literal byte string** and a unit
+//! **The `workspace` spelling is pinned as a literal byte string** and a unit
 //! test pins it, because `--sandbox` is unvalidated at clap and an unrecognized
-//! value becomes a *custom* profile rather than an error: `read_only` would be
+//! value becomes a *custom* profile rather than an error: `workspac` would be
 //! looked up as somebody's own profile, fail to load, and hard-exit the child.
-//! Measured here too — `--sandbox read_only` refuses naming `'read_only'`,
-//! where `--sandbox readonly` normalizes to the built-in and refuses naming
-//! `'read-only'`.
+//! Measured on 1.0.31 — `--sandbox workspac` refuses with *"Custom sandbox
+//! profile 'workspac' not found"* and *"could not apply the 'workspac' sandbox
+//! profile"*, exit 1 — exactly as D508 measured `read_only` on 1.0.6.
 //!
 //! # What that refusal must arrive as
 //!
@@ -102,6 +122,14 @@
 //! That ordering is what **AC-8**'s fourth arm asks for, and it is a property
 //! of the shim core rather than of anything here — pinned by a test in this
 //! file's suite so it cannot quietly stop being true.
+//!
+//! The two refusals below were recorded under the `read-only` floor D508
+//! pinned, and neither has been re-measured under `workspace`: on 1.0.31 this
+//! machine has neither a symlinked `~/.grok` nor a Docker socket left to refuse
+//! on. The first is expected to carry over — that vendor's source applies the
+//! same hook write-deny to every built-in profile but `devbox` and `off` — and
+//! it arrives the same way if it does, as the vendor's own sentence in the
+//! lead's mail.
 //!
 //! It is not hypothetical. On the machine this was written on, `~/.grok` was
 //! a symlink until 2026-08-20, and the `read-only` profile refuses to start
@@ -213,23 +241,24 @@ use crate::shim::{Door, Driver, Reply, Shape, Turn};
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "grok";
 
-/// The `--sandbox` value D508(a) pins, as a **literal byte string**.
+/// The `--sandbox` value **D560** pins, as a **literal byte string**.
 ///
 /// Not a spelling to be normalized on the way past: `--sandbox` is unvalidated
 /// at clap and an unrecognized value becomes a custom profile that fails to
-/// load and hard-exits the child, so `read_only` is a broken teammate rather
+/// load and hard-exits the child, so `workspac` is a broken teammate rather
 /// than a typo. A unit test pins these exact bytes.
-pub const SANDBOX_VALUE: &str = "read-only";
+pub const SANDBOX_VALUE: &str = "workspace";
 
 /// The `--permission-mode` value composed on every turn.
 ///
-/// One of that flag's six documented values, and the reason it is this one
-/// rather than `plan` is recorded in D508(a): as an approval axis the two are
-/// the same non-event at this version, while `dontAsk`'s own vendor doc states
-/// the intent it will carry the day the mode is wired — *silently deny
-/// non-pre-approved tools* — so composing it now means the posture tightens
-/// rather than needing a code change.
-pub const PERMISSION_MODE: &str = "dontAsk";
+/// One of that flag's six documented values (`default`, `acceptEdits`,
+/// `auto`, `dontAsk`, `bypassPermissions`, `plan`), and **D560**'s: under it
+/// grok's own file tools edit inside the sandbox unasked, which is what a
+/// teammate that implements needs, while a shell command that writes still
+/// asks. D508(a) composed `dontAsk` for a read-and-answer floor; on 1.0.31 the
+/// two modes answered an in-tree shell write identically, so the choice
+/// between them is the one that names what the grant is.
+pub const PERMISSION_MODE: &str = "acceptEdits";
 
 /// The wire this side reads: *"NDJSON in the Anthropic Messages API wire
 /// format"*.
@@ -248,20 +277,20 @@ pub const OUTPUT_FORMAT: &str = "streaming-messages-json";
 /// no `--prompt-json`, no `--prompt-file`. No identity flag, because that CLI
 /// has none to give.
 ///
-/// Measured twice on 2026-08-20, and the recording
-/// (`tests/fixtures/grok-tui-probe.txt`) carries both: against `grok 1.0.6`
-/// with `~/.grok` a symlink the flags parse and then the read-only profile
-/// refuses to apply (bead `ganja-code-q98`), with the same sentence the
-/// headless child exits on — the dead-pane case a pane exists to keep on
-/// screen, kept verbatim; and against `grok 1.0.7` with `~/.grok` a real
-/// directory the same argv reaches the composer under `sandbox:read-only`.
-/// The test compares this table against the recorded launch line rather than
-/// against a second literal.
+/// Measured on 2026-09-15 against `grok 1.0.31` (**D560**): a pane launched with
+/// exactly these words reached the composer, and its status line read
+/// `sandbox:workspace` after the first turn. The recording
+/// (`tests/fixtures/grok-tui-probe.txt`) keeps the two 2026-08-20 recordings of
+/// the `read-only` floor beneath it — the 1.0.6 refusal under a symlinked
+/// `~/.grok` (bead `ganja-code-q98`), kept verbatim because it is the dead-pane
+/// case a pane exists to keep on screen, and the 1.0.7 composer. The test
+/// compares this table against the recorded launch line rather than against a
+/// second literal.
 pub const TUI_ARGV: [&str; 4] = ["--sandbox", SANDBOX_VALUE, "--permission-mode", PERMISSION_MODE];
 
 /// What a readiness poll looks for in a captured pane: the composer's prompt
 /// glyph, **measured** (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7
-/// recording).
+/// recording, and the same line on 1.0.31 under **D560**'s floor).
 ///
 /// grok's composer draws no placeholder text — codex's `Ask Codex to do
 /// anything` has no counterpart here — so the empty composer line is the box
@@ -290,13 +319,14 @@ pub const READY_MARKER: &str = "❯";
 /// aliases (`-c` for `--continue`, `-w` for `--worktree`) that a long-flag
 /// grep would walk straight past.
 ///
-/// Six entries are **values** rather than flags, for the reason codex's list
-/// carries two: a posture is escaped as easily by a value as by a flag. Three
+/// Nine entries are **values** rather than flags, for the reason codex's list
+/// carries one: a posture is escaped as easily by a value as by a flag. Two
 /// of them are real `--permission-mode` values that would select an approval
-/// posture this grant does not include — `acceptEdits`, `auto` and
-/// `bypassPermissions`, out of the six that flag documents (`default`,
-/// `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan`). `plan` and
-/// `default` are absent because neither widens anything.
+/// posture this grant does not include — `auto` and `bypassPermissions`, out
+/// of the six that flag documents (`default`, `acceptEdits`, `auto`,
+/// `dontAsk`, `bypassPermissions`, `plan`). `acceptEdits` is the composed
+/// mode (**D560**); `dontAsk`, `plan` and `default` are absent because none of
+/// them widens anything.
 ///
 /// **`always-approve` is on the list and is *not* one of those six**, which is
 /// worth stating rather than leaving as an apparent typo: it is the
@@ -304,21 +334,28 @@ pub const READY_MARKER: &str = "❯";
 /// `resolve_effective_yolo` matches beside `bypassPermissions`. It is banned
 /// here so that no future edit reaches for it as though the flag took it.
 ///
-/// The last two values are `--sandbox` profiles. `strict` is on the list even
-/// though it reads stricter, and D508(a) records why: it buys a narrower read
-/// by making **the workspace itself writable**, which is the wrong trade under
-/// a v1 that grants read and not write.
+/// The last six values are `--sandbox` profiles, and the rule for them is
+/// stricter than the mode's: **every built-in profile but the floor, in every
+/// spelling that vendor's parser maps onto one**, narrower ones included. The
+/// mode is defence-in-depth; the profile is the bound the consent sentence
+/// describes, and it describes exactly one. A wider profile (`devbox`, which
+/// makes nearly the whole disk writable; `off` and its alias `none`) is an
+/// escape; a narrower one (`strict`, `read-only` and its alias `readonly`)
+/// would make the sentence a person approved false in the other direction —
+/// and a resume asking for a profile the conversation was not created under is
+/// refused outright, so a stray one is a dead teammate. Choosing a narrower
+/// profile per agent is bead `ganja-code-n0e0`'s, as a decision, never a
+/// literal that drifts in here.
 ///
 /// `-s` is deliberately **absent**. On this vendor's surface it is the short
 /// alias of `--session-id`, which this file composes — unlike codex, where the
 /// same two letters are the sandbox flag.
-pub const NEVER_COMPOSED: [&str; 26] = [
-    // Approval escapes: the flag that approves everything, the three
+pub const NEVER_COMPOSED: [&str; 29] = [
+    // Approval escapes: the flag that approves everything, the two
     // `--permission-mode` values that would, and the config-level spelling of
     // the first of them.
     "--always-approve",
     "bypassPermissions",
-    "acceptEdits",
     "auto",
     "always-approve",
     // Rule and tool surface: `--allow` widens what needs no approval,
@@ -369,9 +406,14 @@ pub const NEVER_COMPOSED: [&str; 26] = [
     // against with a shape it cannot read — a turn lost to a flag nobody
     // reading the launch line would connect to the output format.
     "--json-schema",
-    // The two sandbox profiles that are not the floor, as values.
-    "strict",
+    // Every built-in sandbox profile that is not the floor, as values, in
+    // each spelling the vendor's parser maps onto one: wider, then narrower.
+    "devbox",
     "off",
+    "none",
+    "strict",
+    "read-only",
+    "readonly",
 ];
 
 /// The record kind that opens a turn and names the session grok is running.
@@ -662,15 +704,18 @@ impl Driver for Grok {
         let refused = if seen.cancelled() {
             // **The measured shape.** A probed 1.0.6 ends a turn whose tool ask
             // nothing approved with `stop_reason: "cancelled"` and
-            // `errors: ["cancelled"]` — one word, which on its own tells a lead
-            // nothing. This is the sentence that does, and it names the tool
-            // because "your teammate stopped" is not something anybody can act
-            // on where "it stopped asking to run `write`" is.
+            // `errors: ["cancelled"]`, and 1.0.31 under **D560**'s floor still
+            // does for a shell command that writes — one word, which on its own
+            // tells a lead nothing. This is the sentence that does, and it
+            // names the tool because "your teammate stopped" is not something
+            // anybody can act on where "it stopped asking to run
+            // `run_terminal_command`" is.
             Some(format!(
-                "grok cancelled this turn on an unapproved tool request.{} This build composes no \
-                 approval flag, so that CLI's headless client answers every permission request \
-                 `Cancelled`, which ends the turn rather than denying the call and letting the \
-                 turn continue. Reading takes no approval; anything that does ends the turn here.",
+                "grok cancelled this turn on an unapproved tool request.{} Headless, that CLI \
+                 answers every permission request `Cancelled`, which ends the turn rather than \
+                 denying the call and letting the turn continue. Reading and editing files with \
+                 grok's own tools take no approval; a shell command that writes does, and ends \
+                 the turn here.",
                 seen.on_tool()
             ))
         } else if seen.failed {

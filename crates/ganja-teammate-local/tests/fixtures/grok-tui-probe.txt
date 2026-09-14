@@ -1,6 +1,7 @@
 # Whether grok's own TUI accepts the pinned floors, and what it does next —
-# the recording **D512**'s pane-mode spelling is compared against. Two
-# recordings, because the answer changed with this machine:
+# the recording **D512**'s pane-mode spelling is compared against. Three
+# recordings, because the answer changed with this machine and then with the
+# floor:
 #
 # 1. 2026-08-20, grok 1.0.6, `~/.grok` a SYMLINK: the flags parse, then the
 #    read-only profile refuses to apply (bead ganja-code-q98) — in TUI mode
@@ -10,6 +11,13 @@
 # 2. 2026-08-20, later the same day, grok 1.0.7, `~/.grok` a real directory
 #    (the user un-symlinked it): the composer IS reached, and the paste, Enter
 #    and approval probes below were run against it.
+# 3. 2026-09-15 (UTC 2026-09-14T17:47Z-17:58Z), grok 1.0.31, when **D560**
+#    moved the floor from `--sandbox read-only --permission-mode dontAsk` to
+#    `--sandbox workspace --permission-mode acceptEdits` (bead
+#    ganja-code-easd): the composer is reached under the new floor, and the
+#    approval probe was re-run against it in a scratch git repository <cwd>
+#    under ~/.cache/ganja/probes/, outside temp. The `launch:` line is this
+#    recording's; recordings 1 and 2 ran the `earlier launch` line.
 #
 # This file is the *recording* the `tui_argv` and `READY_MARKER` tests beside
 # `src/teammate/grok.rs` compare against, rather than a second string literal:
@@ -27,17 +35,21 @@
 #
 # Binary:  grok 1.0.6 (24c70bc7ffdd) [alpha] — recording 1
 #          grok 1.0.7 (325eae35b09b) [alpha] — recording 2
-# Host:    tmux next-3.8, macOS, 2026-08-20
+#          grok 1.0.31 (b44e0bc0a8e0) [alpha] — recording 3
+# Host:    tmux next-3.8, macOS, 2026-08-20 and 2026-09-15
 #
-launch: grok --sandbox read-only --permission-mode dontAsk
+launch: grok --sandbox workspace --permission-mode acceptEdits
+earlier launch (D508, recordings 1 and 2): grok --sandbox read-only --permission-mode dontAsk
 outcome (1.0.6, ~/.grok a symlink): flags parse; profile application refused on this machine (~/.grok is a symlink, bead ganja-code-q98); exit 1; verbatim:
 error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.
 outcome (1.0.7, ~/.grok a real directory): composer reached, floors accepted; the first frame draws the welcome panel ("Grok Build  1.0.7", New worktree / Resume session / Changelog / Quit) above the composer box, and the status line after the first turn reads "main sandbox:read-only ~/rust/src/github.com/zchee/ganja-code"
-composer capture (empty composer line, 1.0.7):
+outcome (1.0.31, the D560 floor): composer reached, floors accepted; the first frame draws the welcome panel ("Grok Build  1.0.31", New worktree / Resume session / Changelog / Quit) above the composer box, and the status line after the first turn reads "main sandbox:workspace <cwd>"
+composer capture (empty composer line, 1.0.31, and the same line on 1.0.7):
   │ ❯                                                                                                                                                        │  
 composer box footer (model-dependent, not a marker): Grok 4.6 (xhigh)
 paste probe (1.0.7): load-buffer + paste-buffer -p delivered two lines into the composer unsubmitted, cursor at the end of line two:
   │ ❯ ganja paste probe line one
   │   line two stays put
 enter probe (1.0.7): Enter after the paste submitted BOTH lines as one user message and a real turn ran ("Both lines arrived as one message … The second line stayed in the same prompt; it was not treated as a separate turn.")
+approval probe (1.0.31, --sandbox workspace --permission-mode acceptEdits, TUI): asked to create TUI_TOOL_WROTE.txt in <cwd> with the file-writing tool — it did, with no approval prompt, and the file is on disk; asked to run `mkdir -p build3 && printf WROTE > build3/TUI_WROTE.txt` inside <cwd>, the TUI raised its own approval prompt to the person ("1 (●) Yes, and don't ask again for anything (always-approve mode) / 2 (○) Yes, proceed / 3 (○) No, reject (type to add feedback) / 4 (○) Never allow: mkdir -p"), and approving it ("Yes, proceed") landed the file holding WROTE; asked to run `printf WROTE > <outside>/TUI_OUTSIDE.txt` for a sibling directory of <cwd>, the same prompt, and the approved command was refused ("(eval):1: operation not permitted") and did NOT create the file; asked to run `mkdir -p build4 && printf WROTE > build4/REJECTED.txt` inside <cwd>, rejecting that ended the turn ("Turn cancelled because a permission was denied in 8.0s.") and no directory was created. So in TUI mode grok's file tools write in the working tree unasked, a person answers a shell write's ask in the pane, the workspace floor holds against an approved write outside it, and only a rejection ends the turn.
 approval probe (1.0.7, --permission-mode dontAsk, TUI): asked to create ganja-probe.txt in cwd — the write tool was blocked by the sandbox ("The write tool was blocked; I'll create the file from the shell instead."), grok proposed a shell write and the TUI raised its own three-option approval prompt to the person ("1 (●) Yes, and don't ask again for anything (always-approve mode) / 2 (○) Yes, proceed / 3 (○) No, reject (type to add feedback)"); approving it did NOT create the file — read-only denied the shell write too — and grok asked again, for a /tmp probe; rejecting that ended the turn ("Turn cancelled by user in 1m16s."). So in TUI mode dontAsk does not silence approval prompts, a person answers them in the pane, and the read-only floor holds against an approved write.

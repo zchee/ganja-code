@@ -653,48 +653,66 @@ const POSTURE_AGY: &str = "sandbox: terminal bounded, no enforced filesystem bou
      can, including credentials, and write anywhere you can; those writes are outside the \
      snapshot chain /undo walks";
 
-/// codex's pinned posture, **measured** — the strongest floor of the three.
+/// codex's pinned posture, **measured** — **D560**'s `workspace-write`, the
+/// tightest floor of the three.
 ///
-/// Every clause was taken rather than inferred, and by two instruments that
-/// agree: `codex sandbox` ran a write, a read and a network attempt under
-/// exactly the composed override, and the vendor's own persisted rollout for a
-/// probe turn recorded the same profile — `file_system: restricted` with one
-/// `root`/`read` entry, `network: restricted`.
+/// D560 (2026-09-15, amending D508(a)) moved it from `read-only`: every
+/// teammate backend implements, and whether a given teammate should be
+/// read-only becomes a per-agent decision later (bead `ganja-code-n0e0`), not
+/// a per-backend one. Every clause was taken rather than inferred, by three
+/// instruments that agree: `codex sandbox` ran writes, a read and a network
+/// attempt under exactly the composed override; real turns under the shipped
+/// argv wrote in the working tree and were refused outside it; and the
+/// vendor's own persisted rollout recorded the same profile on every turn —
+/// one `root`/`read` entry, `write` for the cwd, `/tmp` and `$TMPDIR`, the
+/// cwd's `.git` carved back to `read`, `network: restricted`.
 ///
-/// Writes are denied everywhere, the child's own cwd included. Reads are the
-/// whole disk, which is why the sentence says what that *enables*: a bound
-/// stated without its consequence is a bound nobody can price, and whole-disk
-/// read is the ability to read a credential. The network clause is the one
-/// that separates this floor from grok's — there, whole-disk read sits beside
-/// an unbounded network and the pair is exfiltration; here the second half is
+/// The write bound names the carve-out because it is the clause a person would
+/// otherwise get wrong: a codex teammate edits the tree and **cannot commit**.
+/// The write clause carries the consequence agy's row carries, for agy's
+/// reason: these writes never pass through this build's own tool calls, so
+/// they are outside the snapshot chain `/undo` walks, and somebody who
+/// believes a codex teammate's edits are revertable the way a ganja
+/// teammate's are has consented under a wrong description. Reads are the whole
+/// disk, which is why the sentence says what that *enables*: a bound stated
+/// without its consequence is a bound nobody can price, and whole-disk read is
+/// the ability to read a credential. The network clause is the one that
+/// separates this floor from grok's — there, whole-disk read sits beside an
+/// unbounded network and the pair is exfiltration; here the second half is
 /// closed, so the sentence ends by saying so rather than by borrowing grok's
 /// words.
-const POSTURE_CODEX: &str = "sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you \
-     can, including credentials, but has no network to send them over";
+const POSTURE_CODEX: &str = "sandbox=workspace-write: writes in the working tree (not .git) and temp only, \
+     whole-disk read, network denied — may read any file you can, including credentials, and edit \
+     files outside the snapshot chain /undo walks, but has no network to send them over";
 
-/// grok's pinned posture, **measured** — every clause of it, as of W5.
+/// grok's pinned posture, **measured** — **D560**'s `workspace` profile under
+/// `--permission-mode acceptEdits`, every clause of it, on 1.0.31.
 ///
-/// Long because every clause is load-bearing. The write bound is real but
-/// narrow, and "temp" is spelled out because a reader pictures `/tmp` and on
-/// macOS it is also the per-user folder root. The read scope is the whole disk,
-/// which is what makes the second half necessary: a bound stated without what
-/// it *enables* is a bound nobody can price, and whole-disk read plus an
-/// unbounded network is the ability to read a credential and post it somewhere.
-/// The `(macOS)` qualifier belongs to both halves — one Linux-only switch is
-/// why neither holds here.
+/// Long because every clause is load-bearing. The write bound is the working
+/// tree plus what that vendor's profile always keeps writable — its own home
+/// and temp — and "temp" is spelled out because a reader pictures `/tmp` and
+/// on macOS it is also the per-user folder root. The `/undo` rider is agy's and
+/// codex's, for their reason. The read scope is the whole disk, which is what
+/// makes the second half necessary: a bound stated without what it *enables*
+/// is a bound nobody can price, and whole-disk read plus an unbounded network
+/// is the ability to read a credential and post it somewhere. The network
+/// clause is unqualified now: D508's row said "(macOS)" because `read-only`'s
+/// network switch was Linux-gated, while `workspace` carries no network switch
+/// on any platform — measured on macOS (a shell `curl` answered `200`
+/// unasked), and on Linux over-disclosure at worst, which is the safe
+/// direction of that error.
 ///
-/// The last clause is W5's gating measurement and it is what a person consents
-/// to rather than a detail: a pure-read turn **completed**, with the read tool
-/// call reaching terminal status, and a write turn and a shell turn on the same
-/// conversation each ended `stop_reason: "cancelled"` with the tool named. So a
-/// grok teammate is a read-and-answer teammate that stops mid-answer the moment
-/// it wants anything else — bounded, mailed, and survivable, but not silent
-/// about it. Said in the dialog and the ring because somebody agreeing to a
-/// teammate that may stop mid-answer should be agreeing to that.
-const POSTURE_GROK: &str = "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk \
-     read, no network bound (macOS) — may read any file you can, including credentials, and may \
-     send them anywhere; reading takes no approval, and a tool request that needs one ends the \
-     turn";
+/// The last clause is the headless door's measurement and it is what a person
+/// consents to rather than a detail: grok's own file tools wrote and edited in
+/// the working tree unasked, and a shell command that writes — inside the tree
+/// as much as outside it — raised an ask the headless client answered as a
+/// cancel, ending the turn (`stop_reason: "cancelled"`, the tool named). So a
+/// grok teammate edits files freely and stops the moment it wants a shell to
+/// write — bounded, mailed, and survivable, but not silent about it.
+const POSTURE_GROK: &str = "sandbox=workspace: writes in the working tree, ~/.grok and temp only, \
+     whole-disk read, no network bound — may read any file you can, including credentials, send \
+     them anywhere, and edit files outside the snapshot chain /undo walks; a shell write asks, \
+     which ends the turn";
 
 /// `a`, `b` and `c` — the list a refusal ends with.
 fn spell(names: &[&str]) -> String {

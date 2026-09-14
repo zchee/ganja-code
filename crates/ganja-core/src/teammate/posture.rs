@@ -112,9 +112,9 @@ use crate::teammate::{Teammate, backend_name, posture_line};
 /// raises a dialog, every time, and there is no way to turn that off. That is
 /// stronger than it first reads — a vendor's trust gate that cannot be
 /// permanently pre-cleared is a gate that is never cleared silently — and it
-/// is proportionate only because of what it gates: v1 composes each CLI's
-/// most restrictive working posture, so the question a person is answering
-/// repeatedly is about a read-only agent.
+/// is proportionate because of what it gates: since **D560** every shim is a
+/// foreign agent that writes in the working tree, outside the snapshot chain
+/// `/undo` walks, which is exactly the question worth asking every time.
 ///
 /// A stored **deny** does pass that filter, and refuses.
 pub const FOREIGN: &str = "teammate_foreign";

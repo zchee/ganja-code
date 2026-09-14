@@ -1,4 +1,7 @@
-# What `-c sandbox_mode="read-only"` actually bounds, measured rather than inferred.
+# What `-c sandbox_mode="read-only"` actually bounds, measured rather than inferred
+# — and, in the D560 block at the end, what `-c sandbox_mode="workspace-write"`
+# bounds, the floor since 2026-09-15. The sentence line at the very end is the
+# current one.
 #
 # This file is the *recording* AC-27 compares the shipped posture sentence
 # against. It exists so that the sentence a person consents to at spawn is
@@ -48,7 +51,86 @@
 # One readable `root` entry and no writable one is the same fact instrument 1
 # measured behaviourally: whole-disk read, writes denied everywhere.
 #
-# The sentence those two agree on, in D508 Principle 6's shape — what the
-# posture bounds, then what the read it grants *enables*. Everything after
-# "sentence: " on the next line is the assertion.
-sentence: sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you can, including credentials, but has no network to send them over
+# The sentence those two agreed on, in D508 Principle 6's shape — what the
+# posture bounds, then what the read it grants *enables*. Superseded by D560
+# below and kept as the record of what shipped from 2026-08-20:
+#
+#   sandbox=read-only: writes denied, whole-disk read, network denied — may read any file you can, including credentials, but has no network to send them over
+#
+# ---- D560 re-probe, 2026-09-15 (UTC 2026-09-14T17:38Z-17:47Z), the floor
+# moved to `workspace-write` on a user directive (bead ganja-code-easd: every
+# teammate backend implements; bead ganja-code-n0e0 makes the read-only choice
+# per agent later). Binary: codex-cli 0.155.0-alpha.4. Same machine, and its
+# own ~/.codex config still sets sandbox_mode to danger-full-access and
+# approval_policy to never, so every denial below is still the composed
+# override winning. The probe workspace was a fresh git repository under
+# ~/.cache/ganja/probes/, OUTSIDE temp on purpose: `/tmp` and `$TMPDIR` are
+# writable under workspace-write anyway, so a cwd under temp could not tell a
+# working-tree write from a temp write. <cwd> below is that workspace and
+# <outside> a sibling directory of it.
+#
+# Instrument 1 — the same turn-free ladder, `codex sandbox -c
+# 'sandbox_mode="<mode>"' -- <cmd>`, run in <cwd>:
+#
+#   sandbox_mode          write <cwd>   write /tmp   write <outside>   network   read ~/.ssh
+#   danger-full-access    permitted     permitted    permitted         200       permitted
+#   workspace-write       permitted     permitted    DENIED            DENIED    permitted
+#   read-only             DENIED        DENIED       DENIED            DENIED    permitted
+#
+#   workspace-write, further rows:
+#   network (literal IP): `curl http://93.184.215.14/`   -> exit 7, could not connect
+#   write $TMPDIR:        permitted
+#   write a subdirectory: `mkdir -p sub && echo p > sub/deep.txt` -> permitted
+#   write <cwd>/.git:     `echo p > .git/probe`          -> Operation not permitted
+#   git commit:           fatal: Unable to create '<cwd>/.git/index.lock': Operation not permitted
+#   write ~/.codex:       Operation not permitted
+#
+# Instrument 2 — real turns, one thread (01a0a100-6e3f-7be0-802c-5533d7d94ceb),
+# the first composed exactly as the shipped first turn and every later one as
+# the shipped resume (no `-s`, the `-c` pair only):
+#
+#   t1  17:39:15Z  exec     -s workspace-write -c sandbox_mode="workspace-write"
+#                           -c approval_policy="never" --json --enable
+#                           send_async_message --color never -
+#       ask:     create PROBE_WROTE.txt in the cwd containing WROTE
+#       outcome: PERFORMED. shell `printf 'WROTE' > PROBE_WROTE.txt` exit 0; the
+#                file is on disk and holds WROTE; answer "WROTE". 13s.
+#   t2  17:39:38Z  resume   ask: create a file in <outside> with the shell
+#       outcome: NOT EVIDENCE. The model answered REFUSED without calling any
+#                tool, so nothing was measured; re-issued as t2b with the
+#                command spelled out.
+#   t2b 17:40:57Z  resume   ask: run exactly `printf WROTE > <outside>/PROBE_OUTSIDE.txt`
+#       outcome: DENIED. exec_command exit 1, "zsh:4: operation not permitted:
+#                <outside>/PROBE_OUTSIDE.txt"; no file. 31s.
+#   t3  17:39:59Z  resume   ask: create /tmp/d560-probe-codex.txt with the shell
+#       outcome: PERFORMED. exit 0, the file is on disk — /tmp counts as inside
+#                the writable set for codex, as the rollout below says. 13s.
+#   t4  17:40:12Z  resume   ask: `curl -sS -o /dev/null -w "%{http_code}" --max-time 10 https://example.com`
+#       outcome: DENIED. exit 6, "curl: (6) Could not resolve host:
+#                example.com", printed 000; answer "BLOCKED". 12s.
+#
+# Instrument 3 — the vendor's persisted rollout for that thread recorded five
+# `turn_context` entries, one per turn above, with distinct turn_ids, all
+# identical in the fields that matter:
+#
+#   "sandbox_policy":{"type":"workspace-write","network_access":false,
+#                     "exclude_tmpdir_env_var":false,"exclude_slash_tmp":false}
+#   "approval_policy":"never"
+#   "permission_profile":{"type":"managed","file_system":{"type":"restricted",
+#     "entries":[{root: read}, {<cwd>: write}, {slash_tmp: write},
+#                {tmpdir: write}, {<cwd>/.git: read}, {<cwd>/.agents: read},
+#                {<cwd>/.codex: read}]}, "network":"restricted"}
+#
+# So the resume seam holds for this floor as it held for the last one: the
+# person's danger-full-access reached no turn, resumed or not.
+#
+# TUI (the pane door, D512): `codex -c sandbox_mode="workspace-write" -c
+# approval_policy="never"` in a tmux pane reached the composer, and `/status`
+# read "Permissions: Custom (workspace, never)" — see codex-tui-probe.txt.
+#
+# The sentence those three agree on, in the same shape — what the posture
+# bounds, then what the read and the write it grants enable, then the one
+# thing it still cannot do. The write rider is agy's (Dv-7): these writes never
+# pass through ganja's own tool calls, so they are outside the snapshot chain
+# /undo walks. Everything after "sentence: " on the next line is the assertion.
+sentence: sandbox=workspace-write: writes in the working tree (not .git) and temp only, whole-disk read, network denied — may read any file you can, including credentials, and edit files outside the snapshot chain /undo walks, but has no network to send them over

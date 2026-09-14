@@ -45,8 +45,9 @@
 //!
 //! # What is never composed
 //!
-//! The posture each CLI launches under is D508(a)'s, pinned on **every** turn
-//! rather than only the first, and the escalation door is not built. Until
+//! The posture each CLI launches under is D508(a)'s as **D560** amended it —
+//! write-capable in the working tree — pinned on **every** turn rather than
+//! only the first, and the escalation door is not built. Until
 //! 2026-08-22 a `refuse_bypass` stood here refusing a [`SpawnSpec`](ganja_core::teammate::SpawnSpec) carrying
 //! `bypass` by name for every shim backend, because a silent downgrade to the
 //! conservative posture would have been a worse lie than a refusal; **D513**
@@ -248,18 +249,23 @@ pub fn preamble(
 /// this session's PATH" is the whole of what a person needs in order to fix it.
 pub const REFUSED_NO_BINARY: &str = "this session's PATH holds no executable named";
 
-/// What the composed `--permission-mode dontAsk` does, in the words D508(a)
-/// settled on after two corrections in opposite directions.
+/// What the composed `--permission-mode acceptEdits` does on the headless
+/// door, in **D560**'s measured words (grok 1.0.31).
 ///
-/// Never "inert" — an explicit mode suppresses a config-level always-approve
-/// and a config-level auto for that launch, which is what forces the vendor's
-/// headless client onto its unconditional-cancel arm on a machine whose own
-/// grok config says otherwise. And never an approval axis either: the flag
-/// reaches an agent definition rather than that vendor's permission engine at
-/// the probed version.
-pub const GROK_MODE_LINE: &str = "permission-mode dontAsk composed; selects neither yolo nor auto and suppresses a \
-     config-level always-approve for this launch; not an approval-policy axis at the probed \
-     version";
+/// Three facts, each a measurement rather than a reading of the flag's name.
+/// grok's own file tools (`write`, `hashline_edit`) edit inside the sandbox
+/// with no ask. An explicit mode selects neither `yolo` nor `auto`, so a
+/// config-level always-approve does not reach this launch — measured on a
+/// machine whose own grok config says `yolo = true` and `always-approve`, where
+/// the shell ask below still fired. And a shell command that writes still
+/// asks, inside the working tree as much as outside it, identically under
+/// `dontAsk` — so the ask is that vendor's command classifier, not the mode,
+/// and headless the ask is answered `Cancelled`, which ends the turn. D508(a)
+/// composed `dontAsk` here and this line said so; what it said about an
+/// explicit mode suppressing a config-level always-approve still holds.
+pub const GROK_MODE_LINE: &str = "permission-mode acceptEdits composed; grok's file tools edit unasked \
+     and a config-level always-approve does not reach this launch, so a shell command that \
+     writes still asks, which ends a headless turn";
 
 /// What one shim child is: how it is driven, and therefore what a turn costs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -4,7 +4,8 @@
 //! another vendor's agent as one, so every sentence here is ganja's own, and
 //! the vendor surface it is written against is the binary itself —
 //! `codex-cli 0.149.0-alpha.1`, probed on this machine rather than read out of
-//! a checkout that may not match what a person has installed.
+//! a checkout that may not match what a person has installed, and re-probed
+//! against `codex-cli 0.155.0-alpha.4` when **D560** moved the floor.
 //!
 //! This module is the **words**, and only the words: which flags go on a
 //! command line and what a finished child's stdout meant. When a turn starts,
@@ -22,39 +23,55 @@
 //!
 //! # The posture, and why it is spelled twice
 //!
-//! D508(a) pins `read-only`, and the first turn states it two ways on purpose:
-//! `-s read-only` is the documented flag, and `-c sandbox_mode="read-only"`
-//! beside it makes turn 1 and turn *n* textually identical in posture, so a
-//! reader comparing the two argvs sees one rule rather than two. The resume
-//! turn carries only the `-c` form, because **`codex exec resume` has no `-s`
-//! at all** — the vendor's own `--help` lists the flag on `exec` and not on
-//! `exec resume`, and that asymmetry is the most fragile seam in this file.
+//! **D560** (2026-09-15, amending D508(a), bead `ganja-code-easd`) pins
+//! `workspace-write`: every teammate backend implements, so a codex teammate
+//! writes in the working tree it was spawned in. Whether a *given* teammate
+//! should instead be read-only is a per-agent decision bead `ganja-code-n0e0`
+//! will make; until then the floor is the backend's, and it is this one.
 //!
-//! It is measured rather than assumed. A probe pair on 2026-08-20 created a
-//! thread under the first-turn argv and resumed it under the resume argv on a
-//! machine whose own `config.toml` sets `sandbox_mode` to `danger-full-access`;
-//! the resumed turn declined to write and created no file, and the vendor's own
-//! persisted rollout recorded **two** `turn_context` entries with distinct
-//! `turn_id`s, each carrying `"sandbox_policy":{"type":"read-only"}` and
-//! `"approval_policy":"never"`. The person's permissive config did not reach
-//! either turn, which is the failure this seam exists to rule out.
+//! The first turn states it two ways on purpose: `-s workspace-write` is the
+//! documented flag, and `-c sandbox_mode="workspace-write"` beside it makes
+//! turn 1 and turn *n* textually identical in posture, so a reader comparing
+//! the two argvs sees one rule rather than two. The resume turn carries only
+//! the `-c` form, because **`codex exec resume` has no `-s` at all** — the
+//! vendor's own `--help` lists the flag on `exec` and not on `exec resume`,
+//! and that asymmetry is the most fragile seam in this file.
+//!
+//! It is measured rather than assumed, twice. D508's probe pair on 2026-08-20
+//! pinned `read-only` through it; D560's ladder on 2026-09-15
+//! (`codex-cli 0.155.0-alpha.4`) created a thread under the first-turn argv
+//! and resumed it four times under the resume argv, on a machine whose own
+//! `config.toml` sets `sandbox_mode` to `danger-full-access`. A resumed turn's
+//! shell write outside the working tree failed with `operation not
+//! permitted` and created no file, and the vendor's own persisted rollout
+//! recorded five `turn_context` entries with distinct `turn_id`s, each
+//! carrying `"sandbox_policy":{"type":"workspace-write","network_access":false,…}`
+//! and `"approval_policy":"never"`. The person's permissive config did not
+//! reach any turn, which is the failure this seam exists to rule out.
 //!
 //! `approval_policy` is pinned beside the sandbox for the same reason and it is
 //! not decoration: the approval posture is otherwise whatever the person's own
 //! `config.toml` says, which on one machine is `never` and on another is not.
-//! Two keys, and the never-composed rule below narrows to **exactly** these
-//! two.
+//! Under `never` a write the sandbox denies is denied, not asked about, so a
+//! headless turn never stops on a question nobody can answer. Two keys, and
+//! the never-composed rule below narrows to **exactly** these two.
 //!
 //! # What the posture actually bounds
 //!
 //! Measured turn-free through `codex sandbox`, which runs an arbitrary command
-//! under exactly the composed override, and corroborated by the rollout's own
-//! `permission_profile` — `file_system: restricted` with a single `root`/`read`
-//! entry, `network: restricted`:
+//! under exactly the composed override, by real turns under the shipped argv,
+//! and corroborated by the rollout's own `permission_profile` — one `root`/
+//! `read` entry, `write` entries for the cwd, `/tmp` and `$TMPDIR`, the cwd's
+//! own `.git`, `.agents` and `.codex` carved back to `read`, and
+//! `network: restricted`:
 //!
-//! - **writes** — denied, including inside the child's own cwd.
-//! - **reads** — the whole filesystem. `~/.ssh/known_hosts` and codex's own
-//!   `auth.json` both read cleanly under it.
+//! - **writes** — the child's cwd and everything under it, `/tmp` and
+//!   `$TMPDIR`; denied everywhere else. The carve-out is the clause a person
+//!   would otherwise get wrong: the cwd's `.git` is read-only, so a codex
+//!   teammate edits files and **cannot commit** — `git commit` fails creating
+//!   `.git/index.lock`.
+//! - **reads** — the whole filesystem. `~/.ssh/known_hosts` reads cleanly
+//!   under it.
 //! - **network** — denied, at the socket and not only at DNS: a request to a
 //!   literal address fails to connect rather than failing to resolve.
 //!
@@ -67,10 +84,12 @@
 //! # What is never composed
 //!
 //! [`NEVER_COMPOSED`](crate::codex::NEVER_COMPOSED) is the single source, iterated by the test rather than
-//! copied into it, and it is asserted absent from **both** argvs. Two entries
-//! are values rather than flags — `workspace-write` and `danger-full-access`,
-//! the two `-s` values that are not the floor — because a posture is escaped
-//! as easily by a value as by a flag.
+//! copied into it, and it is asserted absent from **both** argvs. One entry is
+//! a value rather than a flag — `danger-full-access`, the one `-s` value wider
+//! than the floor — because a posture is escaped as easily by a value as by a
+//! flag. `read-only`, the value narrower than it, is not on the list: it
+//! widens nothing, and it is the value the per-agent choice (bead
+//! `ganja-code-n0e0`) will reach for.
 //!
 //! `-c/--config` is the one flag here that is composed *and* dangerous: it can
 //! set any key the config file can. So the rule over it is narrower than
@@ -78,8 +97,8 @@
 //! **one argv token including its quotes**. The quotes are load-bearing rather
 //! than cosmetic: `-c`'s own help says the value portion "is parsed as TOML; if
 //! it fails to parse as TOML, the raw string is used as a literal", so
-//! `sandbox_mode="read-only"` is a TOML string where `sandbox_mode=read-only`
-//! is a bare word that happens to work today.
+//! `sandbox_mode="workspace-write"` is a TOML string where
+//! `sandbox_mode=workspace-write` is a bare word that happens to work today.
 //!
 //! `-p/--profile` is on the list for a reason worth stating, because a probe
 //! narrowed it: at this version a person's own config **cannot** select a
@@ -120,11 +139,12 @@ use crate::shim::{Door, Driver, Launch, Reply, Shape, Turn};
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "codex";
 
-/// The `-s` value D508(a) pins, and one of that flag's three documented values.
-pub const SANDBOX_VALUE: &str = "read-only";
+/// The `-s` value **D560** pins, and one of that flag's three documented
+/// values (`read-only`, `workspace-write`, `danger-full-access`).
+pub const SANDBOX_VALUE: &str = "workspace-write";
 
 /// The sandbox override, as **one argv token** — quotes included.
-pub const SANDBOX_OVERRIDE: &str = "sandbox_mode=\"read-only\"";
+pub const SANDBOX_OVERRIDE: &str = "sandbox_mode=\"workspace-write\"";
 
 /// The approval override, as one argv token.
 pub const APPROVAL_OVERRIDE: &str = "approval_policy=\"never\"";
@@ -148,8 +168,10 @@ pub const PINNED_KEYS: [&str; 2] = ["sandbox_mode", "approval_policy"];
 /// give, and the reaper's witness is therefore deliberately blind to a pane
 /// running it (the plan says so out loud).
 ///
-/// Measured on 2026-08-20 against `codex-cli 0.149.0-alpha.1`: a pane launched
-/// with exactly these words reached the composer with both floors accepted.
+/// Measured on 2026-09-15 against `codex-cli 0.155.0-alpha.4` (**D560**; the
+/// 2026-08-20 recording did the same for `read-only` on 0.149.0-alpha.1): a
+/// pane launched with exactly these words reached the composer, and its own
+/// `/status` read the floors back as `Custom (workspace, never)`.
 /// The recording, `tests/fixtures/codex-tui-probe.txt`, is what the test
 /// compares this against rather than a second literal. The quotes inside the
 /// two values are bytes codex reads as TOML strings and must reach the binary
@@ -208,7 +230,8 @@ pub const REFUSED_NO_LOGIN: &str = "codex is on this session's PATH but has no u
 /// either hands the child a wider posture than the grant, or widens what it
 /// reads a posture *from*:
 ///
-/// - the two `-s` values that are not the floor, as values rather than flags;
+/// - `danger-full-access`, the one `-s` value wider than the floor, as a value
+///   rather than a flag;
 /// - the three documented escape hatches (`--approve-for-me` routes approvals
 ///   through the workspace-write sandbox; the two `--dangerously-` flags say
 ///   what they are);
@@ -232,8 +255,7 @@ pub const REFUSED_NO_LOGIN: &str = "codex is on this session's PATH but has no u
 ///   where the turn is recorded or which model answers it. The last of those is
 ///   the strong spelling of the class the other two reach obliquely, so it
 ///   belongs beside them rather than being left to the person's own config.
-pub const NEVER_COMPOSED: [&str; 20] = [
-    "workspace-write",
+pub const NEVER_COMPOSED: [&str; 19] = [
     "danger-full-access",
     "--approve-for-me",
     "--dangerously-bypass-approvals-and-sandbox",

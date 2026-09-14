@@ -130,7 +130,7 @@ fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
     assert_eq!(
         line,
         format!(
-            "{LAUNCH_HEAD}exec codex -c 'sandbox_mode=\"read-only\"' -c \
+            "{LAUNCH_HEAD}exec codex -c 'sandbox_mode=\"workspace-write\"' -c \
              'approval_policy=\"never\"'{LAUNCH_TAIL}"
         )
     );
@@ -174,7 +174,7 @@ fn every_drivers_launch_line_is_the_wipe_then_exec_the_binary_and_its_floors() {
 fn a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_counts() {
     let needle = "exec /opt/homebrew/bin/grok";
     let launch_row =
-        "❯ exec /opt/homebrew/bin/grok --sandbox read-only --permission-mode dontAsk || exit";
+        "❯ exec /opt/homebrew/bin/grok --sandbox workspace --permission-mode acceptEdits || exit";
     // The reporter's zsh prompt: a directory row, then the glyph row the
     // line was typed on.
     let typed = format!("~\n{launch_row}\n");
@@ -186,7 +186,7 @@ fn a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_count
         format!("❯ ~\n$ {}\n", launch_row.strip_prefix("❯ ").expect("the row opens on the glyph"));
     assert!(!composer_shown(&above, needle, "❯", true));
     // The CLI drawing under the launch row is the composer.
-    let drawn = format!("{typed}\n  main sandbox:read-only ~/rust\n\n❯ \n");
+    let drawn = format!("{typed}\n  main sandbox:workspace ~/rust\n\n❯ \n");
     assert!(composer_shown(&drawn, needle, "❯", true));
     assert!(composer_shown(&drawn, needle, "❯", false));
     // And a marker nowhere is no composer.
@@ -203,7 +203,7 @@ fn a_screen_without_the_launch_row_counts_a_marker_only_once_the_shell_is_gone()
     // The idle prompt alone, the line not yet echoed.
     assert!(!composer_shown("~\n❯ \n", needle, "❯", false));
     // The CLI cleared the screen and drew: nothing of the shell's remains.
-    let cleared = "  main sandbox:read-only ~/rust\n\n❯ \n";
+    let cleared = "  main sandbox:workspace ~/rust\n\n❯ \n";
     assert!(composer_shown(cleared, needle, "❯", true));
     assert!(!composer_shown(cleared, needle, "❯", false));
     // No marker at all is no composer, whatever the shell did.
@@ -224,7 +224,7 @@ fn a_wiped_screen_is_no_composer_until_the_cli_has_drawn_and_the_shell_is_gone()
     }
     // The CLI drew on the wiped screen: its marker counts once, and only
     // once, the foreground stopped being the shell.
-    let drawn = "  main sandbox:read-only ~/rust\n\n❯ \n";
+    let drawn = "  main sandbox:workspace ~/rust\n\n❯ \n";
     assert!(!composer_shown(drawn, needle, "❯", false));
     assert!(composer_shown(drawn, needle, "❯", true));
 }
@@ -570,9 +570,10 @@ fn the_agy_and_codex_pane_clauses_are_the_ones_their_probes_recorded() {
     assert!(codex.contains("asks no approval"), "{codex}");
 }
 
-/// grok's pane sentence is the approval behaviour its 1.0.7 recording
-/// holds — the TUI asks the person, a rejection ends the turn, an approved
-/// write is still denied by read-only — and it still carries none of the
+/// grok's pane sentence is the approval behaviour its **D560** recording
+/// holds on 1.0.31 — the file tools write unasked, the TUI asks the person
+/// before a shell write, the floor holds against an approved write outside
+/// it, and only a rejection ends the turn — and it still carries none of the
 /// headless rider about that flag.
 #[test]
 fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
@@ -580,7 +581,10 @@ fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
         .lines()
         .find_map(|line| line.strip_prefix("approval probe ("))
         .expect("grok's recording carries the approval probe");
+    assert!(probe.starts_with("1.0.31, --sandbox workspace"), "the current floor's: {probe}");
+    assert!(probe.contains("with no approval prompt"), "{probe}");
     assert!(probe.contains("approval prompt to the person"), "{probe}");
+    assert!(probe.contains("landed the file"), "{probe}");
     assert!(probe.contains("did NOT create the file"), "{probe}");
     assert!(probe.contains("rejecting that ended the turn"), "{probe}");
     assert!(
@@ -597,8 +601,9 @@ fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
     let holds = grok.find("holds against your yes").expect(&grok);
     let ends = grok.find("only your no ends the turn").expect(&grok);
     let preamble = grok.find("own TUI in a tmux pane").expect(&grok);
-    let flag = grok.find("dontAsk").expect(&grok);
+    let flag = grok.find(crate::grok::PERMISSION_MODE).expect(&grok);
     assert!(asks < holds && holds < ends && ends < preamble && preamble < flag, "{grok}");
+    assert!(grok.contains("file edits run unasked"), "what the composed mode buys: {grok}");
     // And the headless rider about that flag is not borrowed onto this door.
     let lines = spawn_lines(MemberBackend::Grok);
     assert!(!lines.iter().any(|line| line == shim::GROK_MODE_LINE), "{lines:?}");

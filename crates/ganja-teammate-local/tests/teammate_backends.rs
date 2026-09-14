@@ -350,16 +350,19 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
         assert_eq!(posture_line(backend), None, "{}", backend_name(backend));
     }
 
-    // codex's sentence is **measured** as of W3, and this is the regression
-    // pin rather than the measurement: the assertion that it equals what its
-    // probe actually recorded compares against the recording itself, in
+    // codex's sentence is **measured** as of W3 and re-measured for **D560**'s
+    // `workspace-write` floor, and this is the regression pin rather than the
+    // measurement: the assertion that it equals what its probe actually
+    // recorded compares against the recording itself, in
     // `teammate_shim_codex.rs`. Both matter — one keeps the sentence honest,
     // the other keeps it from drifting.
     assert_eq!(
         posture_line(MemberBackend::Codex),
         Some(
-            "sandbox=read-only: writes denied, whole-disk read, network denied — may read any \
-             file you can, including credentials, but has no network to send them over"
+            "sandbox=workspace-write: writes in the working tree (not .git) and temp only, \
+             whole-disk read, network denied — may read any file you can, including \
+             credentials, and edit files outside the snapshot chain /undo walks, but has no \
+             network to send them over"
         )
     );
     // agy's is **measured** as of W4 and *shipped* as of Dv-7, and it is the
@@ -377,17 +380,18 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
              the snapshot chain /undo walks"
         )
     );
-    // grok's is **measured** as of W5, last clause included: its gating probe
-    // completed a pure-read turn and cancelled a write and a shell turn on the
-    // same conversation. The comparison against the recording itself is in
+    // grok's is **measured** as of W5 and re-measured for **D560**'s
+    // `workspace` floor, last clause included: its probe wrote and edited in
+    // the working tree unasked and cancelled a shell write on the same
+    // conversation. The comparison against the recording itself is in
     // `teammate_shim_grok.rs`; this is the regression pin.
     assert_eq!(
         posture_line(MemberBackend::Grok),
         Some(
-            "sandbox=read-only: writes denied outside ~/.grok and temp, whole-disk read, no \
-             network bound (macOS) — may read any file you can, including credentials, and may \
-             send them anywhere; reading takes no approval, and a tool request that needs one \
-             ends the turn"
+            "sandbox=workspace: writes in the working tree, ~/.grok and temp only, whole-disk \
+             read, no network bound — may read any file you can, including credentials, send \
+             them anywhere, and edit files outside the snapshot chain /undo walks; a shell \
+             write asks, which ends the turn"
         )
     );
 

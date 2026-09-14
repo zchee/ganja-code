@@ -11,9 +11,9 @@
 //! # Why the transcript, and not the pane
 //!
 //! A shim teammate is a foreign CLI in a pty. It has no `send_message` tool,
-//! no mailbox, and — for codex and grok — a read-only sandbox that would
-//! refuse to write one, so **the agent itself cannot answer**: nothing this
-//! side asks it to do would reach the lead. What each of these CLIs does do,
+//! no mailbox, and — for codex and grok — a sandbox that keeps its writes to
+//! the working tree and would refuse to write one, so **the agent itself
+//! cannot answer**: nothing this side asks it to do would reach the lead. What each of these CLIs does do,
 //! unasked, is write its own conversation to its own home. So the answer road
 //! is ganja reading that file and mailing what it finds, exactly as the
 //! headless shim mails what its child printed — the lead's side is unchanged,
