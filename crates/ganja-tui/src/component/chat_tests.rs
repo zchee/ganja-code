@@ -6,9 +6,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 
 use super::{
-    BULLET, COMPACT_BLUE, COMPACT_PERIWINKLE, Chat, Compaction, Instant, RESULT,
-    WORKING_FRAME_STEP, WORKING_FRAMES, WORKING_VERBS, Working, compact_elapsed, compact_pulse,
-    compact_tokens, elapsed, split_at_width, working_frame, wrap,
+    BULLET, COMPACT_BLUE, COMPACT_PERIWINKLE, Chat, Compaction, INSPECTOR_HINT, Instant, RESULT,
+    WORKING_FRAME_STEP, WORKING_FRAMES, WORKING_VERBS, Working, clamp_hint, compact_elapsed,
+    compact_pulse, compact_tokens, elapsed, fold_hint, split_at_width, working_frame, wrap,
 };
 use crate::theme::{Theme, Themes};
 
@@ -544,7 +544,7 @@ fn a_one_line_expansion_folds_to_one_line_and_a_resumed_one_folds_the_same() {
     let drawn = rendered(&mut live, area);
     assert_eq!(
         drawn[..2],
-        ["> /init".to_owned(), format!("{RESULT}expanded to 1 line (ctrl+t to read it)")],
+        ["> /init".to_owned(), format!("{RESULT}expanded to 1 line (ctrl+t to expand)")],
     );
     assert_eq!(rendered(&mut resumed, area), drawn, "a resume draws what a live turn drew");
 }
@@ -564,8 +564,82 @@ fn text_appended_after_an_expansion_is_drawn_rather_than_folded() {
         lines[..3],
         [
             format!("> {TYPED}"),
-            format!("{RESULT}expanded to 8 lines (ctrl+t to read it)"),
+            format!("{RESULT}expanded to 8 lines (ctrl+t to expand)"),
             "  a held message to w1 was released".to_owned(),
+        ],
+    );
+}
+
+/// The fold counts lines the way the pane would draw them: a trailing
+/// newline opens no line of its own, a `\r\n` ending is one line break and
+/// not two, and an empty expansion folds to nothing at all rather than to a
+/// row naming a template that is not there.
+#[test]
+fn the_fold_counts_the_lines_a_template_draws_and_an_empty_one_folds_to_nothing() {
+    let cases = [
+        ("one line", "just this", Some("expanded to 1 line (ctrl+t to expand)")),
+        (
+            "a trailing newline adds no line",
+            "a\nb\n",
+            Some("expanded to 2 lines (ctrl+t to expand)"),
+        ),
+        ("a crlf ending is one break", "a\r\nb", Some("expanded to 2 lines (ctrl+t to expand)")),
+        (
+            "a crlf trailing newline adds no line",
+            "a\r\nb\r\n",
+            Some("expanded to 2 lines (ctrl+t to expand)"),
+        ),
+        ("a lone newline is one empty line", "\n", Some("expanded to 1 line (ctrl+t to expand)")),
+        ("an empty expansion folds to nothing", "", None),
+    ];
+    for (name, expansion, expected) in cases {
+        assert_eq!(fold_hint(expansion).as_deref(), expected, "{name}: {expansion:?}");
+    }
+}
+
+/// The fold row and the clamped-preview hint name the inspector in the same
+/// words, so a person who learned one has already read the other.
+#[test]
+fn the_fold_row_and_a_clamped_preview_name_the_inspector_alike() {
+    let fold = fold_hint("a\nb").expect("a two-line expansion folds");
+    let clamp = clamp_hint(2);
+    assert!(fold.ends_with(INSPECTOR_HINT), "fold row: {fold:?}");
+    assert!(clamp.ends_with(INSPECTOR_HINT), "clamp hint: {clamp:?}");
+}
+
+/// An empty expansion draws the typed line alone, the way an ordinary prompt
+/// draws: no row under it, and nothing under a caret the person did not type.
+#[test]
+fn an_empty_expansion_draws_the_typed_line_as_an_ordinary_prompt() {
+    let mut chat = Chat::default();
+    chat.start_message(Message::from_command("/empty", ""));
+    let mut plain = Chat::default();
+    plain.start_message(Message::user("/empty"));
+
+    let area = Rect::new(0, 0, 40, 3);
+    let drawn = rendered(&mut chat, area);
+    assert_eq!(drawn, ["> /empty", "", ""], "the typed line and nothing under it");
+    assert_eq!(drawn, rendered(&mut plain, area), "exactly what a typed prompt of that line draws");
+}
+
+/// At a width the typed line and the fold row both overrun, each wraps under
+/// its own lead — the typed line under the caret's hang, the fold row under
+/// the `⎿` hang — the path a tool result's rows already take, so neither
+/// continuation can be read as a line of its own.
+#[test]
+fn a_narrow_pane_wraps_the_typed_line_and_the_fold_row_under_their_own_hangs() {
+    let mut chat = Chat::default();
+    chat.start_message(Message::from_command(TYPED, EXPANSION));
+
+    let lines = rendered(&mut chat, Rect::new(0, 0, 40, 5));
+    assert_eq!(
+        lines,
+        [
+            "> /team 1 --backend codex port the",
+            "  loader",
+            "  \u{23bf} expanded to 8 lines (ctrl+t to",
+            "    expand)",
+            "",
         ],
     );
 }

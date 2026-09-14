@@ -296,14 +296,22 @@ async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carrie
         registry.names()
     );
 
-    let (provider, requests) =
-        ScriptedProvider::new(vec![says("one"), says("two"), says("three"), says("four")]);
+    let (provider, requests) = ScriptedProvider::new(vec![
+        says("one"),
+        says("two"),
+        says("three"),
+        says("four"),
+        says("five"),
+    ]);
     let engine = Engine::new(
         provider,
         "recorder-model",
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
+    // The builtin roster, so `/team`'s head token parses as a spec (**D549**)
+    // rather than being refused for want of any agent to name.
+    .with_agents(ganja_testkit::agent_registry(&Config::default()))
     .with_commands(Arc::new(registry));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -313,6 +321,10 @@ async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carrie
         // The composer's surrounding whitespace is not part of the line.
         ("init", "  focus on the test suite  "),
         ("review", "the shell tool"),
+        // A parsed spec: the template is handed only the task, but the line
+        // keeps the head token and the flag — an `/undo` refill of a line
+        // without them would re-run the pipeline on the default roster.
+        ("team", "1:executor --backend codex port the loader"),
     ] {
         engine
             .send(Command::RunCommand { name: name.to_owned(), args: args.to_owned() })
@@ -340,6 +352,7 @@ async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carrie
             Some("/init"),
             Some("/init focus on the test suite"),
             Some("/review the shell tool"),
+            Some("/team 1:executor --backend codex port the loader"),
             None,
         ],
         "each expansion carries its line as typed, and the typed prompt none"
@@ -354,7 +367,12 @@ async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carrie
         text(&minted[0])
     );
     assert_eq!(text(&minted[2]), "review the diff\nfocusing on the shell tool");
-    assert_eq!(text(&minted[3]), "/review is only a word here");
+    let team = text(&minted[3]);
+    assert!(
+        team.contains("port the loader") && !team.contains("1:executor"),
+        "the template was handed the task alone, spec cut out: {team}"
+    );
+    assert_eq!(text(&minted[4]), "/review is only a word here");
 
     let requests = requests.lock().expect("the request log is never poisoned");
     let sent = requests[2]

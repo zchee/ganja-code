@@ -2111,10 +2111,21 @@ async fn fallback_title(turn: &Turn) -> String {
     let prompt = history
         .iter()
         .find(|message| message.role == Role::User)
-        .and_then(|message| message.parts.iter().find_map(Part::as_text))
+        .and_then(title_source)
         .unwrap_or(turn.prompt.as_str());
 
     clip_title(prompt)
+}
+
+/// What a fallback title is clipped from: the slash line a command expansion
+/// was typed as (**D561**) when the message has one, else its first text.
+///
+/// A session a command started would otherwise be listed under its template's
+/// opening sentence — `/team`'s names no task at all — while the pane draws
+/// the line the person typed; the listing names what they asked for, which is
+/// the line.
+fn title_source(message: &Message) -> Option<&str> {
+    message.command.as_deref().or_else(|| message.parts.iter().find_map(Part::as_text))
 }
 
 fn clip_title(prompt: &str) -> String {
@@ -2166,7 +2177,7 @@ async fn spawn_title_if_untitled(turn: &Turn) {
             part.body = PartBody::Text { text: format!("@{path}") };
         }
     }
-    let fallback = clip_title(first_user.parts.iter().find_map(Part::as_text).unwrap_or_default());
+    let fallback = clip_title(title_source(&first_user).unwrap_or_default());
 
     let provider = Arc::clone(&turn.provider);
     let model = turn.model.clone();

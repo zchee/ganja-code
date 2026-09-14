@@ -3,6 +3,6 @@ source: crates/ganja-tui/src/component/chat_tests.rs
 expression: "lines.join(\"\\n\")"
 ---
 > /team 1 --backend codex port the loader
-  ⎿ expanded to 8 lines (ctrl+t to read it)
+  ⎿ expanded to 8 lines (ctrl+t to expand)
 
 ● On it.

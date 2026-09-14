@@ -1430,7 +1430,8 @@ impl Entry {
                 // A command expansion (**D561**): the line the person typed
                 // stands where the prompt would, and the template it expanded
                 // to is folded to one dim row in the result grammar — a page
-                // of instructions under a `>` would claim they wrote it. Only
+                // of instructions under a `>` would claim they wrote it — or to
+                // none when it is empty, since there is nothing to read. Only
                 // the first text part is the expansion, which is why the line
                 // is taken rather than read; anything the engine appended
                 // after it (a settlement receipt) draws as it always did. The
@@ -1438,10 +1439,13 @@ impl Entry {
                 PartBody::Text { text } => {
                     let lead = prompt_lead(lines.is_empty());
                     let rows = match typed.take() {
-                        Some(typed) => vec![
-                            Row::new(&lead, typed.to_owned(), theme.accent),
-                            Row::new(RESULT, fold_hint(text), theme.dim),
-                        ],
+                        Some(typed) => {
+                            let mut rows = vec![Row::new(&lead, typed.to_owned(), theme.accent)];
+                            rows.extend(
+                                fold_hint(text).map(|hint| Row::new(RESULT, hint, theme.dim)),
+                            );
+                            rows
+                        }
                         None => vec![Row::new(&lead, text.clone(), theme.accent)],
                     };
                     lines.extend(lay_out(&rows, columns));
@@ -2033,28 +2037,40 @@ fn result_rows(lines: Vec<(String, Style)>, claimed: bool) -> Vec<Row> {
         .collect()
 }
 
-/// What a clamped preview says about the lines it left out.
+/// The parenthetical every row that stands in for text it does not draw ends
+/// with — [`clamp_hint`]'s and [`fold_hint`]'s alike, spelled once so the two
+/// cannot come to name the one key in two ways.
 ///
 /// Claude Code's own hint names its `ctrl+o` expander; the whole of a call's
 /// output lives in ganja's Ctrl+T inspector, whose transcript tab replays
 /// exactly what `/copy` writes, so the hint names that one instead (**D487**).
+const INSPECTOR_HINT: &str = "(ctrl+t to expand)";
+
+/// What a clamped preview says about the lines it left out.
 fn clamp_hint(hidden: usize) -> String {
     format!(
-        "\u{2026} +{hidden} line{plural} (ctrl+t to expand)",
-        plural = if hidden == 1 { "" } else { "s" },
+        "\u{2026} +{hidden} line{plural} {INSPECTOR_HINT}",
+        plural = if hidden == 1 { "" } else { "s" }
     )
 }
 
 /// The one row a command expansion is folded to under the line the person
 /// typed (**D561**): how long the template it expanded to runs, and where to
-/// read it — the Ctrl+T inspector, named in [`clamp_hint`]'s own words for
-/// that same reason.
-fn fold_hint(expansion: &str) -> String {
+/// read it, in [`INSPECTOR_HINT`]'s words.
+///
+/// Lines are counted the way [`str::lines`] counts them, so a trailing newline
+/// adds none and a `\r\n` ending is one. An empty expansion has nothing to
+/// fold and nothing to read, so it answers [`None`] and the typed line draws
+/// alone, as an ordinary prompt does — "expanded to 0 lines" would name a
+/// template that is not there.
+fn fold_hint(expansion: &str) -> Option<String> {
     let lines = expansion.lines().count();
-    format!(
-        "expanded to {lines} line{plural} (ctrl+t to read it)",
-        plural = if lines == 1 { "" } else { "s" },
-    )
+    (lines > 0).then(|| {
+        format!(
+            "expanded to {lines} line{plural} {INSPECTOR_HINT}",
+            plural = if lines == 1 { "" } else { "s" }
+        )
+    })
 }
 
 /// The first `TOOL_PREVIEW_LINES` lines of `text`, and how many were cut.

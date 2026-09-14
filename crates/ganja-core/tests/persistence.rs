@@ -30,7 +30,7 @@ use ganja_core::provider::{
     ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake,
 };
 use ganja_core::tool::Registry;
-use ganja_core::{Engine, EngineError, SessionId, SessionInfo, Storage, storage};
+use ganja_core::{Config, Engine, EngineError, SessionId, SessionInfo, Storage, storage};
 use tokio_util::sync::CancellationToken;
 
 /// A store rooted in a directory that vanishes with the test. The directory
@@ -1061,6 +1061,71 @@ async fn a_failed_title_request_falls_back_to_the_prompt() {
     let sid = engine.current_session().expect("the first prompt created a session").id;
     let titled = eventually("the fallback title write", || stored_info(&storage, &sid).title).await;
     assert_eq!(titled, prompt, "a dead title request falls back to the clipped first prompt");
+}
+
+/// **D561**. A session a command started is listed under the line the person
+/// typed, not under its template's opening sentence: the fake provider asks
+/// for no title, so the fallback is all the listing ever gets, and a `/team`
+/// template's first sentence names no task at all. The spec tokens survive
+/// into the title the way they survive into the drawn line.
+#[tokio::test]
+async fn a_session_a_command_started_is_titled_by_the_line_typed_rather_than_the_template() {
+    let (_dir, storage) = store();
+    let engine = persistent(
+        Arc::new(FakeProvider::new("on it", Duration::from_millis(1))),
+        fake::MODEL,
+        storage.clone(),
+    )
+    // The builtin roster, so the head token parses as a spec (**D549**).
+    .with_agents(ganja_testkit::agent_registry(&Config::default()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let typed = "/team 1:executor --backend codex port the loader";
+    engine
+        .send(Command::RunCommand {
+            name: "team".to_owned(),
+            args: "1:executor --backend codex port the loader".to_owned(),
+        })
+        .await
+        .expect("an idle engine runs the command");
+    drain(&mut events).await;
+
+    let sid = engine.current_session().expect("the command created a session").id;
+    let transcript = storage.load_transcript(&sid).expect("the transcript loads");
+    assert!(
+        !text_of(&transcript[0]).starts_with(typed),
+        "the message text is the expansion, so a title equal to the line came from the line"
+    );
+    assert_eq!(
+        stored_info(&storage, &sid).title.as_deref(),
+        Some(typed),
+        "the fallback title is the typed line, already on disk at finish"
+    );
+}
+
+/// The same rule on the other fallback route: a provider that is asked for a
+/// title and fails to answer falls back to the typed line too, while the title
+/// request itself still carries the whole message.
+#[tokio::test]
+async fn a_failed_title_request_for_a_command_falls_back_to_the_line_typed() {
+    let (_dir, storage) = store();
+    let provider = LaneProvider::new(
+        "anthropic",
+        vec![Ok(reply("done", 4)), Err(ProviderError::Transport("boom".to_owned()))],
+    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone());
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::RunCommand { name: "init".to_owned(), args: "focus on tests".to_owned() })
+        .await
+        .expect("init is builtin");
+    drain(&mut events).await;
+
+    let sid = engine.current_session().expect("the command created a session").id;
+    let titled = eventually("the fallback title write", || stored_info(&storage, &sid).title).await;
+    assert_eq!(titled, "/init focus on tests", "the typed line, not the template's first words");
 }
 
 #[tokio::test]
