@@ -127,7 +127,9 @@ async fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     let rendered = refused.to_string();
     assert!(rendered.contains("default_provider") && rendered.contains("gemini"), "{rendered}");
 
-    pre_split_chatgpt_login_only(home.path());
+    ganja_testkit::plant_pre_split_chatgpt_login(home.path());
+    // And the stamps that ordered the two logins it replaced go with them.
+    fs::write(&stamps, "{}").expect("the stamps clear");
 
     // **AC-0.4.** A machine holding nothing but a ChatGPT login written before
     // **D555**. That entry sits under `openai`, which now names the platform
@@ -176,42 +178,5 @@ async fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     // SAFETY: as above.
     unsafe {
         env::remove_var("GANJA_PROVIDER");
-    }
-}
-
-/// Replaces the store with one holding a single pre-**D555** ChatGPT login: an
-/// OAuth entry under `openai`, the id that used to carry both credentials.
-///
-/// Written as a file rather than through `auth::set_oauth` because that
-/// function stores under the id it is given and the whole point of this fixture
-/// is the id it is *not* given any more — there is no supported way left to
-/// produce this entry, which is exactly why a test has to.
-fn pre_split_chatgpt_login_only(data_home: &std::path::Path) {
-    let path = auth::store_path().expect("the store has a path");
-    assert!(path.starts_with(data_home), "the fixture must not reach a real store: {path:?}");
-
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "openai": {
-                "type": "oauth",
-                "refresh": "rt-pre-split-fixture",
-                "access": "at-pre-split-fixture",
-                "expires": 4_102_444_800_000_u64,
-            }
-        }))
-        .expect("the fixture serializes"),
-    )
-    .expect("the fixture writes");
-    fs::write(auth::stamps_path().expect("the stamps have a path"), "{}")
-        .expect("the stamps clear");
-
-    // The store refuses a credential file other users can read.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("the fixture is made private");
     }
 }

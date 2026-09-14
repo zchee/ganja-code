@@ -10,10 +10,10 @@
 //! # Running it
 //!
 //! Inert unless **both** are true: `GANJA_LIVE_TEST=1`, and this machine holds
-//! a stored ChatGPT login that is what a session would actually authenticate
-//! with. The second half is [`provider::wire_lists_models`]'s question, not a
-//! second copy of it — which means an exported `OPENAI_API_KEY` makes the probe
-//! skip, because a key outranks a login and such a session is not a seat at all.
+//! a stored ChatGPT login under the seat's own id, `chatgpt`. Since **D555**
+//! that id is the whole of what makes a session a seat, so an exported
+//! `OPENAI_API_KEY` no longer matters here: it is the platform's credential,
+//! not the seat's.
 //!
 //! ```sh
 //! # nextest, which needs to be told to reach an ignored test:
@@ -125,8 +125,8 @@ use std::sync::{Arc, Mutex};
 use std::{env, fmt, fs};
 
 use futures::StreamExt as _;
+use ganja_core::auth;
 use ganja_core::auth::openai::Login;
-use ganja_core::auth::{self};
 use ganja_core::protocol::{Message, Usage};
 use ganja_core::provider::{
     self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, responses,
@@ -451,19 +451,17 @@ fn described(error: &ProviderError) -> String {
 
 /// The credential situation this probe needs, or [`false`] with the reason.
 ///
-/// The seat half is [`provider::wire_lists_models`]'s own question rather than
-/// a second reading of the store: it answers `true` for exactly the session
-/// this probe is about — a stored ChatGPT login with no exported key outranking
-/// it — and it answers it without handing anything back that could be printed.
+/// The seat half reads the store directly: a stored login under
+/// [`responses::CHATGPT_ID`], which since **D555** is the whole of what makes a
+/// session a seat, whatever key is exported beside it. A probe whose whole
+/// subject is the credential this build presents cannot run against one that
+/// is not there — and the read answers presence only, handing back nothing
+/// that could be printed.
 fn seated() -> bool {
     if env::var(LIVE_ENV).as_deref() != Ok("1") {
         eprintln!("skipping: {LIVE_ENV} is not 1");
         return false;
     }
-    // The id is what makes a session a seat since **D555**, so the gate that
-    // used to ask about credentials asks the store directly instead: a probe
-    // whose whole subject is the credential this build presents cannot run
-    // against one that is not there.
     if auth::oauth_for(responses::CHATGPT_ID).ok().flatten().is_none() {
         eprintln!(
             "skipping: this machine holds no ChatGPT login under `{}` — run \

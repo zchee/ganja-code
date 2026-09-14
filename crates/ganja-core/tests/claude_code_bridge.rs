@@ -1,10 +1,9 @@
 //! The `claude-code` wire end to end: a real [`Engine`] answering a real
-//! `claude` CLI's `can_use_tool` over a real duplex (**D556**, W4 of
-//! `.omc/plans/2026-09-08-claude-code-wire.md`).
+//! `claude` CLI's `can_use_tool` over a real duplex (**D556**).
 //!
 //! The specification is the live recording at
 //! `crates/ganja-provider/tests/fixtures/claude-code-replay-run1.json` and the
-//! wire W3 landed from it, not this file's prose: where the two disagree the
+//! wire built from it, not this file's prose: where the two disagree the
 //! recording is right.
 //!
 //! **Why this suite exists and `ganja-provider`'s own does not cover it.** A
@@ -36,7 +35,7 @@ use ganja_core::provider::claude_code::{ClaudeCodeProvider, argv, binding};
 use ganja_core::provider::{Provider, ProviderError};
 use ganja_core::tool::Registry;
 use ganja_testkit::fake_claude::{self, Call, Record, Script, Turn};
-use ganja_testkit::{LogCapture, RecorderTool, drain, drain_answering};
+use ganja_testkit::{LogCapture, RecorderTool, drain, drain_answering, held_at_dialog, prompt};
 
 /// The version the double reports, so nothing here trips the floor.
 const VERSION: &str = "2.1.263 (Claude Code)";
@@ -54,6 +53,11 @@ const ANSWER: &str = "the answer";
 /// on `tokio::time::Instant`, so a paused runtime reaches it by arithmetic
 /// rather than by waiting, and a smaller number is only easier to read.
 const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a call's dialog may take to be raised. Generous because CI
+/// machines stall; a turn that raises none fails naming it rather than
+/// hanging the suite.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------
 // The double
@@ -73,8 +77,9 @@ struct Spawned {
 /// the same code: that one is `pub(crate)` to the crate that owns the wire,
 /// and widening it would put a test double on the public surface of the very
 /// thing whose public surface is the point. What *is* shared is what matters —
-/// the script format and the record, both [`ganja_testkit`]'s, so the two
-/// suites cannot drift into scripting different CLIs.
+/// the script format, the record and the argv the real CLI refuses, all
+/// [`ganja_testkit`]'s, so the two suites cannot drift into scripting
+/// different CLIs.
 struct FakeCli {
     script: Script,
     spawns: Arc<Mutex<Vec<Spawned>>>,
@@ -135,17 +140,16 @@ impl Spawner for FakeCli {
         let spelled: Vec<String> =
             argv.iter().map(|token| token.to_string_lossy().into_owned()).collect();
 
-        let session_id = spelled
-            .iter()
-            .position(|token| token == "--session-id")
-            .and_then(|at| spelled.get(at + 1))
-            .cloned()
-            .unwrap_or_default();
+        // The double refuses what the real CLI refuses, by the testkit's own
+        // list rather than the wire's, as the re-exec'd fake does.
+        if let Some(refused) = fake_claude::refusal(&spelled) {
+            return Err(ProviderError::Transport(refused));
+        }
 
         let record = Arc::new(Mutex::new(Record {
             argv: spelled.clone(),
             cwd: env.cwd.display().to_string(),
-            session_id,
+            session_id: fake_claude::session_id(&spelled),
             ..Record::default()
         }));
 
@@ -165,8 +169,7 @@ impl Spawner for FakeCli {
             .filter(|spawn| spawn.cwd == env.cwd)
             .map(|spawn| spawn.record.lock().expect("the record is never poisoned").turns_played)
             .sum();
-        let mut script = self.script.clone();
-        script.turns = script.turns.split_off(played.min(script.turns.len()));
+        let script = self.script.resumed_after(played);
 
         self.spawns.lock().expect("the spawn list is never poisoned").push(Spawned {
             argv: spelled,
@@ -205,19 +208,30 @@ fn exit_status(code: i32) -> std::process::ExitStatus {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// A wire on `cli`, with its per-key scratch and bindings under `home`.
+/// A wire on `cli`, with its per-key scratch and bindings under `home`, and
+/// the idle `bound` an eviction case runs under ([`None`] leaves the wire's
+/// own).
 ///
 /// Handed back behind an [`Arc`] the caller keeps, because two of the things
 /// this suite asserts are the *wire's* own state rather than the engine's —
 /// how many processes it is holding, and whether a teardown closed them — and
 /// an engine takes its provider by value.
-fn wired(cli: &Arc<FakeCli>, home: &Path) -> Arc<ClaudeCodeProvider> {
-    Arc::new(ClaudeCodeProvider::with_parts(
+fn wired(
+    cli: &Arc<FakeCli>,
+    home: &Path,
+    bound: Option<std::time::Duration>,
+) -> Arc<ClaudeCodeProvider> {
+    let wire = ClaudeCodeProvider::with_parts(
         PathBuf::from("/nonexistent/claude"),
         VERSION.to_owned(),
         Arc::clone(cli) as Arc<dyn Spawner>,
         binding::Paths::under(home),
-    ))
+    );
+
+    Arc::new(match bound {
+        Some(bound) => wire.with_idle_bound(bound),
+        None => wire,
+    })
 }
 
 /// A script whose turns each call [`TOOL`] once and then answer `text`.
@@ -254,17 +268,6 @@ fn rule(action: Action) -> Permissions {
     permissions
 }
 
-/// A prompt, with the four optional fields every frontend leaves empty.
-fn prompt(text: &str) -> Command {
-    Command::SendPrompt {
-        text: text.to_owned(),
-        mentions: Vec::new(),
-        skills: Vec::new(),
-        session_mentions: Vec::new(),
-        peers: Vec::new(),
-    }
-}
-
 /// An engine on `provider`, holding the recorder tool, gated by `permissions`.
 fn seated(
     provider: &Arc<ClaudeCodeProvider>,
@@ -276,6 +279,23 @@ fn seated(
         ganja_core::provider::claude_code::DEFAULT_MODEL,
         Arc::new(Registry::new(vec![tool])),
         permissions,
+    )
+}
+
+/// [`seated`] over a session store at `store`, for a case that needs the
+/// transcript kept — a title request, a rewind, a team continuation.
+fn seated_persistent(
+    provider: &Arc<ClaudeCodeProvider>,
+    tool: Arc<RecorderTool>,
+    permissions: Permissions,
+    store: PathBuf,
+) -> Engine {
+    Engine::persistent(
+        Arc::clone(provider) as Arc<dyn Provider>,
+        ganja_core::provider::claude_code::DEFAULT_MODEL,
+        Arc::new(Registry::new(vec![tool])),
+        permissions,
+        ganja_core::storage::Storage::open(store),
     )
 }
 
@@ -294,36 +314,23 @@ fn says(answers: &[&str]) -> Script {
     }
 }
 
-/// Waits until `cli` has spawned `want` processes, or gives up.
+/// Waits until `ready` holds, or fails naming `what` never happened.
 ///
-/// The title request is a detached task, so a case that asserted on the spawn
-/// count straight after the turn would be asserting on a race. Bounded rather
-/// than unbounded because a failure here should read as "the second spawn
-/// never happened", not as a hung suite.
-async fn spawns_reach(cli: &Arc<FakeCli>, want: usize) {
+/// For what a detached task does — a title request's spawn, an idle eviction —
+/// so a case asserting on it straight after the turn would be asserting on a
+/// race. Bounded rather than unbounded because a failure here should name what
+/// never happened, not hang the suite. It yields rather than sleeps: a sleep on
+/// a `start_paused` runtime would move the very clock the idle bound is
+/// measured on.
+async fn until(what: &str, mut ready: impl FnMut() -> bool) {
     for _ in 0..2_000 {
-        if cli.count() >= want {
+        if ready() {
             return;
         }
         tokio::task::yield_now().await;
     }
 
-    panic!("wanted {want} spawns, the wire made {}", cli.count());
-}
-
-/// Reads the stream up to the first permission dialog and hands its id back,
-/// leaving the turn held open on it.
-async fn held_at_dialog(
-    events: &mut futures::stream::BoxStream<'static, Event>,
-) -> ganja_core::protocol::PermissionId {
-    use futures::StreamExt as _;
-
-    loop {
-        let event = events.next().await.expect("the dialog should arrive before the stream ends");
-        if let Event::PermissionRequested { id, .. } = event {
-            return id;
-        }
-    }
+    panic!("{what} never happened");
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +349,7 @@ async fn one_ask_raises_one_dialog_and_the_answer_runs_the_tool_exactly_once() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["found it"]));
     let (tool, calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let engine = seated(&wired(&cli, home.path()), tool, rule(Action::Ask));
+    let engine = seated(&wired(&cli, home.path(), None), tool, rule(Action::Ask));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
@@ -379,7 +386,7 @@ async fn a_denied_dialog_reaches_the_cli_as_a_refusal_and_runs_nothing() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["never mind"]));
     let (tool, calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let engine = seated(&wired(&cli, home.path()), tool, rule(Action::Ask));
+    let engine = seated(&wired(&cli, home.path(), None), tool, rule(Action::Ask));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
@@ -409,11 +416,11 @@ async fn the_cli_sees_no_tools_call_until_the_dialog_has_been_answered() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["found it"]));
     let (tool, calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let engine = seated(&wired(&cli, home.path()), tool, rule(Action::Ask));
+    let engine = seated(&wired(&cli, home.path(), None), tool, rule(Action::Ask));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
-    let dialog = held_at_dialog(&mut events).await;
+    let (dialog, _) = held_at_dialog(&mut events, PATIENCE).await;
 
     assert!(
         cli.record(0).mcp_results.is_empty(),
@@ -453,21 +460,16 @@ async fn a_title_request_spawns_a_one_shot_beside_the_held_conversation() {
     let data = ganja_testkit::temp_dir();
     let cli = FakeCli::new(says(&["found it", "A Title"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
-    let engine = Engine::persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        ganja_core::provider::claude_code::DEFAULT_MODEL,
-        Arc::new(Registry::new(vec![tool])),
-        rule(Action::Allow),
-        ganja_core::storage::Storage::open(data.path().join("sessions.db")),
-    );
+    let provider = wired(&cli, home.path(), None);
+    let engine =
+        seated_persistent(&provider, tool, rule(Action::Allow), data.path().join("sessions.db"));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
     drain(&mut events).await;
     assert_eq!(provider.held_entries(), 1, "the conversation's own process, held");
 
-    spawns_reach(&cli, 2).await;
+    until("the title request's spawn", || cli.count() >= 2).await;
     assert_eq!(
         provider.held_entries(),
         1,
@@ -498,7 +500,7 @@ async fn the_served_model_is_reported_after_a_turn_and_a_fallback_moves_only_it(
     script.turns[1].fallback = Some("claude-sonnet-5".to_owned());
     let cli = FakeCli::new(script);
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
+    let provider = wired(&cli, home.path(), None);
     let engine = seated(&provider, tool, rule(Action::Allow));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -535,7 +537,7 @@ async fn shutting_the_engine_down_closes_every_held_process() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(says(&["found it"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
+    let provider = wired(&cli, home.path(), None);
     let engine = seated(&provider, tool, rule(Action::Allow));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -573,15 +575,7 @@ async fn an_idle_eviction_fills_the_slot_and_the_fresh_record_empties_it() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(says(&["found it", "still here"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = Arc::new(
-        ClaudeCodeProvider::with_parts(
-            PathBuf::from("/nonexistent/claude"),
-            VERSION.to_owned(),
-            Arc::clone(&cli) as Arc<dyn Spawner>,
-            binding::Paths::under(home.path()),
-        )
-        .with_idle_bound(BOUND),
-    );
+    let provider = wired(&cli, home.path(), Some(BOUND));
     let engine = seated(&provider, tool, rule(Action::Allow));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -591,13 +585,7 @@ async fn an_idle_eviction_fills_the_slot_and_the_fresh_record_empties_it() {
     assert_eq!(provider.last_eviction(), None, "and nothing has been evicted");
 
     tokio::time::advance(BOUND + std::time::Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    for _ in 0..2_000 {
-        if provider.last_eviction().is_some() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    until("the idle eviction", || provider.last_eviction().is_some()).await;
 
     let evicted = provider.last_eviction().expect("the bound closed the idle process");
     assert_eq!(provider.held_entries(), 0, "and the table gave the entry up");
@@ -642,7 +630,8 @@ async fn a_hook_that_exits_two_reaches_the_cli_as_a_refusal_carrying_its_reason(
     .expect("the block describes one hook");
     // Allowed by rule, so the only thing that can refuse this call is the
     // hook — which is what makes the assertion below about the hook.
-    let engine = seated(&wired(&cli, home.path()), tool, rule(Action::Allow)).with_hooks(hooks);
+    let engine =
+        seated(&wired(&cli, home.path(), None), tool, rule(Action::Allow)).with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
@@ -711,7 +700,7 @@ async fn a_model_switch_the_process_ignores_opens_a_fresh_record_whose_preamble_
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["found it", "still here", "and once more"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
+    let provider = wired(&cli, home.path(), None);
     let engine = seated(&provider, tool, rule(Action::Allow));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -775,8 +764,8 @@ async fn an_effort_switch_opens_a_fresh_record_carrying_the_new_effort() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(says(&["found it", "still here"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let (log, _guard) = capturing();
-    let provider = wired(&cli, home.path());
+    let (log, _guard) = LogCapture::install(tracing::Level::DEBUG);
+    let provider = wired(&cli, home.path(), None);
     let engine = seated(&provider, tool, rule(Action::Allow));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -858,14 +847,9 @@ async fn a_rewind_opens_a_fresh_record_carrying_only_user_and_tool_lines() {
     let data = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["found it", "second", "third"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
-    let engine = Engine::persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        ganja_core::provider::claude_code::DEFAULT_MODEL,
-        Arc::new(Registry::new(vec![tool])),
-        rule(Action::Allow),
-        ganja_core::storage::Storage::open(data.path().join("sessions.db")),
-    );
+    let provider = wired(&cli, home.path(), None);
+    let engine =
+        seated_persistent(&provider, tool, rule(Action::Allow), data.path().join("sessions.db"));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
@@ -958,12 +942,12 @@ async fn a_steer_typed_while_a_tool_runs_rides_the_next_turn_rather_than_this_on
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::new(calls_the_tool(&["found it", "and again"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
+    let provider = wired(&cli, home.path(), None);
     let engine = seated(&provider, tool, rule(Action::Ask));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
-    let dialog = held_at_dialog(&mut events).await;
+    let (dialog, _) = held_at_dialog(&mut events, PATIENCE).await;
     let frames_before = cli.record(0).user_frames.len();
 
     engine
@@ -1036,16 +1020,8 @@ async fn an_agent_switch_keeps_the_process_and_only_an_eviction_opens_a_new_one(
     let project = ganja_testkit::temp_dir();
     let cli = FakeCli::new(says(&["found it", "still here", "new prompt now"]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = Arc::new(
-        ClaudeCodeProvider::with_parts(
-            PathBuf::from("/nonexistent/claude"),
-            VERSION.to_owned(),
-            Arc::clone(&cli) as Arc<dyn Spawner>,
-            binding::Paths::under(home.path()),
-        )
-        .with_idle_bound(BOUND),
-    );
-    let (log, _guard) = capturing();
+    let provider = wired(&cli, home.path(), Some(BOUND));
+    let (log, _guard) = LogCapture::install(tracing::Level::DEBUG);
     let engine =
         seated(&provider, tool, rule(Action::Allow)).with_agents(two_agents(project.path()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -1075,17 +1051,12 @@ async fn an_agent_switch_keeps_the_process_and_only_an_eviction_opens_a_new_one(
 
     // Only the bound gets that conversation a process running the new prompt.
     tokio::time::advance(BOUND + std::time::Duration::from_secs(1)).await;
-    for _ in 0..2_000 {
-        if provider.held_entries() == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    until("the idle eviction", || provider.held_entries() == 0).await;
     engine.send(prompt("after the bound")).await.expect("the engine is idle");
     drain(&mut events).await;
 
     let records = cli.conversation();
-    let [_, fresh] = records.as_slice() else {
+    let [opening, fresh] = records.as_slice() else {
         panic!("the eviction is what opens the next record, got {records:?}");
     };
     assert_eq!(
@@ -1093,10 +1064,29 @@ async fn an_agent_switch_keeps_the_process_and_only_an_eviction_opens_a_new_one(
         Some(1),
         "and that record really did carry a system prompt of its own"
     );
+    let carries_the_new_prompt = |at: usize| {
+        cli.record(at)
+            .system_prompt
+            .is_some_and(|lines| lines.iter().any(|line| line.contains(OTHER_PROMPT)))
+    };
+    assert!(
+        carries_the_new_prompt(*fresh),
+        "the switched-to agent's own prompt: {:?}",
+        cli.record(*fresh).system_prompt
+    );
+    assert!(
+        !carries_the_new_prompt(*opening),
+        "where the process it replaced opened on the first agent's: {:?}",
+        cli.record(*opening).system_prompt
+    );
 }
 
 /// The agent this case switches to.
 const OTHER_AGENT: &str = "plan";
+
+/// That agent's prompt, which the request carries verbatim at the head of its
+/// system prompt — so a record can be asked which agent it opened under.
+const OTHER_PROMPT: &str = "a different system prompt entirely";
 
 /// A registry holding the session's own agent and one more to switch to.
 ///
@@ -1107,7 +1097,7 @@ fn two_agents(project: &Path) -> Arc<ganja_core::agent::Registry> {
     agent.insert(
         OTHER_AGENT.to_owned(),
         ganja_core::config::AgentConfig {
-            prompt: Some("a different system prompt entirely".to_owned()),
+            prompt: Some(OTHER_PROMPT.to_owned()),
             description: Some("the second primary this case switches to".to_owned()),
             mode: Some(ganja_core::config::AgentMode::Primary),
             ..ganja_core::config::AgentConfig::default()
@@ -1118,19 +1108,6 @@ fn two_agents(project: &Path) -> Arc<ganja_core::agent::Registry> {
     Arc::new(
         ganja_core::agent::Registry::build(&config, project).expect("the table resolves an agent"),
     )
-}
-
-/// A subscriber this case can read its own log lines back out of.
-fn capturing() -> (LogCapture, tracing::subscriber::DefaultGuard) {
-    let capture = LogCapture::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-
-    (capture, guard)
 }
 
 /// **AC-4.14**, and **Dv-22**'s end-to-end pin. Every `/team`
@@ -1159,7 +1136,7 @@ async fn every_team_continuation_is_one_frame_on_the_process_that_answered() {
     // record that followed would look like the wire choosing to respawn.
     let cli = FakeCli::new(says(&["talked"; 12]));
     let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
-    let provider = wired(&cli, home.path());
+    let provider = wired(&cli, home.path(), None);
     let (_root, _team, registry, _door) = ganja_testkit::team_with(
         home.path(),
         Arc::new(ganja_core::provider::FakeProvider::new("on it", std::time::Duration::ZERO)),
@@ -1167,24 +1144,19 @@ async fn every_team_continuation_is_one_frame_on_the_process_that_answered() {
         ganja_core::storage::Storage::open(home.path().join("teammate-storage")),
         |_| Permissions::default(),
     );
-    let engine = Engine::persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        ganja_core::provider::claude_code::DEFAULT_MODEL,
-        Arc::new(Registry::new(vec![tool])),
-        rule(Action::Allow),
-        ganja_core::storage::Storage::open(home.path().join("lead-storage")),
-    )
-    .with_teammates(Arc::clone(&registry), ganja_testkit::externals())
-    // One task nobody has finished, which is the other half of what makes a
-    // turn continue: a live team alone would end the turn as usual.
-    .with_tasks(Arc::new(ganja_testkit::StaticTasks::new(vec![ganja_testkit::task(
-        "1",
-        ganja_tool::tasklist::Status::InProgress,
-        "helper",
-        "keep going",
-        &[],
-    )])));
-    let (log, _guard) = capturing();
+    let engine =
+        seated_persistent(&provider, tool, rule(Action::Allow), home.path().join("lead-storage"))
+            .with_teammates(Arc::clone(&registry), ganja_testkit::externals())
+            // One task nobody has finished, which is the other half of what makes a
+            // turn continue: a live team alone would end the turn as usual.
+            .with_tasks(Arc::new(ganja_testkit::StaticTasks::new(vec![ganja_testkit::task(
+                "1",
+                ganja_tool::tasklist::Status::InProgress,
+                "helper",
+                "keep going",
+                &[],
+            )])));
+    let (log, _guard) = LogCapture::install(tracing::Level::DEBUG);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     // A member that is *alive*, which is what `live_team` reads — not one with

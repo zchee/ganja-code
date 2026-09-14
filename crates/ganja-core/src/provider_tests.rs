@@ -211,8 +211,10 @@ fn a_pre_split_chatgpt_login_under_the_platform_id_is_never_adopted() {
     );
 
     // Skipped, never fatal: the next login this session can run as still wins.
-    let mixed =
-        vec![(openai::ID.to_owned(), CredentialKind::Oauth), stored(&["anthropic"])[0].clone()];
+    let mixed = vec![
+        (openai::ID.to_owned(), CredentialKind::Oauth),
+        ("anthropic".to_owned(), CredentialKind::ApiKey),
+    ];
     assert_eq!(adoptable_login(&Config::default(), mixed).as_deref(), Some("anthropic"));
 
     // And the seat's own id is adopted like anybody else's login — the skip is
@@ -310,7 +312,13 @@ async fn the_seat_lists_its_own_roster_without_reading_a_credential() {
 
     assert_eq!(offered, responses::SEAT_ROSTER);
     for model in &listed.models {
-        assert!(!model.name.is_empty(), "a row the catalog cannot name is labelled by its id");
+        assert_eq!(
+            model.name,
+            catalog::model_for(responses::CHATGPT_ID, &model.id)
+                .map_or_else(|| model.id.clone(), |info| info.name.clone()),
+            "named by the seat's own catalog rows, and a row the catalog cannot name is \
+             labelled by its id"
+        );
     }
 }
 

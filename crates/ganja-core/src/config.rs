@@ -1501,7 +1501,9 @@ pub struct ClaudeCodeConfig {
     /// How long a held `claude` process may sit idle before the wire closes
     /// it, in **seconds**.
     ///
-    /// **Absent is 600** ([`ClaudeCodeConfig::idle_bound`] is what reads it).
+    /// **Absent is
+    /// [`held::DEFAULT_IDLE_BOUND`](crate::provider::claude_code::held::DEFAULT_IDLE_BOUND)**
+    /// ([`ClaudeCodeConfig::idle_bound`] is what reads it).
     /// An [`Option`] rather than a bare number for
     /// [`TeammateConfig::shim_turn_timeout`]'s reason: a tier that says
     /// nothing has to leave the tier below it alone. Seconds for that key's
@@ -1516,7 +1518,9 @@ pub struct ClaudeCodeConfig {
 }
 
 impl ClaudeCodeConfig {
-    /// The idle bound this config asks for, or 600 s when it asks for none.
+    /// The idle bound this config asks for, or
+    /// [`held::DEFAULT_IDLE_BOUND`](crate::provider::claude_code::held::DEFAULT_IDLE_BOUND)
+    /// when it asks for none.
     ///
     /// Unlike [`TeammateConfig::shim_turn_timeout`] this resolves the default
     /// here rather than handing [`None`] on, because the wire's door
@@ -2868,12 +2872,12 @@ fn check_openrouter(config: &OpenRouterConfig) -> Result<(), String> {
 /// line away, and says what the number is for.
 fn check_claude_code(config: &ClaudeCodeConfig) -> Result<(), String> {
     if config.idle_bound == Some(0) {
-        return Err(
+        return Err(format!(
             "claude_code.idle_bound must be at least 1 second; a bound of 0 evicts every held \
              claude process before its first turn, so every turn would open a fresh record \
-             without the assistant's earlier replies (absent is 600)"
-                .to_owned(),
-        );
+             without the assistant's earlier replies (absent is {})",
+            crate::provider::claude_code::held::DEFAULT_IDLE_BOUND.as_secs()
+        ));
     }
 
     Ok(())

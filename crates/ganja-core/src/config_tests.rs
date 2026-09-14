@@ -423,7 +423,7 @@ fn teammates_carries_the_one_deadline_a_person_can_move() {
 /// **D556.** The one key of the `claude_code` table is seconds, absent is
 /// 600, a bound of nothing is refused by name, a misspelling is refused by
 /// name too, and a later tier's number wins over an earlier one's while
-/// silence leaves it alone — the five things ruling 16 asked of it.
+/// silence leaves it alone — the five things D556 asks of it.
 #[test]
 fn claude_code_idle_bound_is_seconds_defaults_to_ten_minutes_and_is_refused_at_zero() {
     let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");

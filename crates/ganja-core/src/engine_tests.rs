@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
-use ganja_testkit::{StaticTasks, task_summary};
+use ganja_testkit::{StaticTasks, deadline_millis, task_summary};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -426,6 +426,9 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
     }
 }
 
+/// A model id no catalog row answers, so nothing sizes a session that runs it.
+const UNSIZED: &str = "a-model-no-catalog-row-answers";
+
 /// A model nothing sizes — no catalog row, and a wire that borrows none —
 /// never compacts on its own, because there is no fill level to read. But a
 /// `/compact` a person typed on it used to return without asking anything,
@@ -435,7 +438,6 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
 #[tokio::test]
 async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_summary() {
     const SUMMARY: &str = "## Objective\n- find the thing";
-    const UNSIZED: &str = "a-model-no-catalog-row-answers";
     assert!(crate::catalog::model(UNSIZED).is_none(), "the test needs a model nothing sizes");
 
     let provider = Arc::new(ScriptedProvider::new(vec![
@@ -461,16 +463,7 @@ async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_sum
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
-    engine
-        .send(Command::SendPrompt {
-            text: "next".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            session_mentions: Vec::new(),
-            peers: Vec::new(),
-        })
-        .await
-        .expect("an idle engine accepts a prompt");
+    prompt(&engine, "next").await;
     drain(&mut events).await;
     assert_eq!(
         seen.lock().expect("the request log is never poisoned").len(),
@@ -537,8 +530,6 @@ async fn a_manual_compaction_summarizes_a_model_nothing_sizes_and_stores_the_sum
 /// cut at. The record, not the position, is what names it.
 #[tokio::test]
 async fn a_resumed_window_marks_the_summary_its_record_names_though_the_row_predates_the_mark() {
-    const UNSIZED: &str = "a-model-no-catalog-row-answers";
-
     let provider = Arc::new(ScriptedProvider::new(vec![
         ProviderEvent::TextDelta("carrying on".to_owned()),
         ProviderEvent::Finish(FinishReason::Completed),
@@ -571,16 +562,7 @@ async fn a_resumed_window_marks_the_summary_its_record_names_though_the_row_pred
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
-    engine
-        .send(Command::SendPrompt {
-            text: "next".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            session_mentions: Vec::new(),
-            peers: Vec::new(),
-        })
-        .await
-        .expect("an idle engine accepts a prompt");
+    prompt(&engine, "next").await;
     drain(&mut events).await;
 
     let requests = seen.lock().expect("the request log is never poisoned");
@@ -659,11 +641,31 @@ async fn the_context_estimate_has_no_window_for_an_uncataloged_model() {
     );
 }
 
-/// A wire that names what its vendor served, and nothing else: the id is
-/// the one `catalog::borrowed_row` lends to, and the served pair is set by
-/// the test the way a turn's frames would set it.
+/// A wire that names what its vendor served: the id is the one
+/// `catalog::borrowed_row` lends to, the served pair is set by the test the
+/// way a turn's frames would set it, and every request is answered and
+/// logged by the [`ScriptedProvider`] inside it.
 struct ServingProvider {
     served: Mutex<Option<crate::provider::ServedModel>>,
+    script: ScriptedProvider,
+}
+
+impl ServingProvider {
+    /// A wire that has served nothing yet and answers every request with
+    /// `events`.
+    fn new(events: Vec<ProviderEvent>) -> Self {
+        Self { served: Mutex::new(None), script: ScriptedProvider::new(events) }
+    }
+
+    /// Records that the vendor answered a request for `requested` with
+    /// `served`.
+    fn serve(&self, requested: &str, served: &str) {
+        *self.served.lock().expect("the served slot is never poisoned") =
+            Some(crate::provider::ServedModel {
+                requested: requested.to_owned(),
+                served: served.to_owned(),
+            });
+    }
 }
 
 #[async_trait]
@@ -674,10 +676,10 @@ impl Provider for ServingProvider {
 
     async fn stream(
         &self,
-        _request: ChatRequest,
-        _cancel: CancellationToken,
+        request: ChatRequest,
+        cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        Ok(stream::iter(vec![ProviderEvent::Finish(FinishReason::Completed)]).boxed())
+        self.script.stream(request, cancel).await
     }
 
     fn served_model(&self) -> Option<crate::provider::ServedModel> {
@@ -691,20 +693,14 @@ impl Provider for ServingProvider {
 /// answers some other request (a delegated child's) or no row at all.
 #[tokio::test]
 async fn a_served_model_lends_an_uncataloged_session_the_borrowed_rows_window() {
-    let provider = Arc::new(ServingProvider { served: Mutex::new(None) });
+    let provider =
+        Arc::new(ServingProvider::new(vec![ProviderEvent::Finish(FinishReason::Completed)]));
     let engine = bare(Arc::clone(&provider) as Arc<dyn Provider>, "default");
-    let serve = |requested: &str, served: &str| {
-        *provider.served.lock().expect("the served slot is never poisoned") =
-            Some(crate::provider::ServedModel {
-                requested: requested.to_owned(),
-                served: served.to_owned(),
-            });
-    };
 
     assert_eq!(engine.context_estimate().window, None, "nothing served yet, nothing to borrow");
     assert_eq!(engine.context_breakdown().await.window, None);
 
-    serve("default", "claude-opus-5[1m]");
+    provider.serve("default", "claude-opus-5[1m]");
     assert_eq!(
         engine.context_estimate().window,
         Some(1_000_000),
@@ -714,15 +710,105 @@ async fn a_served_model_lends_an_uncataloged_session_the_borrowed_rows_window() 
     assert_eq!(breakdown.window, Some(1_000_000), "/context reads the same denominator");
     assert_eq!(breakdown.reserve, Some(100_000), "and derives its reserve from it");
 
-    serve("sonnet", "claude-sonnet-5");
+    provider.serve("sonnet", "claude-sonnet-5");
     assert_eq!(
         engine.context_estimate().window,
         None,
         "a served name that answers another model's request says nothing about this one"
     );
 
-    serve("default", "claude-no-such-model");
+    provider.serve("default", "claude-no-such-model");
     assert_eq!(engine.context_estimate().window, None, "a spelling no row answers lends nothing");
+}
+
+/// `q5es`'s other half: the window a served model lends drives ganja's own
+/// auto-compaction, not only the meter. At 95% of the borrowed million the
+/// turn's first request is the summarize one — toolless, the conversation
+/// serialized into one message — and the record then names the summary. A
+/// trigger that read the catalog alone would find no row and ask nothing.
+#[tokio::test]
+async fn a_borrowed_window_that_is_nearly_full_compacts_on_its_own() {
+    let provider = Arc::new(ServingProvider::new(vec![
+        ProviderEvent::TextDelta("## Objective\n- find the thing".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    provider.serve("default", "claude-opus-5[1m]");
+    let seen = Arc::clone(&provider.script.seen);
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let storage = Storage::open(directory.path().join("storage"));
+    let session = ganja_testkit::seed_session(&storage, 950_000);
+    ganja_testkit::seed_message(&storage, &session, &Message::user("the objective"));
+
+    let engine = Engine::persistent(
+        provider,
+        "default",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        storage,
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&session).await.expect("the session loads");
+
+    prompt(&engine, "next").await;
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    assert_eq!(requests.len(), 2, "the summarize request, then the turn's own: {requests:?}");
+    let summarize = &requests[0];
+    assert!(summarize.tools.is_empty(), "the summarize request is the toolless one");
+    assert_eq!(summarize.messages.len(), 1, "one message carries the whole conversation");
+    assert!(
+        summarize.messages[0]
+            .parts
+            .iter()
+            .filter_map(Part::as_text)
+            .any(|text| text.contains("[User]: the objective")),
+        "serialized into it: {summarize:?}"
+    );
+    assert!(
+        engine.current_session().and_then(|info| info.summary).is_some(),
+        "and the record names the summary"
+    );
+}
+
+/// **D556**, Dv-16. On a wire whose effort roster is its own rather than any
+/// model's, a `/model` leaves the chosen effort standing: the roster did not
+/// move with the model, so there is nothing to clear and nothing to announce.
+/// A reconcile that read the catalog's rows again would find none for this
+/// wire and clear it on every switch.
+#[tokio::test]
+async fn a_claude_code_effort_survives_a_model_switch() {
+    let engine = bare(
+        Arc::new(ServingProvider::new(vec![ProviderEvent::Finish(FinishReason::Completed)])),
+        "default",
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SwitchEffort { effort: Some("xhigh".to_owned()) })
+        .await
+        .expect("the wire's own roster carries xhigh");
+    let adopted = events.next().await.expect("the adoption is announced");
+    assert!(
+        matches!(&adopted, Event::EffortChanged { effort: Some(effort), .. } if effort == "xhigh"),
+        "got {adopted:?}"
+    );
+
+    engine
+        .send(Command::SwitchModel { model: "claude-sonnet-5".to_owned() })
+        .await
+        .expect("an uncataloged wire serves any model it is told to ask for");
+    assert_eq!(engine.effort().as_deref(), Some("xhigh"), "the effort outlives the switch");
+
+    let mut announced = Vec::new();
+    while let Some(Some(event)) = futures::FutureExt::now_or_never(events.next()) {
+        announced.push(event);
+    }
+    assert!(
+        !announced.iter().any(|event| matches!(event, Event::EffortChanged { .. })),
+        "and no change of effort was announced: {announced:?}"
+    );
 }
 
 /// An engine with something in every fixed category, for the breakdown
@@ -2428,21 +2514,6 @@ fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
     );
 }
 
-/// A moment `seconds` from now, as [`Command::SetDeadline`] spells one.
-///
-/// The instant is built against the real clock and put where the test wants
-/// it — ahead for the remaining case, behind for the overdue one — because
-/// the engine's slot holds a `SystemTime` and no runtime clock control moves
-/// one. Nothing sleeps: a deadline in the past is the overdue case already.
-fn deadline_millis(seconds: i64) -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("this machine's clock is after the epoch");
-    let millis = u64::try_from(now.as_millis()).expect("the epoch fits a u64 of millis");
-
-    millis.checked_add_signed(seconds * 1000).expect("the moment is representable")
-}
-
 /// The request-only messages `request` carries, in order.
 fn request_only_texts(request: &ChatRequest) -> Vec<String> {
     request
@@ -2504,17 +2575,8 @@ async fn a_deadline_ahead_puts_one_request_only_block_at_the_tail_of_every_reque
         .send(Command::SetDeadline { until: Some(deadline_millis(300)) })
         .await
         .expect("a deadline is taken in every state");
-    for prompt in ["first", "second"] {
-        engine
-            .send(Command::SendPrompt {
-                text: prompt.to_owned(),
-                mentions: Vec::new(),
-                skills: Vec::new(),
-                session_mentions: Vec::new(),
-                peers: Vec::new(),
-            })
-            .await
-            .expect("an idle engine accepts a prompt");
+    for text in ["first", "second"] {
+        prompt(&engine, text).await;
         drain(&mut events).await;
     }
 
@@ -2552,16 +2614,7 @@ async fn a_deadline_behind_says_so_and_still_lets_the_turn_finish() {
         .send(Command::SetDeadline { until: Some(deadline_millis(-40)) })
         .await
         .expect("an instant already behind is taken like any other");
-    engine
-        .send(Command::SendPrompt {
-            text: "carry on".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            session_mentions: Vec::new(),
-            peers: Vec::new(),
-        })
-        .await
-        .expect("a passed deadline refuses no prompt");
+    prompt(&engine, "carry on").await;
 
     let drained = drain(&mut events).await;
     assert!(
@@ -2592,15 +2645,7 @@ async fn no_deadline_puts_nothing_in_the_request() {
     let engine = bare(provider, "scripted-model");
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    let prompt = |text: &str| Command::SendPrompt {
-        text: text.to_owned(),
-        mentions: Vec::new(),
-        skills: Vec::new(),
-        session_mentions: Vec::new(),
-        peers: Vec::new(),
-    };
-
-    engine.send(prompt("never budgeted")).await.expect("an idle engine accepts a prompt");
+    prompt(&engine, "never budgeted").await;
     drain(&mut events).await;
 
     engine
@@ -2608,7 +2653,7 @@ async fn no_deadline_puts_nothing_in_the_request() {
         .await
         .expect("a deadline is taken in every state");
     engine.send(Command::SetDeadline { until: None }).await.expect("and cleared again");
-    engine.send(prompt("budget withdrawn")).await.expect("an idle engine accepts a prompt");
+    prompt(&engine, "budget withdrawn").await;
     drain(&mut events).await;
 
     let requests = seen.lock().expect("the request log is never poisoned");
@@ -2637,16 +2682,7 @@ async fn the_deadline_block_never_reaches_the_transcript() {
         .send(Command::SetDeadline { until: Some(deadline_millis(300)) })
         .await
         .expect("a deadline is taken in every state");
-    engine
-        .send(Command::SendPrompt {
-            text: "hi".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            session_mentions: Vec::new(),
-            peers: Vec::new(),
-        })
-        .await
-        .expect("an idle engine accepts a prompt");
+    prompt(&engine, "hi").await;
 
     let drained = drain(&mut events).await;
     for event in &drained {

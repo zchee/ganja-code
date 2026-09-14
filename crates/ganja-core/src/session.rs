@@ -860,17 +860,9 @@ pub(crate) struct Turn {
     /// mid-turn reaches the next steer rather than waiting for the next
     /// prompt.
     pub(crate) receipts: Arc<std::sync::Mutex<Vec<crate::teammate::receipts::Settled>>>,
-    /// When this sitting's time budget runs out (**D557**), carried the way
-    /// [`Turn::receipts`] is — the engine's own cell rather than a snapshot,
-    /// so a `/deadline` typed *during* this turn reaches its next step rather
-    /// than waiting for the next prompt. That is the moment a deadline is
-    /// most likely to be typed, which is why it is shared rather than copied.
-    ///
-    /// Read at every step and never stored: what the block says is derived
-    /// from this instant and the clock, so there is nothing here that can go
-    /// stale. [`None`] is a session nobody has budgeted, which is every
-    /// scripted and golden run — and under it every request is byte-identical
-    /// to one built before this existed.
+    /// When this sitting's time budget runs out (**D557**): the engine's own
+    /// cell, carried the way [`Turn::receipts`] is and read at every step —
+    /// see the doc on `Engine`'s `deadline` field for why it is shared rather than copied.
     pub(crate) deadline: Arc<std::sync::Mutex<Option<SystemTime>>>,
     /// Whether this turn's session leads a team that holds **nobody**
     /// (**D530**, **D543**), read once at the turn's start beside
@@ -1479,7 +1471,7 @@ fn receipt_part(turn: &Turn) -> Option<Part> {
 /// names the critical path and explicitly protects the checks: a deadline that
 /// read as "go faster" would buy time out of the one budget nobody wants it
 /// spent from.
-pub fn deadline_block(remaining: Result<Duration, Duration>, until: SystemTime) -> String {
+pub(crate) fn deadline_block(remaining: Result<Duration, Duration>, until: SystemTime) -> String {
     let clock = clock_at(until);
 
     match remaining {
@@ -1514,9 +1506,10 @@ pub fn deadline_block(remaining: Result<Duration, Duration>, until: SystemTime) 
 /// hour in the wrong zone is still usable and an absent one is not.
 fn clock_at(until: SystemTime) -> String {
     let Ok(timestamp) = jiff::Timestamp::try_from(until) else {
-        // Outside the range jiff represents at all, which
-        // `engine::millis_after_epoch` has already refused every wire value
-        // for. Reachable only from a caller that built the instant itself.
+        // An instant past jiff's range (year 9999). The wire carries any u64
+        // of millis and `/deadline`'s span grammar has no cap below that, so a
+        // typed `/deadline 100000000h` lands here; an hour placeholder beats
+        // no sentence.
         return "--:--".to_owned();
     };
 
@@ -3644,19 +3637,10 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // that has spawned nobody, and folding would make the deadline's
         // presence depend on the team's.
         //
-        // Rebuilt from the cell and the clock at **every** step rather than
-        // taken once (`take_blocks`'s posture, deliberately not shared): a
-        // deadline is not news that has been delivered, it is a standing fact
-        // whose value has changed by the time the next step asks. A block
-        // that appeared once would be a reminder the model read twenty steps
-        // ago, which is the opposite of what it is for.
+        // Rebuilt at **every** step rather than taken once like the guards
+        // above — see [`Turn::deadline`].
         if let Some(until) = *turn.deadline.lock().expect("the deadline is never poisoned") {
             let now = SystemTime::now();
-            // `Ok` while the instant is ahead and `Err` once it is behind,
-            // which is exactly what `duration_since` already answers: its
-            // error carries the span it went the other way by, so the sign
-            // and the magnitude arrive together and nothing here subtracts
-            // twice.
             let remaining = until.duration_since(now).map_err(|behind| behind.duration());
             messages.push(Message::request_only_user(deadline_block(remaining, until)));
         }
@@ -4146,13 +4130,13 @@ fn resolve_mentions_within(
                         }
                     }
                     // Named, never carried: the model still learns what was
-                    // attached, in the block a type the wire cannot carry
-                    // earns, and the vendor is never sent a request it would
-                    // refuse whole.
+                    // attached, and the vendor is never sent a request it
+                    // would refuse whole.
                     Ok(crate::attachment::Bounded::Over) => PartBody::Text {
-                        text: format!(
-                            "<attached-file path=\"{path}\" mime=\"{mime}\">\n(attached by name only: \
-                             larger than the {limit}-byte attachment limit)\n</attached-file>"
+                        text: by_name_only(
+                            &path,
+                            &mime,
+                            &format!("larger than the {limit}-byte attachment limit"),
                         ),
                     },
                     // The same failure block a text mention earns: the user
@@ -4166,14 +4150,24 @@ fn resolve_mentions_within(
                 }
             } else {
                 PartBody::Text {
-                    text: format!(
-                        "<attached-file path=\"{path}\" mime=\"{mime}\">\n(attached by name only: \
-                         this provider's wire does not carry {mime} content)\n</attached-file>"
+                    text: by_name_only(
+                        &path,
+                        &mime,
+                        &format!("this provider's wire does not carry {mime} content"),
                     ),
                 }
             };
         }
     }
+}
+
+/// The block a binary attachment degrades to when its bytes are not sent:
+/// the name and the kind, and `why` the bytes are not there. One renderer for
+/// both reasons, so the two blocks cannot drift apart.
+fn by_name_only(path: &str, mime: &str, why: &str) -> String {
+    format!(
+        "<attached-file path=\"{path}\" mime=\"{mime}\">\n(attached by name only: {why})\n</attached-file>"
+    )
 }
 
 /// The literal sequence a peer's body may not carry, because carrying it would
