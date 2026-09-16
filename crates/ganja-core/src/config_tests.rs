@@ -6,9 +6,9 @@ use tempfile::TempDir;
 use super::{
     AgentMode, AgentsConfig, Config, ConfigError, Dialect, DialogExpiry, HookCommand, HookHandler,
     HookMatcher, InboundPolicy, LspConfig, McpOauth, McpServer, NonZeroU64, NotificationEvent,
-    NotificationMethod, Notifications, Overrides, StatuslineConfig, StatuslineElement,
-    TeamlessSend, ThemeMode, existing, merge_files, model_bound_to, project_files, read,
-    split_model,
+    NotificationMethod, Notifications, Overrides, ResponsesOptions, ServiceTier, StatuslineConfig,
+    StatuslineElement, TeamlessSend, ThemeMode, existing, merge_files, model_bound_to,
+    project_files, read, responses, split_model,
 };
 use crate::permission::{Action, Decision, Permissions, Rule};
 
@@ -1389,13 +1389,13 @@ fn a_provider_entry_carries_every_field_it_may_hold() {
     .expect("all three dialects parse");
 
     let local = &config.provider["local-llama"];
-    assert_eq!(local.dialect, Dialect::OpenaiChatCompletions);
-    assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(local.dialect, Some(Dialect::OpenaiChatCompletions));
+    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
     assert_eq!(local.key_env.as_deref(), Some("LLAMA_API_KEY"));
     assert_eq!(local.headers["x-route"], "gpu-0");
 
     let gateway = &config.provider["gateway"];
-    assert_eq!(gateway.dialect, Dialect::AnthropicMessages);
+    assert_eq!(gateway.dialect, Some(Dialect::AnthropicMessages));
     assert_eq!(
         gateway.key_env, None,
         "an entry that names no variable is answered by the store alone"
@@ -1404,7 +1404,7 @@ fn a_provider_entry_carries_every_field_it_may_hold() {
 
     assert_eq!(
         config.provider["proxy"].dialect,
-        Dialect::OpenaiResponses,
+        Some(Dialect::OpenaiResponses),
         "an endpoint serving the Responses surface names that mapping"
     );
 }
@@ -1482,6 +1482,321 @@ fn a_provider_entry_that_describes_no_usable_endpoint_is_refused_by_name() {
     );
 }
 
+/// The refusal `text` earns, whole. Every assertion below compares the
+/// **entire** sentence rather than a substring: these are the sentences
+/// somebody reads instead of spending a turn on a 400, and a test that only
+/// checks a key name would not notice one losing the probe date or the id.
+fn refusal(text: &str) -> String {
+    let error = parse(text).expect_err("this document is refused");
+    let ConfigError::Parse { message, .. } = error else {
+        panic!("expected a parse failure for {text}");
+    };
+    message
+}
+
+/// The options this document configures for `id` on `model`.
+fn options(text: &str, id: &str, model: &str) -> ResponsesOptions {
+    parse(text)
+        .expect("this document loads")
+        .provider_options(id, model)
+        .expect("this id carries an options table")
+}
+
+/// **AC-1, AC-8.** A builtin's entry is an `options` table and nothing else,
+/// and only on the two ids that read one (**D563**).
+#[test]
+fn a_builtin_provider_entry_may_carry_options_and_nothing_else() {
+    assert!(
+        parse("[provider.chatgpt.options]\nservice_tier = \"priority\"\n").is_ok(),
+        "the one shape a builtin's entry can take"
+    );
+
+    assert_eq!(
+        refusal("[provider.chatgpt]\nbase_url = \"https://x\"\n"),
+        "provider \"chatgpt\" is one this build already ships; a `provider` entry for it may \
+         carry `options` and nothing else, and its endpoint moves with its own base-URL variable"
+    );
+    assert_eq!(
+        refusal("[provider.anthropic.options]\nservice_tier = \"default\"\n"),
+        "provider \"anthropic\" takes no `options`; this build reads them on the two Responses \
+         ids, chatgpt and openai"
+    );
+}
+
+/// **AC-8.** The declared-endpoint arm keeps both of its requirements and
+/// gains one refusal: an endpoint this build has never spoken to has no
+/// measured option surface to curate.
+#[test]
+fn a_config_declared_endpoint_still_needs_its_dialect_and_base_url() {
+    assert_eq!(
+        refusal("[provider.proxy]\ndialect = \"openai-responses\"\n"),
+        "provider \"proxy\" is a config-declared endpoint and needs `base_url`"
+    );
+    assert_eq!(
+        refusal("[provider.proxy]\nbase_url = \"https://p\"\n"),
+        "provider \"proxy\" is a config-declared endpoint and needs `dialect`"
+    );
+    assert_eq!(
+        refusal(
+            "[provider.proxy]\ndialect = \"openai-responses\"\nbase_url = \"https://p\"\n\
+             [provider.proxy.options]\nservice_tier = \"default\"\n"
+        ),
+        "provider \"proxy\" is a config-declared endpoint and takes no `options`"
+    );
+}
+
+/// **AC-10.** What a config *declares* is an endpoint, and a builtin's
+/// `options` entry declares none — so it never appears in a listing of what
+/// this project declares, where it would send somebody looking for an entry
+/// they did not write.
+#[test]
+fn declared_endpoints_never_name_a_builtin() {
+    let config = parse(
+        "[provider.chatgpt.options]\nservice_tier = \"priority\"\n\
+         [provider.proxy]\ndialect = \"openai-responses\"\nbase_url = \"https://p\"\n",
+    )
+    .expect("both entries load");
+
+    assert_eq!(config.declared_endpoints(), vec!["proxy".to_owned()]);
+    assert_eq!(config.provider.len(), 2, "both are still entries in the table");
+}
+
+/// **AC-2, AC-4.** A key the seat rejects is refused under `chatgpt` naming
+/// the key, the id and the probe — and loads under `openai`, where it is one
+/// of that id's own.
+///
+/// The three whose refusal was not a bare `Unsupported parameter` get
+/// sentences of their own, because "not here" would tell somebody nothing
+/// about what the backend actually did with the value they wrote.
+#[test]
+fn a_platform_only_key_under_chatgpt_is_refused_naming_the_probe() {
+    let cases = [
+        (
+            "temperature = 0.2",
+            "provider \"chatgpt\" cannot carry `options.temperature`: the ChatGPT seat rejects \
+             it (`Unsupported parameter: temperature`, probe 2026-09-16); it is an `openai` key",
+        ),
+        (
+            "reasoning = { mode = \"pro\" }",
+            "provider \"chatgpt\" cannot carry `options.reasoning.mode`: the ChatGPT seat \
+             rejects `pro` (`reasoning.mode is not supported with this model`, probe \
+             2026-09-16) and `standard` is already its default; it is an `openai` key",
+        ),
+        (
+            "prompt_cache_key = \"k\"",
+            "provider \"chatgpt\" cannot carry `options.prompt_cache_key`: the ChatGPT seat \
+             replaces it with a key of its own on every response (probe 2026-09-16), so a value \
+             here would do nothing; it is an `openai` key",
+        ),
+        (
+            "reasoning = { summary = \"concise\" }",
+            "provider \"chatgpt\" cannot carry `options.reasoning.summary`: only `auto` has been \
+             measured on the ChatGPT seat (probe 2026-09-16) and the wire already sends it; the \
+             key is configurable on `openai`",
+        ),
+    ];
+
+    for (key, expected) in cases {
+        assert_eq!(refusal(&format!("[provider.chatgpt.options]\n{key}\n")), expected);
+        assert!(
+            parse(&format!("[provider.openai.options]\n{key}\n")).is_ok(),
+            "{key} is an openai key"
+        );
+    }
+
+    assert_eq!(
+        options("[provider.openai.options]\ntemperature = 0.2\n", "openai", "gpt-5.5").temperature,
+        Some(0.2)
+    );
+}
+
+/// **AC-3.** `fast` is a config spelling of `priority`: the backend answers
+/// the word itself with `Unsupported service_tier: fast`, so it is rewritten
+/// at load and nothing ever writes it back out.
+#[test]
+fn fast_is_read_as_priority_and_never_written() {
+    for id in ["chatgpt", "openai"] {
+        let options =
+            options(&format!("[provider.{id}.options]\nservice_tier = \"fast\"\n"), id, "gpt-5.5");
+
+        assert_eq!(options.service_tier, Some(ServiceTier::Priority));
+        assert_eq!(ServiceTier::Priority.as_str(), "priority");
+
+        let written = serde_json::to_string(&options).expect("the table serializes");
+        assert!(!written.contains("fast"), "the alias must not survive a round trip: {written}");
+    }
+
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\nservice_tier = \"flex\"\n"),
+        "provider \"chatgpt\" cannot carry `options.service_tier = \"flex\"`: the ChatGPT seat \
+         rejects it (`Unsupported service_tier: flex`, probe 2026-09-16); the seat takes default, \
+         priority, ultrafast"
+    );
+    assert!(
+        parse("[provider.openai.options]\nservice_tier = \"flex\"\n").is_ok(),
+        "the platform documents all six"
+    );
+}
+
+/// **AC-5.** A hosted tool's `type` is curated and everything else about it
+/// passes through, because the settings a hosted tool takes move when the
+/// vendor moves them and the one thing a wrong value makes unrecoverable is
+/// the type.
+#[test]
+fn a_hosted_tool_type_is_curated_and_the_rest_of_the_entry_is_not() {
+    let carried = options(
+        "[provider.chatgpt.options]\n\
+         server_tools = [{ type = \"web_search\", search_context_size = \"low\" }, \
+         { type = \"image_generation\" }]\n",
+        "chatgpt",
+        "gpt-5.5",
+    );
+
+    assert_eq!(carried.server_tools.len(), 2);
+    assert_eq!(carried.server_tools[0].kind, "web_search");
+    assert_eq!(carried.server_tools[0].rest["search_context_size"].as_str(), Some("low"));
+    assert!(carried.server_tools[1].rest.is_empty());
+
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\nserver_tools = [{ type = \"code_interpreter\" }]\n"),
+        "provider \"chatgpt\" cannot carry a `server_tools` entry of type \"code_interpreter\": \
+         the ChatGPT seat rejects it (`Unsupported tool type: code_interpreter`, probe \
+         2026-09-16); the seat takes web_search, image_generation"
+    );
+    assert!(
+        parse("[provider.openai.options]\nserver_tools = [{ type = \"code_interpreter\" }]\n")
+            .is_ok(),
+        "the platform runs it"
+    );
+
+    // Refused on **both** ids, and for neither id's reason: it runs on the
+    // client, so a hosted advertisement of it promises an executor this build
+    // does not offer through that door.
+    for id in ["chatgpt", "openai"] {
+        assert_eq!(
+            refusal(&format!("[provider.{id}.options]\nserver_tools = [{{ type = \"shell\" }}]\n")),
+            format!(
+                "provider \"{id}\" cannot carry a `server_tools` entry of type \"shell\": it \
+                 needs client-side execution, which this build does not offer through a hosted \
+                 tool"
+            )
+        );
+    }
+}
+
+/// **AC-6.** Only a builtin a custom advertisement can actually carry may be
+/// named, and the refusal hands back the list rather than leaving somebody to
+/// guess which of their tools qualify.
+#[test]
+fn a_custom_tool_must_be_a_builtin_with_one_required_string() {
+    assert!(parse("[provider.chatgpt.options]\ncustom_tools = [\"bash\"]\n").is_ok());
+
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\ncustom_tools = [\"edit\"]\n"),
+        format!(
+            "provider \"chatgpt\" cannot carry `custom_tools = [\"edit\"]`: only a builtin with \
+             exactly one required string argument can be advertised as a custom tool; those are {}",
+            responses::options::CUSTOM_TOOLS.join(", ")
+        )
+    );
+}
+
+/// **AC-8.** Two more per-id narrowings, both unprobed rather than rejected
+/// on the seat — which is why the sentences say so instead of quoting a
+/// backend error nobody has seen.
+#[test]
+fn a_hosted_tool_choice_and_a_platform_include_are_refused_under_chatgpt() {
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\ntool_choice = { type = \"web_search\" }\n"),
+        "provider \"chatgpt\" cannot carry a hosted `tool_choice` of type \"web_search\": that \
+         form is unprobed on the ChatGPT seat (probe 2026-09-16 registered web_search and \
+         image_generation as tools and never named one in `tool_choice`); it is admitted on \
+         `openai` only"
+    );
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\ninclude = [\"message.output_text.logprobs\"]\n"),
+        format!(
+            "provider \"chatgpt\" cannot carry `include = [\"message.output_text.logprobs\"]`; \
+             the values this id takes are {}",
+            responses::options::SEAT_INCLUDE.join(", ")
+        )
+    );
+
+    // The two forms that are not hosted stay reachable on the seat, which is
+    // what makes the refusal above about the *form* rather than about the key.
+    assert!(parse("[provider.chatgpt.options]\ntool_choice = \"auto\"\n").is_ok());
+    assert!(
+        parse(
+            "[provider.chatgpt.options]\n\
+             tool_choice = { type = \"allowed_tools\", mode = \"auto\", tools = [] }\n"
+        )
+        .is_ok()
+    );
+}
+
+/// **AC-7.** The per-model overlay is field-wise and one deep: the entry for
+/// the model a request names replaces what it sets, and leaves everything
+/// else the provider-wide table said.
+#[test]
+fn a_per_model_table_wins_over_the_provider_wide_value() {
+    let text = "[provider.chatgpt.options]\n\
+                service_tier = \"priority\"\n\
+                parallel_tool_calls = true\n\
+                [provider.chatgpt.options.model.\"gpt-5.6-sol\"]\n\
+                service_tier = \"ultrafast\"\n";
+
+    let sol = options(text, "chatgpt", "gpt-5.6-sol");
+    assert_eq!(sol.service_tier, Some(ServiceTier::Ultrafast));
+    assert_eq!(sol.parallel_tool_calls, Some(true), "an unset key leaves the wide value alone");
+    assert!(sol.model.is_empty(), "the answer for one model carries no table of its own");
+
+    assert_eq!(
+        options(text, "chatgpt", "gpt-5.5").service_tier,
+        Some(ServiceTier::Priority),
+        "a model the table does not name reads the provider-wide value"
+    );
+}
+
+/// **AC-7.** The overlay is one deep, and a second level is refused rather
+/// than ignored: nobody could read a two-level lookup off a config file, and
+/// an ignored table is a setting whose author still believes it applies.
+#[test]
+fn a_per_model_entry_cannot_nest_a_model_table() {
+    assert_eq!(
+        refusal(
+            "[provider.chatgpt.options.model.\"gpt-5.5\".model.\"gpt-5.6-sol\"]\n\
+             service_tier = \"ultrafast\"\n"
+        ),
+        "provider \"chatgpt\" nests a `model` table inside `options.model.\"gpt-5.5\"`; a \
+         per-model entry cannot carry one"
+    );
+}
+
+/// A per-model entry is held to the **same** per-id gate as the table around
+/// it — otherwise `[provider.chatgpt.options.model."gpt-5.5"]` would be a way
+/// to write a key the seat 400s and hear nothing about it until a turn died.
+#[test]
+fn a_per_model_entry_is_gated_exactly_as_the_table_around_it() {
+    assert_eq!(
+        refusal("[provider.chatgpt.options.model.\"gpt-5.5\"]\ntemperature = 0.2\n"),
+        "provider \"chatgpt\" cannot carry `options.temperature`: the ChatGPT seat rejects it \
+         (`Unsupported parameter: temperature`, probe 2026-09-16); it is an `openai` key"
+    );
+}
+
+/// An id that carries no `options` table answers nothing, which is every id
+/// but the two — and, for those two, every model of a config that wrote none.
+#[test]
+fn an_id_with_no_options_table_answers_nothing() {
+    let config = parse("[provider.chatgpt.options]\nservice_tier = \"priority\"\n")
+        .expect("the document loads");
+
+    assert!(config.provider_options("chatgpt", "gpt-5.5").is_some());
+    assert!(config.provider_options("openai", "gpt-5.5").is_none());
+    assert!(config.provider_options("anthropic", "claude-sonnet-5").is_none());
+    assert!(Config::default().provider_options("chatgpt", "gpt-5.5").is_none());
+}
+
 /// The same rule the provider endpoints obey, and the same reason twice
 /// over: the credential travels in a header on every request, and so does
 /// anything in `headers`.
@@ -1539,8 +1854,8 @@ fn a_closer_tier_replaces_a_whole_provider_entry() {
 
     let config = merge_files(&[outer, inner]).expect("both tiers parse");
     let entry = &config.provider["x"];
-    assert_eq!(entry.dialect, Dialect::AnthropicMessages);
-    assert_eq!(entry.base_url, "https://new.test");
+    assert_eq!(entry.dialect, Some(Dialect::AnthropicMessages));
+    assert_eq!(entry.base_url.as_deref(), Some("https://new.test"));
     assert_eq!(
         entry.key_env, None,
         "the replaced entry's variable must not survive onto the new host"
@@ -1947,7 +2262,7 @@ provider = { local-llama = { dialect = "openai-chat-completions", base_url = "ht
     assert!(config.command["ship"].description.is_none());
     assert!(matches!(config.mcp["fs"], McpServer::Local(_)));
     assert_eq!(config.hooks["Stop"].len(), 1);
-    assert_eq!(config.provider["local-llama"].dialect, Dialect::OpenaiChatCompletions);
+    assert_eq!(config.provider["local-llama"].dialect, Some(Dialect::OpenaiChatCompletions));
 }
 
 /// The key is a scalar like `model`, and merges like one: a tier that

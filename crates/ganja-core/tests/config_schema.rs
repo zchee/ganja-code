@@ -167,6 +167,42 @@ headers = { X-Custom = "1" }
 dialect = "openai-responses"
 base_url = "https://responses.example/v1"
 
+[provider.chatgpt.options]
+service_tier = "priority"
+parallel_tool_calls = true
+custom_tools = ["bash"]
+include = ["web_search_call.action.sources"]
+reasoning = { context = "all_turns" }
+text = { verbosity = "low" }
+stream_options = { include_obfuscation = false }
+tool_choice = "auto"
+server_tools = [{ type = "web_search", search_context_size = "low" }]
+context_management = [{ type = "compaction", compact_threshold = 400000 }]
+client_metadata = { lane = "w1" }
+access_programs = { beta = true }
+
+[provider.chatgpt.options.model."gpt-5.6-sol"]
+service_tier = "ultrafast"
+
+[provider.openai.options]
+service_tier = "flex"
+temperature = 0.2
+top_p = 0.9
+top_logprobs = 3
+max_output_tokens = 4096
+max_tool_calls = 8
+prompt_cache_key = "ganja"
+prompt_cache_retention = "24h"
+prompt_cache_options = { mode = "auto", ttl = "1h", comparison_response_id = "resp_1" }
+truncation = "auto"
+safety_identifier = "anon"
+user = "anon"
+metadata = { lane = "w1" }
+moderation = { model = "omni-moderation-latest", policy = "default" }
+reasoning = { summary = "concise", mode = "standard" }
+include = ["message.output_text.logprobs"]
+tool_choice = { type = "web_search" }
+
 [webfetch]
 allow_private = true
 
@@ -227,10 +263,18 @@ fn the_schema_matches_what_the_real_loader_accepts() {
         &home.path().join("mcp-remote"),
         &schema,
     );
+    the_loader_names_exactly_the_keys_a_responses_options_table_accepts(
+        &home.path().join("responses-options"),
+        &schema,
+    );
     the_kitchen_sink_document_loads_through_the_real_loader(&home.path().join("kitchen-sink"));
     the_loader_refuses_a_non_loopback_mcp_url_that_the_schema_alone_would_accept(
         &home.path().join("non-loopback"),
     );
+    the_loader_refuses_the_per_id_narrowing_the_schema_alone_cannot_express(
+        &home.path().join("per-id"),
+    );
+    the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(&home.path().join("excluded"));
 }
 
 /// Code → schema, for [`Config`] itself: a bogus top-level key makes serde
@@ -293,6 +337,86 @@ fn the_loader_names_exactly_the_fields_a_remote_mcp_entry_accepts(project: &Path
     );
 }
 
+/// Code → schema, for `ResponsesOptions` — the shape **D563** added, and the
+/// one with the most keys in this file. The probe goes under
+/// `[provider.chatgpt.options]` because that is where a person writes one, so
+/// the refusal is the one they would actually read.
+fn the_loader_names_exactly_the_keys_a_responses_options_table_accepts(
+    project: &Path,
+    schema: &Value,
+) {
+    let message = bogus_key_error(project, "[provider.chatgpt.options]\nzzz_schema_probe = 1\n");
+    let loader_fields = expected_fields(&message);
+    let schema_fields = schema_keys(schema, Some("ResponsesOptions"));
+
+    assert_eq!(
+        loader_fields, schema_fields,
+        "ResponsesOptions' own fields (from serde's refusal: {message:?}) must be exactly \
+         the schema's ResponsesOptions properties"
+    );
+}
+
+/// **The per-id narrowing is the loader's alone**, and this is the evidence.
+///
+/// Both ids `$ref` one `ResponsesOptions` in the schema, so the schema
+/// describes the *union* of what the two accept — an editor cannot know which
+/// id a key is legal under, and `properties.chatgpt` pointing at a narrowed
+/// copy would break the drift enumeration above, which compares serde's one
+/// struct against one definition. The narrowing is therefore
+/// `check_responses_options`', measured against the wire's own lists, and a
+/// document the seat would 400 is refused at load with the key, the id and the
+/// probe date in the sentence. Asserted rather than commented, so that a later
+/// schema that *can* express it is a visible test change.
+fn the_loader_refuses_the_per_id_narrowing_the_schema_alone_cannot_express(project: &Path) {
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+
+    for (document, expected) in [
+        (
+            "[provider.chatgpt.options]\ntemperature = 0.2\n",
+            "provider \"chatgpt\" cannot carry `options.temperature`: the ChatGPT seat rejects it \
+             (`Unsupported parameter: temperature`, probe 2026-09-16); it is an `openai` key",
+        ),
+        (
+            "[provider.chatgpt.options]\nservice_tier = \"flex\"\n",
+            "provider \"chatgpt\" cannot carry `options.service_tier = \"flex\"`: the ChatGPT \
+             seat rejects it (`Unsupported service_tier: flex`, probe 2026-09-16); the seat takes \
+             default, priority, ultrafast",
+        ),
+    ] {
+        let message = bogus_key_error(project, document);
+        assert_eq!(message, expected);
+
+        let instance: Value =
+            toml::from_str(document).expect("the refused document is still valid TOML");
+        assert!(
+            validator.is_valid(&instance),
+            "the schema describes the union of both ids' keys, on purpose: {document}"
+        );
+    }
+}
+
+/// A key **neither** id reads is refused by both halves — the one narrowing
+/// the schema can express, because it is a property nothing declares rather
+/// than a property one id declares.
+///
+/// `background` is the example on purpose: it holds state across requests,
+/// which this build's `store: false` posture has nowhere to put, so it is
+/// excluded from both ids by decision rather than by measurement.
+fn the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(project: &Path) {
+    let message = bogus_key_error(project, "[provider.chatgpt.options]\nbackground = true\n");
+    assert!(
+        message.contains("unknown field `background`"),
+        "an excluded key is refused by name: {message}"
+    );
+
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+    let instance = json!({ "provider": { "chatgpt": { "options": { "background": true } } } });
+    assert!(
+        !validator.is_valid(&instance),
+        "additionalProperties: false on ResponsesOptions should refuse it too"
+    );
+}
+
 /// A document naming every top-level key, and both MCP shapes with every
 /// field, must load through the real loader without complaint — the other
 /// half of [`a_kitchen_sink_document_also_validates_against_the_schema`],
@@ -347,23 +471,80 @@ fn the_schema_is_a_valid_draft_2020_12_document() {
 /// again, and it is asserted **both** ways: an id that ships and is missing
 /// here is an editor that accepts what will not load, and an id here that no
 /// longer ships is an editor refusing an entry that would work.
+///
+/// Since **D563** the list is `PROVIDERS` **minus the two Responses ids**: an
+/// entry for `chatgpt` or `openai` now means something — a curated `options`
+/// table — so refusing the name outright would refuse a document that loads.
+/// The two are `properties` instead, and this test asserts that split rather
+/// than working around it.
 #[test]
 fn the_schemas_builtin_refusal_list_is_exactly_what_this_build_ships() {
     let schema = schema();
-    let listed: BTreeSet<String> = schema["properties"]["provider"]["propertyNames"]["not"]["enum"]
+    let provider = &schema["properties"]["provider"];
+    let listed: BTreeSet<String> = provider["propertyNames"]["not"]["enum"]
         .as_array()
         .expect("the provider table refuses builtin ids by enumerating them")
         .iter()
         .map(|id| id.as_str().expect("every entry is a provider id").to_owned())
         .collect();
+    let configurable: BTreeSet<String> = provider["properties"]
+        .as_object()
+        .expect("the two Responses ids are named properties")
+        .keys()
+        .cloned()
+        .collect();
     let shipped: BTreeSet<String> =
         ganja_core::provider::PROVIDERS.iter().map(|id| (*id).to_owned()).collect();
 
     assert_eq!(
-        listed, shipped,
+        configurable,
+        BTreeSet::from(["chatgpt".to_owned(), "openai".to_owned()]),
+        "only the two Responses ids take an `options` entry (D563)"
+    );
+    assert!(
+        listed.is_disjoint(&configurable),
+        "an id cannot be both refused by name and configurable: {:?}",
+        listed.intersection(&configurable).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        &listed | &configurable,
+        shipped,
         "the schema's builtin list and `PROVIDERS` have drifted; the `$comment` \
          beside the enum names both sites"
     );
+}
+
+/// A **config-declared** entry still needs both halves of its endpoint
+/// (**D563**).
+///
+/// The struct's two fields became [`Option`] so that a builtin's `options`
+/// entry could exist at all, which means serde no longer refuses an entry that
+/// declares half an endpoint — `check_providers` does. The schema keeps
+/// `required` for the declared shape regardless, because an editor is the one
+/// place somebody finds out before running anything.
+#[test]
+fn a_config_declared_endpoint_is_still_required_to_declare_one() {
+    let schema = schema();
+
+    assert_eq!(
+        schema["$defs"]["ProviderConfig"]["required"],
+        json!(["dialect", "base_url"]),
+        "the declared-endpoint shape keeps both required fields"
+    );
+    assert!(
+        schema["$defs"]["ProviderConfig"]["properties"].get("options").is_none(),
+        "a config-declared endpoint takes no `options`"
+    );
+
+    let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+    for instance in [
+        json!({ "provider": { "proxy": { "dialect": "openai-responses" } } }),
+        json!({ "provider": { "proxy": {
+            "dialect": "openai-responses", "base_url": "https://p", "options": {}
+        } } }),
+    ] {
+        assert!(!validator.is_valid(&instance), "the schema should refuse {instance}");
+    }
 }
 
 /// The schema, on its own, validates the same kitchen-sink document the

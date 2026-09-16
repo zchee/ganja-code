@@ -113,10 +113,11 @@ async fn a_config_named_responses_endpoint_takes_a_whole_turn_and_is_asked_for_n
     config.provider.insert(
         PROVIDER_ID.to_owned(),
         ProviderConfig {
-            dialect: Dialect::OpenaiResponses,
-            base_url: base_url.clone(),
+            dialect: Some(Dialect::OpenaiResponses),
+            base_url: Some(base_url.clone()),
             key_env: Some(KEY_VAR.to_owned()),
             headers: [(ROUTE.to_owned(), ROUTE_CANARY.to_owned())].into_iter().collect(),
+            options: None,
         },
     );
     // The config's own `model` tier names both halves, which is the route a

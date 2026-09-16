@@ -221,16 +221,14 @@
     },
     "provider": {
       "type": "object",
-      "description": "Endpoints this build can talk to besides the ones it ships, by id. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. An id this build already ships is refused at load, because such an entry would never be reached.",
-      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:2615-2623 (check_providers) against crates/ganja-provider/src/provider.rs:182-200 (PROVIDERS). This enum must equal PROVIDERS as a set; crates/ganja-core/tests/config_schema.rs pins both directions.",
+      "description": "Endpoints this build can talk to besides the ones it ships, by id, and — for the two ids that speak OpenAI's Responses API, chatgpt and openai — a curated `options` table for a builtin this build already ships (D563). The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. Any other builtin id is refused at load, because such an entry would never be reached.",
+      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs check_providers/check_builtin_options against crates/ganja-provider/src/provider.rs PROVIDERS. This enum must equal PROVIDERS minus the two Responses ids, as a set; crates/ganja-core/tests/config_schema.rs pins both directions.",
       "default": {},
       "propertyNames": {
         "type": "string",
         "not": {
           "enum": [
             "anthropic",
-            "openai",
-            "chatgpt",
             "openrouter",
             "opencode",
             "opencode-go",
@@ -240,6 +238,16 @@
             "cursor",
             "claude-code"
           ]
+        }
+      },
+      "properties": {
+        "chatgpt": {
+          "$ref": "#/$defs/BuiltinProviderEntry",
+          "description": "Request options for the chatgpt Responses id. This entry configures a builtin: it may carry `options` and nothing else, and the provider's endpoint still moves with its own base-URL variable."
+        },
+        "openai": {
+          "$ref": "#/$defs/BuiltinProviderEntry",
+          "description": "Request options for the openai Responses id. This entry configures a builtin: it may carry `options` and nothing else, and the provider's endpoint still moves with its own base-URL variable."
         }
       },
       "additionalProperties": {
@@ -1055,6 +1063,422 @@
         "bel"
       ],
       "default": "osc9"
+    },
+    "BuiltinProviderEntry": {
+      "title": "Options for a builtin provider",
+      "description": "A `provider` entry whose id names a wire this build already ships. It carries request options and nothing else — a builtin's endpoint, credential and headers all move with that builtin's own variables, so naming dialect, base_url, key_env or headers here is refused at load.",
+      "$comment": "crates/ganja-core/src/config.rs check_builtin_options (D563).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "options": {
+          "$ref": "#/$defs/ResponsesOptions",
+          "description": "Curated Responses API request options for this id."
+        }
+      }
+    },
+    "ResponsesOptions": {
+      "title": "Responses API request options",
+      "description": "What a request on the chatgpt or openai id carries beyond the conversation (D563). Every key is curated and refused by name at load, because the ChatGPT seat answers an unknown key with a 400 and the loader is the only place that can say so before a request is spent. Which of these keys each id accepts is narrower than this schema can express: the seat takes a measured subset and the loader refuses the rest naming the key, the id and the probe.",
+      "$comment": "crates/ganja-core/src/config.rs ResponsesOptions (deny_unknown_fields); per-id gate at check_responses_options against crates/ganja-provider/src/provider/responses/options.rs.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service_tier": {
+          "$ref": "#/$defs/ServiceTier",
+          "description": "How the turn is scheduled and billed. Measured as recognized rather than honored on the seat: every accepted value came back echoing default."
+        },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningOptions",
+          "description": "How the model reasons, and how much of that reasoning comes back."
+        },
+        "text": {
+          "$ref": "#/$defs/TextOptions",
+          "description": "How the model writes."
+        },
+        "parallel_tool_calls": {
+          "type": "boolean",
+          "description": "Whether the model may call several tools in one step."
+        },
+        "stream_options": {
+          "$ref": "#/$defs/StreamOptions",
+          "description": "Stream-level settings."
+        },
+        "tool_choice": {
+          "$ref": "#/$defs/ToolChoice",
+          "description": "What the model must call, if anything. The names inside an allowed_tools form are deliberately not checked at load: which tools a request offers is decided per turn."
+        },
+        "custom_tools": {
+          "type": "array",
+          "description": "Builtin tools to advertise as Responses custom tools beside their ordinary function entries, by registry name. Only a builtin with exactly one required string argument can be reached through a custom advertisement.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "server_tools": {
+          "type": "array",
+          "description": "Vendor-run tools, sent verbatim. Each one bills per call.",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ServerToolEntry",
+            "description": "One vendor-run tool."
+          }
+        },
+        "include": {
+          "type": "array",
+          "description": "Extra response fields to ask for, unioned with the wire's own entries rather than replacing them.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_management": {
+          "type": "array",
+          "description": "Server-side transcript compaction, passed through. Independent of ganja's own compaction, which keeps running off the reported input tokens.",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Compaction",
+            "description": "One server-side compaction directive."
+          }
+        },
+        "client_metadata": {
+          "type": "object",
+          "description": "Free-form client metadata, passed through.",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "access_programs": {
+          "type": "object",
+          "description": "Access-program settings, passed through."
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "description": "Ceiling on the tokens one response may generate. openai only — the seat rejects it.",
+          "minimum": 1
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "description": "Ceiling on the tool calls one response may make. openai only.",
+          "minimum": 1
+        },
+        "prompt_cache_key": {
+          "type": "string",
+          "description": "Prompt-cache partition key. openai only: the seat replaces it with one of its own on every response."
+        },
+        "prompt_cache_retention": {
+          "type": "string",
+          "description": "How long the prompt cache keeps an entry. openai only."
+        },
+        "prompt_cache_options": {
+          "$ref": "#/$defs/PromptCacheOptions",
+          "description": "Finer prompt-cache settings. openai only."
+        },
+        "temperature": {
+          "type": "number",
+          "description": "Sampling temperature. openai only."
+        },
+        "top_p": {
+          "type": "number",
+          "description": "Nucleus sampling cutoff. openai only."
+        },
+        "top_logprobs": {
+          "type": "integer",
+          "description": "How many alternative tokens to report per position. openai only, and what message.output_text.logprobs comes back through.",
+          "minimum": 0
+        },
+        "truncation": {
+          "$ref": "#/$defs/Truncation",
+          "description": "What to do with a request that overflows the window. openai only."
+        },
+        "safety_identifier": {
+          "type": "string",
+          "description": "An opaque end-user identifier for the vendor's abuse tooling. openai only."
+        },
+        "user": {
+          "type": "string",
+          "description": "The vendor's older end-user identifier. openai only."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Free-form request metadata. openai only.",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "moderation": {
+          "$ref": "#/$defs/Moderation",
+          "description": "Moderation settings. openai only."
+        },
+        "model": {
+          "type": "object",
+          "description": "Per-model overrides, by the model id a request names. Overlaid field-wise over everything above: a set value replaces, and a list replaces whole. A per-model entry may not carry a `model` table of its own.",
+          "default": {},
+          "additionalProperties": {
+            "$ref": "#/$defs/ResponsesOptions"
+          }
+        }
+      }
+    },
+    "ServiceTier": {
+      "title": "Service tier",
+      "description": "The seat takes default, priority and ultrafast; the platform documents all six. `fast` is an alias of `priority`, rewritten at load and never sent.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "default",
+        "flex",
+        "scale",
+        "priority",
+        "ultrafast",
+        "fast"
+      ]
+    },
+    "ReasoningOptions": {
+      "title": "Reasoning options",
+      "description": "`reasoning` on a Responses request.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/ReasoningContext",
+          "description": "How much of the conversation the model reasons over."
+        },
+        "summary": {
+          "$ref": "#/$defs/ReasoningSummary",
+          "description": "How much of the reasoning comes back as readable summary. openai only: the wire already sends auto on both ids and the seat was never measured serving anything else."
+        },
+        "mode": {
+          "$ref": "#/$defs/ReasoningMode",
+          "description": "Which reasoning stack answers. openai only — the seat rejects pro and standard is already its default."
+        }
+      }
+    },
+    "ReasoningContext": {
+      "title": "Reasoning context",
+      "description": "How much of the conversation a reasoning model reasons over.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "current_turn",
+        "all_turns"
+      ]
+    },
+    "ReasoningSummary": {
+      "title": "Reasoning summary",
+      "description": "How much readable reasoning comes back.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "concise",
+        "detailed"
+      ]
+    },
+    "ReasoningMode": {
+      "title": "Reasoning mode",
+      "description": "Which reasoning stack answers.",
+      "type": "string",
+      "enum": [
+        "standard",
+        "pro"
+      ]
+    },
+    "TextOptions": {
+      "title": "Text options",
+      "description": "`text` on a Responses request, minus `format` — which is `ganja run --json-schema`'s alone and is deliberately not a config key.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "verbosity": {
+          "$ref": "#/$defs/Verbosity",
+          "description": "How much the model writes."
+        }
+      }
+    },
+    "Verbosity": {
+      "title": "Verbosity",
+      "description": "How much the model writes.",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "StreamOptions": {
+      "title": "Stream options",
+      "description": "`stream_options` on a Responses request.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include_obfuscation": {
+          "type": "boolean",
+          "description": "Whether text deltas carry the vendor's padding field. The wire already sends false on both Responses ids; a config setting it is setting it back."
+        }
+      }
+    },
+    "ToolChoice": {
+      "title": "Tool choice",
+      "description": "What the model must call: a bare word, an allowed_tools narrowing, one named function, or a hosted tool. The hosted form is admitted on openai only — it is unprobed on the seat.",
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "required"
+          ]
+        },
+        {
+          "title": "Allowed tools",
+          "description": "A narrowed set the model picks from.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "allowed_tools"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "required"
+              ]
+            },
+            "tools": {
+              "type": "array",
+              "description": "The tools the model may pick from, in the vendor's own spelling.",
+              "default": [],
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "mode",
+            "tools"
+          ]
+        },
+        {
+          "title": "Named function",
+          "description": "One tool the model must call.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "function"
+            },
+            "name": {
+              "type": "string",
+              "description": "The tool that must be called."
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "title": "Hosted tool",
+          "description": "One vendor-run tool the model must call. openai only.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "The hosted tool's type."
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ServerToolEntry": {
+      "title": "Vendor-run tool",
+      "description": "One hosted tool, sent verbatim. `type` is validated per id — the seat registers web_search and image_generation, and shell, apply_patch and computer are refused on both ids because they need client-side execution. Every other key passes through, because the settings a hosted tool takes move when the vendor moves them.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Which hosted tool this is."
+        }
+      }
+    },
+    "Compaction": {
+      "title": "Server-side compaction",
+      "description": "One `context_management` directive, passed through.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "The directive's kind; `compaction` is the one the vendor documents."
+        },
+        "compact_threshold": {
+          "type": "integer",
+          "description": "How many tokens the backend lets the transcript reach first.",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "PromptCacheOptions": {
+      "title": "Prompt cache options",
+      "description": "Finer prompt-cache settings. openai only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Which caching mode to use."
+        },
+        "ttl": {
+          "type": "string",
+          "description": "How long an entry lives."
+        },
+        "comparison_response_id": {
+          "type": "string",
+          "description": "The response whose cache this request continues."
+        }
+      }
+    },
+    "Truncation": {
+      "title": "Truncation",
+      "description": "What to do with a request that overflows the window.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "disabled"
+      ]
+    },
+    "Moderation": {
+      "title": "Moderation",
+      "description": "Moderation settings. openai only.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Which moderation model answers."
+        },
+        "policy": {
+          "type": "string",
+          "description": "Which policy it applies."
+        }
+      }
     }
   }
 }

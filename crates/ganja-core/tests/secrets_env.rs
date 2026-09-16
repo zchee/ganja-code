@@ -208,10 +208,11 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         config.provider.insert(
             "local-llama".to_owned(),
             ganja_core::config::ProviderConfig {
-                dialect: provider::Dialect::OpenaiChatCompletions,
-                base_url: url.clone(),
+                dialect: Some(provider::Dialect::OpenaiChatCompletions),
+                base_url: Some(url.clone()),
                 key_env: Some("ANTHROPIC_API_KEY".to_owned()),
                 headers: std::collections::BTreeMap::new(),
+                options: None,
             },
         );
         // The flag tier, which outranks the `GANJA_PROVIDER=anthropic` this

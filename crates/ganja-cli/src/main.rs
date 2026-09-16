@@ -660,7 +660,11 @@ fn configured_provider_exists(provider: &NamedProvider) -> Result<()> {
         return Ok(());
     }
 
-    let declared = config.provider.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
+    // `declared_endpoints`, not the table's keys: since **D563** a `provider`
+    // entry may configure a builtin (`[provider.chatgpt.options]`) rather than
+    // declare an endpoint, and naming one of those here would send somebody
+    // looking for an endpoint they never wrote.
+    let declared = config.declared_endpoints().join(", ");
     bail!(
         "no provider `{id}`; this build ships {}{}",
         ganja_core::provider::PROVIDERS.join(", "),

@@ -97,6 +97,10 @@ use crate::provider::{
 };
 use crate::tool::ToolDefinition;
 
+// Documented by its own module doc; an outer one here would be merged with it
+// and resolve that doc's intra-doc links in *this* module's scope.
+pub mod options;
+
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
 ///
 /// The same one [`super::openai`] answers to, because it is the same vendor

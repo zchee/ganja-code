@@ -61,8 +61,10 @@ use crate::{
     project::Project,
     // Same reason: what wires a `provider` entry may name is the provider
     // layer's to say, and a second enum here would be a second opinion about
-    // which wires exist.
-    provider::Dialect,
+    // which wires exist. `responses` joins it for the same reason again
+    // (**D563**): which keys the two Responses ids accept was measured against
+    // that wire, so the lists are read from there rather than restated here.
+    provider::{Dialect, responses},
 };
 
 /// Environment variable naming one extra config **file** to read.
@@ -496,17 +498,43 @@ fn connect_by_default() -> bool {
 /// The entry is a **curated key set** like every other shape here: a field
 /// this build does not have is refused by name rather than ignored, because
 /// an ignored endpoint setting is one whose author still believes it applies.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+///
+/// # Two shapes, one table (**D563**)
+///
+/// Since D563 a `provider` entry is one of two things, and which one it is
+/// follows from its id rather than from a key:
+///
+/// - a **config-declared endpoint**, the original shape, whose id names no
+///   builtin. [`dialect`](Self::dialect) and [`base_url`](Self::base_url) are
+///   required there and [`options`](Self::options) is refused, because an
+///   endpoint this build has never spoken to has no measured option surface
+///   to curate;
+/// - a **builtin's options entry**, whose id is `chatgpt` or `openai`. It may
+///   carry `options` and nothing else: the two Responses ids take a curated
+///   per-provider option table, and everything else about a builtin — where
+///   it lives, what credential it presents — still moves with that builtin's
+///   own variables.
+///
+/// The two required fields are therefore [`Option`] on the struct and
+/// required by `check_providers` instead, so that the refusal can name the
+/// shape somebody meant. [`endpoint`](Self::endpoint) is what a caller reads
+/// them through once the loader has proved them present.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// Which request/response mapping the endpoint speaks. Required: the
-    /// wires encode a message differently, and guessing from a URL is how a
-    /// session sends an Anthropic body to a chat-completions server.
-    pub dialect: Dialect,
+    /// Which request/response mapping the endpoint speaks. Required on a
+    /// config-declared endpoint: the wires encode a message differently, and
+    /// guessing from a URL is how a session sends an Anthropic body to a
+    /// chat-completions server. Refused on a builtin, whose wire is the
+    /// build's.
+    pub dialect: Option<Dialect>,
     /// Where it lives. Refused unless it is `https`, or `http` to loopback —
     /// the rule [`crate::provider`] applies to every base URL, for the reason
     /// it applies there: the credential travels in a header on every request.
-    pub base_url: String,
+    ///
+    /// Required on a config-declared endpoint and refused on a builtin, which
+    /// is moved with its own base-URL variable.
+    pub base_url: Option<String>,
     /// The environment variable holding the endpoint's key, consulted before
     /// the credential store.
     ///
@@ -520,6 +548,524 @@ pub struct ProviderConfig {
     /// reason [`base_url`](Self::base_url) is held to the rule above.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Per-provider request options for the two ids that speak OpenAI's
+    /// Responses API — `chatgpt` and `openai` (**D563**).
+    ///
+    /// Refused on every other id, builtin or declared, and refused there **by
+    /// name**: the keys are one vendor's, measured against one backend, and a
+    /// table of them under another provider is a setting whose author still
+    /// believes it applies.
+    #[serde(default)]
+    pub options: Option<ResponsesOptions>,
+}
+
+impl ProviderConfig {
+    /// The endpoint this entry declares, or [`None`] for a builtin's options
+    /// entry, which declares none.
+    ///
+    /// The one door onto the two fields `check_providers` proves present for
+    /// every declared id, so that no caller has to decide for itself what a
+    /// half-filled entry means — there are no half-filled entries past the
+    /// loader.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<(Dialect, &str)> {
+        Some((self.dialect?, self.base_url.as_deref()?))
+    }
+}
+
+/// What `[provider.chatgpt.options]` and `[provider.openai.options]` may say
+/// (**D563**).
+///
+/// Spec: `.omc/research/2026-09-16-chatgpt-seat-param-probe.md`, 120 live
+/// calls. Which of these keys each id takes is
+/// [`responses::options`]' answer, not
+/// this struct's: the struct is the **shape** a document decodes to, and the
+/// per-id gate in `check_providers` reads the wire's own measured lists so
+/// that the two can never disagree about what a backend accepts.
+///
+/// Every field is optional and nothing here is sent unless it is set. Two
+/// things follow from that and are worth saying once:
+///
+/// - **a key the backend refuses is refused at load**, by name and with the
+///   probe date beside it, because the seat answers an unknown key with a 400
+///   and the loader is the only place that can say so before a request is
+///   spent;
+/// - **a value is typed wherever the vendor publishes a closed set**, so that
+///   a misspelling is a line somebody can read rather than a turn that dies
+///   mid-stream.
+///
+/// [`model`](Self::model) is the per-model overlay, applied by
+/// [`for_model`](Self::for_model); a per-model entry may not nest another.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponsesOptions {
+    /// Which service tier the turn is billed and scheduled at.
+    ///
+    /// **Measured as recognized rather than honored on the seat**: every
+    /// accepted value came back with the completed frame echoing `default`,
+    /// and the one `ultrafast` sample was slower than its baseline. That is
+    /// why the status bar draws what was asked and `/usage` draws what the
+    /// backend said it served.
+    pub service_tier: Option<ServiceTier>,
+    /// How the model reasons, and how much of that reasoning comes back.
+    pub reasoning: Option<ReasoningOptions>,
+    /// How the model writes.
+    pub text: Option<TextOptions>,
+    /// Whether the model may call several tools in one step.
+    pub parallel_tool_calls: Option<bool>,
+    /// Stream-level settings; one key so far.
+    pub stream_options: Option<StreamOptions>,
+    /// Which tool the model must call, if any.
+    ///
+    /// The names inside an `allowed_tools` form are deliberately **not**
+    /// checked at load: which tools a request offers is decided per turn — an
+    /// agent, a plan mode and an MCP server all move it — so a name that is
+    /// absent today is not a name that is wrong.
+    pub tool_choice: Option<ToolChoice>,
+    /// Builtin tools to advertise as Responses *custom* tools beside their
+    /// ordinary function entries, by registry name.
+    ///
+    /// Held to
+    /// [`CUSTOM_TOOLS`](crate::provider::responses::options::CUSTOM_TOOLS):
+    /// a custom advertisement carries one free-text argument, so only a tool
+    /// with exactly one required string argument can be reached through it.
+    #[serde(default)]
+    pub custom_tools: Vec<String>,
+    /// Vendor-run tools, sent verbatim.
+    #[serde(default)]
+    pub server_tools: Vec<ServerToolEntry>,
+    /// Extra response fields to ask for. Unioned with the wire's own entries
+    /// rather than replacing them.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// Server-side transcript compaction, passed through.
+    ///
+    /// Independent of ganja's own compaction, which keeps running off the
+    /// reported input tokens; a session with both active says so once in the
+    /// log.
+    #[serde(default)]
+    pub context_management: Vec<Compaction>,
+    /// Free-form client metadata, passed through.
+    #[serde(default)]
+    pub client_metadata: BTreeMap<String, String>,
+    /// Access-program settings, passed through.
+    pub access_programs: Option<toml::Table>,
+    /// Ceiling on the tokens one response may generate. Platform only — the
+    /// seat rejected it.
+    pub max_output_tokens: Option<u64>,
+    /// Ceiling on the tool calls one response may make. Platform only.
+    pub max_tool_calls: Option<u64>,
+    /// Prompt-cache partition key. Platform only: the seat replaces it with
+    /// one of its own on every response.
+    pub prompt_cache_key: Option<String>,
+    /// How long the prompt cache keeps an entry. Platform only.
+    pub prompt_cache_retention: Option<String>,
+    /// Finer prompt-cache settings. Platform only.
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    /// Sampling temperature. Platform only.
+    pub temperature: Option<f64>,
+    /// Nucleus sampling cutoff. Platform only.
+    pub top_p: Option<f64>,
+    /// How many alternative tokens to report per position. Platform only, and
+    /// the reason `message.output_text.logprobs` is on that id's `include`
+    /// list: this is what comes back through it.
+    pub top_logprobs: Option<u32>,
+    /// What to do with a request that overflows the window. Platform only.
+    pub truncation: Option<Truncation>,
+    /// An opaque end-user identifier for the vendor's abuse tooling. Platform
+    /// only.
+    pub safety_identifier: Option<String>,
+    /// The vendor's older end-user identifier. Platform only.
+    pub user: Option<String>,
+    /// Free-form request metadata. Platform only.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    /// Moderation settings. Platform only.
+    pub moderation: Option<Moderation>,
+    /// Per-model overrides, by the model id a request names.
+    ///
+    /// Overlaid field-wise over everything above by
+    /// [`for_model`](Self::for_model). A per-model entry carrying a `model`
+    /// table of its own is refused at load: the overlay is one deep, and a
+    /// second level would be a rule nobody could read off a config file.
+    #[serde(default)]
+    pub model: BTreeMap<String, ResponsesOptions>,
+}
+
+impl ResponsesOptions {
+    /// This table overlaid by its own entry for `model`.
+    ///
+    /// The overlay rule is the config's own, applied field by field: a set
+    /// [`Option`] replaces, and a non-empty list or map replaces **whole**
+    /// rather than merging — the rule every other list in this file follows,
+    /// so that a per-model `include` is the entries somebody wrote there and
+    /// not those entries plus whatever the provider-wide table happened to
+    /// hold.
+    ///
+    /// The result never carries a [`model`](Self::model) table: it is the
+    /// answer for one model, and a table inside it would invite a second
+    /// lookup nobody performs.
+    ///
+    /// Defined once and called from both sides — [`Config::provider_options`]
+    /// and the engine's per-turn resolver — because two spellings of an
+    /// overlay are two overlays.
+    #[must_use]
+    pub fn for_model(&self, model: &str) -> Self {
+        let mut merged = self.clone();
+        merged.model = BTreeMap::new();
+
+        let Some(over) = self.model.get(model) else {
+            return merged;
+        };
+
+        replace_if_set(&mut merged.service_tier, over.service_tier);
+        clone_if_set(&mut merged.reasoning, over.reasoning.as_ref());
+        clone_if_set(&mut merged.text, over.text.as_ref());
+        replace_if_set(&mut merged.parallel_tool_calls, over.parallel_tool_calls);
+        clone_if_set(&mut merged.stream_options, over.stream_options.as_ref());
+        clone_if_set(&mut merged.tool_choice, over.tool_choice.as_ref());
+        replace_if_filled(&mut merged.custom_tools, &over.custom_tools);
+        replace_if_filled(&mut merged.server_tools, &over.server_tools);
+        replace_if_filled(&mut merged.include, &over.include);
+        replace_if_filled(&mut merged.context_management, &over.context_management);
+        if !over.client_metadata.is_empty() {
+            merged.client_metadata.clone_from(&over.client_metadata);
+        }
+        clone_if_set(&mut merged.access_programs, over.access_programs.as_ref());
+        replace_if_set(&mut merged.max_output_tokens, over.max_output_tokens);
+        replace_if_set(&mut merged.max_tool_calls, over.max_tool_calls);
+        clone_if_set(&mut merged.prompt_cache_key, over.prompt_cache_key.as_ref());
+        clone_if_set(&mut merged.prompt_cache_retention, over.prompt_cache_retention.as_ref());
+        clone_if_set(&mut merged.prompt_cache_options, over.prompt_cache_options.as_ref());
+        replace_if_set(&mut merged.temperature, over.temperature);
+        replace_if_set(&mut merged.top_p, over.top_p);
+        replace_if_set(&mut merged.top_logprobs, over.top_logprobs);
+        replace_if_set(&mut merged.truncation, over.truncation);
+        clone_if_set(&mut merged.safety_identifier, over.safety_identifier.as_ref());
+        clone_if_set(&mut merged.user, over.user.as_ref());
+        if !over.metadata.is_empty() {
+            merged.metadata.clone_from(&over.metadata);
+        }
+        clone_if_set(&mut merged.moderation, over.moderation.as_ref());
+
+        merged
+    }
+
+    /// Every key this table sets, in the dotted spelling the allow-lists in
+    /// [`responses::options`] use.
+    ///
+    /// The nested tables are reported **per leaf** — `reasoning.summary`
+    /// rather than `reasoning` — because that is the granularity the seat
+    /// answers at: it takes `reasoning.context` and rejects
+    /// `reasoning.mode`, and a gate over whole tables could not say so.
+    ///
+    /// [`model`](Self::model) is not reported: it is this file's own overlay
+    /// rather than a key any backend reads.
+    #[must_use]
+    pub fn set_keys(&self) -> Vec<&'static str> {
+        let reasoning = self.reasoning.as_ref();
+        let text = self.text.as_ref();
+        let stream = self.stream_options.as_ref();
+
+        [
+            ("service_tier", self.service_tier.is_some()),
+            ("reasoning.context", reasoning.is_some_and(|it| it.context.is_some())),
+            ("reasoning.summary", reasoning.is_some_and(|it| it.summary.is_some())),
+            ("reasoning.mode", reasoning.is_some_and(|it| it.mode.is_some())),
+            ("text.verbosity", text.is_some_and(|it| it.verbosity.is_some())),
+            ("parallel_tool_calls", self.parallel_tool_calls.is_some()),
+            (
+                "stream_options.include_obfuscation",
+                stream.is_some_and(|it| it.include_obfuscation.is_some()),
+            ),
+            ("tool_choice", self.tool_choice.is_some()),
+            ("custom_tools", !self.custom_tools.is_empty()),
+            ("server_tools", !self.server_tools.is_empty()),
+            ("include", !self.include.is_empty()),
+            ("context_management", !self.context_management.is_empty()),
+            ("client_metadata", !self.client_metadata.is_empty()),
+            ("access_programs", self.access_programs.is_some()),
+            ("max_output_tokens", self.max_output_tokens.is_some()),
+            ("max_tool_calls", self.max_tool_calls.is_some()),
+            ("prompt_cache_key", self.prompt_cache_key.is_some()),
+            ("prompt_cache_retention", self.prompt_cache_retention.is_some()),
+            ("prompt_cache_options", self.prompt_cache_options.is_some()),
+            ("temperature", self.temperature.is_some()),
+            ("top_p", self.top_p.is_some()),
+            ("top_logprobs", self.top_logprobs.is_some()),
+            ("truncation", self.truncation.is_some()),
+            ("safety_identifier", self.safety_identifier.is_some()),
+            ("user", self.user.is_some()),
+            ("metadata", !self.metadata.is_empty()),
+            ("moderation", self.moderation.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect()
+    }
+}
+
+/// Overlay for a [`Copy`] field: a set value replaces, an unset one leaves
+/// the base alone.
+fn replace_if_set<T: Copy>(base: &mut Option<T>, over: Option<T>) {
+    if over.is_some() {
+        *base = over;
+    }
+}
+
+/// [`replace_if_set`] for a field that has to be cloned.
+fn clone_if_set<T: Clone>(base: &mut Option<T>, over: Option<&T>) {
+    if let Some(value) = over {
+        *base = Some(value.clone());
+    }
+}
+
+/// Overlay for a list: a non-empty one replaces whole, an empty one leaves
+/// the base alone. Replacing rather than concatenating is this file's rule for
+/// every list but `instructions`.
+fn replace_if_filled<T: Clone>(base: &mut Vec<T>, over: &[T]) {
+    if !over.is_empty() {
+        *base = over.to_vec();
+    }
+}
+
+/// How a turn is scheduled and billed.
+///
+/// The seat takes three of these (`default`, `priority`, `ultrafast`) and the
+/// platform documents all six. `fast` is an **alias** rather than a value: it
+/// is the word somebody reaches for, the backend answers it with
+/// `Unsupported service_tier: fast`, and rewriting it at load costs nothing
+/// and saves a turn. Nothing ever writes the string `fast` back out.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    /// Let the backend choose. Platform only.
+    Auto,
+    /// The ordinary tier, and the explicit sentinel `/fast off` sends.
+    Default,
+    /// Cheaper, slower, best-effort. Platform only.
+    Flex,
+    /// Reserved capacity. Platform only.
+    Scale,
+    /// The fast tier, and what `fast` means.
+    #[serde(alias = "fast")]
+    Priority,
+    /// The faster tier above [`Priority`](Self::Priority).
+    Ultrafast,
+}
+
+impl ServiceTier {
+    /// The literal this tier is sent as.
+    ///
+    /// Spelled here rather than derived from the serde name so that the wire
+    /// spelling is a fact of this type rather than of its attributes — and so
+    /// that `fast` can be an alias without ever becoming an output.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Ultrafast => "ultrafast",
+        }
+    }
+}
+
+/// `reasoning` on a Responses request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningOptions {
+    /// How much of the conversation the model reasons over.
+    pub context: Option<ReasoningContext>,
+    /// How much of the reasoning comes back as readable summary.
+    ///
+    /// **Platform only.** The wire already sends `auto` on both ids and the
+    /// seat was never measured serving anything else, so a value here would
+    /// be a guess on the one id where a wrong guess costs a turn.
+    pub summary: Option<ReasoningSummary>,
+    /// Which reasoning stack answers. Platform only — the seat rejects `pro`
+    /// and `standard` is already its default.
+    pub mode: Option<ReasoningMode>,
+}
+
+/// How much of the conversation a reasoning model reasons over.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningContext {
+    /// The backend chooses.
+    Auto,
+    /// This turn alone.
+    CurrentTurn,
+    /// Every turn in the transcript.
+    AllTurns,
+}
+
+/// How much readable reasoning comes back.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummary {
+    /// The backend chooses — what the wire sends when nothing says otherwise.
+    Auto,
+    /// Short.
+    Concise,
+    /// Long.
+    Detailed,
+}
+
+/// Which reasoning stack answers.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningMode {
+    /// The ordinary one.
+    Standard,
+    /// The heavier one.
+    Pro,
+}
+
+/// `text` on a Responses request, minus `format` — which is
+/// `ganja run --json-schema`'s alone and is deliberately not a config key: a
+/// schema every turn of every session is forced through is a setting whose
+/// blast radius nobody would guess from one line of TOML.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextOptions {
+    /// How much the model writes.
+    pub verbosity: Option<Verbosity>,
+}
+
+/// How much the model writes.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verbosity {
+    /// Terse.
+    Low,
+    /// The default.
+    Medium,
+    /// Expansive.
+    High,
+}
+
+/// `stream_options` on a Responses request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamOptions {
+    /// Whether text deltas carry the vendor's padding field.
+    ///
+    /// The wire already sends `false` on both Responses ids — it is bytes
+    /// nobody reads. A config setting it is setting it back.
+    pub include_obfuscation: Option<bool>,
+}
+
+/// What the model must call, if anything.
+///
+/// Untagged because the vendor's own field is: it is a bare word or one of
+/// three object shapes, and a config has to be able to spell each. The
+/// ordering of the variants is load-bearing — serde tries them in order, so
+/// the shapes with more fields come first.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    /// `"auto"`, `"none"`, `"required"`.
+    Word(String),
+    /// `{type = "allowed_tools", mode = "auto", tools = [...]}`.
+    Allowed {
+        /// Always `allowed_tools`.
+        #[serde(rename = "type")]
+        kind: String,
+        /// `auto` or `required`, over the narrowed set.
+        mode: String,
+        /// The tools the model may pick from, in the vendor's own spelling.
+        tools: Vec<toml::Table>,
+    },
+    /// `{type = "function", name = "..."}`.
+    Function {
+        /// Always `function`.
+        #[serde(rename = "type")]
+        kind: String,
+        /// The tool that must be called.
+        name: String,
+    },
+    /// `{type = "web_search"}` and the other hosted forms. Platform only: no
+    /// call in the probe ever named a hosted tool here, so the seat's answer
+    /// is unknown and a guess would cost a turn.
+    Hosted {
+        /// The hosted tool's type.
+        #[serde(rename = "type")]
+        kind: String,
+    },
+}
+
+impl ToolChoice {
+    /// The hosted tool's type, for the one form that names one.
+    #[must_use]
+    pub fn hosted_type(&self) -> Option<&str> {
+        match self {
+            Self::Hosted { kind } => Some(kind),
+            Self::Word(_) | Self::Allowed { .. } | Self::Function { .. } => None,
+        }
+    }
+}
+
+/// One vendor-run tool, sent verbatim.
+///
+/// [`kind`](Self::kind) is validated per id and everything else passes
+/// through: the settings a hosted tool takes are that tool's, they move when
+/// the vendor moves them, and curating them here would mean a config key per
+/// vendor release. What is curated is the one thing a wrong value makes
+/// unrecoverable — a type the backend has no tool for is a 400 on every turn.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ServerToolEntry {
+    /// Which hosted tool this is.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Everything else the entry said, kept in the order it was written.
+    #[serde(flatten)]
+    pub rest: toml::Table,
+}
+
+/// One server-side compaction directive, passed through.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Compaction {
+    /// The directive's kind; `compaction` is the one the vendor documents.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// How many tokens the backend lets the transcript reach first.
+    pub compact_threshold: Option<u64>,
+}
+
+/// Finer prompt-cache settings. Platform only.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptCacheOptions {
+    /// Which caching mode to use.
+    pub mode: Option<String>,
+    /// How long an entry lives.
+    pub ttl: Option<String>,
+    /// The response whose cache this request continues.
+    pub comparison_response_id: Option<String>,
+}
+
+/// What to do with a request that overflows the window. Platform only.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Truncation {
+    /// Drop from the middle.
+    Auto,
+    /// Refuse the request.
+    Disabled,
+}
+
+/// Moderation settings. Platform only.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Moderation {
+    /// Which moderation model answers.
+    pub model: Option<String>,
+    /// Which policy it applies.
+    pub policy: Option<String>,
 }
 
 /// What the `lsp` key asked for.
@@ -1853,6 +2399,36 @@ pub struct SkillsConfig {
 }
 
 impl Config {
+    /// The ids in `provider` that declare an **endpoint** — every key of the
+    /// table minus the builtins (**D563**).
+    ///
+    /// The distinction exists because a `provider` entry stopped being one
+    /// thing: `[provider.chatgpt.options]` configures a wire this build
+    /// already ships and declares nothing, so a refusal that listed it as
+    /// something "this project's config declares" would send somebody looking
+    /// for an endpoint they never wrote. Every listing of what a config
+    /// declares reads this rather than the table's keys.
+    #[must_use]
+    pub fn declared_endpoints(&self) -> Vec<String> {
+        self.provider
+            .keys()
+            .filter(|id| !crate::provider::PROVIDERS.contains(&id.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// The Responses options configured for `id`, overlaid for `model`
+    /// (**D563**).
+    ///
+    /// [`None`] when the id carries no `options` table at all, which is every
+    /// id but the two the loader admits one on. The overlay is
+    /// [`ResponsesOptions::for_model`]'s, called here and by the engine's
+    /// per-turn resolver so that both sides read one rule.
+    #[must_use]
+    pub fn provider_options(&self, id: &str, model: &str) -> Option<ResponsesOptions> {
+        Some(self.provider.get(id)?.options.as_ref()?.for_model(model))
+    }
+
     /// The directories `skills.paths` named, resolved and existing.
     ///
     /// A path that names nothing is warned about and dropped rather than
@@ -2704,22 +3280,40 @@ fn check_lsp(config: Option<&LspConfig>) -> Result<(), String> {
 ///
 /// No message quotes the URL. A provider entry is configuration, and
 /// configuration is allowed to carry a credential in its userinfo.
+/// Since **D563** the function is two arms rather than one, keyed on whether
+/// the id names a builtin — see [`ProviderConfig`]'s own doc for the two
+/// shapes a `provider` entry can now be. The builtin arm was the early
+/// `return Err` above until that decision gave two builtins something they can
+/// legitimately carry; everything it used to refuse it still refuses, and the
+/// declared arm is unchanged except that its two required fields are now
+/// proved here rather than by serde.
 fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), String> {
     for (id, entry) in providers {
         if crate::provider::PROVIDERS.contains(&id.as_str()) {
+            check_builtin_options(id, entry)?;
+            continue;
+        }
+
+        if entry.options.is_some() {
             return Err(format!(
-                "provider \"{id}\" is one this build already ships, so a `provider` entry \
-                 for it would never be reached; point the builtin somewhere else with its \
-                 own base-URL variable instead"
+                "provider \"{id}\" is a config-declared endpoint and takes no `options`"
             ));
         }
+
+        let Some((_, base_url)) = entry.endpoint() else {
+            let field = if entry.dialect.is_none() { "dialect" } else { "base_url" };
+            return Err(format!(
+                "provider \"{id}\" is a config-declared endpoint and needs `{field}`"
+            ));
+        };
+
         if entry.key_env.as_ref().is_some_and(|var| var.trim().is_empty()) {
             return Err(format!(
                 "provider \"{id}\" has a blank `key_env`, which names no variable"
             ));
         }
 
-        let parsed = Url::parse(&entry.base_url)
+        let parsed = Url::parse(base_url)
             .map_err(|error| format!("provider \"{id}\" has no valid base_url: {error}"))?;
         if !crate::provider::reachable_in_the_clear(&parsed) {
             return Err(format!(
@@ -2727,6 +3321,169 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
                  anything else puts its credential on the wire in the clear"
             ));
         }
+    }
+
+    Ok(())
+}
+
+/// The builtin arm of [`check_providers`] (**D563**).
+///
+/// A builtin's entry may carry exactly one key, `options`, and only on the two
+/// ids that speak the Responses API. Everything else about a builtin — where
+/// it lives, what credential it presents, what headers it sends — is still the
+/// builtin's own, moved with its own variables, so an entry naming one of
+/// those fields is refused with the endpoint half of the old sentence.
+fn check_builtin_options(id: &str, entry: &ProviderConfig) -> Result<(), String> {
+    if entry.dialect.is_some()
+        || entry.base_url.is_some()
+        || entry.key_env.is_some()
+        || !entry.headers.is_empty()
+    {
+        return Err(format!(
+            "provider \"{id}\" is one this build already ships; a `provider` entry for it may \
+             carry `options` and nothing else, and its endpoint moves with its own base-URL \
+             variable"
+        ));
+    }
+
+    let Some(options) = &entry.options else {
+        return Err(format!(
+            "provider \"{id}\" is one this build already ships, so a `provider` entry \
+             for it would never be reached; point the builtin somewhere else with its \
+             own base-URL variable instead"
+        ));
+    };
+
+    let Some(accepted) = responses::options::accepted(id) else {
+        return Err(format!(
+            "provider \"{id}\" takes no `options`; this build reads them on the two Responses \
+             ids, chatgpt and openai"
+        ));
+    };
+
+    check_responses_options(id, options, accepted)?;
+
+    for (model, per_model) in &options.model {
+        if !per_model.model.is_empty() {
+            return Err(format!(
+                "provider \"{id}\" nests a `model` table inside `options.model.\"{model}\"`; a \
+                 per-model entry cannot carry one"
+            ));
+        }
+        check_responses_options(id, per_model, accepted)?;
+    }
+
+    Ok(())
+}
+
+/// One `options` table — the provider-wide one or a per-model overlay — held
+/// to what the id it sits under was measured to accept.
+///
+/// The measurement is the wire's, read out of
+/// [`responses::options`] rather than
+/// restated here, which is what stops the loader and the wire from disagreeing
+/// about what a backend takes. Three keys get sentences of their own because
+/// the seat's refusal of them was not a bare `Unsupported parameter` and a
+/// reader deserves to know what actually happened.
+fn check_responses_options(
+    id: &str,
+    options: &ResponsesOptions,
+    accepted: &[&str],
+) -> Result<(), String> {
+    for key in options.set_keys() {
+        if accepted.contains(&key) {
+            continue;
+        }
+
+        return Err(match key {
+            "reasoning.mode" => format!(
+                "provider \"{id}\" cannot carry `options.reasoning.mode`: the ChatGPT seat \
+                 rejects `pro` (`reasoning.mode is not supported with this model`, probe \
+                 2026-09-16) and `standard` is already its default; it is an `openai` key"
+            ),
+            "prompt_cache_key" => format!(
+                "provider \"{id}\" cannot carry `options.prompt_cache_key`: the ChatGPT seat \
+                 replaces it with a key of its own on every response (probe 2026-09-16), so a \
+                 value here would do nothing; it is an `openai` key"
+            ),
+            "reasoning.summary" => format!(
+                "provider \"{id}\" cannot carry `options.reasoning.summary`: only `auto` has \
+                 been measured on the ChatGPT seat (probe 2026-09-16) and the wire already \
+                 sends it; the key is configurable on `openai`"
+            ),
+            _ => format!(
+                "provider \"{id}\" cannot carry `options.{key}`: the ChatGPT seat rejects it \
+                 (`Unsupported parameter: {key}`, probe 2026-09-16); it is an `openai` key"
+            ),
+        });
+    }
+
+    if let Some(tier) = options.service_tier {
+        let tiers = responses::options::tiers(id).unwrap_or_default();
+        if !tiers.contains(&tier.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" cannot carry `options.service_tier = \"{}\"`: the ChatGPT \
+                 seat rejects it (`Unsupported service_tier: {}`, probe 2026-09-16); the seat \
+                 takes {}",
+                tier.as_str(),
+                tier.as_str(),
+                responses::options::SEAT_TIERS.join(", ")
+            ));
+        }
+    }
+
+    for entry in &options.server_tools {
+        let kind = &entry.kind;
+        if responses::options::CLIENT_SIDE_SERVER_TOOLS.contains(&kind.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" cannot carry a `server_tools` entry of type \"{kind}\": it \
+                 needs client-side execution, which this build does not offer through a hosted \
+                 tool"
+            ));
+        }
+
+        let kinds = responses::options::server_tools(id).unwrap_or_default();
+        if !kinds.contains(&kind.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" cannot carry a `server_tools` entry of type \"{kind}\": the \
+                 ChatGPT seat rejects it (`Unsupported tool type: {kind}`, probe 2026-09-16); \
+                 the seat takes {}",
+                responses::options::SEAT_SERVER_TOOLS.join(", ")
+            ));
+        }
+    }
+
+    for name in &options.custom_tools {
+        if !responses::options::CUSTOM_TOOLS.contains(&name.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" cannot carry `custom_tools = [\"{name}\"]`: only a builtin \
+                 with exactly one required string argument can be advertised as a custom tool; \
+                 those are {}",
+                responses::options::CUSTOM_TOOLS.join(", ")
+            ));
+        }
+    }
+
+    let values = responses::options::include(id).unwrap_or_default();
+    for value in &options.include {
+        if !values.contains(&value.as_str()) {
+            return Err(format!(
+                "provider \"{id}\" cannot carry `include = [\"{value}\"]`; the values this id \
+                 takes are {}",
+                values.join(", ")
+            ));
+        }
+    }
+
+    if let Some(kind) = options.tool_choice.as_ref().and_then(ToolChoice::hosted_type)
+        && id == crate::provider::responses::CHATGPT_ID
+    {
+        return Err(format!(
+            "provider \"{id}\" cannot carry a hosted `tool_choice` of type \"{kind}\": that \
+             form is unprobed on the ChatGPT seat (probe 2026-09-16 registered web_search and \
+             image_generation as tools and never named one in `tool_choice`); it is admitted on \
+             `openai` only"
+        ));
     }
 
     Ok(())

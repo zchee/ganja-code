@@ -675,6 +675,46 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
         .stdout(predicate::str::contains("PROVIDER").not());
 }
 
+/// **AC-10.** What the refusal for an unknown provider calls "this project's
+/// config declares" is its **endpoints**, and since **D563** a `provider`
+/// entry does not have to be one.
+///
+/// `[provider.chatgpt.options]` configures a wire this build already ships; it
+/// declares nothing, and naming it here would answer a typo by pointing at an
+/// entry whose author was not describing an endpoint at all. The two halves
+/// are asserted against one binary so the sentence is the one somebody reads,
+/// not the one a unit test constructs.
+#[test]
+fn an_options_entry_for_a_builtin_is_not_something_this_project_declares() {
+    let cache = cache();
+
+    let configuring = project();
+    fs::write(
+        configuring.path().join("ganja.toml"),
+        "[provider.chatgpt.options]\nservice_tier = \"priority\"\n",
+    )
+    .expect("the config file is writable");
+
+    offline(&cache)
+        .current_dir(configuring.path())
+        .env("GANJA_PROVIDER", "bogus")
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("this config names").not());
+
+    // The declared shape still answers as it always did, which is what makes
+    // the clause above about the *kind* of entry rather than about D563
+    // silencing the list.
+    offline(&cache)
+        .current_dir(declaring_project().path())
+        .env("GANJA_PROVIDER", "bogus")
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("this config names local-llama"));
+}
+
 /// The cursor roster is the wire's to serve, so `models cursor` asks the
 /// stored login before it asks anything else — and with none stored, what
 /// comes back is the wire's own refusal naming the repair, with the catalog
