@@ -6,7 +6,7 @@
 # doc holds the command, the gate and the three things this cannot measure.
 #
 # Build: ganja-code 0.1.0
-# Note:  post-commit-2 tree: originator+UA ganja-code on the codex backend; ganja auth login (browser) completed 2026-08-25 under originator=ganja-code
+# Note:  not recorded; set GANJA_PROBE_NOTE to stamp one
 
 == identity headers ==
 # Captured off a loopback socket this process owns. The quartet below is decided
@@ -28,13 +28,13 @@ also sent: accept, content-length, content-type, host
 == the live turn ==
 # Against the real backend. The wire reports no served-model field, so
 # what is recorded is the model asked for and whether it was accepted.
-# Offered is not servable: SUBSCRIPTION_DEFAULT is deliberately outside
-# the roster below, so unless GANJA_MODEL named a roster member this
-# turn is a sixth ask rather than one of the five.
-model asked: gpt-5.4
+# SUBSCRIPTION_DEFAULT has been a roster member since 2026-09-16, so
+# unless GANJA_MODEL named another one this turn repeats a ladder row
+# rather than adding an ask the ladder does not make.
+model asked: gpt-5.5
 outcome: served
 finish: Completed
-usage: input=21 output=5 cache_read=0 reasoning=0
+usage: input=21 output=27 cache_read=0 reasoning=20
 reply: "pong"
 
 == what this build offers a seat ==
@@ -42,12 +42,13 @@ reply: "pong"
 # (D476). Recorded as what ganja volunteers, never as a measurement:
 # the ladder below is the measured half.
 notice: pinned to what a ChatGPT subscription is offered; --refresh does not apply
-default: gpt-5.4
-offered: gpt-5.5 (gpt-5.5)
-offered: gpt-5.6-sol (gpt-5.6-sol)
-offered: gpt-5.6-terra (gpt-5.6-terra)
-offered: gpt-5.6-luna (gpt-5.6-luna)
-offered: gpt-5.3-codex-spark (gpt-5.3-codex-spark)
+default: gpt-5.5
+unmeasured: gpt-5.6-terra, gpt-5.6-luna
+offered: gpt-6-astra (GPT-6 Astra)
+offered: gpt-5.5 (GPT-5.5)
+offered: gpt-5.6-sol (GPT-5.6 Sol)
+offered: gpt-5.6-terra (GPT-5.6 Terra)
+offered: gpt-5.6-luna (GPT-5.6 Luna)
 
 == the ladder ==
 # One ask per offered model, in the roster's own order. This is the
@@ -56,8 +57,8 @@ offered: gpt-5.3-codex-spark (gpt-5.3-codex-spark)
 # arrives already masked against the presented credential; a longer one
 # is cut on a char boundary and ends in an ellipsis. Line breaks inside
 # one are flattened to spaces, so a row stays a row.
-gpt-5.5: served
+gpt-6-astra: served
+gpt-5.5: see the live turn above
 gpt-5.6-sol: served
 gpt-5.6-terra: served
 gpt-5.6-luna: served
-gpt-5.3-codex-spark: served
