@@ -96,6 +96,7 @@ fn response(status: &str, content_type: &str, body: &str) -> String {
 fn hello(model: &str) -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: model.to_owned(),
         system: None,

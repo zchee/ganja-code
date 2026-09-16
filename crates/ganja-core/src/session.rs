@@ -2278,6 +2278,10 @@ async fn request_title(
             // A title request offers no tools of its own and asks for no
             // gateway ones, so a row here would belong to no transcript.
             | ProviderEvent::ServerTool { .. }
+            // A toolless request makes no custom call, and what the backend
+            // served a title is not the session's to report (**D563**).
+            | ProviderEvent::ToolCallCustom { .. }
+            | ProviderEvent::Served(_)
             | ProviderEvent::Usage(_) => {}
         }
     }
@@ -2306,6 +2310,10 @@ async fn title_stream(
         // No effort: this request may ask a cheaper stablemate the selected
         // name was never validated against.
         effort_options: serde_json::Map::new(),
+        // None of the session's Responses options either (**D563**): a title
+        // is not the conversation, so its tier, format and tools are not this
+        // request's.
+        responses: Default::default(),
     };
 
     provider.stream(request, CancellationToken::new()).await
@@ -3179,6 +3187,7 @@ async fn compact_if_needed(
         // The same model as the steps, so the same effort: a session that
         // thinks harder should not summarize with a different mind.
         effort_options: turn.effort_options.clone(),
+        responses: Default::default(),
     };
 
     let (text, usage) = summarize(turn, request).await?;
@@ -3311,8 +3320,12 @@ async fn summarize(
             ProviderEvent::ReasoningDelta(_)
             | ProviderEvent::ReasoningBreak
             | ProviderEvent::ReasoningState { .. } => {}
+            // What the backend served a summary is not what it serves the
+            // session's steps, so it is not the session's to report (**D563**).
+            ProviderEvent::Served(_) => {}
             ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
+            | ProviderEvent::ToolCallCustom { .. }
             | ProviderEvent::ToolCallEnd { .. }
             | ProviderEvent::ServerTool { .. } => {
                 tracing::debug!("the summarize request offered no tools; dropping a call");
@@ -3743,6 +3756,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             turn_start,
             tools,
             effort_options: turn.effort_options.clone(),
+            responses: Default::default(),
         }
     };
 
@@ -4007,7 +4021,9 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             // `calls`: there is nothing to execute, nothing to ask permission
             // for, and nothing for the next request to carry. What it changes
             // is what a person sees.
-            ProviderEvent::ServerTool { tool, input, output } => {
+            // `blob` is not written anywhere yet: the fold that puts it under
+            // the data home, and the path in `output`, is W3b's (**D563**).
+            ProviderEvent::ServerTool { tool, input, output, blob: _ } => {
                 let part = Part::server_tool(tool, input, output);
                 assistant.parts.push(part.clone());
                 turn.persist_part(assistant, &part);
@@ -4033,6 +4049,12 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             ProviderEvent::ReasoningBreak => {
                 open_reasoning = None;
             }
+            // Both folded nowhere yet (**D563**): W3b replaces these arms with
+            // the fold that marks the open call's part `custom` and persists
+            // it, and the fold that writes the echo into the session's served
+            // slot. Until then a custom call runs, and is replayed, as the
+            // ordinary function call its deltas already describe.
+            ProviderEvent::ToolCallCustom { .. } | ProviderEvent::Served(_) => {}
             // Reasoning a person could read, which is a part of its own — not
             // pasted into the reply, and not sent anywhere. It is written
             // through and delivered for the same reason a text delta is: a

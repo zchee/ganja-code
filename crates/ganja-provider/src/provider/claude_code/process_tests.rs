@@ -33,6 +33,7 @@ async fn each_request_shape_takes_the_arm_the_table_names() {
         messages: vec![user("t1", "name this"), user("t2", "in five words")],
         turn_start: 0,
         tools: Vec::new(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     };
     let summary = crate::provider::ChatRequest {

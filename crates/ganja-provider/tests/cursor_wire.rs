@@ -417,6 +417,7 @@ fn exchange_events() -> Vec<ProviderEvent> {
 fn request() -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-5.3-codex".to_owned(),
         system: Some("You are terse.".to_owned()),

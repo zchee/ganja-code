@@ -50,7 +50,10 @@ tempfile.workspace = true
 # speaks over the real stdin and stdout, and it records a signal rather than
 # dying of one, so a test can tell "no signal was sent" from "one was sent and
 # worked".
-tokio = { workspace = true, features = ["io-std", "signal"] }
+#
+# `net` is `responses_server`'s: a loopback listener a real provider sends its
+# Responses requests to, so a suite asserts on the bytes a socket carried.
+tokio = { workspace = true, features = ["io-std", "net", "signal"] }
 # `CancellationToken` lives behind `rt`, the same feature ganja-core itself
 # enables it with.
 tokio-util = { workspace = true, features = ["rt"] }

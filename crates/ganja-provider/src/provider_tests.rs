@@ -5,9 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::sse::Frame;
 use super::{
-    CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, check_base_url,
-    configured_headers, endpoint, events, peeked, reopens, reported, responses, retry, shielded,
-    shown_base_url, unusable,
+    CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, ServedOptions,
+    check_base_url, configured_headers, endpoint, events, matters, peeked, reopens, reported,
+    responses, retry, shielded, shown_base_url, unusable,
 };
 use crate::auth;
 use crate::protocol::FinishReason;
@@ -580,6 +580,47 @@ fn a_spliced_body_keeps_the_wires_fields_over_the_efforts() {
     assert_eq!(untouched, body, "no effort means the wire's body exactly");
 }
 
+/// **AC-19** (D563): a served echo is nothing a transcript draws, so a stream
+/// that has said only that may still be reopened; a custom-call marker belongs
+/// to a row already on screen, so one that has said it may not.
+#[test]
+fn a_served_echo_is_not_content_and_a_custom_call_marker_is() {
+    assert!(!matters(&ProviderEvent::Served(ServedOptions::default())));
+    assert!(matters(&ProviderEvent::ToolCallCustom { id: "c1".to_owned() }));
+}
+
+/// Two layers that both hold a key as an object share it one level deep, the
+/// later one winning inside it; any other collision is a replacement, and the
+/// typed body still lands over every layer (D563).
+#[test]
+fn layers_merge_objects_one_level_deep_and_the_body_still_wins() {
+    let lower = serde_json::json!({"reasoning": {"summary": "auto"}, "tool_choice": "auto"})
+        .as_object()
+        .cloned()
+        .expect("an object fixture");
+    let upper = serde_json::json!({
+        "reasoning": {"effort": "high", "summary": "detailed"},
+        "tool_choice": {"type": "allowed_tools"},
+        "model": "theirs",
+    })
+    .as_object()
+    .cloned()
+    .expect("an object fixture");
+    let body = serde_json::json!({"model": "ours"});
+
+    let merged =
+        serde_json::to_value(super::splice([&lower, &upper], &body)).expect("a body serializes");
+
+    assert_eq!(
+        merged,
+        serde_json::json!({
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "tool_choice": {"type": "allowed_tools"},
+            "model": "ours",
+        })
+    );
+}
+
 /// `turn_start` is a caller's value on a `pub` field, so the one clamp both
 /// history-keyed wires read it through brings a value past the end back to
 /// the last message, leaves one in range alone, and answers `0` for a
@@ -594,6 +635,7 @@ fn a_turn_start_past_the_end_clamps_to_the_last_message() {
         messages: vec![Message::user("first"), Message::user("second")],
         turn_start: 99,
         tools: Vec::new(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     };
     assert_eq!(request.clamped_turn_start(), 1, "past the end is the last index");

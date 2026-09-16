@@ -1003,6 +1003,7 @@ async fn a_one_shots_scratch_directory_is_shared_and_survives() {
             messages: vec![user("m1", "name this")],
             turn_start: 0,
             tools: Vec::new(),
+            responses: Default::default(),
             effort_options: serde_json::Map::new(),
         },
     )

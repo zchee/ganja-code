@@ -59,9 +59,8 @@
 //! `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GANJA_PROVIDER` and `GANJA_MODEL`, and
 //! a plain `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::collections::VecDeque;
 use std::env;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt as _;
 use ganja_core::auth::{self, AuthError, OauthCredential, RefreshOauth};
@@ -74,11 +73,10 @@ use ganja_core::provider::{
 };
 use ganja_core::tool::Registry;
 use ganja_core::{Engine, catalog};
+use ganja_testkit::responses_server::{Endpoint, responses_transcript, serve};
 use ganja_testkit::{RecorderTool, drain};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Where a Responses turn goes, under the endpoint's base URL.
@@ -135,198 +133,6 @@ const KEY_MODEL: &str = "gpt-5.6";
 const SUBSCRIPTION_HEADERS: [&str; 4] =
     ["chatgpt-account-id", "originator", "openai-beta", "user-agent"];
 
-/// One request the endpoint was asked to serve.
-#[derive(Clone)]
-struct Recorded {
-    /// Request line and headers, verbatim.
-    head: String,
-    /// The body, for a request that had one.
-    body: String,
-}
-
-impl Recorded {
-    /// The path asked for, which is what tells the two wires apart.
-    fn path(&self) -> &str {
-        self.head
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .split('?')
-            .next()
-            .unwrap_or_default()
-    }
-
-    /// The value of `name`, compared case-insensitively the way a header name
-    /// is. [`None`] where the request did not carry it at all, which is a
-    /// different answer from carrying it empty.
-    fn header(&self, name: &str) -> Option<String> {
-        let prefix = format!("{name}:");
-
-        self.head.lines().find_map(|line| {
-            let (found, value) = line.split_once(':')?;
-            found
-                .trim()
-                .eq_ignore_ascii_case(prefix.trim_end_matches(':'))
-                .then(|| value.trim().to_owned())
-        })
-    }
-
-    /// The body as JSON, for the phases that assert on the whole request.
-    fn json(&self) -> serde_json::Value {
-        serde_json::from_str(&self.body)
-            .unwrap_or_else(|error| panic!("the body should be JSON ({error}): {}", self.body))
-    }
-}
-
-/// Everything the server task and the test both hold.
-struct State {
-    seen: Mutex<Vec<Recorded>>,
-    reply: Mutex<String>,
-    /// Bodies for the next requests, oldest first, ahead of [`State::reply`].
-    ///
-    /// A turn that calls a tool is two requests, and the second one cannot be
-    /// answered with the first one's body — a reply that calls the tool again
-    /// is a loop with no end.
-    scripted: Mutex<VecDeque<String>>,
-}
-
-/// A loopback endpoint serving whatever the current phase set.
-struct Endpoint {
-    /// What a provider is pointed at.
-    base_url: String,
-    state: Arc<State>,
-    /// Kept so the server outlives the test talking to it.
-    _server: tokio::task::JoinHandle<()>,
-}
-
-impl Endpoint {
-    /// Every request served so far, oldest first.
-    fn seen(&self) -> Vec<Recorded> {
-        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
-    }
-
-    /// The one request this phase produced.
-    fn only(&self) -> Recorded {
-        let seen = self.seen();
-        let [request] = seen.as_slice() else {
-            panic!("one turn is one request, got {}", seen.len());
-        };
-
-        request.clone()
-    }
-
-    /// Forgets what has been served, so a phase counts only its own traffic.
-    fn forget(&self) {
-        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
-    }
-
-    /// Sets the event-stream body every turn is answered with from now on.
-    fn answers_turns_with(&self, body: impl Into<String>) {
-        *self.state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
-    }
-
-    /// Queues one body per request, consumed in order before the standing one.
-    fn answers_the_next_requests_with(&self, bodies: impl IntoIterator<Item = String>) {
-        *self.state.scripted.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            bodies.into_iter().collect();
-    }
-}
-
-/// Starts an endpoint that answers every connection for as long as the test
-/// holds it.
-async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
-    let address = listener.local_addr().expect("a bound socket has an address");
-    let state = Arc::new(State {
-        seen: Mutex::new(Vec::new()),
-        reply: Mutex::new(responses_transcript()),
-        scripted: Mutex::new(VecDeque::new()),
-    });
-
-    let served = Arc::clone(&state);
-    let server = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let state = Arc::clone(&served);
-
-            tokio::spawn(async move {
-                let Some(request) = read_request(&mut socket).await else {
-                    return;
-                };
-                let body = state
-                    .scripted
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .pop_front()
-                    .unwrap_or_else(|| {
-                        state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
-                    });
-                state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
-
-                let _ = socket
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nconnection: close\r\n\
-                             content-type: text/event-stream\r\n\r\n{body}"
-                        )
-                        .as_bytes(),
-                    )
-                    .await;
-                let _ = socket.flush().await;
-                // Dropping the socket ends a close-delimited body.
-            });
-        }
-    });
-
-    Endpoint { base_url: format!("http://{address}/backend-api/codex"), state, _server: server }
-}
-
-/// Reads one whole request: head to the blank line, then whatever
-/// `content-length` promised.
-async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
-    let mut buffer = Vec::new();
-    let mut byte = [0_u8; 1];
-
-    while !buffer.ends_with(b"\r\n\r\n") {
-        match socket.read(&mut byte).await {
-            Ok(0) | Err(_) => return None,
-            Ok(_) => buffer.push(byte[0]),
-        }
-    }
-    let head = String::from_utf8_lossy(&buffer).into_owned();
-
-    let length: usize = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
-        })
-        .unwrap_or(0);
-    let mut body = vec![0_u8; length];
-    if length > 0 && socket.read_exact(&mut body).await.is_err() {
-        return None;
-    }
-
-    Some(Recorded { head, body: String::from_utf8_lossy(&body).into_owned() })
-}
-
-/// A whole Responses turn: a thought, two fragments of reply, and the bill.
-fn responses_transcript() -> String {
-    [
-        r#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6"}}"#,
-        r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}"#,
-        r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Short is right."}"#,
-        r#"data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}"#,
-        r#"data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Hello, "}"#,
-        r#"data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"world!"}"#,
-        r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":42,"input_tokens_details":{"cached_tokens":16},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":4}}}}"#,
-    ]
-    .join("\n\n")
-        + "\n\n"
-}
-
 /// A whole chat-completions turn, for the phase that proves the key path.
 fn completions_transcript() -> String {
     [
@@ -370,6 +176,7 @@ impl RefreshOauth for NeverRenews {
 fn ask(model: &str) -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: model.to_owned(),
         system: Some("be brief".to_owned()),

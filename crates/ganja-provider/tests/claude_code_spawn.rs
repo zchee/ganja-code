@@ -202,6 +202,7 @@ fn conversation(
             description: "reads a file".to_owned(),
             schema: serde_json::json!({"type": "object"}),
         }],
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     }
 }
@@ -387,6 +388,7 @@ async fn check_one_shot(home: &Path, side: &Path) -> Result<(), String> {
             messages: vec![message("g1", "name this")],
             turn_start: 0,
             tools: Vec::new(),
+            responses: Default::default(),
             effort_options: serde_json::Map::new(),
         },
     )

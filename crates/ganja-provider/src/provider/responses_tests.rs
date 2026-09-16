@@ -8,8 +8,8 @@ use super::{
     ACCOUNT_HEADER, ALLOWED_MODELS, Aliases, BETA, BETA_HEADER, Backend, Body,
     CHAT_COMPLETIONS_ONLY, CHATGPT_ID, CODEX_USER_AGENT, DEFAULT_BASE_URL, Frame, ID, Mapper as _,
     Mapping, NO_PLATFORM_KEY, OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
-    SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves,
-    summarized,
+    SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, composed, defaulted, generation, reauth,
+    seals_reasoning, serves,
 };
 use crate::auth::{AuthError, OauthCredential, RefreshOauth};
 use crate::catalog;
@@ -147,6 +147,7 @@ fn gateway_ask() -> ChatRequest {
 fn ask() -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -433,10 +434,9 @@ fn a_config_named_request_carries_its_headers_and_asks_for_nothing_sealed() {
         body.get("include").is_none(),
         "nothing sealed is asked of an endpoint this build has never met: {body}"
     );
-    let untouched = serde_json::Map::new();
     assert_eq!(
-        summarized(&untouched, SERVED, Backend::Compat),
-        untouched,
+        serde_json::to_value(composed(&ask(), Backend::Compat, &[])).expect("the body serializes"),
+        body,
         "and no default is written into somebody else's `reasoning` object"
     );
 }
@@ -549,7 +549,7 @@ fn the_backend_that_replays_sealed_state_is_the_one_that_records_it() {
 /// reference does document `reasoning` with effort levels.
 #[test]
 fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
-    let bare = summarized(&serde_json::Map::new(), "openai/gpt-5.4", Backend::OpenRouter);
+    let bare = defaulted(Backend::OpenRouter, 0, "openai/gpt-5.4");
     assert!(
         bare.is_empty(),
         "an id that merely *contains* this vendor's model family is not this \
@@ -559,10 +559,8 @@ fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
     let mut request = gateway_ask();
     request.effort_options =
         json!({"reasoning": {"effort": "high"}}).as_object().cloned().expect("object fixture");
-    let own = Body::new(&request, Backend::OpenRouter);
-    let options = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
-    let body =
-        serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+    let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
+        .expect("a spliced body serializes");
 
     assert_eq!(
         body["reasoning"],
@@ -615,10 +613,8 @@ fn every_effort_this_gateway_offers_travels_as_the_one_field_it_documents() {
         let mut request = gateway_ask();
         request.effort_options = options.clone();
 
-        let own = Body::new(&request, Backend::OpenRouter);
-        let spliced = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
-        let body =
-            serde_json::to_value(splice_effort(&spliced, &own)).expect("a spliced body serializes");
+        let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
+            .expect("a spliced body serializes");
 
         assert_eq!(
             body["reasoning"],
@@ -692,19 +688,15 @@ fn a_reasoning_model_is_asked_to_show_its_thinking() {
     for (name, options, expected) in cases {
         let mut request = ask();
         request.effort_options = options;
-        let own = Body::new(&request, Backend::Platform);
-        let options = summarized(&request.effort_options, &request.model, Backend::Platform);
-        let body =
-            serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+        let body = serde_json::to_value(composed(&request, Backend::Platform, &[]))
+            .expect("a spliced body serializes");
         assert_eq!(body["reasoning"], expected, "{name}");
     }
 
     let mut request = ask();
     request.model = "gpt-5-chat".to_owned();
-    let own = Body::new(&request, Backend::Platform);
-    let options = summarized(&request.effort_options, &request.model, Backend::Platform);
-    let body =
-        serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+    let body = serde_json::to_value(composed(&request, Backend::Platform, &[]))
+        .expect("a spliced body serializes");
     assert!(
         body.get("reasoning").is_none(),
         "a model that does not reason is asked nothing about reasoning"
@@ -998,6 +990,7 @@ fn a_sealed_thought_is_replayed_before_the_calls_it_produced() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1061,6 +1054,7 @@ fn an_attachment_becomes_the_input_item_its_mime_names() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1111,6 +1105,7 @@ fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1545,6 +1540,7 @@ fn the_system_prompt_travels_as_instructions_and_the_turn_as_items() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -1592,6 +1588,7 @@ fn conforms(name: &str) -> bool {
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1660,6 +1657,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1688,6 +1686,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1737,7 +1736,7 @@ fn a_request_advertises_the_tools_it_was_given() {
 #[test]
 fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
     let request = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
-    let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+    let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
         .expect("the body serializes");
 
     assert_eq!(
@@ -1767,23 +1766,20 @@ fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
 
     // A turn with nothing to offer sends neither key: `tool_choice` beside
     // an absent roster is a choice about nothing.
-    let bare = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
+    let bare = serde_json::to_value(composed(&gateway_ask(), Backend::OpenRouter, &[]))
         .expect("the body serializes");
     assert!(bare.get("tools").is_none() && bare.get("tool_choice").is_none(), "got {bare}");
 
-    // And the two OpenAI backends are untouched: their request is the Codex
-    // CLI's, which sends no `tool_choice` and has been served without one on
-    // every turn this build has taken.
+    // The two OpenAI backends send the same value since D563 (probe
+    // 2026-09-16, row 30); the whole-body pins beside `defaulted` own that.
     for backend in [Backend::Codex, Backend::Platform] {
-        let owned = serde_json::to_value(Body::new(
+        let owned = serde_json::to_value(composed(
             &ChatRequest { tools: vec![a_tool()], ..ask() },
             backend,
+            &[],
         ))
         .expect("the body serializes");
-        assert!(
-            owned.get("tool_choice").is_none(),
-            "{backend:?} gained a field its vendor never asked for: {owned}"
-        );
+        assert_eq!(owned["tool_choice"], json!("auto"), "{backend:?}: {owned}");
     }
 }
 
@@ -2017,6 +2013,7 @@ async fn a_gateway_run_tool_becomes_a_row_and_never_a_call_to_execute() {
             tool: "openrouter:web_search".to_owned(),
             input: json!({"query": "rust 2024 edition"}),
             output: "3 results".to_owned(),
+            blob: None,
         }),
         "the row has to carry the call and its answer: {seen:?}"
     );
@@ -2071,6 +2068,7 @@ async fn a_gateway_tools_own_fields_are_shown_rather_than_guessed_at() {
             input: json!({"action": {"commands": ["ls -la"]}}),
             output: r#"[{"outcome":{"exit_code":0,"type":"exit"},"stderr":"","stdout":"total 0"}]"#
                 .to_owned(),
+            blob: None,
         }),
         "got {seen:?}"
     );
@@ -2209,6 +2207,7 @@ fn a_finished_call_is_sent_back_as_a_call_item_and_an_output_item() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2287,6 +2286,7 @@ fn a_two_step_turn_is_sent_back_one_group_per_step() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2317,6 +2317,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2687,5 +2688,566 @@ async fn a_turn_that_stopped_early_still_reports_what_it_spent() {
             ProviderEvent::Finish(FinishReason::Completed),
         ],
         "got {seen:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D563: the configured Responses options, custom tools and server tools.
+// ---------------------------------------------------------------------------
+
+/// A `bash`-shaped tool: one required string, one optional number — the
+/// shape `options::CUSTOM_TOOLS` admits.
+fn a_shell_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "bash".to_owned(),
+        description: "Runs a shell command.".to_owned(),
+        schema: json!({
+            "type": "object",
+            "properties": {"command": {"type": "string"}, "timeout": {"type": "number"}},
+            "required": ["command"],
+        }),
+    }
+}
+
+/// An `edit`-shaped tool: three required strings, which no single free-text
+/// input can carry.
+fn an_edit_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "edit".to_owned(),
+        description: "Edits a file.".to_owned(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "oldString": {"type": "string"},
+                "newString": {"type": "string"},
+            },
+            "required": ["filePath", "oldString", "newString"],
+        }),
+    }
+}
+
+/// `object` as a map, for a fixture that spells a body layer as JSON.
+fn object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    value.as_object().cloned().expect("an object fixture")
+}
+
+/// What a request on `backend` sends, as the send site composes it.
+fn sent(request: &ChatRequest, backend: Backend) -> serde_json::Value {
+    serde_json::to_value(composed(request, backend, &[])).expect("the body serializes")
+}
+
+/// A model `seals_reasoning` answers no for, shaped like the vendor's own
+/// chat model.
+const NOT_REASONING: &str = "gpt-5-chat-latest";
+
+/// **AC-11.** The whole body per backend with nothing configured. This
+/// vendor's two gain exactly one key over what they sent before D563 — and
+/// no tier, because the engine resolves that one — and every other backend
+/// is sent what it was sent before, to the byte.
+#[test]
+fn every_codex_and_platform_request_carries_no_obfuscation_and_no_tier() {
+    let before = json!({
+        "model": SERVED,
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "reasoning": {"summary": "auto"},
+    });
+    let mut after = before.clone();
+    after["stream_options"] = json!({"include_obfuscation": false});
+
+    for backend in [Backend::Codex, Backend::Platform] {
+        assert_eq!(sent(&ask(), backend), after, "{backend:?}");
+    }
+
+    assert_eq!(
+        sent(&gateway_ask(), Backend::OpenRouter),
+        json!({
+            "model": GATEWAY_MODEL,
+            "stream": true,
+            "store": false,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        }),
+        "the gateway is sent what it was sent before a layer existed"
+    );
+}
+
+/// **AC-11**, the byte half. A gateway row and a config-named endpoint get no
+/// default at all, so their request never takes the map round trip: the
+/// bytes are the typed body's own, field order included, with a roster and
+/// without one.
+#[test]
+fn the_opencode_and_compat_bodies_are_unchanged_with_and_without_a_roster() {
+    for backend in [Backend::Opencode(crate::provider::opencode::ZEN_ID), Backend::Compat] {
+        for request in [ask(), ChatRequest { tools: vec![a_tool()], ..ask() }] {
+            let composed_bytes = serde_json::to_string(&composed(&request, backend, &[]))
+                .expect("the body serializes");
+            let typed_bytes =
+                serde_json::to_string(&Body::new(&request, backend)).expect("the body serializes");
+            assert_eq!(composed_bytes, typed_bytes, "{backend:?}");
+            assert!(
+                !composed_bytes.contains("tool_choice")
+                    && !composed_bytes.contains("stream_options")
+                    && !composed_bytes.contains("reasoning"),
+                "{backend:?} was sent a default that is another vendor's: {composed_bytes}"
+            );
+        }
+    }
+}
+
+/// **AC-12.** `tool_choice: "auto"` beside a roster on this vendor's two and
+/// the gateway, never on a gateway row or a config-named endpoint; and a
+/// configured choice replaces the default whole.
+#[test]
+fn a_roster_is_offered_with_auto_unless_a_choice_was_configured() {
+    let with_tool = ChatRequest { tools: vec![a_tool()], ..ask() };
+    for backend in [Backend::Codex, Backend::Platform] {
+        assert_eq!(sent(&with_tool, backend)["tool_choice"], json!("auto"), "{backend:?}");
+    }
+    for backend in [Backend::Opencode(crate::provider::opencode::ZEN_ID), Backend::Compat] {
+        assert!(sent(&with_tool, backend).get("tool_choice").is_none(), "{backend:?}");
+    }
+    let gateway = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
+    assert_eq!(sent(&gateway, Backend::OpenRouter)["tool_choice"], json!("auto"));
+
+    let allowed = json!({
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": "noop"}],
+    });
+    let mut configured = with_tool.clone();
+    configured.responses.body = object(json!({"tool_choice": allowed}));
+    let body = sent(&configured, Backend::Codex);
+    // Equal to the configured object and nothing more: the default `"auto"`
+    // is a string under an object, so it was replaced rather than merged.
+    assert_eq!(body["tool_choice"], allowed, "sent verbatim: {body}");
+}
+
+/// **AC-12b.** The roster gate: a configured `tool_choice` and
+/// `parallel_tool_calls` go when the request offers no tool, each dropped
+/// with a line that says so, and stay when it offers one — a hosted tool
+/// alone counting as one.
+#[test]
+fn roster_keys_are_dropped_from_a_request_that_offers_no_tool() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let configured = object(json!({"tool_choice": "required", "parallel_tool_calls": false}));
+
+    let mut bare = ask();
+    bare.responses.body = configured.clone();
+    let bytes =
+        serde_json::to_string(&composed(&bare, Backend::Codex, &[])).expect("the body serializes");
+    assert!(
+        !bytes.contains(r#""tool_choice""#) && !bytes.contains(r#""parallel_tool_calls""#),
+        "a choice about no tools reached the wire: {bytes}"
+    );
+    let logged = log.logged();
+    let drops: Vec<&str> = logged
+        .lines()
+        .filter(|line| {
+            line.contains("a configured Responses key was dropped from this request")
+                && line.contains(r#"reason="no tools""#)
+        })
+        .collect();
+    assert_eq!(drops.len(), 2, "one line per dropped key: {logged}");
+
+    let mut offered = ChatRequest { tools: vec![a_tool()], ..ask() };
+    offered.responses.body = configured;
+    let body = sent(&offered, Backend::Codex);
+    assert_eq!(body["tool_choice"], json!("required"), "{body}");
+    assert_eq!(body["parallel_tool_calls"], json!(false), "{body}");
+
+    let mut hosted = ask();
+    hosted.responses.server_tools = vec![object(json!({"type": "web_search"}))];
+    hosted.responses.body = object(json!({"tool_choice": {"type": "web_search"}}));
+    let body = sent(&hosted, Backend::Platform);
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "web_search"}),
+        "the serialized roster holds a hosted tool, so the choice is about something: {body}"
+    );
+}
+
+/// **AC-13b.** The reasoning gate: a configured `reasoning` object, and a
+/// configured summary, never reach a model that does not reason — which
+/// answers the field with a 400 — and reach one that does beside the
+/// default summary.
+#[test]
+fn configured_reasoning_never_reaches_a_model_that_does_not_reason() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+
+    let mut plain = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    plain.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    let body = sent(&plain, Backend::Codex);
+    assert!(body.get("reasoning").is_none(), "{body}");
+    let logged = log.logged();
+    assert!(
+        logged.lines().any(|line| line.contains("a configured Responses key was dropped")
+            && line.contains(r#"key="reasoning.context""#)
+            && line.contains(r#"reason="model does not reason""#)),
+        "{logged}"
+    );
+
+    let mut summary = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    summary.responses.reasoning_summary = Some("concise".to_owned());
+    let body = sent(&summary, Backend::Platform);
+    assert!(body.get("reasoning").is_none(), "the summary recreated the object: {body}");
+
+    let mut reasoning = ask();
+    reasoning.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    assert_eq!(
+        sent(&reasoning, Backend::Codex)["reasoning"],
+        json!({"context": "all_turns", "summary": "auto"})
+    );
+}
+
+/// **AC-13.** A resolved tier is sent as given on every backend and absent
+/// when there is none; an effort and a configured context share one
+/// `reasoning` object with the effort's summary kept; and a configured
+/// summary outranks the effort's on the platform alone.
+#[test]
+fn a_resolved_tier_is_sent_as_given_on_every_backend() {
+    let backends = [
+        Backend::Codex,
+        Backend::Platform,
+        Backend::OpenRouter,
+        Backend::Opencode(crate::provider::opencode::ZEN_ID),
+        Backend::Compat,
+    ];
+    for backend in backends {
+        for tier in ["default", "ultrafast"] {
+            let mut request = ask();
+            request.responses.service_tier = Some(tier.to_owned());
+            assert_eq!(sent(&request, backend)["service_tier"], json!(tier), "{backend:?}");
+        }
+        assert!(sent(&ask(), backend).get("service_tier").is_none(), "{backend:?}");
+    }
+}
+
+#[test]
+fn an_effort_and_a_configured_context_share_one_reasoning_object() {
+    let high = object(json!({
+        "reasoning": {"effort": "high", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }));
+    let mut request = ask();
+    request.effort_options = high.clone();
+    request.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    assert_eq!(
+        sent(&request, Backend::Codex)["reasoning"],
+        json!({"effort": "high", "summary": "auto", "context": "all_turns"})
+    );
+
+    let mut concise = ask();
+    concise.effort_options = high;
+    concise.responses.reasoning_summary = Some("concise".to_owned());
+    assert_eq!(sent(&concise, Backend::Platform)["reasoning"]["summary"], json!("concise"));
+    assert_eq!(
+        sent(&concise, Backend::Codex)["reasoning"]["summary"],
+        json!("auto"),
+        "the seat has only ever been measured with auto"
+    );
+}
+
+/// **AC-14.** A configured `include` joins the wire's own entry and the
+/// effort's rather than replacing either, once each.
+#[test]
+fn a_configured_include_joins_the_efforts_own_entry() {
+    let sources = "web_search_call.action.sources";
+    let mut request = ask();
+    request.effort_options = object(json!({
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }));
+    request.responses.include = vec![sources.to_owned()];
+    assert_eq!(
+        sent(&request, Backend::Codex)["include"],
+        json!(["reasoning.encrypted_content", sources])
+    );
+
+    let mut plain = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    plain.responses.include = vec![sources.to_owned(), sources.to_owned()];
+    assert_eq!(
+        sent(&plain, Backend::Codex)["include"],
+        json!([sources]),
+        "listed twice, sent once"
+    );
+}
+
+/// **AC-15.** A hosted entry rides the `tools` array verbatim after the
+/// function tools, and no directive reaches the body as a key of its own.
+#[test]
+fn a_server_tool_entry_is_sent_verbatim_after_the_function_tools() {
+    let entry = json!({"type": "web_search", "search_context_size": "low"});
+    let mut request = ChatRequest { tools: vec![a_tool()], ..ask() };
+    request.responses.server_tools = vec![object(entry.clone())];
+    let body = sent(&request, Backend::Codex);
+
+    let tools = body["tools"].as_array().expect("a roster");
+    assert_eq!(tools.len(), 2, "{body}");
+    assert_eq!(tools[0]["type"], json!("function"));
+    assert_eq!(tools.last(), Some(&entry), "{body}");
+}
+
+#[test]
+fn no_directive_reaches_the_body_as_a_key() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses = crate::provider::responses::options::RequestOptions {
+        service_tier: Some("priority".to_owned()),
+        text_format: Some(json!({"type": "json_schema", "name": "ganja_run"})),
+        custom_tools: vec!["bash".to_owned()],
+        server_tools: vec![object(json!({"type": "web_search"}))],
+        include: vec!["web_search_call.action.sources".to_owned()],
+        reasoning_summary: Some("concise".to_owned()),
+        body: object(json!({"text": {"verbosity": "low"}})),
+    };
+
+    for backend in [Backend::Codex, Backend::Platform] {
+        let body = sent(&request, backend);
+        for key in ["custom_tools", "server_tools", "include_from_options", "reasoning_summary"] {
+            assert!(body.get(key).is_none(), "{backend:?} sent `{key}` as a key: {body}");
+        }
+        assert_eq!(body["model"], json!(SERVED), "the only `model` is the wire's own string");
+    }
+
+    let gateway = serde_json::to_value(composed(
+        &gateway_ask(),
+        Backend::OpenRouter,
+        &["web_search".to_owned()],
+    ))
+    .expect("the body serializes");
+    assert_eq!(gateway["tools"], json!([{"type": "openrouter:web_search"}]));
+}
+
+/// **AC-16.** A hosted web search's `action` is the row's input; an image
+/// generation's result rides the blob, with its format as the mime, and
+/// never the input.
+#[tokio::test]
+async fn an_image_generation_result_rides_the_blob_and_never_the_input() {
+    let seen = events(concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"web_search_call","id":"ws_1","status":"completed","#,
+        r#""action":{"type":"search","query":"q","sources":[{"url":"https://example.com"}]}}}"#,
+        "\n\n",
+        r#"data: {"type":"response.output_item.done","output_index":1,"item":{"#,
+        r#""type":"image_generation_call","id":"ig_1","status":"completed","#,
+        r#""result":"aW1hZ2UtYnl0ZXM=","output_format":"png"}}"#,
+        "\n\n",
+        r#"data: {"type":"response.completed","response":{}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let rows: Vec<&ProviderEvent> =
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ServerTool { .. })).collect();
+    assert_eq!(
+        rows,
+        [
+            &ProviderEvent::ServerTool {
+                tool: "web_search_call".to_owned(),
+                input: json!({
+                    "type": "search",
+                    "query": "q",
+                    "sources": [{"url": "https://example.com"}],
+                }),
+                output: String::new(),
+                blob: None,
+            },
+            &ProviderEvent::ServerTool {
+                tool: "image_generation_call".to_owned(),
+                input: serde_json::Value::Null,
+                output: String::new(),
+                blob: Some(crate::provider::Blob {
+                    mime: "image/png".to_owned(),
+                    base64: "aW1hZ2UtYnl0ZXM=".to_owned(),
+                }),
+            },
+        ],
+        "{seen:?}"
+    );
+    let ProviderEvent::ServerTool { input, .. } = rows[1] else { unreachable!() };
+    assert!(!input.to_string().contains("aW1hZ2UtYnl0ZXM="), "the image reached the input");
+}
+
+/// **AC-17.** A listed single-string tool is advertised twice — custom and
+/// function — and a listed name that is not on the roster, or not
+/// single-string, is advertised as a function alone and logged.
+#[test]
+fn a_custom_tool_is_advertised_beside_its_function_twin() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let tools = sent(&request, Backend::Codex)["tools"].clone();
+    assert_eq!(
+        tools,
+        json!([
+            {
+                "type": "function",
+                "name": "bash",
+                "description": "Runs a shell command.",
+                "parameters": a_shell_tool().schema,
+            },
+            {"type": "custom", "name": "bash", "description": "Runs a shell command."},
+        ])
+    );
+
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let mut absent = ChatRequest { tools: vec![a_tool()], ..ask() };
+    absent.responses.custom_tools = vec!["bash".to_owned()];
+    assert_eq!(
+        sent(&absent, Backend::Codex)["tools"],
+        sent(&ChatRequest { tools: vec![a_tool()], ..ask() }, Backend::Codex)["tools"],
+        "today's roster exactly"
+    );
+    let mut wide = ChatRequest { tools: vec![an_edit_tool()], ..ask() };
+    wide.responses.custom_tools = vec!["edit".to_owned()];
+    assert_eq!(sent(&wide, Backend::Codex)["tools"].as_array().map(Vec::len), Some(1));
+    let logged = log.logged();
+    for tool in ["bash", "edit"] {
+        assert!(
+            logged
+                .lines()
+                .any(|line| line.contains("a custom_tools name was advertised as a function")
+                    && line.contains(&format!(r#"tool="{tool}""#))),
+            "{tool}: {logged}"
+        );
+    }
+
+    let read = ToolDefinition {
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "offset": {"type": "number"},
+                "limit": {"type": "number"},
+            },
+            "required": ["filePath"],
+        }),
+        ..a_tool()
+    };
+    let mut optional = ChatRequest { tools: vec![read], ..ask() };
+    optional.responses.custom_tools = vec!["read".to_owned()];
+    assert_eq!(
+        sent(&optional, Backend::Codex)["tools"][1],
+        json!({"type": "custom", "name": "read", "description": "Reads a file from disk."}),
+        "optional arguments do not disqualify a tool; they are only unreachable"
+    );
+}
+
+/// **AC-18**, the inbound half. A custom call arrives as the four events an
+/// ordinary call does, with the marker between its start and its arguments,
+/// and its free-text input mapped onto the tool's one required argument.
+#[tokio::test]
+async fn a_custom_tool_call_becomes_an_ordinary_argument_object_and_says_so() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+
+    let transcript = concat!(
+        r#"data: {"type":"response.output_item.added","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":""}}"#,
+        "\n\n",
+        r#"data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","delta":"ls"}"#,
+        "\n\n",
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":"ls"}}"#,
+        "\n\n",
+    );
+    let seen: Vec<ProviderEvent> =
+        replay(transcript, CancellationToken::new(), mapping).collect().await;
+    let expected = [
+        ProviderEvent::ToolCallStart { id: "c1".to_owned(), name: "bash".to_owned() },
+        ProviderEvent::ToolCallCustom { id: "c1".to_owned() },
+        ProviderEvent::ToolCallDelta {
+            id: "c1".to_owned(),
+            json: r#"{"command":"ls"}"#.to_owned(),
+        },
+        ProviderEvent::ToolCallEnd { id: "c1".to_owned() },
+    ];
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the four before it.
+    assert_eq!(&seen[..4], &expected, "{seen:?}");
+
+    // A stream whose opening frame never arrived still says all four, in order.
+    let closing_only = concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":"ls"}}"#,
+        "\n\n",
+    );
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+    let seen: Vec<ProviderEvent> =
+        replay(closing_only, CancellationToken::new(), mapping).collect().await;
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the four before it.
+    assert_eq!(&seen[..4], &expected, "{seen:?}");
+}
+
+/// **AC-19.** A completed or incomplete frame that echoes how it was served
+/// says so once, immediately before its bill; a stream with neither frame
+/// says nothing; and the served tier is logged beside the requested one.
+#[tokio::test]
+async fn a_completed_or_incomplete_frame_emits_one_served_event_before_usage() {
+    let served = ProviderEvent::Served(crate::provider::ServedOptions {
+        service_tier: Some("default".to_owned()),
+        verbosity: Some("low".to_owned()),
+        parallel_tool_calls: None,
+        context: None,
+    });
+
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let requested = Mapping {
+        model: SERVED.to_owned(),
+        requested: Some("priority".to_owned()),
+        ..Mapping::default()
+    };
+    let seen: Vec<ProviderEvent> = replay(
+        concat!(
+            r#"data: {"type":"response.completed","response":{"#,
+            r#""service_tier":"default","text":{"verbosity":"low"},"usage":{}}}"#,
+            "\n\n",
+        ),
+        CancellationToken::new(),
+        requested,
+    )
+    .collect()
+    .await;
+    assert_eq!(seen.iter().filter(|event| matches!(event, ProviderEvent::Served(_))).count(), 1);
+    assert_eq!(&seen[..2], &[served.clone(), ProviderEvent::Usage(Usage::default())], "{seen:?}");
+    let logged = log.logged();
+    assert!(
+        logged.lines().any(|line| line.contains("service_tier the backend served")
+            && line.contains(r#"served="default""#)
+            && line.contains(r#"requested="priority""#)),
+        "{logged}"
+    );
+
+    let incomplete = events(concat!(
+        r#"data: {"type":"response.incomplete","response":{"#,
+        r#""service_tier":"default","text":{"verbosity":"low"},"#,
+        r#""incomplete_details":{"reason":"max_output_tokens"},"usage":{}}}"#,
+        "\n\n",
+    ))
+    .await;
+    assert_eq!(&incomplete[..2], &[served, ProviderEvent::Usage(Usage::default())]);
+
+    let neither = events(concat!(
+        r#"data: {"type":"response.output_text.delta","item_id":"m","delta":"cut"}"#,
+        "\n\n",
+    ))
+    .await;
+    assert!(!neither.iter().any(|event| matches!(event, ProviderEvent::Served(_))), "{neither:?}");
+}
+
+/// **AC-20.** `run --json-schema`'s document and a configured verbosity
+/// share one `text` object.
+#[test]
+fn a_text_format_and_a_configured_verbosity_share_one_text_object() {
+    let format = json!({"type": "json_schema", "name": "ganja_run", "schema": {}, "strict": true});
+    let mut request = ask();
+    request.responses.text_format = Some(format.clone());
+    request.responses.body = object(json!({"text": {"verbosity": "low"}}));
+    assert_eq!(
+        sent(&request, Backend::Codex)["text"],
+        json!({"format": format, "verbosity": "low"})
     );
 }

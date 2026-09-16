@@ -34,6 +34,10 @@ pub mod fake_claude;
 mod fs;
 mod log;
 mod provider;
+// A module rather than a re-export: a loopback endpoint's whole vocabulary —
+// what it serves, what it recorded, how a phase resets it — only makes sense
+// together.
+pub mod responses_server;
 mod session;
 mod subagent;
 mod tasklist;
@@ -46,7 +50,7 @@ pub use command::{deadline_millis, prompt};
 pub use drain::{drain, drain_allowing, drain_answering, held_at_dialog};
 pub use fs::{Homes, plant, plant_pre_split_chatgpt_login, redirect_xdg_data_home, temp_dir};
 pub use log::LogCapture;
-pub use provider::{Director, ScriptedProvider, says, tool_call, transcript};
+pub use provider::{Director, ScriptedProvider, says, served, tool_call, transcript};
 pub use session::{
     PRE_UUID_ID, entries, plant_preuuid_store, seed_message, seed_session, seeded_session_info,
     set_aside_of,

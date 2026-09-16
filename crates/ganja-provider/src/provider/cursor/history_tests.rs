@@ -17,6 +17,7 @@ fn request(messages: Vec<Message>, turn_start: usize) -> ChatRequest {
         messages,
         turn_start,
         tools: Vec::new(),
+        responses: Default::default(),
         effort_options: Default::default(),
     }
 }

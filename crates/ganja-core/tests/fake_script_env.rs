@@ -37,6 +37,7 @@ async fn turn(provider: &dyn Provider) -> Vec<ProviderEvent> {
         .stream(
             ChatRequest {
                 turn_start: 0,
+                responses: Default::default(),
                 effort_options: Default::default(),
                 model: fake::MODEL.to_owned(),
                 system: None,

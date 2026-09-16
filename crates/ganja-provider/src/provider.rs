@@ -238,7 +238,11 @@ pub const PROVIDERS: [&str; 11] = [
 ];
 
 /// One request to a model.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// [`Default`] so that a literal written for one wire can say
+/// `..Default::default()` for the fields only another wire reads — the
+/// Responses options above all, which every wire but one ignores.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChatRequest {
     /// Model identifier, spelled the way the provider expects it on the wire.
     pub model: String,
@@ -279,6 +283,14 @@ pub struct ChatRequest {
     /// every request had before efforts existed — means no effort, and the
     /// body is exactly the wire's own.
     pub effort_options: serde_json::Map<String, serde_json::Value>,
+    /// What the engine resolved for this request out of
+    /// `[provider.<id>.options]`, `/fast` and `run --json-schema` (**D563**).
+    ///
+    /// Read by the Responses wire alone, and there only on the two ids that
+    /// speak OpenAI's own Responses API; every other wire ignores it, and
+    /// [`Default`] — what every request carried before the options existed —
+    /// sends nothing.
+    pub responses: responses::options::RequestOptions,
 }
 
 impl ChatRequest {
@@ -294,31 +306,51 @@ impl ChatRequest {
 
 /// The request body a wire sends, with the effort's options under it.
 ///
-/// The effort map goes into the merged object **first** and the wire's own
-/// fields land after it, so a key both claim resolves to the wire: its required
-/// fields — the model, the stream flag, `max_tokens` — are what make the
-/// request one its API accepts, and a catalog row must not be able to unmake
-/// that. A body that is not a JSON object (no wire here has one) is passed
-/// through, because there is nothing to merge into.
-///
-/// A serialize-time wrapper rather than an eager [`serde_json::Value`]: with
-/// no effort selected — every request before efforts existed — the typed
-/// body serializes exactly as it always did, field order included, which is
-/// what the wires' pinned request bytes hold. Only a request actually
-/// carrying options pays the round trip through a map, whose key order no API
-/// here reads.
+/// The one-layer case of [`splice`], which is every wire's but the Responses
+/// one: see there for the collision rule, and for why a request with nothing
+/// to splice serializes exactly as its typed body always did.
 pub(crate) fn splice_effort<'a, B: serde::Serialize>(
     options: &'a serde_json::Map<String, serde_json::Value>,
     body: &'a B,
 ) -> impl serde::Serialize + 'a {
-    struct Spliced<'a, B> {
-        options: &'a serde_json::Map<String, serde_json::Value>,
+    splice([options], body)
+}
+
+/// The request body a wire sends, with `layers` under it.
+///
+/// Earlier layers are lower: each is merged over the ones before it, and the
+/// typed body lands **last**, so a key both a layer and the wire claim
+/// resolves to the wire — its required fields (the model, the stream flag,
+/// `max_tokens`) are what make the request one its API accepts, and neither a
+/// catalog row nor a config table may unmake that. Between two layers, a key
+/// both hold as an object is merged **one level deep** rather than replaced,
+/// which is what lets an effort's `reasoning.effort`, a configured
+/// `reasoning.context` and the wire's default `reasoning.summary` share one
+/// `reasoning` object (**D563**); any other collision is a replacement. The
+/// body itself replaces rather than merges, because nothing a wire types is
+/// an object a layer is meant to add to.
+///
+/// A body that is not a JSON object (no wire here has one) is passed through,
+/// because there is nothing to merge into.
+///
+/// A serialize-time wrapper rather than an eager [`serde_json::Value`]: with
+/// every layer empty — every request before efforts existed — the typed body
+/// serializes exactly as it always did, field order included, which is what
+/// the wires' pinned request bytes hold. Only a request actually carrying
+/// options pays the round trip through a map, whose key order no API here
+/// reads.
+pub(crate) fn splice<'a, B: serde::Serialize, const N: usize>(
+    layers: [&'a serde_json::Map<String, serde_json::Value>; N],
+    body: &'a B,
+) -> impl serde::Serialize + 'a {
+    struct Spliced<'a, B, const N: usize> {
+        layers: [&'a serde_json::Map<String, serde_json::Value>; N],
         body: &'a B,
     }
 
-    impl<B: serde::Serialize> serde::Serialize for Spliced<'_, B> {
+    impl<B: serde::Serialize, const N: usize> serde::Serialize for Spliced<'_, B, N> {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            if self.options.is_empty() {
+            if self.layers.iter().all(|layer| layer.is_empty()) {
                 return self.body.serialize(serializer);
             }
             let own = serde_json::to_value(self.body).map_err(serde::ser::Error::custom)?;
@@ -326,15 +358,29 @@ pub(crate) fn splice_effort<'a, B: serde::Serialize>(
                 return own.serialize(serializer);
             };
 
-            let mut merged = self.options.clone();
-            // `Map::extend` replaces on a duplicate key: the collision rule.
+            let mut merged = serde_json::Map::new();
+            for layer in self.layers {
+                for (key, value) in layer {
+                    match (merged.get_mut(key), value) {
+                        (
+                            Some(serde_json::Value::Object(lower)),
+                            serde_json::Value::Object(upper),
+                        ) => lower.extend(upper.clone()),
+                        _ => {
+                            merged.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            // `Map::extend` replaces on a duplicate key: the wire's own fields
+            // win every collision.
             merged.extend(own);
 
             merged.serialize(serializer)
         }
     }
 
-    Spliced { options, body }
+    Spliced { layers, body }
 }
 
 /// Splits one message's parts into a slice per model request.
@@ -440,6 +486,24 @@ pub enum ProviderEvent {
         /// Fragment of the arguments, which are only valid JSON once joined.
         json: String,
     },
+    /// The call [`ProviderEvent::ToolCallStart`] just opened was advertised,
+    /// and made, as a Responses **custom tool** (**D563**).
+    ///
+    /// Said between that start and the call's first
+    /// [`ProviderEvent::ToolCallDelta`], so that whatever is persisted from
+    /// here on — even a stream cut before the call closes — records how the
+    /// call was made. The deltas that follow are an ordinary argument object:
+    /// the wire has already mapped the custom call's free-text `input` onto
+    /// the tool's one required argument, so nothing downstream executes it
+    /// differently. What the marker changes is how the call is **replayed**,
+    /// which is a question only the wire that advertised it can answer.
+    ///
+    /// Sent by the Responses wire alone, so no other wire constructs it —
+    /// the [`ProviderEvent::ReasoningState`] precedent.
+    ToolCallCustom {
+        /// The call the marker belongs to.
+        id: String,
+    },
     /// A tool call's arguments are complete.
     ToolCallEnd {
         /// Call that is now complete.
@@ -467,7 +531,22 @@ pub enum ProviderEvent {
         /// What the provider reported it produced, rendered as text. Empty
         /// where the item reported nothing.
         output: String,
+        /// Binary output the tool produced — an `image_generation_call`'s
+        /// image — kept out of both [`input`](Self::ServerTool::input) and
+        /// [`output`](Self::ServerTool::output), because a base64 image in a
+        /// transcript row is megabytes nobody reads (**D563**). [`None`] for
+        /// every tool that answers in text.
+        blob: Option<Blob>,
     },
+    /// What the backend said it served, off the response's own terminal
+    /// frame (**D563**).
+    ///
+    /// Reported beside what the request *asked* for rather than instead of
+    /// it: the ChatGPT seat echoes `service_tier: "default"` for every tier it
+    /// is sent (probe 2026-09-16), and somebody reading `/usage` is owed both
+    /// halves. Said immediately before [`ProviderEvent::Usage`], and only when
+    /// the frame echoed at least one of the fields it carries.
+    Served(ServedOptions),
     /// What the turn cost.
     Usage(Usage),
     /// The turn died part-way through.
@@ -477,6 +556,32 @@ pub enum ProviderEvent {
     Failed(ProviderError),
     /// The model stopped, and why.
     Finish(FinishReason),
+}
+
+/// Bytes a provider-run tool produced, as the provider encoded them.
+///
+/// Carried as the base64 text the item arrived with rather than decoded here:
+/// the wire never looks inside, and whoever writes it to disk decodes once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Blob {
+    /// The media type, `image/png` and the like.
+    pub mime: String,
+    /// The content, base64 as the item carried it.
+    pub base64: String,
+}
+
+/// The fields a Responses terminal frame echoes about how the request was
+/// served (**D563**), each [`None`] where the frame did not say.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServedOptions {
+    /// `response.service_tier`.
+    pub service_tier: Option<String>,
+    /// `response.text.verbosity`.
+    pub verbosity: Option<String>,
+    /// `response.parallel_tool_calls`.
+    pub parallel_tool_calls: Option<bool>,
+    /// `response.reasoning.context`.
+    pub context: Option<String>,
 }
 
 /// A provider could not answer.
@@ -1189,12 +1294,20 @@ fn matters(event: &ProviderEvent) -> bool {
         | ProviderEvent::ReasoningState { .. }
         | ProviderEvent::ToolCallStart { .. }
         | ProviderEvent::ToolCallDelta { .. }
+        // It belongs to a call row [`ProviderEvent::ToolCallStart`] already
+        // opened, so it can only follow something a person could see.
+        | ProviderEvent::ToolCallCustom { .. }
         | ProviderEvent::ToolCallEnd { .. }
         // A row a person can already see, which is exactly what this predicate
         // asks about — a retry that replayed the stream would show the
         // provider's own tool run twice.
         | ProviderEvent::ServerTool { .. } => true,
-        ProviderEvent::Usage(_) | ProviderEvent::Finish(_) | ProviderEvent::Failed(_) => false,
+        // What the backend echoed about the request, which no transcript
+        // row draws — a replay that repeated it would repeat nothing visible.
+        ProviderEvent::Served(_)
+        | ProviderEvent::Usage(_)
+        | ProviderEvent::Finish(_)
+        | ProviderEvent::Failed(_) => false,
     }
 }
 

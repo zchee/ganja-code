@@ -82,7 +82,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{self, RefreshOauth};
@@ -91,9 +91,9 @@ use crate::provider::openai::{self, arguments, result};
 use crate::provider::sse::Frame;
 use crate::provider::toolname::{Aliases, OPENAI_CAP, alias};
 use crate::provider::{
-    ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
-    check_base_url, client, key_for, open, opencode, openrouter, setting, shown_base_url,
-    splice_effort, steps,
+    Blob, ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
+    ServedOptions, check_base_url, client, key_for, open, opencode, openrouter, setting,
+    shown_base_url, splice, steps,
 };
 use crate::tool::ToolDefinition;
 
@@ -764,16 +764,60 @@ impl ResponsesProvider {
             }
         }
 
-        // The effort's options go under the wire's own fields, so a catalog
-        // row can add `reasoning` but can never unmake `model` or `stream`.
-        let own = Body::new(request, self.backend).serving(&self.server_tools);
-        let options = summarized(&request.effort_options, &request.model, self.backend);
-        let body = splice_effort(&options, &own);
+        let body = composed(request, self.backend, &self.server_tools);
         built.json(&body).build().map_err(|error| {
             ProviderError::Transport(
                 resolved.presented.redact(&format!("malformed request: {error}")),
             )
         })
+    }
+}
+
+/// The body one request sends: the typed [`Body`] with every layer under it
+/// (**D563**).
+///
+/// Lowest first: the backend's free defaults ([`defaulted`]), the configured
+/// body less what this request cannot carry ([`gated`]), the effort — a
+/// session selection, so above config — and the directives written into
+/// objects the layers below may already hold ([`directed`]). The wire's own
+/// fields land over all four, so neither a catalog row nor a config table can
+/// unmake `model` or `stream`.
+///
+/// One function rather than four lines at the send site, so the tests read
+/// the body the way a request sends it rather than a reassembly of it.
+fn composed<'a>(
+    request: &'a ChatRequest,
+    backend: Backend,
+    server_tools: &[String],
+) -> impl Serialize + 'a {
+    struct Composed<'a> {
+        own: Body<'a>,
+        defaults: Map<String, Value>,
+        configured: Map<String, Value>,
+        effort: &'a Map<String, Value>,
+        directives: Map<String, Value>,
+    }
+
+    impl Serialize for Composed<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            splice([&self.defaults, &self.configured, self.effort, &self.directives], &self.own)
+                .serialize(serializer)
+        }
+    }
+
+    let own = Body::new(request, backend);
+    // Counted before the gateway's own tools join, because what the gateway
+    // was sent before this layer existed is what it is still sent:
+    // `tool_choice` beside a function roster, never beside a roster of its
+    // own tools alone.
+    let offered = own.tools.len();
+
+    Composed {
+        own: own.serving(server_tools),
+        defaults: defaulted(backend, offered, &request.model),
+        configured: gated(&request.responses.body, offered > 0, &request.model),
+        effort: &request.effort_options,
+        directives: directed(request, backend),
     }
 }
 
@@ -848,8 +892,17 @@ impl Provider for ResponsesProvider {
             "requesting a turn"
         );
 
+        let custom = CustomArguments::of(&request);
+        let model = request.model.clone();
+        let requested = request.responses.service_tier.clone();
+
         open(
-            move || Mapping::for_backend(backend, aliases.clone()),
+            move || Mapping {
+                custom: custom.clone(),
+                model: model.clone(),
+                requested: requested.clone(),
+                ..Mapping::for_backend(backend, aliases.clone())
+            },
             &self.client,
             built,
             &self.base_url,
@@ -936,10 +989,14 @@ struct Body<'a> {
     store: bool,
     /// What the backend should hand back beside the reply.
     ///
-    /// One entry or nothing: the only thing this build asks for is the sealed
-    /// reasoning it can replay, and a body with no `include` at all is the
-    /// shape upstream sends where nobody opted in
-    /// (`test/provider/openai-responses.test.ts:638`).
+    /// Nothing, where nobody asked for anything — a body with no `include` at
+    /// all is the shape upstream sends where nobody opted in
+    /// (`test/provider/openai-responses.test.ts:638`). Otherwise the ordered,
+    /// deduplicated union of three askers (**D563**): the sealed reasoning
+    /// this wire replays, whatever the effort's own map asks for, and a
+    /// configured `include`. A union rather than a layer, because this field
+    /// is a list and the splice replaces lists: the body is the last layer,
+    /// so the effort's entry would otherwise be dropped by the wire's own.
     ///
     /// **Decided by the model, not by the credential**, which is where
     /// upstream decides it: the option rides the model facade
@@ -947,8 +1004,8 @@ struct Body<'a> {
     /// `providers/openai.ts:43`), so both backends this provider reaches send
     /// it for a model that reasons and neither sends it for one that does not.
     /// See [`seals_reasoning`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    include: Option<[&'static str; 1]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    include: Vec<&'a str>,
     /// The system prompt.
     ///
     /// **A divergence, deliberately.** `@ai-sdk/openai` pushes it as an input
@@ -969,26 +1026,14 @@ struct Body<'a> {
     /// registry.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolSpec<'a>>,
-    /// Whether the model may decide to call one of them.
-    ///
-    /// **[`Backend::OpenRouter`] only, and only beside a non-empty roster.**
-    /// `"auto"` is the value the agent loop always wants and the one that
-    /// vendor's reference spells in every tool example it publishes
-    /// (`api_reference/responses/tool-calling`); what its API defaults to when
-    /// the field is absent, that reference does not say, and a gateway
-    /// defaulting to `none` would be a session whose tools are advertised and
-    /// never called. The other two backends are unchanged because their request
-    /// is the Codex CLI's, which sends no `tool_choice` and has been answered by
-    /// that endpoint on every turn this build has taken.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<&'static str>,
 }
 
 /// One entry of a request's `tools` array.
 ///
-/// Untagged, because the two shapes are told apart by what they carry: a tool
-/// this side will execute names itself, and a tool the *provider* will execute
-/// is a type and nothing else.
+/// Untagged, because the shapes are told apart by what they carry: a tool this
+/// side will execute names itself — with a schema as a function, without one
+/// as a custom tool — and a tool the *provider* will execute is a type and
+/// whatever that type's own knobs are.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ToolSpec<'a> {
@@ -1006,19 +1051,31 @@ enum ToolSpec<'a> {
         /// The argument schema, which this API names `parameters` as well.
         parameters: &'a Value,
     },
-    /// A tool the model may call and **the gateway** runs (**D489**).
+    /// A tool the model may call with one free-text `input` and **this
+    /// build** runs (**D563**): a registry tool named in `custom_tools`,
+    /// advertised in addition to its [`ToolSpec::Function`] entry, never
+    /// instead of it.
     ///
-    /// One field, which is the whole shape the reference publishes:
-    /// `{"type": "openrouter:web_search"}`. No name, because the type *is* the
-    /// name; no schema, because the vendor owns the tool; and no `parameters`,
-    /// because every knob the reference documents there — search engines,
-    /// result caps, shell environments — is a per-tool object this build has no
-    /// config surface for and would be inventing defaults for. What a config
-    /// asks for today is the tool, at the vendor's own defaults.
-    Server {
+    /// Only a tool whose argument schema has exactly one required property,
+    /// and it a string, can be advertised this way: the call's `input` is
+    /// mapped onto that one argument and onto nothing else, so optional arguments are unreachable through the custom advertisement.
+    /// That is why the function twin stays on the roster beside it.
+    Custom {
         #[serde(rename = "type")]
-        kind: String,
+        kind: &'static str,
+        /// The same name, under the same [`alias`], its function twin carries.
+        name: Cow<'a, str>,
+        description: &'a str,
     },
+    /// A tool the model may call and **the provider** runs — a gateway's own
+    /// (**D489**) or a hosted one a config named (**D563**).
+    ///
+    /// Sent verbatim, `type` first: the gateway's are the one field its
+    /// reference publishes, `{"type": "openrouter:web_search"}`, and a hosted
+    /// entry is whatever the config table carried, whose every key past `type`
+    /// is the vendor's own knob and passes through untouched. No name, because
+    /// the type *is* the name; no schema, because the vendor owns the tool.
+    Server(Map<String, Value>),
 }
 
 /// One entry in a request's `input`.
@@ -1238,7 +1295,7 @@ impl<'a> Body<'a> {
             }
         }
 
-        let tools: Vec<ToolSpec<'a>> = request
+        let mut tools: Vec<ToolSpec<'a>> = request
             .tools
             .iter()
             .map(|tool: &ToolDefinition| ToolSpec::Function {
@@ -1248,17 +1305,55 @@ impl<'a> Body<'a> {
                 parameters: &tool.schema,
             })
             .collect();
+        // After every function entry rather than beside its twin, so that a
+        // function tool's position never depends on a config key and a
+        // request stays diffable against the same session without one.
+        for name in &request.responses.custom_tools {
+            let Some(tool) = request.tools.iter().find(|tool| tool.name == *name) else {
+                tracing::debug!(
+                    tool = name.as_str(),
+                    reason = "not on this request's roster",
+                    "a custom_tools name was advertised as a function"
+                );
+                continue;
+            };
+            if single_string_argument(&tool.schema).is_none() {
+                tracing::debug!(
+                    tool = name.as_str(),
+                    reason = "its schema is not exactly one required string argument",
+                    "a custom_tools name was advertised as a function"
+                );
+                continue;
+            }
+            tools.push(ToolSpec::Custom {
+                kind: CUSTOM,
+                name: alias(&tool.name, OPENAI_CAP),
+                description: &tool.description,
+            });
+        }
+        tools.extend(request.responses.server_tools.iter().cloned().map(ToolSpec::Server));
+
+        let mut include: Vec<&'a str> = Vec::new();
+        let sealed = (backend.replays_reasoning() && seals_reasoning(&request.model))
+            .then_some(REASONING_INCLUDE);
+        let effort = request.effort_options.get("include").and_then(Value::as_array);
+        for entry in sealed
+            .into_iter()
+            .chain(effort.into_iter().flatten().filter_map(Value::as_str))
+            .chain(request.responses.include.iter().map(String::as_str))
+        {
+            if !include.contains(&entry) {
+                include.push(entry);
+            }
+        }
 
         Self {
             model: &request.model,
             stream: true,
             store: false,
-            include: (backend.replays_reasoning() && seals_reasoning(&request.model))
-                .then_some([REASONING_INCLUDE]),
+            include,
             instructions: request.system.as_deref(),
             input,
-            tool_choice: (backend == Backend::OpenRouter && !tools.is_empty())
-                .then_some(TOOL_CHOICE_AUTO),
             tools,
         }
     }
@@ -1278,8 +1373,13 @@ impl<'a> Body<'a> {
     /// built by a fixture carries none of these and every existing request is
     /// byte-identical.
     fn serving(mut self, names: &[String]) -> Self {
-        self.tools.extend(names.iter().map(|name| ToolSpec::Server {
-            kind: format!("{}{name}", openrouter::SERVER_TOOL_PREFIX),
+        self.tools.extend(names.iter().map(|name| {
+            let mut entry = Map::new();
+            entry.insert(
+                "type".to_owned(),
+                Value::String(format!("{}{name}", openrouter::SERVER_TOOL_PREFIX)),
+            );
+            ToolSpec::Server(entry)
         }));
 
         self
@@ -1405,6 +1505,16 @@ struct Mapping {
     /// is a summary dropped on a stream that also streamed raw thinking, which
     /// is the richer of the two.
     thinking: Option<&'static str>,
+    /// Which argument a custom call's `input` becomes, by registry name.
+    custom: CustomArguments,
+    /// Custom calls already announced by their opening frame, by `call_id`,
+    /// so the closing frame does not announce them twice.
+    opened_custom: HashSet<String>,
+    /// The model this request asked for, for the served-tier log line.
+    model: String,
+    /// The `service_tier` this request carried, for the same line: what was
+    /// served is only worth logging beside what was asked.
+    requested: Option<String>,
 }
 
 impl Default for Mapping {
@@ -1415,6 +1525,10 @@ impl Default for Mapping {
             calls: HashMap::new(),
             aliases: Aliases::default(),
             thinking: None,
+            custom: CustomArguments::default(),
+            opened_custom: HashSet::new(),
+            model: String::new(),
+            requested: None,
         }
     }
 }
@@ -1486,11 +1600,18 @@ impl Mapper for Mapping {
             | "response.function_call_arguments.done"
             | "response.reasoning_summary_text.done"
             | "response.reasoning_summary_part.done"
+            // A custom call's `input` streams here and arrives again, whole,
+            // on the item's closing frame — which is the one read, because
+            // the input is mapped onto an argument object only once it is
+            // complete.
+            | "response.custom_tool_call_input.delta"
+            | "response.custom_tool_call_input.done"
             | "keepalive" => {}
             "response.output_item.added" => self.opened(&chunk["item"], events),
             "response.function_call_arguments.delta" => self.filled(&chunk, events),
             "response.output_item.done" => self.closed(&chunk["item"], events),
             "response.completed" | "response.incomplete" => {
+                self.served(&chunk["response"], events);
                 self.absorb(&chunk["response"]["usage"]);
                 if let Some(reason) = chunk["response"]["incomplete_details"]["reason"].as_str() {
                     // No `FinishReason` says "stopped early but said something":
@@ -1636,6 +1757,10 @@ impl Mapping {
     /// produce nothing here. What a reasoning item is worth arrives when it
     /// closes; see [`sealed`].
     fn opened(&mut self, item: &Value, events: &mut Vec<ProviderEvent>) {
+        if item["type"].as_str() == Some(CUSTOM_TOOL_CALL) {
+            self.custom_opened(item, events);
+            return;
+        }
         if item["type"].as_str() != Some(FUNCTION_CALL) {
             return;
         }
@@ -1687,6 +1812,7 @@ impl Mapping {
                     events.push(ProviderEvent::ToolCallEnd { id });
                 }
             }
+            CUSTOM_TOOL_CALL => self.custom_closed(item, events),
             REASONING => {
                 if self.seals {
                     sealed(item, events);
@@ -1710,8 +1836,94 @@ impl Mapping {
             kind if kind.starts_with(openrouter::SERVER_TOOL_PREFIX) => {
                 server_tool(kind, item, events);
             }
+            // A hosted tool the vendor ran (**D563**): the item types its own
+            // server tools close as, enumerated because this vendor's are not
+            // namespaced and an unknown item type is not a tool call.
+            kind if HOSTED_TOOL_ITEMS.contains(&kind) => server_tool(kind, item, events),
             _ => {}
         }
+    }
+
+    /// Announces a custom call the model started making: its start, then the
+    /// marker that says how it was made, before any argument arrives.
+    fn custom_opened(&mut self, item: &Value, events: &mut Vec<ProviderEvent>) {
+        let Some(call_id) = item["call_id"].as_str().filter(|id| !id.is_empty()) else {
+            tracing::debug!("a custom tool call arrived without the id that correlates it");
+            return;
+        };
+        if !self.opened_custom.insert(call_id.to_owned()) {
+            return;
+        }
+
+        events.push(ProviderEvent::ToolCallStart {
+            id: call_id.to_owned(),
+            name: self.aliases.original(item["name"].as_str().unwrap_or_default().to_owned()),
+        });
+        events.push(ProviderEvent::ToolCallCustom { id: call_id.to_owned() });
+    }
+
+    /// Closes a custom call: its whole `input`, mapped onto the one argument
+    /// the tool takes, then its end.
+    ///
+    /// A call whose opening frame never arrived is announced here first, so
+    /// the four events always arrive in the same order.
+    fn custom_closed(&mut self, item: &Value, events: &mut Vec<ProviderEvent>) {
+        self.custom_opened(item, events);
+        let Some(call_id) = item["call_id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        self.opened_custom.remove(call_id);
+
+        let name = self.aliases.original(item["name"].as_str().unwrap_or_default().to_owned());
+        match self.custom.argument(&name) {
+            Some(argument) => {
+                let mut arguments = Map::new();
+                arguments.insert(
+                    argument.to_owned(),
+                    Value::String(item["input"].as_str().unwrap_or_default().to_owned()),
+                );
+                events.push(ProviderEvent::ToolCallDelta {
+                    id: call_id.to_owned(),
+                    json: Value::Object(arguments).to_string(),
+                });
+            }
+            // Not a tool this request advertised as custom. Closed with no
+            // arguments rather than guessed at: the tool refuses the call,
+            // and the model reads why.
+            None => tracing::debug!(
+                tool = name.as_str(),
+                "a custom tool call named a tool this request did not advertise as one"
+            ),
+        }
+        events.push(ProviderEvent::ToolCallEnd { id: call_id.to_owned() });
+    }
+
+    /// Reports what the terminal frame echoed about how the request was
+    /// served, when it echoed anything.
+    ///
+    /// Nothing is said for a frame that echoed none of the four fields —
+    /// every gateway's, and every recorded fixture's — because an empty
+    /// report is not a report that the backend served the defaults.
+    fn served(&self, response: &Value, events: &mut Vec<ProviderEvent>) {
+        let served = ServedOptions {
+            service_tier: response["service_tier"].as_str().map(str::to_owned),
+            verbosity: response["text"]["verbosity"].as_str().map(str::to_owned),
+            parallel_tool_calls: response["parallel_tool_calls"].as_bool(),
+            context: response["reasoning"]["context"].as_str().map(str::to_owned),
+        };
+        if served == ServedOptions::default() {
+            return;
+        }
+        if let Some(tier) = served.service_tier.as_deref() {
+            tracing::debug!(
+                model = self.model.as_str(),
+                served = tier,
+                requested = self.requested.as_deref(),
+                "service_tier the backend served"
+            );
+        }
+
+        events.push(ProviderEvent::Served(served));
     }
 
     /// Reads the usage the terminal frame carries.
@@ -1803,11 +2015,29 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
     /// The keys that identify an item rather than describing the call it made.
     /// `output` is here because it is the *answer*: it has a row of its own,
     /// and a fallback that swept it in would show it twice.
-    const ENVELOPE: [&str; 5] = ["type", "id", "status", "call_id", "output"];
+    /// `result` is here because it is the binary answer, carried as the
+    /// [`Blob`] and never as text a row would print.
+    const ENVELOPE: [&str; 6] = ["type", "id", "status", "call_id", "output", "result"];
+
+    let blob = (kind == IMAGE_GENERATION_CALL)
+        .then(|| item["result"].as_str())
+        .flatten()
+        .filter(|base64| !base64.is_empty())
+        .map(|base64| Blob {
+            // The format the vendor documents as the default when the item
+            // does not say, so a missing field is not a missing mime.
+            mime: format!("image/{}", item["output_format"].as_str().unwrap_or("png")),
+            base64: base64.to_owned(),
+        });
 
     let input = match &item["arguments"] {
         Value::String(arguments) => {
             serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
+        }
+        // What a web search was asked, which this vendor carries as the
+        // item's `action` rather than as arguments.
+        Value::Null if kind == WEB_SEARCH_CALL && !item["action"].is_null() => {
+            item["action"].clone()
         }
         Value::Null => {
             let rest: serde_json::Map<String, Value> = item
@@ -1816,6 +2046,9 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
                     object
                         .iter()
                         .filter(|(key, _)| !ENVELOPE.contains(&key.as_str()))
+                        // Already the blob's mime, and a row showing it
+                        // beside an image nobody can see says nothing.
+                        .filter(|(key, _)| blob.is_none() || key.as_str() != "output_format")
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect()
                 })
@@ -1830,7 +2063,78 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
         structured => structured.to_string(),
     };
 
-    events.push(ProviderEvent::ServerTool { tool: kind.to_owned(), input, output });
+    tracing::debug!(
+        tool = kind,
+        bytes = blob.as_ref().map_or(0, |blob| blob.base64.len()),
+        "a server tool answered"
+    );
+    events.push(ProviderEvent::ServerTool { tool: kind.to_owned(), input, output, blob });
+}
+
+/// The item a Responses custom tool call arrives as (**D563**).
+const CUSTOM_TOOL_CALL: &str = "custom_tool_call";
+
+/// The `type` a custom tool is advertised under.
+const CUSTOM: &str = "custom";
+
+/// The item a hosted web search closes as.
+const WEB_SEARCH_CALL: &str = "web_search_call";
+
+/// The item a hosted image generation closes as — the one hosted tool whose
+/// answer is bytes.
+const IMAGE_GENERATION_CALL: &str = "image_generation_call";
+
+/// Every item type a hosted tool this vendor serves closes as, one per
+/// `server_tools` type either id accepts.
+const HOSTED_TOOL_ITEMS: [&str; 5] = [
+    WEB_SEARCH_CALL,
+    IMAGE_GENERATION_CALL,
+    "file_search_call",
+    "code_interpreter_call",
+    "mcp_call",
+];
+
+/// The one argument a tool's custom `input` becomes, if the tool has one.
+///
+/// The predicate [`options::CUSTOM_TOOLS`] is derived by: exactly one
+/// `required` property, and that property a string. A tool with two required
+/// arguments has no way to receive the second through one free-text input.
+fn single_string_argument(schema: &Value) -> Option<&str> {
+    let [required] = schema["required"].as_array()?.as_slice() else {
+        return None;
+    };
+    let required = required.as_str()?;
+
+    (schema["properties"][required]["type"].as_str() == Some("string")).then_some(required)
+}
+
+/// The argument each tool this request advertised as custom takes its `input`
+/// as, by registry name — what the mapper needs to turn a custom call back
+/// into an ordinary argument object.
+#[derive(Clone, Debug, Default)]
+struct CustomArguments(HashMap<String, String>);
+
+impl CustomArguments {
+    /// The map for the custom tools `request` actually advertised: listed,
+    /// on the roster, and single-string — the same test [`Body::new`] makes.
+    fn of(request: &ChatRequest) -> Self {
+        Self(
+            request
+                .responses
+                .custom_tools
+                .iter()
+                .filter_map(|name| {
+                    let tool = request.tools.iter().find(|tool| tool.name == *name)?;
+                    let argument = single_string_argument(&tool.schema)?;
+                    Some((name.clone(), argument.to_owned()))
+                })
+                .collect(),
+        )
+    }
+
+    fn argument(&self, tool: &str) -> Option<&str> {
+        self.0.get(tool).map(String::as_str)
+    }
 }
 
 /// The item kind a tool call arrives as.
@@ -1839,15 +2143,29 @@ const FUNCTION_CALL: &str = "function_call";
 /// "Call one if you decide to", the only one of this API's three tool-choice
 /// values an agent loop ever wants: `"none"` would advertise a roster nothing
 /// may call, and naming one tool is a decision the *model* is being asked to
-/// make. See [`Body::tool_choice`] for which backend is sent it, and why only
-/// that one.
+/// make. See [`defaulted`] for which backends are sent it, and why.
 const TOOL_CHOICE_AUTO: &str = "auto";
+
+/// What `stream_options.include_obfuscation` defaults to on this vendor's
+/// two backends (**D563**): the padding field every delta otherwise carries
+/// costs bytes on every frame and protects against a side channel a
+/// terminal session reading its own stream is not exposed to. Honored on the
+/// seat (probe 2026-09-16, row 22: the deltas lose `obfuscation`).
+const INCLUDE_OBFUSCATION: bool = false;
+
+/// What `reasoning.summary` defaults to for a model that reasons: what the
+/// Codex CLI itself sends, and the vendor's own spelling of "show the
+/// thinking".
+const REASONING_SUMMARY: &str = "auto";
+
+/// The two body keys that mean something only beside a tool roster.
+const ROSTER_KEYS: [&str; 2] = ["tool_choice", "parallel_tool_calls"];
 
 /// The item kind sealed thinking arrives as, and goes back as.
 const REASONING: &str = "reasoning";
 
 /// OpenAI's name for a fragment of readable thinking, which only exists
-/// downstream of a `reasoning.summary` in the request ([`summarized`]).
+/// downstream of a `reasoning.summary` in the request ([`defaulted`]).
 const REASONING_SUMMARY_DELTA: &str = "response.reasoning_summary_text.delta";
 
 /// The frame that opens a new summary block inside one reasoning item. Worth
@@ -1896,46 +2214,142 @@ fn seals_reasoning(model: &str) -> bool {
     id.contains("gpt-5") && !id.contains("gpt-5-chat") && !id.contains("gpt-5-pro")
 }
 
-/// The effort's options with `reasoning.summary` defaulted to `"auto"` for a
-/// model that reasons.
+/// The free defaults a `backend`'s request carries, as the lowest layer
+/// (**D563**).
 ///
-/// The Responses API streams no readable thinking unless the request asks —
-/// `response.reasoning_summary_text.delta` (which [`Mapping`] already turns
-/// into the pane's thinking) only exists downstream of a `reasoning.summary`
-/// in the body. `"auto"` is what the Codex CLI itself sends, on the same
-/// backend, so it is the vendor's own spelling of "show the thinking".
+/// Exhaustive on purpose: a sixth backend has to decide what it is sent.
 ///
-/// Merged key-wise rather than set whole: an effort's `reasoning.effort` must
-/// survive beside the summary, and a summary somebody spelled out in their own
-/// options is theirs — the default fills absence only. Gated by
-/// [`seals_reasoning`] exactly as `include` is, and for the same reason: a
-/// model that does not reason answers a `reasoning` field with a 400.
-fn summarized(
-    options: &serde_json::Map<String, serde_json::Value>,
-    model: &str,
-    backend: Backend,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut options = options.clone();
-    // Gated on the backend as well as the model, because both halves of the
-    // default are this vendor's: `seals_reasoning` is a rule about *its* model
-    // ids, and `"auto"` is what *its* CLI sends. Neither is a statement about a
-    // gateway whose roster is mostly other people's models — see
-    // [`super::openrouter`], which sends a `reasoning` object only when an
-    // effort put one there.
-    if !backend.replays_reasoning() || !seals_reasoning(model) {
-        return options;
+/// - **This vendor's two** get `stream_options.include_obfuscation: false`,
+///   `tool_choice: "auto"` beside a non-empty roster, and — for a model that
+///   reasons — `reasoning.summary: "auto"`. The Responses API streams no
+///   readable thinking unless the request asks —
+///   `response.reasoning_summary_text.delta`, which [`Mapping`] turns into the
+///   pane's thinking, only exists downstream of a `reasoning.summary` — and a
+///   model that does not reason answers a `reasoning` field with a 400, which
+///   is why that one is gated by [`seals_reasoning`] exactly as `include` is.
+///   None of the three changes what a turn costs, and every one sits under
+///   the layers above it, so a configured value or an effort's own replaces
+///   it; there is deliberately no spelling that omits one, and a vendor that
+///   refuses one is fixed at its constant.
+/// - **[`Backend::OpenRouter`]** gets `tool_choice: "auto"` beside a
+///   non-empty roster and nothing else — see [`super::openrouter`]'s ledger
+///   for why that vendor gets no `reasoning` default, which is the other
+///   vendor's.
+/// - **The gateways and a config-named endpoint** get nothing: they are sent
+///   exactly what they were sent before this layer existed.
+///
+/// **No `service_tier`, ever.** The engine resolves that one, so that what a
+/// status bar reports is what was sent.
+fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value> {
+    let mut layer = Map::new();
+    match backend {
+        Backend::Codex | Backend::Platform => {
+            let mut stream_options = Map::new();
+            stream_options.insert("include_obfuscation".to_owned(), INCLUDE_OBFUSCATION.into());
+            layer.insert("stream_options".to_owned(), Value::Object(stream_options));
+            if roster > 0 {
+                layer.insert("tool_choice".to_owned(), TOOL_CHOICE_AUTO.into());
+            }
+            if seals_reasoning(model) {
+                let mut reasoning = Map::new();
+                reasoning.insert("summary".to_owned(), REASONING_SUMMARY.into());
+                layer.insert(REASONING.to_owned(), Value::Object(reasoning));
+            }
+        }
+        Backend::OpenRouter => {
+            if roster > 0 {
+                layer.insert("tool_choice".to_owned(), TOOL_CHOICE_AUTO.into());
+            }
+        }
+        Backend::Opencode(_) | Backend::Compat => {}
     }
 
-    let reasoning = options
-        .entry("reasoning".to_owned())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    if let serde_json::Value::Object(object) = reasoning {
-        object
-            .entry("summary".to_owned())
-            .or_insert_with(|| serde_json::Value::String("auto".to_owned()));
+    layer
+}
+
+/// The configured body, less what this one request cannot carry (**D563**).
+///
+/// Two checks only the wire can make, because only the wire sees a request's
+/// roster and model: the engine hands every request of a turn the same body,
+/// and a title or compaction request offers no tools while the model a child
+/// runs may not reason.
+///
+/// - `tool_choice` and `parallel_tool_calls` go when `offered` is false —
+///   when the serialized `tools` array is empty, hosted entries included, so
+///   a hosted `tool_choice` beside a hosted tool and no function roster is
+///   kept.
+/// - `reasoning` goes whole when the model does not reason, for the 400
+///   [`defaulted`] avoids.
+///
+/// Every drop is logged, one line per key, so a configured value that did
+/// nothing on a request says why.
+fn gated(body: &Map<String, Value>, offered: bool, model: &str) -> Map<String, Value> {
+    let mut body = body.clone();
+    if !offered {
+        for key in ROSTER_KEYS {
+            if body.remove(key).is_some() {
+                dropped(key, "no tools");
+            }
+        }
+    }
+    if !seals_reasoning(model)
+        && let Some(reasoning) = body.remove(REASONING)
+    {
+        match reasoning.as_object() {
+            Some(object) if !object.is_empty() => {
+                for key in object.keys() {
+                    dropped(&format!("{REASONING}.{key}"), "model does not reason");
+                }
+            }
+            _ => dropped(REASONING, "model does not reason"),
+        }
     }
 
-    options
+    body
+}
+
+/// The directives a request carries that are written into the body rather
+/// than spliced as keys, as the topmost layer (**D563**).
+///
+/// - `service_tier`, already resolved by the engine, on whichever backend was
+///   handed one.
+/// - `text.format`, the document `run --json-schema` rides, merged into the
+///   one `text` object a configured `verbosity` may already have opened.
+/// - `reasoning.summary`, on the platform alone — the seat has only ever
+///   been measured with `auto` — and only for a model that reasons, so it can
+///   never recreate the `reasoning` object [`gated`] just removed. Above the
+///   effort, because it is the one key where the catalog effort carries a
+///   *default* rather than a selection, and a configured value has to be able
+///   to outrank it.
+fn directed(request: &ChatRequest, backend: Backend) -> Map<String, Value> {
+    let options = &request.responses;
+    let mut layer = Map::new();
+    if let Some(tier) = &options.service_tier {
+        layer.insert("service_tier".to_owned(), Value::String(tier.clone()));
+    }
+    if let Some(format) = &options.text_format {
+        let mut text = Map::new();
+        text.insert("format".to_owned(), format.clone());
+        layer.insert("text".to_owned(), Value::Object(text));
+    }
+    if let Some(summary) = &options.reasoning_summary
+        && backend == Backend::Platform
+    {
+        if seals_reasoning(&request.model) {
+            let mut reasoning = Map::new();
+            reasoning.insert("summary".to_owned(), Value::String(summary.clone()));
+            layer.insert(REASONING.to_owned(), Value::Object(reasoning));
+        } else {
+            dropped("reasoning.summary", "model does not reason");
+        }
+    }
+
+    layer
+}
+
+/// Says that a configured key was left off this request, and why.
+fn dropped(key: &str, reason: &'static str) {
+    tracing::debug!(key, reason, "a configured Responses key was dropped from this request");
 }
 
 /// The chat-completions sentinel, which some deployments send here too.

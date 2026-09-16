@@ -2505,6 +2505,7 @@ fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
         messages: Vec::new(),
         turn_start: 0,
         tools: Vec::new(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     };
 

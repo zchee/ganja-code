@@ -1161,6 +1161,7 @@ pub(super) fn opening(model: &str) -> ChatRequest {
         messages: vec![crate::protocol::Message::user("read the file")],
         turn_start: 0,
         tools: roster(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     }
 }

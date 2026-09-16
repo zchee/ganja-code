@@ -402,6 +402,7 @@ async fn turn(provider: &dyn Provider, model: &str) -> Outcome {
         .stream(
             ChatRequest {
                 turn_start: 0,
+                responses: Default::default(),
                 effort_options: Default::default(),
                 model: model.to_owned(),
                 system: Some("Answer with a single word.".to_owned()),

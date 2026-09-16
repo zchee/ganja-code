@@ -31,6 +31,7 @@ const SCRIPT: &str = r#"{
 fn request(prompt: &str) -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: MODEL.to_owned(),
         system: None,
