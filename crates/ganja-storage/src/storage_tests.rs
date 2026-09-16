@@ -2,7 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use ganja_protocol::{
-    Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState, Usage,
+    FastChoice, Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role,
+    ToolState, Usage,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -60,6 +61,7 @@ fn info(id: &str, updated: u64) -> SessionInfo {
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     }
 }
 
@@ -91,6 +93,44 @@ fn the_session_row_preserves_default_bytes_round_trips_effort_and_reads_older_ro
     let decoded: SessionInfo =
         serde_json::from_str(older).expect("the default reads a row from before the field existed");
     assert_eq!(decoded.effort, None);
+}
+
+/// The same three shapes for the service-tier choice (**D563**), which is the
+/// same kind of thing and earns the same three claims: both words survive the
+/// round trip, a session that made no choice writes no key — the bare bytes
+/// above are the proof, and they are what they always were — and a row from
+/// before the field existed reads as no choice rather than refusing.
+///
+/// What is stored is the choice, never the tier a turn resolves it to, so a
+/// row saying `fast` resumes asking for whichever tier the resumed model's
+/// fast lane is spelled with.
+#[test]
+fn the_session_row_round_trips_the_fast_choice_and_reads_rows_from_before_it() {
+    for choice in [FastChoice::On, FastChoice::Off] {
+        let mut carried = info("ses_fast", 2);
+        carried.fast = Some(choice);
+
+        let encoded = serde_json::to_string(&carried).expect("the row serializes");
+        let spelled = match choice {
+            FastChoice::On => "on",
+            FastChoice::Off => "off",
+        };
+        assert!(encoded.contains(&format!(r#""fast":"{spelled}""#)), "got {encoded}");
+        let decoded: SessionInfo = serde_json::from_str(&encoded).expect("the row parses back");
+        assert_eq!(decoded, carried);
+    }
+
+    assert!(
+        !serde_json::to_string(&info("ses_default", 2))
+            .expect("the row serializes")
+            .contains("fast"),
+        "no choice is the field's absence"
+    );
+
+    let older = r#"{"id":"ses_older","version":1,"created":1,"updated":2}"#;
+    let decoded: SessionInfo =
+        serde_json::from_str(older).expect("the default reads a row from before the field existed");
+    assert_eq!(decoded.fast, None);
 }
 
 /// A message with pinned ids and times, carrying `parts`.
@@ -127,6 +167,7 @@ fn tool(id: &str) -> Part {
                 started: 7,
                 completed: 9,
             },
+            custom: false,
         },
     }
 }

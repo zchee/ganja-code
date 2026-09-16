@@ -119,6 +119,7 @@ fn request() -> ChatRequest {
         // The turn opened at the newest question: the pair before it is the
         // history this request carries and does not re-send.
         turn_start: 2,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-5.3-codex".to_owned(),
         system: Some("You are terse.".to_owned()),
@@ -530,6 +531,7 @@ fn a_resume_goes_out_as_a_fieldless_resume_action_over_the_composed_state() {
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
     let resuming = turn(vec![Message::user("Read a.rs."), stepped], 0);

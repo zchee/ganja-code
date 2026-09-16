@@ -150,6 +150,15 @@ const EXPIRED: &str = "expired \u{2014} refreshes on the next request";
 /// gone stale and nothing may say when it comes back.
 const NO_RESET: &str = "resets: \u{2014}";
 
+/// What the `Service tier:` row says before any terminal frame has echoed one
+/// (**D563**).
+///
+/// A sentence rather than an em dash or a blank: the tier is a thing this
+/// session asked for and has not heard back about, which is not the same news
+/// as a backend that answers nothing — and the two are told apart by reading
+/// this row again after a turn.
+const NOT_YET_SERVED: &str = "not yet reported";
+
 /// Column widths of the per-turn table, matching the inspector's tab so the
 /// same rows read the same in both places.
 const ID_WIDTH: usize = 10;
@@ -201,6 +210,17 @@ pub struct Data {
     /// only for a `tui.statusline` roster that names `model`, so on a default
     /// bar this panel is the one surface that has it.
     pub served_model: Option<ganja_core::provider::ServedModel>,
+    /// What the next request asks the Responses API for as its `service_tier`,
+    /// which rung of the ladder decided it, and what the backend last said it
+    /// served (**D563**), as `Engine::service_tier` last answered. [`None`] —
+    /// every provider that sends no tier at all — renders no `Service tier:`
+    /// row, the same honest-absence rule everything else here is drawn under.
+    ///
+    /// **This is where the served tier is.** The status bar draws the request
+    /// alone, because the seat was measured to echo `default` whatever it was
+    /// sent; the panel is the surface that can afford to say both without one
+    /// of them being mistaken for the other.
+    pub tier: Option<ganja_core::responses_ladder::TierView>,
 }
 
 /// The dialog itself.
@@ -323,6 +343,28 @@ impl Usage {
                     &format!(
                         "  {:<16} {} (asked for {})",
                         "Served model:", served.served, served.requested
+                    ),
+                    inner_width,
+                ),
+                theme.fg,
+            ));
+        }
+        // What the request asks the vendor to schedule it as, and what the
+        // vendor said it did (**D563**) — the one place the pair is drawn,
+        // because the two really are different claims here: the ChatGPT seat
+        // was measured to echo `default` whatever it was sent, so a surface
+        // that showed only the echo would report every fast seat session as an
+        // ordinary one. The rung is named because what moves the tier back is
+        // different for each: `/fast reset`, a config line, or nothing at all.
+        if let Some(tier) = &self.data.tier {
+            lines.push(Line::styled(
+                clip(
+                    &format!(
+                        "  {:<16} requested {} ({}) \u{2014} served {}",
+                        "Service tier:",
+                        tier.requested,
+                        tier.source.label(),
+                        tier.served.as_deref().unwrap_or(NOT_YET_SERVED),
                     ),
                     inner_width,
                 ),

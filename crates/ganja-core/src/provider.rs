@@ -358,16 +358,21 @@ impl Wire {
 /// credential, and [`ProviderError::Transport`] when its `headers` are not
 /// headers or its endpoint is somewhere a credential may not travel. All of
 /// them fail at startup, where the message is readable.
-fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvider, ProviderError> {
+/// The endpoint arrives destructured rather than read off `entry` here,
+/// because since **D563** a `provider` entry does not have to declare one —
+/// `[provider.chatgpt.options]` is an entry that configures a builtin. The
+/// loader proves both fields present for every id that reaches this function,
+/// and [`ProviderConfig::endpoint`] is where the caller does the proving, so
+/// there is no half-declared endpoint left for this to have an opinion about.
+fn configured_provider(
+    id: &str,
+    entry: &ProviderConfig,
+    dialect: Dialect,
+    base_url: &str,
+) -> Result<CompatProvider, ProviderError> {
     let credential = CredentialSource::Key(configured_key(id, entry.key_env.as_deref())?);
 
-    CompatProvider::new(
-        id,
-        entry.dialect,
-        &entry.base_url,
-        credential,
-        configured_headers(id, &entry.headers)?,
-    )
+    CompatProvider::new(id, dialect, base_url, credential, configured_headers(id, &entry.headers)?)
 }
 
 /// Resolves the provider and model a session runs on.
@@ -437,7 +442,7 @@ pub async fn select(config: &Config) -> Result<Selection, SelectionError> {
             return Err(SelectionError::Unknown {
                 requested: requested.to_string_lossy().into_owned(),
                 named_by: PROVIDER_ENV,
-                configured: config.provider.keys().cloned().collect(),
+                configured: config.declared_endpoints(),
             });
         }
         Err(VarError::NotPresent) => None,
@@ -577,16 +582,25 @@ pub async fn select(config: &Config) -> Result<Selection, SelectionError> {
         // entry can never quietly replace a shipped wire — `config` refuses
         // an entry naming one by name for that reason, which is what keeps
         // this arm from being the place a shadowing is discovered.
-        configured => match config.provider.get(configured) {
-            Some(entry) => Wire::catalog(configured_provider(configured, entry)?),
-            None => {
-                return Err(SelectionError::Unknown {
-                    requested,
-                    named_by,
-                    configured: config.provider.keys().cloned().collect(),
-                });
+        // An entry that declares no endpoint is not an endpoint: since
+        // **D563** a `provider` entry may configure a builtin instead, and
+        // such an entry reaching this arm would be an id nothing ships and
+        // nothing declares, which is the refusal below.
+        configured => {
+            match config.provider.get(configured).and_then(|entry| Some((entry, entry.endpoint()?)))
+            {
+                Some((entry, (dialect, base_url))) => {
+                    Wire::catalog(configured_provider(configured, entry, dialect, base_url)?)
+                }
+                None => {
+                    return Err(SelectionError::Unknown {
+                        requested,
+                        named_by,
+                        configured: config.declared_endpoints(),
+                    });
+                }
             }
-        },
+        }
     };
 
     // Now that the provider is settled, the config key can be asked whether

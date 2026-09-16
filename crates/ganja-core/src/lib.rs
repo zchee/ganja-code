@@ -55,6 +55,7 @@ pub mod mcp;
 /// frontend exists to ask.
 pub mod plugin;
 pub mod provider;
+pub mod responses_ladder;
 pub mod session;
 /// Runs the second agent loop a `task` call delegates to, and starts the
 /// teammates that call's other door asks for.

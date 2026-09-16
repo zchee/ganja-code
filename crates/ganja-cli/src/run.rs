@@ -233,6 +233,25 @@ pub struct RunArgs {
         conflicts_with = "attach"
     )]
     deadline: Option<u64>,
+    /// Hold this turn's answer to a JSON Schema: a path to a `.json` file, or
+    /// the document inline. Every request of the turn carries it as the
+    /// Responses API's `text.format`, and the assistant's text is the document.
+    /// It is sent strict, so every object in it must set
+    /// `additionalProperties: false`.
+    // Resolved at the clap boundary (`json_schema_flag`), `--deadline`'s own
+    // precedent: a value that is neither a readable file nor JSON is refused
+    // before any engine is assembled. The *provider* it needs cannot be
+    // checked here — it is not known until `select` has run — so that refusal
+    // is `json_schema_provider`'s, below, and is still ahead of any session.
+    // Refused together with `--attach` for `--effort`'s reason: the client's
+    // surface carries no text-format route (**D563**).
+    #[arg(
+        long,
+        value_name = "FILE|JSON",
+        value_parser = json_schema_flag,
+        conflicts_with = "attach"
+    )]
+    json_schema: Option<serde_json::Value>,
     /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -317,7 +336,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
         &Overrides { model: args.model, agent: args.agent, config_file: args.config },
     )
     .await?;
-    let Assembled { engine, servers, config, .. } = assembled;
+    let Assembled { engine, servers, config, provider, .. } = assembled;
+    // Before the session and before the hooks (**D563**): a flag the selected
+    // provider cannot carry is a run that would answer in prose whatever the
+    // schema said, and saying so costs nothing here where saying it later
+    // costs a stored session and a spent request.
+    let text_format = json_schema_format(args.json_schema, &provider)?;
     // The D479 trio reaches the receiver classifier (D523): a `run --auto`
     // session is bypass-classed for cross-session admission, exactly as the
     // UI's `--yolo` session is. Classification only — what `auto` does to
@@ -347,6 +371,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // after it and before the prompt, so the turn's very first request
     // carries the block: a budget that bit from the second step on would
     // leave the step most likely to wander unhurried.
+    // Beside the deadline and for its reason: held on the engine before the
+    // prompt, so the turn's very first request carries the schema. Not a
+    // command — nothing about it is session state a resume would restore
+    // (**D563**), which is why it is the one door `run` has and `/`-commands
+    // have none.
+    if let Some(format) = text_format {
+        engine.set_text_format(Some(format));
+    }
     let outcome = async {
         effort_switch(&engine, args.effort).await?;
         seed_deadline(&engine, args.deadline).await?;
@@ -420,6 +452,221 @@ fn deadline_flag(argument: &str) -> Result<u64, String> {
     // a deadline nobody chose.
     ganja_tui::command::wire_millis(until)
         .ok_or_else(|| format!("{argument:?} names an instant a deadline cannot carry"))
+}
+
+/// The name a `--json-schema` document is sent under (**D563**).
+///
+/// The Responses API takes a name beside the schema and echoes it back on the
+/// item it produced. It names *this door* rather than the schema, because the
+/// document is the caller's and nothing here knows what it describes.
+const JSON_SCHEMA_NAME: &str = "ganja_run";
+
+/// `--json-schema`'s value parser: the document, from a file at `argument` if
+/// one is there, and otherwise from `argument` itself (**D563**).
+///
+/// The file is tried first, and the reason is which mistake each ordering
+/// makes unreadable: a path is never valid JSON, so trying JSON first would
+/// report a typo'd filename as a JSON syntax error at column 1.
+///
+/// A path that **exists** is read, rather than one that is a regular file: a
+/// directory named here is a mistyped path, and the read that follows says so
+/// in the same sentence a permission error does. Testing for a file instead
+/// would send a directory down the inline branch and answer "no such file"
+/// about something that is plainly there.
+///
+/// Whatever the source, the document must be a JSON **object**. A schema is one
+/// by definition, and the three values this refuses — a number, a bare `true`,
+/// an array — would otherwise travel all the way to the vendor and come back as
+/// somebody else's error message about a request this build assembled.
+///
+/// # Errors
+///
+/// `E2` when `argument` is neither a file that is there nor a JSON document; a
+/// sentence naming the file when one is there and could not be read or parsed —
+/// which is **not** `E2`, because "no such file" would be false about exactly
+/// the case a person most needs told apart from a missing one; and a third
+/// naming the JSON type that arrived when the document parsed and is not an
+/// object; and a fifth, [`closed`]'s, naming the first object node that does
+/// not set `additionalProperties: false`.
+fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
+    let path = std::path::Path::new(argument);
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("--json-schema could not read {argument:?}: {error}"))?;
+        let document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+            format!("--json-schema could not read the JSON in {argument:?}: {error}")
+        })?;
+
+        return object(document, &format!("the JSON in {argument:?}")).and_then(closed);
+    }
+
+    let document: serde_json::Value = serde_json::from_str(argument).map_err(|error| {
+        format!(
+            "--json-schema takes a path to a JSON file or an inline JSON document; {argument:?} is neither: no such file, and not JSON ({error})"
+        )
+    })?;
+
+    object(document, &format!("{argument:?}")).and_then(closed)
+}
+
+/// `document` when it is a JSON object, and otherwise the sentence saying what
+/// arrived instead (**D563**), where `source` names where it came from — the
+/// file, or the value typed on the command line.
+///
+/// The source is named rather than left implicit for [`json_schema_flag`]'s own
+/// reason: a person who passed a path and is told `[] is not an object` has to
+/// guess whether this build read their file or their filename.
+fn object(document: serde_json::Value, source: &str) -> Result<serde_json::Value, String> {
+    if document.is_object() {
+        return Ok(document);
+    }
+
+    let kind = match &document {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => unreachable!("answered above"),
+    };
+
+    Err(format!("--json-schema takes a JSON Schema, which is an object; {source} is {kind}"))
+}
+
+/// `schema` when every object node in it sets `additionalProperties: false`,
+/// and otherwise the sentence naming the first node that does not, by its JSON
+/// path (**D563**, the fifth sentence).
+///
+/// The wrap in [`json_schema_format`] is `strict: true`, and strict mode needs
+/// every object closed. Measured on the ChatGPT seat on 2026-09-17: AC-31's
+/// own fixture, which left the key out, came back a 400 reading `Invalid
+/// schema for response_format 'ganja_run': In context=(), 'additionalProperties'
+/// is required to be supplied and to be false.` — and the same schema with the
+/// key answered. Refused here rather than relaxed to `strict: false`, because a
+/// best-effort shape hands the checking back to the script this flag serves,
+/// and refused at the flag because the answer is already known before a
+/// request is spent. The sentence ends in the vendor's own words so that
+/// somebody who has met the 400 recognizes it.
+///
+/// An object node is one whose `type` is or includes `"object"`, or which has
+/// `properties`. The walk follows the schema keywords that hold subschemas and
+/// nothing else, so a `const`, an `enum` or a `default` whose *value* happens
+/// to look like a schema is data, not a node.
+fn closed(schema: serde_json::Value) -> Result<serde_json::Value, String> {
+    match open_object(&schema, "$".to_owned()) {
+        None => Ok(schema),
+        Some(path) => Err(format!(
+            "--json-schema is sent strict, so every object in it must close itself; the object at {path} does not: 'additionalProperties' is required to be supplied and to be false"
+        )),
+    }
+}
+
+/// The JSON path of the first object node at or under `node` that does not set
+/// `additionalProperties: false`, walked in document order, or [`None`].
+fn open_object(node: &Value, path: String) -> Option<String> {
+    let Value::Object(members) = node else {
+        return None;
+    };
+
+    let typed_object = match members.get("type") {
+        Some(Value::String(kind)) => kind == "object",
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
+        _ => false,
+    };
+    if (typed_object || members.contains_key("properties"))
+        && members.get("additionalProperties") != Some(&Value::Bool(false))
+    {
+        return Some(path);
+    }
+
+    for (keyword, value) in members {
+        let here = format!("{path}{}", segment(keyword));
+        let found = match keyword.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                value.as_object().and_then(|named| {
+                    named.iter().find_map(|(name, schema)| {
+                        open_object(schema, format!("{here}{}", segment(name)))
+                    })
+                })
+            }
+            "anyOf" | "allOf" | "oneOf" | "prefixItems" => value.as_array().and_then(|listed| {
+                listed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
+            }),
+            // `items` was an array of schemas before draft 2020-12, and a
+            // document written to an older draft is still somebody's schema.
+            "items" if value.is_array() => value.as_array().and_then(|listed| {
+                listed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
+            }),
+            "items"
+            | "additionalItems"
+            | "additionalProperties"
+            | "unevaluatedItems"
+            | "unevaluatedProperties"
+            | "contains"
+            | "propertyNames"
+            | "not"
+            | "if"
+            | "then"
+            | "else" => open_object(value, here),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    None
+}
+
+/// One step of a JSON path: `.name` for a key a reader could type bare, and
+/// `["name"]` for one that needs quoting.
+fn segment(key: &str) -> String {
+    let bare = key
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '$'
+        });
+    if bare { format!(".{key}") } else { format!("[{key:?}]") }
+}
+
+/// The `text.format` document `--json-schema` rides as, or [`None`] when the
+/// flag was not given (**D563**).
+///
+/// # Errors
+///
+/// `E3` on a provider that does not speak the Responses API. Refused rather
+/// than ignored, for the reason every other unusable flag here is refused: a
+/// run that quietly dropped it would answer in whatever prose the model felt
+/// like and exit 0, and a script reading that answer as JSON is the failure
+/// this sentence exists to prevent.
+fn json_schema_format(schema: Option<serde_json::Value>, provider: &str) -> Result<Option<Value>> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    if !ganja_core::provider::responses::options::speaks_options(provider) {
+        bail!(
+            "--json-schema rides the Responses API's text.format; the selected provider {provider} does not speak it"
+        );
+    }
+
+    Ok(Some(serde_json::json!({
+        "type": "json_schema",
+        "name": JSON_SCHEMA_NAME,
+        "schema": schema,
+        // The vendor's own word for "answer exactly this or fail", which is
+        // the only reading of a schema somebody passed on the command line:
+        // a best-effort shape would put the burden of checking back on the
+        // script this flag exists to serve.
+        "strict": true,
+    })))
 }
 
 /// Installs [`REFUSED`] as standing rules the engine re-applies itself.
@@ -878,6 +1125,11 @@ impl<'a> Reporter<'a> {
             // the six nd-JSON type names have no room for a shape no consumer
             // was promised.
             | Event::EffortChanged { .. }
+            // A service-tier choice (**D563**) is session state for the same
+            // reason, and a headless run has no door that moves one: what
+            // resolves the tier here is the configuration, read before the
+            // turn opens.
+            | Event::FastChanged { .. }
             // A permission-mode change (**D496**) is the same kind of thing
             // and unreachable besides: what sends one is a team's lead
             // answering a teammate mid-session, and a headless run holds no

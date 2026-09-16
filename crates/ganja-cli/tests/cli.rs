@@ -583,9 +583,9 @@ fn a_named_provider_is_the_only_one_the_listing_carries() {
         .args(["models", "openai"])
         .assert()
         .success()
-        // The starred row is openai's default, `gpt-5.6`; the previous default
-        // stays listed beside it, unstarred — it is still what a ChatGPT seat
-        // runs.
+        // The starred row is openai's default, `gpt-5.6`; `gpt-5.4` stays
+        // listed beside it, unstarred — a platform row is not removed because
+        // the ChatGPT seat stopped serving it.
         .stdout(
             predicate::str::contains("gpt-5.6*")
                 .and(predicate::str::contains("gpt-5.4 "))
@@ -675,6 +675,46 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
         .stdout(predicate::str::contains("PROVIDER").not());
 }
 
+/// **AC-10.** What the refusal for an unknown provider calls "this project's
+/// config declares" is its **endpoints**, and since **D563** a `provider`
+/// entry does not have to be one.
+///
+/// `[provider.chatgpt.options]` configures a wire this build already ships; it
+/// declares nothing, and naming it here would answer a typo by pointing at an
+/// entry whose author was not describing an endpoint at all. The two halves
+/// are asserted against one binary so the sentence is the one somebody reads,
+/// not the one a unit test constructs.
+#[test]
+fn an_options_entry_for_a_builtin_is_not_something_this_project_declares() {
+    let cache = cache();
+
+    let configuring = project();
+    fs::write(
+        configuring.path().join("ganja.toml"),
+        "[provider.chatgpt.options]\nservice_tier = \"priority\"\n",
+    )
+    .expect("the config file is writable");
+
+    offline(&cache)
+        .current_dir(configuring.path())
+        .env("GANJA_PROVIDER", "bogus")
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("this config names").not());
+
+    // The declared shape still answers as it always did, which is what makes
+    // the clause above about the *kind* of entry rather than about D563
+    // silencing the list.
+    offline(&cache)
+        .current_dir(declaring_project().path())
+        .env("GANJA_PROVIDER", "bogus")
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("this config names local-llama"));
+}
+
 /// The cursor roster is the wire's to serve, so `models cursor` asks the
 /// stored login before it asks anything else — and with none stored, what
 /// comes back is the wire's own refusal naming the repair, with the catalog
@@ -698,8 +738,11 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 /// Offline in the strong sense: fetching is off, every home is this test's, and
 /// since **D555** the seat arm reaches no credential either — the id is the
 /// whole question, which is why this arranges no store at all. What proves
-/// membership is not the catalog's is `gpt-5.6-sol`: no row of this build's
-/// table carries it, and it is listed regardless.
+/// membership is not the catalog's is `gpt-5.4`: this build's table carries the
+/// row and the listing leaves it out. It used to be proved the other way round,
+/// by `gpt-5.6-sol` being listed with no row at all — until 2026-09-16 gave the
+/// four roster models rows of their own, so a seat started offline has a window
+/// for the model it is about to ask.
 #[test]
 fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
     offline(&cache()).args(["models", "chatgpt"]).assert().success().stdout(
@@ -711,9 +754,9 @@ fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
             .and(predicate::str::contains("gpt-5.6-sol"))
             .and(predicate::str::contains("gpt-5.6-terra"))
             .and(predicate::str::contains("gpt-5.6-luna"))
-            .and(predicate::str::contains("gpt-5.3-codex-spark"))
-            // The catalog header, and the two rows a seat is not offered:
-            // this listing is the roster alone.
+            .and(predicate::str::contains("gpt-5.3-codex-spark").not())
+            // The catalog header, and the rows a seat is not offered: this
+            // listing is the roster alone.
             .and(predicate::str::contains("PROVIDER").not())
             .and(predicate::str::contains("gpt-5.4 ").not()),
     );
@@ -891,6 +934,7 @@ fn store(storage: &Storage, id: &str, parent: Option<&str>) {
             activated_tools: std::collections::BTreeSet::new(),
             parent: parent.map(|parent| SessionId::from(parent.to_owned())),
             revert: None,
+            fast: None,
         })
         .expect("a session stores");
 }

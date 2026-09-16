@@ -50,6 +50,10 @@ fn data() -> Data {
         // wire but one reports nothing, and this module's existing assertions
         // are all written against a panel with no such row.
         served_model: None,
+        // And once more for the tier row (**D563**): every provider but the two
+        // Responses ids resolves none, which is what a fake-provider session is
+        // — so the panel these assertions were written against is unchanged.
+        tier: None,
     }
 }
 
@@ -547,4 +551,42 @@ fn a_tiny_area_draws_without_panicking() {
 
         Usage::new(data()).render(area, &mut buffer, &Theme::default());
     }
+}
+
+/// **D563, AC-30.** The panel is where the tier's two halves are drawn
+/// together: what the next request asks for, which rung of the ladder decided
+/// it, and what the backend last said it served — with the waiting state said
+/// in words rather than left blank.
+#[test]
+fn the_tier_row_says_what_was_asked_for_and_what_came_back() {
+    let mut data = data();
+    data.tier = Some(ganja_core::responses_ladder::TierView {
+        requested: "priority".to_owned(),
+        source: ganja_core::responses_ladder::Source::ChatgptDefault,
+        served: None,
+    });
+    let waiting = rendered(&Usage::new(data.clone()), AREA);
+    assert!(
+        waiting.contains("requested priority (chatgpt default) \u{2014} served not yet reported"),
+        "got:\n{waiting}"
+    );
+
+    data.tier = Some(ganja_core::responses_ladder::TierView {
+        requested: "priority".to_owned(),
+        source: ganja_core::responses_ladder::Source::Fast,
+        served: Some("default".to_owned()),
+    });
+    let answered = rendered(&Usage::new(data), AREA);
+    assert!(
+        answered.contains("requested priority (/fast) \u{2014} served default"),
+        "the echo replaces the waiting words, and the rung is named; got:\n{answered}"
+    );
+}
+
+/// **D563, AC-30.** A provider that resolves no tier draws no row at all —
+/// the honest-absence rule every other section of this panel keeps.
+#[test]
+fn a_provider_with_no_tier_draws_no_tier_row() {
+    let screen = rendered(&Usage::new(data()), AREA);
+    assert!(!screen.contains("Service tier"), "got:\n{screen}");
 }

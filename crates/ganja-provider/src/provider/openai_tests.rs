@@ -339,6 +339,7 @@ fn the_system_prompt_becomes_the_first_message() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -381,6 +382,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -409,6 +411,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
 fn a_request_without_a_system_prompt_starts_with_the_user() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -427,6 +430,7 @@ fn a_request_without_a_system_prompt_starts_with_the_user() {
 fn an_effort_passes_through_but_cannot_claim_the_model() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: serde_json::json!({
             "reasoning_effort": "high",
             "model": "someone-elses",
@@ -462,7 +466,12 @@ fn an_effort_passes_through_but_cannot_claim_the_model() {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     }
 }
 
@@ -522,6 +531,7 @@ fn a_tool() -> ToolDefinition {
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -572,6 +582,7 @@ fn conforms(name: &str) -> bool {
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -649,6 +660,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -673,6 +685,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 fn a_finished_call_is_sent_back_as_a_call_and_a_tool_message() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -771,6 +784,7 @@ fn a_turn_of_two_steps() -> Message {
 fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -843,6 +857,7 @@ fn a_turn_without_step_markers_is_one_step() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -887,6 +902,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
 
         let request = ChatRequest {
             turn_start: 0,
+            responses: Default::default(),
             effort_options: Default::default(),
             model: "gpt-test".to_owned(),
             system: None,
@@ -943,6 +959,7 @@ fn a_step_marker_starts_a_new_message_rather_than_being_dropped() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -975,6 +992,7 @@ fn text_fragments_within_one_step_are_joined_into_one_message() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,

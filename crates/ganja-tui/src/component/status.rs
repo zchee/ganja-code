@@ -245,6 +245,15 @@ pub struct Status {
     /// no window of its own: without a count, a session leading four teammates
     /// looks exactly like one leading none.
     teammates: usize,
+    /// Whether the next request asks for a fast `service_tier` (**D563**), as
+    /// `App::poll_fast` last resolved it off `Engine::service_tier`.
+    ///
+    /// A bool rather than the tier literal, because the segment is the word
+    /// `fast` and nothing else: `priority` and `ultrafast` are two vendor
+    /// spellings of one fact a person acts on, and a bar that printed the
+    /// spelling would make somebody learn which of the two their model takes
+    /// to read it. The literal is `/usage`'s row, beside what was served.
+    fast: bool,
     /// When this sitting's time budget runs out (**D557**), or [`None`] while
     /// nobody has set one — which is the absent-config bar and every session
     /// that has not typed `/deadline`.
@@ -338,6 +347,7 @@ impl Status {
             queued_dialogs: 0,
             held: 0,
             teammates: 0,
+            fast: false,
             deadline: None,
             task_list: (0, 0),
             yolo: false,
@@ -507,6 +517,17 @@ impl Status {
         self.teammates = teammates;
     }
 
+    /// Records whether the next request asks for a fast `service_tier`
+    /// (**D563**).
+    ///
+    /// The conclusion rather than the tier, and which literals count as fast is
+    /// the app's to decide, because the same predicate decides what a bare
+    /// `/fast` toggles to — two answers to that question would be a bar saying
+    /// `fast` over a command that turns it on.
+    pub fn set_fast(&mut self, fast: bool) {
+        self.fast = fast;
+    }
+
     /// Records when this sitting's time budget runs out, or that none is set
     /// (**D557**).
     ///
@@ -647,6 +668,15 @@ impl Status {
         // A walk that reproduced this order would have to special-case both,
         // which is more machinery than the four lines it would save.
         for element in [
+            // First on the walk, and the one element here that can change a
+            // bar nobody configured (**D563**): on a `chatgpt` session the
+            // resolved default *is* a fast tier, so the cell is there from the
+            // first frame — `App::drive` resolves it before that frame is
+            // drawn. It leads rather than sitting with the work counts
+            // because it is about the request the activity segment beside it
+            // is running — the same reason the agent and the effort precede
+            // that segment in the head above.
+            StatuslineElement::Fast,
             StatuslineElement::Queued,
             StatuslineElement::Jobs,
             StatuslineElement::Tasks,
@@ -825,6 +855,17 @@ impl Status {
                     theme.fg.add_modifier(Modifier::BOLD),
                 )]
             }),
+            // One word, and the word is what was *asked for* (**D563**): the
+            // seat echoes `default` whatever it is sent, so a segment drawn
+            // from the echo would tell every seat session it is not fast when
+            // nobody has established that. What came back is `/usage`'s row.
+            StatuslineElement::Fast => {
+                if self.fast {
+                    plain("fast".to_owned())
+                } else {
+                    None
+                }
+            }
             // What is waiting sits beside what is happening, because the
             // two together are the answer to "where is my message": a queue
             // with a depth and no visible strip row would otherwise be the

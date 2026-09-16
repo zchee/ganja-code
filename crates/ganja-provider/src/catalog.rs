@@ -7,7 +7,9 @@
 //! and adopted at startup; where there is no cache to adopt, the compiled-in
 //! snapshot answers. That snapshot is pruned from <https://models.dev/api.json>
 //! as taken on **2026-08-03** (the `gpt-6-astra` row and `gpt-5.6`'s prices
-//! from the same file on **2026-09-07**), covering the current generation of
+//! from the same file on **2026-09-07**; the `gpt-5.5` and `gpt-5.6-{sol,luna,
+//! terra}` rows from <https://models.opencode.ai/api.json>, the fetched tier's
+//! own file, on **2026-09-16**), covering the current generation of
 //! the two providers this build ships, and it is unconditional — sizing and pricing
 //! work with no network, no cache and no home directory, so a session started
 //! offline is never left without a context window. Upstream's third tier, an
@@ -540,6 +542,48 @@ const SNAPSHOT: &[Row] = &[
         context_window: 400_000,
         max_output: 128_000,
         pricing: Pricing { input: 1.75, output: 14.0, cache_read: 0.175, cache_write: None },
+    },
+    // The four below are read from `models.opencode.ai/api.json` on 2026-09-16 —
+    // the fetched tier's own file, where the older rows here say models.dev —
+    // and they are here because `responses::SEAT_ROSTER` offers all four with
+    // nothing offline to size them by, so a seat started with no cache had no
+    // context window for its own default.
+    //
+    // **They sit after `gpt-5.3-codex` deliberately.** `gpt-5.6-luna`'s input
+    // price ties `gpt-5.4-nano`'s 0.2, and the offline title model is the first
+    // minimum of a `min_by` over this table; ahead of nano these rows would move
+    // it silently.
+    Row {
+        id: "gpt-5.5",
+        provider_id: "openai",
+        name: "GPT-5.5",
+        context_window: 1_050_000,
+        max_output: 128_000,
+        pricing: Pricing { input: 5.0, output: 30.0, cache_read: 0.5, cache_write: None },
+    },
+    Row {
+        id: "gpt-5.6-sol",
+        provider_id: "openai",
+        name: "GPT-5.6 Sol",
+        context_window: 1_050_000,
+        max_output: 128_000,
+        pricing: Pricing { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: Some(5.0) },
+    },
+    Row {
+        id: "gpt-5.6-luna",
+        provider_id: "openai",
+        name: "GPT-5.6 Luna",
+        context_window: 1_050_000,
+        max_output: 128_000,
+        pricing: Pricing { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: Some(0.25) },
+    },
+    Row {
+        id: "gpt-5.6-terra",
+        provider_id: "openai",
+        name: "GPT-5.6 Terra",
+        context_window: 1_050_000,
+        max_output: 128_000,
+        pricing: Pricing { input: 2.0, output: 12.0, cache_read: 0.2, cache_write: Some(2.5) },
     },
     // `provider_id` is `grok` and not `xai`: the file a credential is stored in
     // uses upstream's name for this provider and everything else uses ganja's,

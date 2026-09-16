@@ -391,6 +391,7 @@ fn a_selection_hands_the_configured_idle_bound_to_the_wire() {
                     description: "a roster of one, so this is no one-shot".to_owned(),
                     schema: serde_json::json!({"type": "object", "properties": {}}),
                 }],
+                responses: Default::default(),
                 effort_options: serde_json::Map::new(),
             };
             let mut stream = selection

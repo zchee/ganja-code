@@ -94,10 +94,11 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
     config.provider.insert(
         PROVIDER_ID.to_owned(),
         ProviderConfig {
-            dialect: Dialect::AnthropicMessages,
-            base_url: base_url.clone(),
+            dialect: Some(Dialect::AnthropicMessages),
+            base_url: Some(base_url.clone()),
             key_env: Some(KEY_VAR.to_owned()),
             headers: std::collections::BTreeMap::new(),
+            options: None,
         },
     );
     // The flag tier this time, so that both spellings a person can reach a

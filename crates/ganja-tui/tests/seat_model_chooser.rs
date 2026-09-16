@@ -5,7 +5,8 @@
 //! rows and is still not offered them, so the lane is now chosen by the seam's
 //! own `wire_lists_models` rather than by an empty table, and this is what
 //! pins that: the roster appears, and `gpt-5.4` — an openai row this build's
-//! catalog carries, servable on the seat and deliberately unoffered — does not.
+//! catalog still carries, and one the seat stopped serving on 2026-09-16 — does
+//! not.
 //!
 //! It lives out here rather than beside the module because the App reaches the
 //! real config and data homes as it starts, which means `XDG_DATA_HOME` and
@@ -80,14 +81,7 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 
-    for model in [
-        "gpt-6-astra",
-        "gpt-5.5",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "gpt-5.3-codex-spark",
-    ] {
+    for model in ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
         assert!(offered.contains(model), "the seat is offered `{model}`:\n{offered}");
     }
     assert!(

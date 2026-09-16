@@ -376,6 +376,23 @@ pub enum PartBody {
         tool: String,
         /// Where the call currently stands.
         state: ToolState,
+        /// **Advertisement provenance**: how the Responses wire advertised the
+        /// tool this call came back under, read only by that wire (**D563**).
+        ///
+        /// `true` when the call arrived as a `custom_tool_call` — a tool this
+        /// build advertised as a free-text custom entry beside its ordinary
+        /// function twin — which is the one fact a later request cannot
+        /// re-derive: the options that advertised it may have changed, or the
+        /// session may have been resumed on another provider entirely. So the
+        /// replay reads the call's own record rather than the current
+        /// configuration, and a session resumed on any other wire replays it
+        /// as the ordinary function call every other wire understands.
+        ///
+        /// `false` for every call any other wire makes and for every call this
+        /// one made as a function, and skipped when false, so a transcript
+        /// written before this existed is byte-identical to one written now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        custom: bool,
     },
     /// A file the user attached to their message with an `@` mention.
     ///
@@ -766,6 +783,7 @@ impl Part {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 state: ToolState::Pending { input: None },
+                custom: false,
             },
         }
     }
@@ -1395,6 +1413,24 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
+    /// Asks the rest of the session's requests at the vendor's fast service
+    /// tier, or explicitly at its ordinary one, or back under whatever the
+    /// configuration says (**D563**). Takes effect at the next turn, and is
+    /// refused while one is streaming, exactly as [`Command::SwitchEffort`].
+    ///
+    /// What is stored is the **intent**, never a tier literal: the tier a
+    /// vendor spells its fast lane with differs per model, so the literal is
+    /// resolved per turn from the model then active, and a [`Command::SwitchModel`]
+    /// re-resolves it without the choice being touched. Refused on any
+    /// provider that does not speak the Responses API, where the tier has no
+    /// meaning at all.
+    SetFast {
+        /// The choice, or [`None`] to clear it and fall back to whatever the
+        /// configuration resolves. Absent from the wire when [`None`], so the
+        /// clearing command's bytes carry nothing but its type.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fast: Option<FastChoice>,
+    },
     /// Runs the rest of the session under a different permission posture
     /// (**D-15**, **D496**).
     ///
@@ -1550,6 +1586,34 @@ pub enum PermissionReply {
     Always,
     /// Refuse the call. The model is told, and decides what to do next.
     Reject,
+}
+
+/// Which service tier a session asks its vendor for (**D563**).
+///
+/// **An intent, not a tier literal.** The word a vendor spells its fast lane
+/// with is per model — one model's is `ultrafast` where every other's is
+/// `priority` — so what a person chooses is "fast" or "not fast", and the
+/// literal is resolved per turn from the model then active. That is what lets
+/// a [`Command::SwitchModel`] move the tier without the choice being touched,
+/// and what lets a per-model configuration entry decide the word while the
+/// choice stays above it.
+///
+/// [`FastChoice::Off`] is not the absence of a choice: it asks for the
+/// vendor's ordinary tier **explicitly**, outranking a configuration that
+/// asks for a fast one. Clearing the choice is [`None`] in the command that
+/// carries it.
+///
+/// The rename attribute is this crate's `snake_case` rule, not a choice
+/// between spellings: two one-word variants are written identically by
+/// `snake_case` and `kebab-case`, so the rule that governs every other enum
+/// here governs this one too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FastChoice {
+    /// Ask for the fast tier of whichever model is active.
+    On,
+    /// Ask for the vendor's ordinary tier, whatever the configuration says.
+    Off,
 }
 
 /// How much a session asks before it acts (**D496**).
@@ -2075,6 +2139,24 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
     },
+    /// The engine took a service-tier choice — or cleared one (**D563**).
+    ///
+    /// Announced from every path that moves the choice, for
+    /// [`Event::EffortChanged`]'s reason: a frontend's indicator should not
+    /// depend on having issued [`Command::SetFast`] itself.
+    ///
+    /// It carries the choice rather than the tier the next request will
+    /// actually ask for, because the tier is per model and a frontend drawing
+    /// one asks the engine for it — what moved here is what the person chose.
+    FastChanged {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// The choice now active, or [`None`] for whatever the configuration
+        /// resolves. Absent from the wire when [`None`], matching the command
+        /// that asks for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fast: Option<FastChoice>,
+    },
     /// The engine took a [`Command::SetPermissionMode`] (**D-15**, **D496**).
     ///
     /// **Fired at acceptance, which is not when it bites.** The posture
@@ -2237,6 +2319,7 @@ impl Event {
             | Event::RevertChanged { session_id, .. }
             | Event::AgentChanged { session_id, .. }
             | Event::EffortChanged { session_id, .. }
+            | Event::FastChanged { session_id, .. }
             | Event::PermissionModeChanged { session_id, .. }
             | Event::PeerHeld { session_id, .. }
             | Event::PeerHoldSettled { session_id, .. }

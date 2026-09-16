@@ -34,10 +34,11 @@ fn spelling(model: &str) -> Config {
     config.provider.insert(
         COMPAT_ID.to_owned(),
         ProviderConfig {
-            dialect: Dialect::OpenaiChatCompletions,
-            base_url: "http://127.0.0.1:11434/v1".to_owned(),
+            dialect: Some(Dialect::OpenaiChatCompletions),
+            base_url: Some("http://127.0.0.1:11434/v1".to_owned()),
             key_env: Some(COMPAT_KEY_VAR.to_owned()),
             headers: BTreeMap::new(),
+            options: None,
         },
     );
 

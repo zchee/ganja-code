@@ -14,8 +14,8 @@ use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
 use ganja_core::permission::{Decision, Permissions};
 use ganja_core::protocol::{
-    Command, Event, FinishReason, PartBody, PermissionId, PermissionMode, PermissionReply, Role,
-    ToolState, Usage,
+    Command, Event, FastChoice, FinishReason, PartBody, PermissionId, PermissionMode,
+    PermissionReply, Role, ToolState, Usage,
 };
 use ganja_core::provider::{COMPOSING, ChatRequest, Provider, ProviderError, ProviderEvent};
 use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
@@ -150,6 +150,14 @@ fn shape(event: &Event) -> String {
         Event::EffortChanged { effort, .. } => {
             format!("effort_changed:{}", effort.as_deref().unwrap_or("default"))
         }
+        Event::FastChanged { fast, .. } => format!(
+            "fast_changed:{}",
+            match fast {
+                Some(FastChoice::On) => "on",
+                Some(FastChoice::Off) => "off",
+                None => "default",
+            }
+        ),
         Event::PermissionModeChanged { mode, .. } => format!(
             "permission_mode_changed:{}",
             match mode {
@@ -1213,7 +1221,7 @@ fn stored_call(storage: &Storage, engine: &Engine, call_id: &str) -> Option<(Str
     let session = engine.current_session()?.id;
     storage.load_transcript(&session).ok()?.iter().flat_map(|message| &message.parts).find_map(
         |part| match &part.body {
-            PartBody::Tool { call_id: id, tool, state } if id == call_id => {
+            PartBody::Tool { call_id: id, tool, state, .. } if id == call_id => {
                 Some((tool.clone(), state.clone()))
             }
             _ => None,

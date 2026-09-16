@@ -154,6 +154,7 @@ async fn the_watcher_logs_the_childs_calls_in_order_and_keeps_the_newest() {
             call_id: format!("call_{index}"),
             tool: format!("tool-{index}"),
             state,
+            custom: false,
         },
     };
     for index in 0..105 {
@@ -651,6 +652,8 @@ fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammat
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
         teammates: Some(teammates),
         identity: Arc::new(identity::Identity::new(std::env::temp_dir())),
+        responses: crate::responses_ladder::Seed::default(),
+        served: Some(Arc::default()),
     })
 }
 

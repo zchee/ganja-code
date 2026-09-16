@@ -174,7 +174,7 @@ async fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     let seat =
         provider::select(&Config::default()).await.expect("the seat is built from its id alone");
     assert_eq!(seat.provider.id(), "chatgpt");
-    assert_eq!(seat.model, "gpt-5.4", "the seat's default is its wire's, never the catalog's");
+    assert_eq!(seat.model, "gpt-5.5", "the seat's default is its wire's, never the catalog's");
     // SAFETY: as above.
     unsafe {
         env::remove_var("GANJA_PROVIDER");

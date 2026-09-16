@@ -50,7 +50,11 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// The model the drill runs as: one the seat serves, and one that reasons.
-const MODEL: &str = "gpt-5.4";
+///
+/// It said `gpt-5.4` until 2026-09-16, when the seat stopped serving that id
+/// and the wire started refusing the request before the drill could observe
+/// anything about a stored part.
+const MODEL: &str = "gpt-5.5";
 
 /// The state the record held before a future build rewrote it. Nothing may put
 /// this on the wire — if it appears in a request, something salvaged a field
@@ -159,6 +163,7 @@ fn stored_step() -> Message {
                         started: 1,
                         completed: 2,
                     },
+                    custom: false,
                 },
             },
             Part {
@@ -284,6 +289,7 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
         .stream(
             ChatRequest {
                 turn_start: 0,
+                responses: Default::default(),
                 effort_options: Default::default(),
                 model: MODEL.to_owned(),
                 system: None,

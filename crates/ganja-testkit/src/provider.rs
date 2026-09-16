@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
-use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent, ServedOptions};
 use ganja_protocol::{FinishReason, PartBody, ToolState};
 use tokio_util::sync::CancellationToken;
 
@@ -163,6 +163,28 @@ impl Provider for ScriptedProvider {
 /// ```
 pub fn says(text: &str) -> Vec<ProviderEvent> {
     vec![ProviderEvent::TextDelta(text.to_owned()), ProviderEvent::Finish(FinishReason::Completed)]
+}
+
+/// What a Responses backend echoes when it served a request at `tier`, and
+/// nothing else (**D563**) — the one field `/usage` and the status bar report.
+///
+/// An event rather than a step: a script places it where the wire would,
+/// ahead of the turn's finish.
+///
+/// ```
+/// use ganja_core::provider::ProviderEvent;
+///
+/// let event = ganja_testkit::served("default");
+/// assert!(matches!(
+///     event,
+///     ProviderEvent::Served(ref served) if served.service_tier.as_deref() == Some("default")
+/// ));
+/// ```
+pub fn served(tier: &str) -> ProviderEvent {
+    ProviderEvent::Served(ServedOptions {
+        service_tier: Some(tier.to_owned()),
+        ..ServedOptions::default()
+    })
 }
 
 /// A step that calls `tool` with `args`, under the fixed id `"call"`, and

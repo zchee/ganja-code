@@ -495,6 +495,7 @@ fn info(name: Option<&str>) -> SessionInfo {
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     }
 }
 

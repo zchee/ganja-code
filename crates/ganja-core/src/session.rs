@@ -882,6 +882,27 @@ pub(crate) struct Turn {
     /// cell, carried the way [`Turn::receipts`] is and read at every step —
     /// see the doc on `Engine`'s `deadline` field for why it is shared rather than copied.
     pub(crate) deadline: Arc<std::sync::Mutex<Option<SystemTime>>>,
+    /// The Responses options this turn's step requests carry (**D563**),
+    /// resolved by the engine against [`Turn::model`] before the turn started —
+    /// or, on a subagent's turn, resolved for the child's own model and cut to
+    /// what a child carries. The default value on every provider but the two
+    /// Responses ids, which every wire but that one ignores.
+    ///
+    /// Scoped per request site, each of which names its scope: a step carries
+    /// all of it, the compaction request its
+    /// [`summary_view`](crate::provider::responses::options::RequestOptions::summary_view),
+    /// and the title request none.
+    pub(crate) responses: crate::provider::responses::options::RequestOptions,
+    /// Which rung of the ladder decided [`Turn::responses`]' tier, for the one
+    /// debug line each request logs about it. [`None`] where no tier was
+    /// resolved.
+    pub(crate) tier_source: Option<crate::responses_ladder::Source>,
+    /// Where what the backend said it served is written (**D563**): the
+    /// engine's per-session slot on a root turn, and on a child turn the same
+    /// slot only when the child asked the parent's model — an echo about
+    /// another model's request would put a tier in `/usage` the session never
+    /// asked for. [`None`] where nothing should be written.
+    pub(crate) served: Option<Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>>,
     /// Whether this turn's session leads a team that holds **nobody**
     /// (**D530**, **D543**), read once at the turn's start beside
     /// [`Turn::teamless_send`] for the call-time posture computation
@@ -1084,6 +1105,15 @@ impl Turn {
     /// [`Host::lsp`]: crate::subagent::Host::lsp
     pub(crate) fn child(spawn: &crate::subagent::Spawn, parts: ChildParts) -> Self {
         let host = &spawn.host;
+        // Resolved for the child's own model (**D563**), from the inputs the
+        // parent snapshotted at its turn's start: the session's `/fast` choice
+        // and table, the child model's per-model entry and fast tier. Cut to
+        // the tier and the body — see `child_view` for what a child does not
+        // carry, and the effort comment below for why a value validated
+        // against one model is not handed to another.
+        let (responses, tier_source) =
+            crate::responses_ladder::resolve(&host.responses, &parts.model);
+        let served = host.served.as_ref().filter(|_| parts.model == host.model).map(Arc::clone);
 
         Self {
             provider: Arc::clone(&host.provider),
@@ -1123,6 +1153,9 @@ impl Turn {
             // to give, and which the parent would then have to take apart
             // again. The hurrying happens where the plan is.
             deadline: Arc::default(),
+            responses: responses.child_view(),
+            tier_source,
+            served,
             // The parent's own resolver — a child's prompt carries no
             // `@`-mentions of its own (`kind` above is always seeded with an
             // empty `session_mentions`), so this is never consulted, but
@@ -2278,6 +2311,10 @@ async fn request_title(
             // A title request offers no tools of its own and asks for no
             // gateway ones, so a row here would belong to no transcript.
             | ProviderEvent::ServerTool { .. }
+            // A toolless request makes no custom call, and what the backend
+            // served a title is not the session's to report (**D563**).
+            | ProviderEvent::ToolCallCustom { .. }
+            | ProviderEvent::Served(_)
             | ProviderEvent::Usage(_) => {}
         }
     }
@@ -2306,6 +2343,10 @@ async fn title_stream(
         // No effort: this request may ask a cheaper stablemate the selected
         // name was never validated against.
         effort_options: serde_json::Map::new(),
+        // None of the session's Responses options either (**D563**): a title
+        // is not the conversation, so its tier, format and tools are not this
+        // request's.
+        responses: Default::default(),
     };
 
     provider.stream(request, CancellationToken::new()).await
@@ -2804,6 +2845,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
                 metadata: serde_json::Value::Null,
                 started,
             },
+            custom: false,
         },
     };
     let part_id = part.id.clone();
@@ -3179,7 +3221,13 @@ async fn compact_if_needed(
         // The same model as the steps, so the same effort: a session that
         // thinks harder should not summarize with a different mind.
         effort_options: turn.effort_options.clone(),
+        // The same tier and body the steps carry, and none of the directives
+        // (**D563**): a summary offers no tools and is not the answer a
+        // `--json-schema` document describes. The roster keys left in the body
+        // are the wire's to drop, since it sees this request offers nothing.
+        responses: turn.responses.summary_view(),
     };
+    log_tier(turn, &request.responses);
 
     let (text, usage) = summarize(turn, request).await?;
     if text.trim().is_empty() {
@@ -3311,8 +3359,12 @@ async fn summarize(
             ProviderEvent::ReasoningDelta(_)
             | ProviderEvent::ReasoningBreak
             | ProviderEvent::ReasoningState { .. } => {}
+            // What the backend served a summary is not what it serves the
+            // session's steps, so it is not the session's to report (**D563**).
+            ProviderEvent::Served(_) => {}
             ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
+            | ProviderEvent::ToolCallCustom { .. }
             | ProviderEvent::ToolCallEnd { .. }
             | ProviderEvent::ServerTool { .. } => {
                 tracing::debug!("the summarize request offered no tools; dropping a call");
@@ -3743,8 +3795,13 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             turn_start,
             tools,
             effort_options: turn.effort_options.clone(),
+            // Everything the turn resolved (**D563**): the tier, the body, the
+            // custom and hosted advertisements, `include`, and on a headless
+            // `--json-schema` run the format the answer is held to.
+            responses: turn.responses.clone(),
         }
     };
+    log_tier(turn, &request.responses);
 
     let mut events = match turn.provider.stream(request, turn.cancel.clone()).await {
         Ok(events) => events,
@@ -4007,8 +4064,21 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             // `calls`: there is nothing to execute, nothing to ask permission
             // for, and nothing for the next request to carry. What it changes
             // is what a person sees.
-            ProviderEvent::ServerTool { tool, input, output } => {
-                let part = Part::server_tool(tool, input, output);
+            //
+            // A binary answer never reaches the row (**D563**): the bytes go
+            // to a file under the data home named for this part, and the row
+            // records the path. Whatever text is left is clamped the way every
+            // tool result is, so the worst a vendor can put in `output` is a
+            // spill path rather than megabytes in the transcript.
+            ProviderEvent::ServerTool { tool, input, output, blob } => {
+                let mut part = Part::server_tool(tool, input, String::new());
+                let output = match blob {
+                    Some(blob) => server_tool_blob(&part.id, blob).await,
+                    None => output,
+                };
+                if let PartBody::ServerTool { output: recorded, .. } = &mut part.body {
+                    *recorded = crate::tool::truncate::clamp(&output).text;
+                }
                 assistant.parts.push(part.clone());
                 turn.persist_part(assistant, &part);
 
@@ -4032,6 +4102,49 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             // nothing.
             ProviderEvent::ReasoningBreak => {
                 open_reasoning = None;
+            }
+            // How the call was advertised (**D563**). Nothing about what runs
+            // changes — the deltas that follow are an ordinary argument object
+            // — but the next request replays a custom call as a custom item,
+            // and a stream cut before the call closes must still leave a row
+            // that says so. The part was first written at the start above, so
+            // this arm writes it again itself rather than waiting for the end.
+            ProviderEvent::ToolCallCustom { id } => {
+                let Some(call) = calls.iter().find(|call| call.id == id) else {
+                    tracing::debug!(id, "custom marker for an unknown call");
+                    continue;
+                };
+                let updated = match assistant.parts.iter_mut().find(|part| part.id == call.part_id)
+                {
+                    Some(part) => {
+                        if let PartBody::Tool { custom, .. } = &mut part.body {
+                            *custom = true;
+                        }
+                        part.clone()
+                    }
+                    None => continue,
+                };
+                turn.persist_part(assistant, &updated);
+
+                if let ControlFlow::Break(stop) = deliver(
+                    turn,
+                    Event::PartUpdated {
+                        session_id: turn.session_id.clone(),
+                        message_id: assistant.id.clone(),
+                        part: updated,
+                    },
+                )
+                .await
+                {
+                    interrupt!(stop, &ToolError::Cancelled.to_string());
+                }
+            }
+            // What the backend said it served (**D563**), into the session's
+            // slot when this turn writes one; the last frame wins.
+            ProviderEvent::Served(served) => {
+                if let Some(slot) = &turn.served {
+                    *slot.lock().expect("the served slot is never poisoned") = Some(served);
+                }
             }
             // Reasoning a person could read, which is a part of its own — not
             // pasted into the reply, and not sent anywhere. It is written
@@ -5489,7 +5602,7 @@ fn composing(assistant: &Message) -> Vec<BufferedCall> {
         .parts
         .iter()
         .filter_map(|part| match &part.body {
-            PartBody::Tool { call_id, tool, state: ToolState::Pending { input: None } }
+            PartBody::Tool { call_id, tool, state: ToolState::Pending { input: None }, .. }
                 if tool == COMPOSING =>
             {
                 Some(BufferedCall {
@@ -5670,6 +5783,67 @@ async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
             Ok(()) => ControlFlow::Continue(()),
             Err(_) => ControlFlow::Break(None),
         },
+    }
+}
+
+/// Says, at debug, which `service_tier` a Responses request carries and which
+/// rung of the ladder decided it (**D563**) — the requested half of what
+/// `/usage` shows, beside the wire's own line about what was served.
+fn log_tier(turn: &Turn, responses: &crate::provider::responses::options::RequestOptions) {
+    if let (Some(tier), Some(source)) = (responses.service_tier.as_deref(), turn.tier_source) {
+        tracing::debug!(
+            model = turn.model.as_str(),
+            requested = tier,
+            source = source.label(),
+            "service_tier on the request"
+        );
+    }
+}
+
+/// Writes a provider-run tool's binary answer to a file named for `part` and
+/// answers with what the row records in its place: the path, or why there is
+/// no file (**D563**).
+///
+/// A failure is recorded rather than raised: the tool already ran on the
+/// vendor's side, and a row that says the image could not be kept is honest
+/// about that, where a failed turn would throw away the reply that followed.
+/// The bytes go either way — they never reach the transcript.
+///
+/// The decode and the write run on the blocking pool: an image is megabytes
+/// of base64 and a synchronous file write, and doing either on the task that
+/// drains the provider's stream would stall that stream — and every other task
+/// sharing its worker thread — for as long as they take.
+async fn server_tool_blob(part: &crate::protocol::PartId, blob: crate::provider::Blob) -> String {
+    let name = part.as_str().to_owned();
+    tokio::task::spawn_blocking(move || write_server_tool_blob(&name, &blob))
+        .await
+        .unwrap_or_else(|error| format!("server-tool-output: {error}"))
+}
+
+/// [`server_tool_blob`]'s blocking half.
+fn write_server_tool_blob(part: &str, blob: &crate::provider::Blob) -> String {
+    use base64::Engine as _;
+
+    // The extension is the media type's subtype when it is a plain word, which
+    // every image type the vendor names is; anything else is kept as bytes
+    // under a name that promises nothing about them.
+    let extension = blob
+        .mime
+        .split_once('/')
+        .map(|(_, subtype)| subtype)
+        .filter(|subtype| !subtype.is_empty() && subtype.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .unwrap_or("bin");
+
+    let written = base64::engine::general_purpose::STANDARD
+        .decode(&blob.base64)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        .and_then(|bytes| {
+            crate::tool::truncate::write_server_tool_output(&format!("{part}.{extension}"), &bytes)
+        });
+
+    match written {
+        Ok(path) => path.display().to_string(),
+        Err(error) => format!("server-tool-output: {error}"),
     }
 }
 

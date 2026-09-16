@@ -22,7 +22,12 @@ fn finished(call_id: &str, state: ToolState) -> Message {
     let mut message = Message::assistant("claude-opus-5");
     message.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: "read".to_owned(),
+            state,
+            custom: false,
+        },
     });
 
     message

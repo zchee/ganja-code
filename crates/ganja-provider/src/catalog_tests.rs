@@ -907,6 +907,48 @@ fn the_snapshot_stands_alone() {
     );
 }
 
+/// A seat started offline is offered a roster it can take a turn on.
+///
+/// The roster and this table drifted apart once already: four of the five ids
+/// `responses::SEAT_ROSTER` offers had no row here, so a first run with no cache
+/// had no window for the model it was about to ask. Asserted against the
+/// compiled-in tier alone — no environment, no cache, nothing fetched — because
+/// that is the tier the failure happened on.
+#[test]
+fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
+    let snapshot = snapshot();
+
+    for id in crate::provider::responses::SEAT_ROSTER {
+        let row = snapshot
+            .models
+            .iter()
+            .find(|model| model.id == id && model.provider_id == "openai")
+            .unwrap_or_else(|| panic!("the seat offers {id} and nothing offline can size it"));
+
+        assert_eq!(row.context_window, 1_050_000, "{id} is one of the seat's million-token models");
+    }
+}
+
+/// The offline title model is decided by this table's order, not only by its
+/// prices.
+///
+/// `title_model` takes the *first* minimum of `min_by(pricing.input)`, and
+/// `gpt-5.6-luna` charges the 0.2 `gpt-5.4-nano` already charged, so a row
+/// inserted above nano would move what an offline session titles with and say
+/// nothing. The four 2026-09-16 rows sit after `gpt-5.3-codex` for this reason.
+#[test]
+fn the_cheapest_openai_snapshot_row_is_still_nano() {
+    let snapshot = snapshot();
+    let cheapest = snapshot
+        .models
+        .iter()
+        .filter(|model| model.provider_id == "openai")
+        .min_by(|left, right| left.pricing.input.total_cmp(&right.pricing.input))
+        .expect("the snapshot carries openai rows");
+
+    assert_eq!(cheapest.id, "gpt-5.4-nano");
+}
+
 /// The recording's two served spellings, a row published below a million
 /// and a spelling nobody lends for, against one fixture table.
 ///

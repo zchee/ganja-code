@@ -32,6 +32,7 @@ fn called(id: &str, call_id: &str, tool: &str, input: serde_json::Value, output:
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
 
@@ -97,6 +98,7 @@ fn a_failed_call_renders_its_own_marker_and_its_error() {
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
 
@@ -117,6 +119,7 @@ fn a_call_that_has_not_finished_renders_no_line_at_all() {
             call_id: "toolu_1".to_owned(),
             tool: "read".to_owned(),
             state: ToolState::Running { input: json!({}), metadata: json!({}), started: 0 },
+            custom: false,
         },
     });
 
@@ -312,6 +315,7 @@ fn no_marker_can_be_spelled_by_a_tool_result_or_by_a_failed_calls_error() {
                     started: 0,
                     completed: 0,
                 },
+                custom: false,
             },
         });
 

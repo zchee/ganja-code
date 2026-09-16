@@ -235,6 +235,22 @@ pub(crate) struct Host {
     /// default socket directory — keeps a test's `--socket-dir` override
     /// reaching a child the same way it reaches the parent.
     pub(crate) identity: Arc<identity::Identity>,
+    /// What the parent turn resolves its Responses options from (**D563**):
+    /// the provider's configured table and the session's `/fast` choice,
+    /// snapshotted when the turn started.
+    ///
+    /// Carried as inputs rather than as a resolved value because a child may
+    /// run a model of its own agent's choosing, and both the per-model entry
+    /// and the fast tier are keyed on the model — so `Turn::child` resolves
+    /// for the child's model from this. Snapshotted per turn, so a table
+    /// replaced mid-turn reaches the next turn's children and never this one's.
+    pub(crate) responses: crate::responses_ladder::Seed,
+    /// The session's served-options slot, which a child writes only when it
+    /// ran the parent's own model: an echo about another model's request is
+    /// not a statement about what the session is being served. [`None`] when
+    /// the parent turn itself asked another model than the session's (a
+    /// `/command`'s one-turn model), so no child of that turn writes it either.
+    pub(crate) served: Option<Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -2452,7 +2468,8 @@ fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, 
         agent: Some(agent.name.clone()),
         model: Some(model.to_owned()),
         // A child runs no effort — see `Turn::child` — so its record claims
-        // none either.
+        // none either, and the same holds for the service-tier choice below:
+        // a child is never handed a door that moves one.
         effort: None,
         // A child's activations live in the shared in-memory set and reach
         // the *root* row at the parent's fan-in flush; its own row never
@@ -2460,6 +2477,7 @@ fn create(state: &SessionState, session: &SessionId, agent: &Agent, what: &str, 
         activated_tools: std::collections::BTreeSet::new(),
         parent,
         revert: None,
+        fast: None,
     };
 
     if let Err(error) = state.storage.save_info(&info) {
@@ -2671,10 +2689,11 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // reverts; the arm exists because the parent's watcher reads the
             // whole event stream and must not be surprised by one of them.
             // The same holds for an agent change — a child is never handed the
-            // approval cell — and for an effort change and a permission-mode
-            // change, which only the engine's command paths announce. A steer
-            // cannot reach a child either: no handle of a child's ever enters
-            // the engine's slot, so its mailbox has no route in.
+            // approval cell — and for an effort change, a service-tier change
+            // and a permission-mode change, which only the engine's command
+            // paths announce. A steer cannot reach a child either: no handle
+            // of a child's ever enters the engine's slot, so its mailbox has
+            // no route in.
             // And a child never compacts: the fill-level guard reads the
             // parent's live record and walks away when the ids differ, so a
             // progress gauge is the root turn's alone.
@@ -2683,7 +2702,8 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             | Event::SteerConsumed { .. }
             | Event::PermissionModeChanged { .. }
             | Event::CompactionProgress { .. }
-            | Event::EffortChanged { .. } => {}
+            | Event::EffortChanged { .. }
+            | Event::FastChanged { .. } => {}
             // A hold, its settlement and a sender's own settlement receipt
             // are a lead's or a sender's surfaces (**D524**, **D534**), and
             // no child session leads a team, binds a socket a peer could
@@ -2744,6 +2764,7 @@ async fn report(watched: &Watched, current: Option<&str>, outcome: &Outcome) {
                         metadata,
                         started: 0,
                     },
+                    custom: false,
                 },
             },
         })

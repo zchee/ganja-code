@@ -351,6 +351,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
                 metadata: serde_json::Value::Null,
                 started: 5,
             },
+            custom: false,
         },
     });
     aborted.parts.push(Part {
@@ -359,6 +360,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
             call_id: "call_10".to_owned(),
             tool: "glob".to_owned(),
             state: ToolState::Pending { input: None },
+            custom: false,
         },
     });
     assert!(aborted.time.completed.is_none(), "the crash marker is the seed");

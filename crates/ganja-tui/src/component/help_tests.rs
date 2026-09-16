@@ -17,8 +17,8 @@ const AREA: Rect = Rect {
     y: 0,
     width: 76,
     // One row per help item, so this grows by one with every command the
-    // roster gains.
-    height: 38,
+    // roster gains — `/fast` most recently (**D563**).
+    height: 39,
 };
 
 /// What an 80×24 terminal actually hands this dialog: the app draws it

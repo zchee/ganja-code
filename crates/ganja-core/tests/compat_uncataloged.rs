@@ -107,10 +107,11 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
     config.provider.insert(
         PROVIDER_ID.to_owned(),
         ProviderConfig {
-            dialect: Dialect::OpenaiChatCompletions,
-            base_url,
+            dialect: Some(Dialect::OpenaiChatCompletions),
+            base_url: Some(base_url),
             key_env: Some(KEY_VAR.to_owned()),
             headers: std::collections::BTreeMap::new(),
+            options: None,
         },
     );
     config.model = Some(format!("{PROVIDER_ID}/{MODEL}"));

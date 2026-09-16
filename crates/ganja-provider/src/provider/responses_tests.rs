@@ -8,8 +8,8 @@ use super::{
     ACCOUNT_HEADER, ALLOWED_MODELS, Aliases, BETA, BETA_HEADER, Backend, Body,
     CHAT_COMPLETIONS_ONLY, CHATGPT_ID, CODEX_USER_AGENT, DEFAULT_BASE_URL, Frame, ID, Mapper as _,
     Mapping, NO_PLATFORM_KEY, OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
-    SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves,
-    summarized,
+    SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, composed, defaulted, generation, reauth,
+    seals_reasoning, serves,
 };
 use crate::auth::{AuthError, OauthCredential, RefreshOauth};
 use crate::catalog;
@@ -29,8 +29,8 @@ const ACCOUNT: &str = "acct_2f7QpL9";
 /// An API key no other value in this module could be mistaken for.
 const KEY: &str = "sk-responses-key-canary-3131";
 
-/// A model this backend serves (`codex.ts:15`).
-const SERVED: &str = "gpt-5.4";
+/// A model this backend serves, named outright by [`ALLOWED_MODELS`].
+const SERVED: &str = "gpt-5.5";
 
 /// One it does not, and the one the live pass actually named
 /// (`codex.ts:289`).
@@ -147,6 +147,7 @@ fn gateway_ask() -> ChatRequest {
 fn ask() -> ChatRequest {
     ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -433,10 +434,9 @@ fn a_config_named_request_carries_its_headers_and_asks_for_nothing_sealed() {
         body.get("include").is_none(),
         "nothing sealed is asked of an endpoint this build has never met: {body}"
     );
-    let untouched = serde_json::Map::new();
     assert_eq!(
-        summarized(&untouched, SERVED, Backend::Compat),
-        untouched,
+        serde_json::to_value(composed(&ask(), Backend::Compat, &[])).expect("the body serializes"),
+        body,
         "and no default is written into somebody else's `reasoning` object"
     );
 }
@@ -549,7 +549,7 @@ fn the_backend_that_replays_sealed_state_is_the_one_that_records_it() {
 /// reference does document `reasoning` with effort levels.
 #[test]
 fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
-    let bare = summarized(&serde_json::Map::new(), "openai/gpt-5.4", Backend::OpenRouter);
+    let bare = defaulted(Backend::OpenRouter, 0, "openai/gpt-5.4");
     assert!(
         bare.is_empty(),
         "an id that merely *contains* this vendor's model family is not this \
@@ -559,10 +559,8 @@ fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
     let mut request = gateway_ask();
     request.effort_options =
         json!({"reasoning": {"effort": "high"}}).as_object().cloned().expect("object fixture");
-    let own = Body::new(&request, Backend::OpenRouter);
-    let options = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
-    let body =
-        serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+    let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
+        .expect("a spliced body serializes");
 
     assert_eq!(
         body["reasoning"],
@@ -615,10 +613,8 @@ fn every_effort_this_gateway_offers_travels_as_the_one_field_it_documents() {
         let mut request = gateway_ask();
         request.effort_options = options.clone();
 
-        let own = Body::new(&request, Backend::OpenRouter);
-        let spliced = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
-        let body =
-            serde_json::to_value(splice_effort(&spliced, &own)).expect("a spliced body serializes");
+        let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
+            .expect("a spliced body serializes");
 
         assert_eq!(
             body["reasoning"],
@@ -692,19 +688,15 @@ fn a_reasoning_model_is_asked_to_show_its_thinking() {
     for (name, options, expected) in cases {
         let mut request = ask();
         request.effort_options = options;
-        let own = Body::new(&request, Backend::Platform);
-        let options = summarized(&request.effort_options, &request.model, Backend::Platform);
-        let body =
-            serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+        let body = serde_json::to_value(composed(&request, Backend::Platform, &[]))
+            .expect("a spliced body serializes");
         assert_eq!(body["reasoning"], expected, "{name}");
     }
 
     let mut request = ask();
     request.model = "gpt-5-chat".to_owned();
-    let own = Body::new(&request, Backend::Platform);
-    let options = summarized(&request.effort_options, &request.model, Backend::Platform);
-    let body =
-        serde_json::to_value(splice_effort(&options, &own)).expect("a spliced body serializes");
+    let body = serde_json::to_value(composed(&request, Backend::Platform, &[]))
+        .expect("a spliced body serializes");
     assert!(
         body.get("reasoning").is_none(),
         "a model that does not reason is asked nothing about reasoning"
@@ -858,7 +850,7 @@ fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
 
 /// The obligation [`SEAT_ROSTER`] carries: an offer this backend would
 /// then refuse is a listing that lies, and the two halves of the roster
-/// reach [`serves`] by different routes — three are named by
+/// reach [`serves`] by different routes — two are named by
 /// [`ALLOWED_MODELS`], three are admitted by the generation rule — so the
 /// pin has to be asserted over the whole list rather than over either.
 #[test]
@@ -869,19 +861,26 @@ fn every_model_the_seat_offers_is_one_the_seat_serves() {
 }
 
 /// The other half of **D476**: the pin narrows what is *offered*, never
-/// what is *servable*. Somebody who types `--model openai/gpt-5.4` on a
-/// seat still takes their turn, although no listing volunteered it — which
-/// is why the roster is a separate constant rather than a shorter
-/// [`ALLOWED_MODELS`].
+/// what is *servable*, which is why the roster is a separate constant
+/// rather than a shorter [`ALLOWED_MODELS`].
+///
+/// It used to be said with `gpt-5.4` and `gpt-5.4-mini`, two models the seat
+/// served and no listing volunteered. The 2026-09-16 probe found the backend
+/// refusing both, so the served-and-unoffered set is empty today and the
+/// claim is asserted structurally instead: [`serves`] never reads
+/// [`SEAT_ROSTER`], so a model reaches a turn through the allow-list or the
+/// generation rule with no roster row anywhere in the argument.
 #[test]
-fn a_model_the_roster_leaves_out_is_still_one_an_explicit_request_may_name() {
-    for unoffered in ["gpt-5.4", "gpt-5.4-mini"] {
-        assert!(!SEAT_ROSTER.contains(&unoffered), "`{unoffered}` is deliberately unoffered");
-        assert!(
-            serves(unoffered),
-            "and deliberately still servable: the pin is an offer, not a gate"
-        );
-    }
+fn an_explicitly_named_served_model_needs_no_roster_row() {
+    assert!(
+        serves("gpt-6-astra") && ALLOWED_MODELS.contains(&"gpt-6-astra"),
+        "the allow-list is one route to a turn, and it is not the roster"
+    );
+    assert!(
+        serves("gpt-5.7") && !SEAT_ROSTER.contains(&"gpt-5.7"),
+        "the generation rule is the other, and a model it admits is servable \
+             although nothing offers it"
+    );
 }
 
 /// The split that makes "display-only" a fact about this build rather
@@ -991,6 +990,7 @@ fn a_sealed_thought_is_replayed_before_the_calls_it_produced() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1054,6 +1054,7 @@ fn an_attachment_becomes_the_input_item_its_mime_names() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1104,6 +1105,7 @@ fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1431,13 +1433,11 @@ fn the_backend_serves_a_pinned_list_and_the_order_of_the_rules_is_the_rule() {
     for served in ALLOWED_MODELS {
         assert!(serves(served), "codex.ts:15 names {served}");
     }
-    // Three of those five are older than the floor, so a check that read
-    // the generation rule first would refuse the models the list exists to
-    // allow — including the one this build now defaults to.
+    // The floor is what refuses the three ids the seat stopped serving on
+    // 2026-09-16, now that no allow-list entry admits them ahead of it.
     assert!(
-        serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
-        "gpt-5.4 is not newer than 5.4 and is served anyway, which is what \
-             makes the list order load-bearing"
+        !serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
+        "gpt-5.4 is not newer than 5.4, and nothing names it any more"
     );
     // And one of them the generation rule cannot read at all: no `N.M`
     // follows its `gpt-`, so the list is the only route it has.
@@ -1540,6 +1540,7 @@ fn the_system_prompt_travels_as_instructions_and_the_turn_as_items() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -1587,6 +1588,7 @@ fn conforms(name: &str) -> bool {
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1655,6 +1657,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1683,6 +1686,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1732,7 +1736,7 @@ fn a_request_advertises_the_tools_it_was_given() {
 #[test]
 fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
     let request = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
-    let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
+    let body = serde_json::to_value(composed(&request, Backend::OpenRouter, &[]))
         .expect("the body serializes");
 
     assert_eq!(
@@ -1762,23 +1766,20 @@ fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
 
     // A turn with nothing to offer sends neither key: `tool_choice` beside
     // an absent roster is a choice about nothing.
-    let bare = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
+    let bare = serde_json::to_value(composed(&gateway_ask(), Backend::OpenRouter, &[]))
         .expect("the body serializes");
     assert!(bare.get("tools").is_none() && bare.get("tool_choice").is_none(), "got {bare}");
 
-    // And the two OpenAI backends are untouched: their request is the Codex
-    // CLI's, which sends no `tool_choice` and has been served without one on
-    // every turn this build has taken.
+    // The two OpenAI backends send the same value since D563 (probe
+    // 2026-09-16, row 30); the whole-body pins beside `defaulted` own that.
     for backend in [Backend::Codex, Backend::Platform] {
-        let owned = serde_json::to_value(Body::new(
+        let owned = serde_json::to_value(composed(
             &ChatRequest { tools: vec![a_tool()], ..ask() },
             backend,
+            &[],
         ))
         .expect("the body serializes");
-        assert!(
-            owned.get("tool_choice").is_none(),
-            "{backend:?} gained a field its vendor never asked for: {owned}"
-        );
+        assert_eq!(owned["tool_choice"], json!("auto"), "{backend:?}: {owned}");
     }
 }
 
@@ -2012,6 +2013,7 @@ async fn a_gateway_run_tool_becomes_a_row_and_never_a_call_to_execute() {
             tool: "openrouter:web_search".to_owned(),
             input: json!({"query": "rust 2024 edition"}),
             output: "3 results".to_owned(),
+            blob: None,
         }),
         "the row has to carry the call and its answer: {seen:?}"
     );
@@ -2066,6 +2068,7 @@ async fn a_gateway_tools_own_fields_are_shown_rather_than_guessed_at() {
             input: json!({"action": {"commands": ["ls -la"]}}),
             output: r#"[{"outcome":{"exit_code":0,"type":"exit"},"stderr":"","stdout":"total 0"}]"#
                 .to_owned(),
+            blob: None,
         }),
         "got {seen:?}"
     );
@@ -2162,7 +2165,12 @@ fn a_tool() -> ToolDefinition {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     }
 }
 
@@ -2204,6 +2212,7 @@ fn a_finished_call_is_sent_back_as_a_call_item_and_an_output_item() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2282,6 +2291,7 @@ fn a_two_step_turn_is_sent_back_one_group_per_step() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2312,6 +2322,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
 
     let request = ChatRequest {
         turn_start: 0,
+        responses: Default::default(),
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2535,6 +2546,51 @@ async fn tool_calls_are_opened_filled_and_closed() {
     );
 }
 
+/// A hosted tool announces its own progress, several frames per call. They
+/// carry nothing the closed item does not carry whole, so they are named
+/// rather than left to the unmapped arm: a busy search turn wrote one debug
+/// line per stage for a row it was already going to draw once.
+#[tokio::test]
+async fn a_hosted_tools_progress_frames_are_named_rather_than_logged() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let seen = events(concat!(
+        r#"data: {"type":"response.web_search_call.in_progress","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.web_search_call.searching","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.web_search_call.completed","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.image_generation_call.generating","item_id":"ig_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.image_generation_call.partial_image","#,
+        r#""item_id":"ig_1","partial_image_b64":"aGFsZg=="}"#,
+        "\n\n",
+        r#"data: {"type":"response.file_search_call.searching","item_id":"fs_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.code_interpreter_call.interpreting","item_id":"ci_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.mcp_call.failed","item_id":"mc_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.completed","response":{"usage":{}}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    assert_eq!(
+        seen,
+        [ProviderEvent::Usage(Usage::default()), ProviderEvent::Finish(FinishReason::Completed)],
+        "a progress announcement became an event: {seen:?}"
+    );
+    let logged = log.logged();
+    assert!(
+        !logged
+            .lines()
+            .any(|line| line.contains("an unmapped responses event") && line.contains("_call.")),
+        "{logged}"
+    );
+    assert!(!logged.contains("aGFsZg=="), "a half-drawn image reached the log: {logged}");
+}
+
 /// The SSE decoder must tolerate anything: this stream carries a dozen
 /// event types this build has no use for, and several more the API has not
 /// invented yet.
@@ -2682,5 +2738,891 @@ async fn a_turn_that_stopped_early_still_reports_what_it_spent() {
             ProviderEvent::Finish(FinishReason::Completed),
         ],
         "got {seen:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D563: the configured Responses options, custom tools and server tools.
+// ---------------------------------------------------------------------------
+
+/// A `bash`-shaped tool: one required string, one optional number — the
+/// shape `options::CUSTOM_TOOLS` admits.
+fn a_shell_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "bash".to_owned(),
+        description: "Runs a shell command.".to_owned(),
+        schema: json!({
+            "type": "object",
+            "properties": {"command": {"type": "string"}, "timeout": {"type": "number"}},
+            "required": ["command"],
+        }),
+    }
+}
+
+/// An `edit`-shaped tool: three required strings, which no single free-text
+/// input can carry.
+fn an_edit_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "edit".to_owned(),
+        description: "Edits a file.".to_owned(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "oldString": {"type": "string"},
+                "newString": {"type": "string"},
+            },
+            "required": ["filePath", "oldString", "newString"],
+        }),
+    }
+}
+
+/// `object` as a map, for a fixture that spells a body layer as JSON.
+fn object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    value.as_object().cloned().expect("an object fixture")
+}
+
+/// What a request on `backend` sends, as the send site composes it.
+fn sent(request: &ChatRequest, backend: Backend) -> serde_json::Value {
+    serde_json::to_value(composed(request, backend, &[])).expect("the body serializes")
+}
+
+/// A model `seals_reasoning` answers no for, shaped like the vendor's own
+/// chat model.
+const NOT_REASONING: &str = "gpt-5-chat-latest";
+
+/// **AC-11.** The whole body per backend with nothing configured. This
+/// vendor's two gain exactly one key over what they sent before D563 — and
+/// no tier, because the engine resolves that one — and every other backend
+/// is sent what it was sent before, to the byte.
+#[test]
+fn every_codex_and_platform_request_carries_no_obfuscation_and_no_tier() {
+    let before = json!({
+        "model": SERVED,
+        "stream": true,
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "reasoning": {"summary": "auto"},
+    });
+    let mut after = before.clone();
+    after["stream_options"] = json!({"include_obfuscation": false});
+
+    for backend in [Backend::Codex, Backend::Platform] {
+        assert_eq!(sent(&ask(), backend), after, "{backend:?}");
+    }
+
+    assert_eq!(
+        sent(&gateway_ask(), Backend::OpenRouter),
+        json!({
+            "model": GATEWAY_MODEL,
+            "stream": true,
+            "store": false,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        }),
+        "the gateway is sent what it was sent before a layer existed"
+    );
+}
+
+/// **AC-11**, the byte half. A gateway row and a config-named endpoint get no
+/// default at all, so their request never takes the map round trip: the
+/// bytes are the typed body's own, field order included, with a roster and
+/// without one.
+#[test]
+fn the_opencode_and_compat_bodies_are_unchanged_with_and_without_a_roster() {
+    for backend in [Backend::Opencode(crate::provider::opencode::ZEN_ID), Backend::Compat] {
+        for request in [ask(), ChatRequest { tools: vec![a_tool()], ..ask() }] {
+            let composed_bytes = serde_json::to_string(&composed(&request, backend, &[]))
+                .expect("the body serializes");
+            let typed_bytes =
+                serde_json::to_string(&Body::new(&request, backend)).expect("the body serializes");
+            assert_eq!(composed_bytes, typed_bytes, "{backend:?}");
+            assert!(
+                !composed_bytes.contains("tool_choice")
+                    && !composed_bytes.contains("stream_options")
+                    && !composed_bytes.contains("reasoning"),
+                "{backend:?} was sent a default that is another vendor's: {composed_bytes}"
+            );
+        }
+    }
+}
+
+/// **AC-12.** `tool_choice: "auto"` beside a roster on this vendor's two and
+/// the gateway, never on a gateway row or a config-named endpoint; and a
+/// configured choice replaces the default whole.
+#[test]
+fn a_roster_is_offered_with_auto_unless_a_choice_was_configured() {
+    let with_tool = ChatRequest { tools: vec![a_tool()], ..ask() };
+    for backend in [Backend::Codex, Backend::Platform] {
+        assert_eq!(sent(&with_tool, backend)["tool_choice"], json!("auto"), "{backend:?}");
+    }
+    for backend in [Backend::Opencode(crate::provider::opencode::ZEN_ID), Backend::Compat] {
+        assert!(sent(&with_tool, backend).get("tool_choice").is_none(), "{backend:?}");
+    }
+    let gateway = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
+    assert_eq!(sent(&gateway, Backend::OpenRouter)["tool_choice"], json!("auto"));
+
+    let allowed = json!({
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": "noop"}],
+    });
+    let mut configured = with_tool.clone();
+    configured.responses.body = object(json!({"tool_choice": allowed}));
+    let body = sent(&configured, Backend::Codex);
+    // Equal to the configured object and nothing more: the default `"auto"`
+    // is a string under an object, so it was replaced rather than merged.
+    assert_eq!(body["tool_choice"], allowed, "sent verbatim: {body}");
+}
+
+/// **AC-12b.** The roster gate: a configured `tool_choice` and
+/// `parallel_tool_calls` go when the request offers no tool, each dropped
+/// with a line that says so, and stay when it offers one — a hosted tool
+/// alone counting as one.
+#[test]
+fn roster_keys_are_dropped_from_a_request_that_offers_no_tool() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let configured = object(json!({"tool_choice": "required", "parallel_tool_calls": false}));
+
+    let mut bare = ask();
+    bare.responses.body = configured.clone();
+    let bytes =
+        serde_json::to_string(&composed(&bare, Backend::Codex, &[])).expect("the body serializes");
+    assert!(
+        !bytes.contains(r#""tool_choice""#) && !bytes.contains(r#""parallel_tool_calls""#),
+        "a choice about no tools reached the wire: {bytes}"
+    );
+    let logged = log.logged();
+    let drops: Vec<&str> = logged
+        .lines()
+        .filter(|line| {
+            line.contains("a configured Responses key was dropped from this request")
+                && line.contains(r#"reason="no tools""#)
+        })
+        .collect();
+    assert_eq!(drops.len(), 2, "one line per dropped key: {logged}");
+
+    let mut offered = ChatRequest { tools: vec![a_tool()], ..ask() };
+    offered.responses.body = configured;
+    let body = sent(&offered, Backend::Codex);
+    assert_eq!(body["tool_choice"], json!("required"), "{body}");
+    assert_eq!(body["parallel_tool_calls"], json!(false), "{body}");
+
+    let mut hosted = ask();
+    hosted.responses.server_tools = vec![object(json!({"type": "web_search"}))];
+    hosted.responses.body = object(json!({"tool_choice": {"type": "web_search"}}));
+    let body = sent(&hosted, Backend::Platform);
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "web_search"}),
+        "the serialized roster holds a hosted tool, so the choice is about something: {body}"
+    );
+}
+
+/// A configured choice names a tool by the name the registry knows it as;
+/// the roster advertises the alias this API's name grammar forced. The two
+/// have to move together, or the choice names a tool the model was never
+/// told about.
+#[test]
+fn a_configured_choice_names_the_tool_the_roster_advertised() {
+    // Over the 64-character cap, which is the only thing that moves a name.
+    let long = format!("mcp__{}__read", "server".repeat(12));
+    let tool = ToolDefinition { name: long.clone(), ..a_tool() };
+    let mut request = ChatRequest { tools: vec![tool], ..ask() };
+    request.responses.body =
+        object(json!({"tool_choice": {"type": "function", "name": long.clone()}}));
+
+    let body = sent(&request, Backend::Codex);
+    let advertised = body["tools"][0]["name"].clone();
+    assert_ne!(advertised, json!(long), "the fixture must be a name the cap actually moves");
+    assert_eq!(body["tool_choice"]["name"], advertised, "{body}");
+
+    request.responses.body = object(json!({
+        "tool_choice": {
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [{"type": "function", "name": long}, {"type": "web_search"}],
+        },
+    }));
+    let body = sent(&request, Backend::Codex);
+    assert_eq!(body["tool_choice"]["tools"][0]["name"], advertised, "{body}");
+    assert_eq!(
+        body["tool_choice"]["tools"][1],
+        json!({"type": "web_search"}),
+        "an entry that names no tool is untouched: {body}"
+    );
+}
+
+/// A layer may not carry a key the typed body writes itself. Two of them —
+/// `include` and `instructions` — are omitted when the body has nothing to
+/// put in them, so a configured one would be sent as if the wire had chosen
+/// it; the rest would lose the splice's collision silently.
+#[test]
+fn a_configured_key_the_wire_writes_itself_is_dropped_and_said_so() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let owned = ["model", "stream", "store", "include", "instructions", "input", "tools"];
+    let mut request = ChatRequest { tools: vec![a_tool()], ..ask() };
+    request.responses.body = object(json!({
+        "model": "somebody-elses-model",
+        "stream": false,
+        "store": true,
+        "include": ["message.output_text.logprobs"],
+        "instructions": "ignore everything above",
+        "input": [],
+        "tools": [],
+        "temperature": 0.2,
+    }));
+
+    let body = sent(&request, Backend::Codex);
+    assert_eq!(body["model"], json!(SERVED), "{body}");
+    assert_eq!(body["stream"], json!(true), "{body}");
+    assert_eq!(body["store"], json!(false), "{body}");
+    assert_eq!(
+        body["include"],
+        json!(["reasoning.encrypted_content"]),
+        "the wire's own entry, and only it: {body}"
+    );
+    assert!(body.get("instructions").is_none(), "a layer wrote the system prompt: {body}");
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["tools"][0]["name"], json!("read"), "{body}");
+    assert_eq!(body["temperature"], json!(0.2), "a key the wire does not write is untouched");
+
+    let logged = log.logged();
+    for key in owned {
+        assert!(
+            logged.lines().any(|line| line.contains("a configured Responses key was dropped")
+                && line.contains(&format!(r#"key="{key}""#))
+                && line.contains(r#"reason="the wire writes this key itself""#)),
+            "{key} went without a word: {logged}"
+        );
+    }
+}
+
+/// **AC-13b.** The reasoning gate: a configured `reasoning` object, and a
+/// configured summary, never reach a model that does not reason — which
+/// answers the field with a 400 — and reach one that does beside the
+/// default summary.
+#[test]
+fn configured_reasoning_never_reaches_a_model_that_does_not_reason() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+
+    let mut plain = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    plain.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    let body = sent(&plain, Backend::Codex);
+    assert!(body.get("reasoning").is_none(), "{body}");
+    let logged = log.logged();
+    assert!(
+        logged.lines().any(|line| line.contains("a configured Responses key was dropped")
+            && line.contains(r#"key="reasoning.context""#)
+            && line.contains(r#"reason="model does not reason""#)),
+        "{logged}"
+    );
+
+    let mut summary = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    summary.responses.reasoning_summary = Some("concise".to_owned());
+    let body = sent(&summary, Backend::Platform);
+    assert!(body.get("reasoning").is_none(), "the summary recreated the object: {body}");
+
+    let mut reasoning = ask();
+    reasoning.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    assert_eq!(
+        sent(&reasoning, Backend::Codex)["reasoning"],
+        json!({"context": "all_turns", "summary": "auto"})
+    );
+}
+
+/// **AC-13.** A resolved tier is sent as given on every backend and absent
+/// when there is none.
+#[test]
+fn a_resolved_tier_is_sent_as_given_on_every_backend() {
+    let backends = [
+        Backend::Codex,
+        Backend::Platform,
+        Backend::OpenRouter,
+        Backend::Opencode(crate::provider::opencode::ZEN_ID),
+        Backend::Compat,
+    ];
+    for backend in backends {
+        for tier in ["default", "ultrafast"] {
+            let mut request = ask();
+            request.responses.service_tier = Some(tier.to_owned());
+            assert_eq!(sent(&request, backend)["service_tier"], json!(tier), "{backend:?}");
+        }
+        assert!(sent(&ask(), backend).get("service_tier").is_none(), "{backend:?}");
+    }
+}
+
+/// **AC-13.** An effort and a configured context share one `reasoning`
+/// object with the effort's summary kept, and a configured summary outranks
+/// the effort's on the platform alone.
+#[test]
+fn an_effort_and_a_configured_context_share_one_reasoning_object() {
+    let high = object(json!({
+        "reasoning": {"effort": "high", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }));
+    let mut request = ask();
+    request.effort_options = high.clone();
+    request.responses.body = object(json!({"reasoning": {"context": "all_turns"}}));
+    assert_eq!(
+        sent(&request, Backend::Codex)["reasoning"],
+        json!({"effort": "high", "summary": "auto", "context": "all_turns"})
+    );
+
+    let mut concise = ask();
+    concise.effort_options = high;
+    concise.responses.reasoning_summary = Some("concise".to_owned());
+    assert_eq!(sent(&concise, Backend::Platform)["reasoning"]["summary"], json!("concise"));
+    assert_eq!(
+        sent(&concise, Backend::Codex)["reasoning"]["summary"],
+        json!("auto"),
+        "the seat has only ever been measured with auto"
+    );
+}
+
+/// **AC-14.** A configured `include` joins the wire's own entry and the
+/// effort's rather than replacing either, once each.
+#[test]
+fn a_configured_include_joins_the_efforts_own_entry() {
+    let sources = "web_search_call.action.sources";
+    let mut request = ask();
+    request.effort_options = object(json!({
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }));
+    request.responses.include = vec![sources.to_owned()];
+    assert_eq!(
+        sent(&request, Backend::Codex)["include"],
+        json!(["reasoning.encrypted_content", sources])
+    );
+
+    let mut plain = ChatRequest { model: NOT_REASONING.to_owned(), ..ask() };
+    plain.responses.include = vec![sources.to_owned(), sources.to_owned()];
+    assert_eq!(
+        sent(&plain, Backend::Codex)["include"],
+        json!([sources]),
+        "listed twice, sent once"
+    );
+}
+
+/// **AC-15.** A hosted entry rides the `tools` array verbatim after the
+/// function tools, and no directive reaches the body as a key of its own.
+#[test]
+fn a_server_tool_entry_is_sent_verbatim_after_the_function_tools() {
+    let entry = json!({"type": "web_search", "search_context_size": "low"});
+    let mut request = ChatRequest { tools: vec![a_tool()], ..ask() };
+    request.responses.server_tools = vec![object(entry.clone())];
+    let body = sent(&request, Backend::Codex);
+
+    let tools = body["tools"].as_array().expect("a roster");
+    assert_eq!(tools.len(), 2, "{body}");
+    assert_eq!(tools[0]["type"], json!("function"));
+    assert_eq!(tools.last(), Some(&entry), "{body}");
+}
+
+#[test]
+fn no_directive_reaches_the_body_as_a_key() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses = crate::provider::responses::options::RequestOptions {
+        service_tier: Some("priority".to_owned()),
+        text_format: Some(json!({"type": "json_schema", "name": "ganja_run"})),
+        custom_tools: vec!["bash".to_owned()],
+        server_tools: vec![object(json!({"type": "web_search"}))],
+        include: vec!["web_search_call.action.sources".to_owned()],
+        reasoning_summary: Some("concise".to_owned()),
+        body: object(json!({"text": {"verbosity": "low"}})),
+    };
+
+    for backend in [Backend::Codex, Backend::Platform] {
+        let body = sent(&request, backend);
+        for key in ["custom_tools", "server_tools", "include_from_options", "reasoning_summary"] {
+            assert!(body.get(key).is_none(), "{backend:?} sent `{key}` as a key: {body}");
+        }
+        assert_eq!(body["model"], json!(SERVED), "the only `model` is the wire's own string");
+    }
+
+    let gateway = serde_json::to_value(composed(
+        &gateway_ask(),
+        Backend::OpenRouter,
+        &["web_search".to_owned()],
+    ))
+    .expect("the body serializes");
+    assert_eq!(gateway["tools"], json!([{"type": "openrouter:web_search"}]));
+}
+
+/// **AC-16.** A hosted web search's `action` is the row's input; an image
+/// generation's result rides the blob, with its format as the mime, and
+/// never the input.
+#[tokio::test]
+async fn an_image_generation_result_rides_the_blob_and_never_the_input() {
+    let seen = events(concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"web_search_call","id":"ws_1","status":"completed","#,
+        r#""action":{"type":"search","query":"q","sources":[{"url":"https://example.com"}]}}}"#,
+        "\n\n",
+        r#"data: {"type":"response.output_item.done","output_index":1,"item":{"#,
+        r#""type":"image_generation_call","id":"ig_1","status":"completed","#,
+        r#""result":"aW1hZ2UtYnl0ZXM=","output_format":"png"}}"#,
+        "\n\n",
+        r#"data: {"type":"response.completed","response":{}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let rows: Vec<&ProviderEvent> =
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ServerTool { .. })).collect();
+    assert_eq!(
+        rows,
+        [
+            &ProviderEvent::ServerTool {
+                tool: "web_search_call".to_owned(),
+                input: json!({
+                    "type": "search",
+                    "query": "q",
+                    "sources": [{"url": "https://example.com"}],
+                }),
+                output: String::new(),
+                blob: None,
+            },
+            &ProviderEvent::ServerTool {
+                tool: "image_generation_call".to_owned(),
+                input: serde_json::Value::Null,
+                output: String::new(),
+                blob: Some(crate::provider::Blob {
+                    mime: "image/png".to_owned(),
+                    base64: "aW1hZ2UtYnl0ZXM=".to_owned(),
+                }),
+            },
+        ],
+        "{seen:?}"
+    );
+    let ProviderEvent::ServerTool { input, .. } = rows[1] else { unreachable!() };
+    assert!(!input.to_string().contains("aW1hZ2UtYnl0ZXM="), "the image reached the input");
+}
+
+/// The image generator is the one hosted tool whose `result` is bytes. On
+/// every other, `result` is whatever that vendor's own tool calls its own
+/// field — unmeasured here — so it stays in the row it arrived on rather
+/// than being assumed to mean the same thing and dropped.
+#[tokio::test]
+async fn a_non_image_items_result_stays_in_the_row_it_arrived_on() {
+    let seen = events(concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"code_interpreter_call","id":"ci_1","status":"completed","#,
+        r#""result":"42","container_id":"c_1"}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    assert_eq!(
+        seen.first(),
+        Some(&ProviderEvent::ServerTool {
+            tool: "code_interpreter_call".to_owned(),
+            input: json!({"result": "42", "container_id": "c_1"}),
+            output: String::new(),
+            blob: None,
+        }),
+        "{seen:?}"
+    );
+}
+
+/// **AC-17.** A listed single-string tool is advertised twice — custom and
+/// function — and a listed name that is not on the roster, or not
+/// single-string, is advertised as a function alone and logged.
+#[test]
+fn a_custom_tool_is_advertised_beside_its_function_twin() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let tools = sent(&request, Backend::Codex)["tools"].clone();
+    assert_eq!(
+        tools,
+        json!([
+            {
+                "type": "function",
+                "name": "bash",
+                "description": "Runs a shell command.",
+                "parameters": a_shell_tool().schema,
+            },
+            {"type": "custom", "name": "bash", "description": "Runs a shell command."},
+        ])
+    );
+
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let mut absent = ChatRequest { tools: vec![a_tool()], ..ask() };
+    absent.responses.custom_tools = vec!["bash".to_owned()];
+    assert_eq!(
+        sent(&absent, Backend::Codex)["tools"],
+        sent(&ChatRequest { tools: vec![a_tool()], ..ask() }, Backend::Codex)["tools"],
+        "today's roster exactly"
+    );
+    let mut wide = ChatRequest { tools: vec![an_edit_tool()], ..ask() };
+    wide.responses.custom_tools = vec!["edit".to_owned()];
+    assert_eq!(sent(&wide, Backend::Codex)["tools"].as_array().map(Vec::len), Some(1));
+    let logged = log.logged();
+    for tool in ["bash", "edit"] {
+        assert!(
+            logged
+                .lines()
+                .any(|line| line.contains("a custom_tools name was advertised as a function")
+                    && line.contains(&format!(r#"tool="{tool}""#))),
+            "{tool}: {logged}"
+        );
+    }
+
+    let read = ToolDefinition {
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "offset": {"type": "number"},
+                "limit": {"type": "number"},
+            },
+            "required": ["filePath"],
+        }),
+        ..a_tool()
+    };
+    let mut optional = ChatRequest { tools: vec![read], ..ask() };
+    optional.responses.custom_tools = vec!["read".to_owned()];
+    assert_eq!(
+        sent(&optional, Backend::Codex)["tools"][1],
+        json!({"type": "custom", "name": "read", "description": "Reads a file from disk."}),
+        "optional arguments do not disqualify a tool; they are only unreachable"
+    );
+}
+
+/// **AC-18**, the inbound half. A custom call arrives as the four events an
+/// ordinary call does, with the marker between its start and its arguments,
+/// and its free-text input mapped onto the tool's one required argument.
+#[tokio::test]
+async fn a_custom_tool_call_becomes_an_ordinary_argument_object_and_says_so() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+
+    let transcript = concat!(
+        r#"data: {"type":"response.output_item.added","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":""}}"#,
+        "\n\n",
+        r#"data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","delta":"ls"}"#,
+        "\n\n",
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":"ls"}}"#,
+        "\n\n",
+    );
+    let seen: Vec<ProviderEvent> =
+        replay(transcript, CancellationToken::new(), mapping).collect().await;
+    let expected = [
+        ProviderEvent::ToolCallStart { id: "c1".to_owned(), name: "bash".to_owned() },
+        ProviderEvent::ToolCallCustom { id: "c1".to_owned() },
+        ProviderEvent::ToolCallDelta {
+            id: "c1".to_owned(),
+            json: r#"{"command":"ls"}"#.to_owned(),
+        },
+        ProviderEvent::ToolCallEnd { id: "c1".to_owned() },
+    ];
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the four before it.
+    assert_eq!(&seen[..4], &expected, "{seen:?}");
+
+    // A stream whose opening frame never arrived still says all four, in order.
+    let closing_only = concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","name":"bash","input":"ls"}}"#,
+        "\n\n",
+    );
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+    let seen: Vec<ProviderEvent> =
+        replay(closing_only, CancellationToken::new(), mapping).collect().await;
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the four before it.
+    assert_eq!(&seen[..4], &expected, "{seen:?}");
+}
+
+/// **AC-18**, the replay half. A stored call replays as the pair its own
+/// record names, and the request's `custom_tools` has no say in it.
+///
+/// The two directions are the whole point: a call the model made as a custom
+/// one replays as the custom pair even where nothing is advertised as custom
+/// any more, and an ordinary call replays as the function pair even where its
+/// tool is. What would break otherwise is a resumed session — the
+/// configuration the call was made under is not the configuration the replay
+/// is built under, and the backend is owed the items it sent.
+#[test]
+fn a_stored_custom_call_replays_as_a_custom_item_whatever_the_options_say() {
+    let stored = |custom: bool| {
+        let mut assistant = Message::assistant(SERVED);
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+        assistant.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "c1".to_owned(),
+                tool: "bash".to_owned(),
+                state: completed(json!({"command": "ls"}), "a.rs\n"),
+                custom,
+            },
+        });
+        assistant
+    };
+    let input = |request: &ChatRequest| {
+        serde_json::to_value(Body::new(request, Backend::Codex)).expect("the body serializes")
+            ["input"]
+            .clone()
+    };
+
+    // A custom call, replayed by a request that advertises no custom tool at
+    // all — the case a `/fast`-less resume or a changed config produces.
+    let custom = ChatRequest {
+        messages: vec![Message::user("list the files"), stored(true)],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    assert!(custom.responses.custom_tools.is_empty(), "nothing is advertised as custom here");
+    assert_eq!(
+        input(&custom),
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {"type": "custom_tool_call", "call_id": "c1", "name": "bash", "input": "ls"},
+            {"type": "custom_tool_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "the call's own record decides, and its input is the words the model sent"
+    );
+
+    // And the other direction: an ordinary call, replayed by a request that
+    // does advertise its tool as custom.
+    let mut function = ChatRequest {
+        messages: vec![Message::user("list the files"), stored(false)],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    function.responses.custom_tools = vec!["bash".to_owned()];
+    assert_eq!(
+        input(&function),
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "bash",
+                "arguments": r#"{"command":"ls"}"#,
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "an unmarked call is a function call whatever this request advertises"
+    );
+}
+
+/// **AC-18**, the inbound half's other door. A custom call naming a tool this
+/// request did not advertise as custom is closed with no arguments at all
+/// rather than with a guess: the three events arrive in order and the tool
+/// refuses a call it was handed nothing for.
+///
+/// This is the state the replay half's fallback exists for
+/// ([`super::replayed_input`]): what such a call stores holds no single
+/// string to unwrap, so it goes back as the `function_call` pair.
+#[tokio::test]
+async fn a_custom_call_naming_an_unadvertised_tool_is_closed_without_arguments() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool(), an_edit_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+
+    let seen: Vec<ProviderEvent> = replay(
+        concat!(
+            r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+            r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","#,
+            r#""name":"edit","input":"drop it"}}"#,
+            "\n\n",
+        ),
+        CancellationToken::new(),
+        mapping,
+    )
+    .collect()
+    .await;
+
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the three before it.
+    assert_eq!(
+        &seen[..3],
+        &[
+            ProviderEvent::ToolCallStart { id: "c1".to_owned(), name: "edit".to_owned() },
+            ProviderEvent::ToolCallCustom { id: "c1".to_owned() },
+            ProviderEvent::ToolCallEnd { id: "c1".to_owned() },
+        ],
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(event, ProviderEvent::ToolCallDelta { .. })),
+        "free text is not an arguments object for a tool nothing wrapped one for: {seen:?}"
+    );
+}
+
+/// **AC-18**, the replay half's unwrapping. A custom call's `input` is the one
+/// argument's string, recovered from the object the inbound mapper wrapped it
+/// in — and a stored call that is not that shape replays as the
+/// `function_call` pair rather than as a custom item carrying invented words.
+///
+/// The arms are the states a stored call can be in. A call that ran carries
+/// the wrapped words, and so does one still streaming them. Three do not: a
+/// call the turn died during, which carries no arguments at all; the empty
+/// object left by a call closed under a name the receiving request never
+/// advertised as custom; and an object this wire did not write, which has no
+/// single string to unwrap. `""` is not available as a stand-in for any of
+/// them, because `input` is a custom item's whole content — an empty one is a
+/// call that said nothing, which the model would read back as words it chose.
+#[test]
+fn a_custom_calls_input_is_the_one_arguments_string_or_the_function_pair() {
+    fn replayed(custom: bool, state: &ToolState) -> Option<&str> {
+        super::replayed_input(&super::Made { call_id: "c1", tool: "bash", state, custom })
+    }
+
+    assert_eq!(replayed(true, &completed(json!({"command": "ls"}), "a.rs\n")), Some("ls"));
+    assert_eq!(
+        replayed(true, &ToolState::Pending { input: Some(json!({"command": "ls"})) }),
+        Some("ls"),
+        "a call still streaming carries the words it has"
+    );
+    assert_eq!(replayed(true, &ToolState::Pending { input: None }), None);
+    assert_eq!(
+        replayed(true, &ToolState::Pending { input: Some(json!({})) }),
+        None,
+        "a call closed under an unadvertised name stored nothing to hand back"
+    );
+    assert_eq!(
+        replayed(true, &completed(json!({"command": "ls", "timeout": 5}), "a.rs\n")),
+        None,
+        "two members is not a shape this wire wrote, so nothing here is the model's words"
+    );
+    assert_eq!(
+        replayed(false, &completed(json!({"command": "ls"}), "a.rs\n")),
+        None,
+        "an unmarked call is a function call however unwrappable its arguments are"
+    );
+
+    // And what such a part actually serializes to: the function pair, whole.
+    let mut assistant = Message::assistant(SERVED);
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+    assistant.parts.push(Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "c1".to_owned(),
+            tool: "bash".to_owned(),
+            state: completed(json!({"command": "ls", "timeout": 5}), "a.rs\n"),
+            custom: true,
+        },
+    });
+    let request = ChatRequest {
+        messages: vec![Message::user("list the files"), assistant],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    let body = serde_json::to_value(Body::new(&request, Backend::Codex)).expect("it serializes");
+    assert_eq!(
+        body["input"],
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "bash",
+                "arguments": r#"{"command":"ls","timeout":5}"#,
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "both halves of the pair fall back together: {body}"
+    );
+}
+
+/// **AC-19.** A completed or incomplete frame that echoes how it was served
+/// says so once, immediately before its bill; a stream with neither frame
+/// says nothing; and the served tier is logged beside the requested one.
+#[tokio::test]
+async fn a_completed_or_incomplete_frame_emits_one_served_event_before_usage() {
+    let served = ProviderEvent::Served(crate::provider::ServedOptions {
+        service_tier: Some("default".to_owned()),
+        verbosity: Some("low".to_owned()),
+        parallel_tool_calls: None,
+        context: None,
+    });
+
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let requested = Mapping {
+        model: SERVED.to_owned(),
+        requested: Some("priority".to_owned()),
+        ..Mapping::default()
+    };
+    let seen: Vec<ProviderEvent> = replay(
+        concat!(
+            r#"data: {"type":"response.completed","response":{"#,
+            r#""service_tier":"default","text":{"verbosity":"low"},"usage":{}}}"#,
+            "\n\n",
+        ),
+        CancellationToken::new(),
+        requested,
+    )
+    .collect()
+    .await;
+    assert_eq!(seen.iter().filter(|event| matches!(event, ProviderEvent::Served(_))).count(), 1);
+    assert_eq!(&seen[..2], &[served.clone(), ProviderEvent::Usage(Usage::default())], "{seen:?}");
+    let logged = log.logged();
+    assert!(
+        logged.lines().any(|line| line.contains("service_tier the backend served")
+            && line.contains(r#"served="default""#)
+            && line.contains(r#"requested="priority""#)),
+        "{logged}"
+    );
+
+    let incomplete = events(concat!(
+        r#"data: {"type":"response.incomplete","response":{"#,
+        r#""service_tier":"default","text":{"verbosity":"low"},"#,
+        r#""incomplete_details":{"reason":"max_output_tokens"},"usage":{}}}"#,
+        "\n\n",
+    ))
+    .await;
+    assert_eq!(&incomplete[..2], &[served, ProviderEvent::Usage(Usage::default())]);
+
+    let neither = events(concat!(
+        r#"data: {"type":"response.output_text.delta","item_id":"m","delta":"cut"}"#,
+        "\n\n",
+    ))
+    .await;
+    assert!(!neither.iter().any(|event| matches!(event, ProviderEvent::Served(_))), "{neither:?}");
+}
+
+/// **AC-19**, the backend half. A gateway relays somebody else's response
+/// through its own normalization, so a field arriving under one of the four
+/// echo names is that gateway's word for its own thing and says nothing
+/// about the options this request configured.
+#[tokio::test]
+async fn only_this_vendors_own_backends_report_how_a_turn_was_served() {
+    const ECHOED: &str = concat!(
+        r#"data: {"type":"response.completed","response":{"#,
+        r#""service_tier":"default","text":{"verbosity":"low"},"#,
+        r#""parallel_tool_calls":true,"reasoning":{"context":"all_turns"},"usage":{}}}"#,
+        "\n\n",
+    );
+
+    let seat = events(ECHOED).await;
+    assert!(
+        seat.iter().any(|event| matches!(event, ProviderEvent::Served(_))),
+        "the frame this vendor's own backend sent said nothing: {seat:?}"
+    );
+
+    let gateway = gateway_events(ECHOED).await;
+    assert!(
+        !gateway.iter().any(|event| matches!(event, ProviderEvent::Served(_))),
+        "a gateway's own words were reported as served options: {gateway:?}"
+    );
+}
+
+/// **AC-20.** `run --json-schema`'s document and a configured verbosity
+/// share one `text` object.
+#[test]
+fn a_text_format_and_a_configured_verbosity_share_one_text_object() {
+    let format = json!({"type": "json_schema", "name": "ganja_run", "schema": {}, "strict": true});
+    let mut request = ask();
+    request.responses.text_format = Some(format.clone());
+    request.responses.body = object(json!({"text": {"verbosity": "low"}}));
+    assert_eq!(
+        sent(&request, Backend::Codex)["text"],
+        json!({"format": format, "verbosity": "low"})
     );
 }

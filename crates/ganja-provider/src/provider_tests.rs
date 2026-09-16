@@ -5,9 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::sse::Frame;
 use super::{
-    CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, check_base_url,
-    configured_headers, endpoint, events, peeked, reopens, reported, responses, retry, shielded,
-    shown_base_url, unusable,
+    CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, ServedOptions,
+    check_base_url, configured_headers, endpoint, events, matters, peeked, reopens, reported,
+    responses, retry, shielded, shown_base_url, unusable,
 };
 use crate::auth;
 use crate::protocol::FinishReason;
@@ -297,6 +297,27 @@ fn the_subscription_backends_default_is_one_that_backend_serves() {
     );
 }
 
+/// The seat serves what its rows and its own gate agree on (**D563**'s find):
+/// `chatgpt` is cataloged through `openai`'s rows, and a lookup that ignored
+/// the alias refused every model the seat offers — so a `/model` switch and a
+/// subagent's `chatgpt/…` pin never took.
+#[test]
+fn the_seat_serves_the_models_it_offers_through_the_row_alias() {
+    for model in responses::SEAT_ROSTER {
+        assert!(super::serves(responses::CHATGPT_ID, model), "{model} is on the seat's roster");
+        assert_eq!(
+            super::adopt(responses::CHATGPT_ID, &format!("chatgpt/{model}")).as_deref(),
+            Some(model)
+        );
+    }
+    assert!(super::serves(responses::ID, "gpt-5.4"), "the platform sells what its rows list");
+    assert!(
+        !super::serves(responses::CHATGPT_ID, "gpt-5.4"),
+        "a row the seat's own gate refuses is not a model the seat serves"
+    );
+    assert!(!super::serves(responses::CHATGPT_ID, "no-such-model"));
+}
+
 /// Emits whatever a frame's data spells, so that the plumbing can be
 /// tested without a provider's JSON in the way.
 struct Echo;
@@ -580,6 +601,47 @@ fn a_spliced_body_keeps_the_wires_fields_over_the_efforts() {
     assert_eq!(untouched, body, "no effort means the wire's body exactly");
 }
 
+/// **AC-19** (D563): a served echo is nothing a transcript draws, so a stream
+/// that has said only that may still be reopened; a custom-call marker belongs
+/// to a row already on screen, so one that has said it may not.
+#[test]
+fn a_served_echo_is_not_content_and_a_custom_call_marker_is() {
+    assert!(!matters(&ProviderEvent::Served(ServedOptions::default())));
+    assert!(matters(&ProviderEvent::ToolCallCustom { id: "c1".to_owned() }));
+}
+
+/// Two layers that both hold a key as an object share it one level deep, the
+/// later one winning inside it; any other collision is a replacement, and the
+/// typed body still lands over every layer (D563).
+#[test]
+fn layers_merge_objects_one_level_deep_and_the_body_still_wins() {
+    let lower = serde_json::json!({"reasoning": {"summary": "auto"}, "tool_choice": "auto"})
+        .as_object()
+        .cloned()
+        .expect("an object fixture");
+    let upper = serde_json::json!({
+        "reasoning": {"effort": "high", "summary": "detailed"},
+        "tool_choice": {"type": "allowed_tools"},
+        "model": "theirs",
+    })
+    .as_object()
+    .cloned()
+    .expect("an object fixture");
+    let body = serde_json::json!({"model": "ours"});
+
+    let merged =
+        serde_json::to_value(super::splice([&lower, &upper], &body)).expect("a body serializes");
+
+    assert_eq!(
+        merged,
+        serde_json::json!({
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "tool_choice": {"type": "allowed_tools"},
+            "model": "ours",
+        })
+    );
+}
+
 /// `turn_start` is a caller's value on a `pub` field, so the one clamp both
 /// history-keyed wires read it through brings a value past the end back to
 /// the last message, leaves one in range alone, and answers `0` for a
@@ -594,6 +656,7 @@ fn a_turn_start_past_the_end_clamps_to_the_last_message() {
         messages: vec![Message::user("first"), Message::user("second")],
         turn_start: 99,
         tools: Vec::new(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     };
     assert_eq!(request.clamped_turn_start(), 1, "past the end is the last index");

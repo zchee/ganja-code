@@ -87,6 +87,7 @@ fn turn() -> Vec<Event> {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
     let message_id = MessageId::from("msg_1".to_owned());
@@ -283,6 +284,7 @@ fn a_failed_call_is_a_tool_use_object_and_its_reason_goes_to_stderr() {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
     let events = [Event::PartUpdated {
@@ -321,6 +323,7 @@ fn a_tool_title_cannot_move_the_terminals_cursor() {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
 
@@ -516,4 +519,211 @@ fn attaching_with_a_deadline_fails_to_parse() {
         panic!("a deadline the attached client cannot carry is refused");
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{error}");
+}
+
+/// **D563, AC-31.** The three shapes `--json-schema` takes at the clap
+/// boundary: a file that is there, a document typed inline, and a value that
+/// is neither — refused there, so no engine is ever assembled around it.
+#[test]
+fn a_json_schema_is_read_from_a_file_or_from_the_value_itself() {
+    let inline = r#"{"type":"object","additionalProperties":false}"#;
+    let parsed = Flags::try_parse_from(["run", "--json-schema", inline, "hello"])
+        .unwrap_or_else(|error| panic!("an inline document parses: {error}"));
+    assert_eq!(
+        parsed.run.json_schema,
+        Some(serde_json::json!({"type": "object", "additionalProperties": false})),
+        "the document is held decoded, not as the text that spelled it"
+    );
+
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("schema.json");
+    std::fs::write(&path, inline).expect("the fixture is writable");
+    let from_file =
+        Flags::try_parse_from(["run", "--json-schema", &path.display().to_string(), "hello"])
+            .unwrap_or_else(|error| panic!("a file that is there parses: {error}"));
+    assert_eq!(from_file.run.json_schema, parsed.run.json_schema, "one document, two spellings");
+
+    assert_eq!(
+        Flags::try_parse_from(["run", "hello"]).expect("a plain run parses").run.json_schema,
+        None,
+        "no flag, no format"
+    );
+}
+
+/// **D563, AC-31.** A value that is neither a file nor JSON is refused by the
+/// **value parser**, in the sentence that names it and both ways it failed.
+#[test]
+fn a_json_schema_that_is_neither_a_file_nor_json_is_refused_at_the_flag() {
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema=nope", "hello"]) else {
+        panic!("a value the flag cannot read starts no run");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+    assert!(
+        error.to_string().contains(
+            "--json-schema takes a path to a JSON file or an inline JSON document; \"nope\" is neither: no such file, and not JSON"
+        ),
+        "got {error}"
+    );
+}
+
+/// **D563, AC-31.** A document that parses and is not an **object** is refused
+/// at the same boundary: a schema is an object, and a number, a bare `true` or
+/// an array would otherwise reach the vendor and come back as somebody else's
+/// error about a request this build assembled.
+#[test]
+fn a_json_schema_that_is_not_an_object_is_refused_at_the_flag() {
+    for (value, kind) in [("42", "a number"), ("true", "a boolean"), ("[]", "an array")] {
+        let Err(error) = Flags::try_parse_from(["run", "--json-schema", value, "hello"]) else {
+            panic!("{value} is JSON, but it is not a schema");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "--json-schema takes a JSON Schema, which is an object; {value:?} is {kind}"
+            )),
+            "the sentence names the value and the type that arrived: {error}"
+        );
+    }
+}
+
+/// **D563, AC-31.** The same refusal about a **file** names the file rather
+/// than the value, so a person who passed a path is not left guessing whether
+/// this build read their file or their filename. And a **directory** is a
+/// mistyped path, answered by the read rather than by "no such file", which
+/// would be false about something plainly there.
+#[test]
+fn a_file_that_is_not_an_object_and_a_directory_each_say_what_they_are() {
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("array.json");
+    std::fs::write(&path, "[]").expect("the fixture is writable");
+    let named = path.display().to_string();
+
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema", &named, "hello"]) else {
+        panic!("a file holding an array is not a schema");
+    };
+    assert!(
+        error.to_string().contains(&format!(
+            "--json-schema takes a JSON Schema, which is an object; the JSON in {named:?} is an array"
+        )),
+        "the file is named as the source, not the value: {error}"
+    );
+
+    let folder = directory.path().display().to_string();
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema", &folder, "hello"]) else {
+        panic!("a directory is not a document");
+    };
+    assert!(
+        error.to_string().contains(&format!("--json-schema could not read {folder:?}")),
+        "a directory is read and fails as one: {error}"
+    );
+    assert!(!error.to_string().contains("no such file"), "got {error}");
+}
+
+/// **D563, W6 (probe 2026-09-17).** The wrap is `strict: true`, and the seat
+/// refused AC-31's own schema for leaving an object open — so the flag refuses
+/// one at the boundary, naming the first open object by its JSON path and
+/// ending in the vendor's own words.
+///
+/// Walked through the keywords that hold subschemas, in document order, so the
+/// path points at the node somebody has to edit; and **only** through those,
+/// so an `enum` or `const` whose value merely looks like a schema is data.
+#[test]
+fn a_json_schema_with_an_open_object_is_refused_at_the_flag_naming_its_path() {
+    let sentence = |path: &str| {
+        format!(
+            "--json-schema is sent strict, so every object in it must close itself; the object at {path} does not: 'additionalProperties' is required to be supplied and to be false"
+        )
+    };
+    let cases = [
+        (r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#, "$"),
+        (r#"{"type":"object","additionalProperties":true}"#, "$"),
+        (r#"{"type":["object","null"]}"#, "$"),
+        (r#"{"properties":{"ok":{"type":"boolean"}}}"#, "$"),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"address":{"type":"object","properties":{}}}}"#,
+            "$.properties.address",
+        ),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"tags":{"type":"array","items":{"type":"object"}}}}"#,
+            "$.properties.tags.items",
+        ),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"x":{"anyOf":[{"type":"string"},{"type":"object"}]}}}"#,
+            "$.properties.x.anyOf[1]",
+        ),
+        (r##"{"$ref":"#/$defs/item","$defs":{"item":{"type":"object"}}}"##, "$.$defs.item"),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"first name":{"type":"object"}}}"#,
+            "$.properties[\"first name\"]",
+        ),
+    ];
+
+    for (schema, path) in cases {
+        let Err(error) = Flags::try_parse_from(["run", "--json-schema", schema, "hello"]) else {
+            panic!("{schema} leaves the object at {path} open, which the seat refuses strict");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+        assert!(error.to_string().contains(&sentence(path)), "{schema}: got {error}");
+    }
+
+    for closed in [
+        r#"{"type":"object","additionalProperties":false,"properties":{"tags":{"type":"array","items":{"type":"string"}}}}"#,
+        r#"{"type":"string"}"#,
+        r#"{"type":"object","additionalProperties":false,"properties":{"kind":{"const":{"type":"object"}},"shape":{"enum":[{"properties":{}}]}}}"#,
+    ] {
+        assert!(
+            Flags::try_parse_from(["run", "--json-schema", closed, "hello"]).is_ok(),
+            "{closed} closes every object it declares"
+        );
+    }
+}
+
+/// The same refusal about a **file**: the check runs on what the file held,
+/// so a schema too long to type is held to the same rule.
+#[test]
+fn a_json_schema_file_with_an_open_object_is_refused_the_same_way() {
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("open.json");
+    std::fs::write(&path, r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#)
+        .expect("the fixture is writable");
+
+    let Err(error) =
+        Flags::try_parse_from(["run", "--json-schema", &path.display().to_string(), "hello"])
+    else {
+        panic!("a file holding an open object is refused");
+    };
+    assert!(
+        error.to_string().contains(
+            "the object at $ does not: 'additionalProperties' is required to be supplied and to be false"
+        ),
+        "got {error}"
+    );
+}
+
+/// **D563, AC-31.** `--attach` carries no text-format route, so the pair is
+/// refused exactly as `--deadline` and `--effort` are there.
+#[test]
+fn attaching_with_a_json_schema_fails_to_parse() {
+    let Err(error) = Flags::try_parse_from([
+        "run",
+        "--attach",
+        "http://127.0.0.1:4096",
+        "--json-schema",
+        r#"{"type":"object","additionalProperties":false}"#,
+        "hello",
+    ]) else {
+        panic!("a schema the attached client cannot carry is refused");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{error}");
+}
+
+/// **D563, AC-32.** There is no `--fast`: a headless run takes its tier from
+/// the configuration, which is what makes `/fast` a screen's command rather
+/// than a flag pair to keep in step.
+#[test]
+fn run_takes_no_fast_flag() {
+    let Err(error) = Flags::try_parse_from(["run", "--fast", "hello"]) else {
+        panic!("`run` has no --fast flag");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument, "{error}");
 }

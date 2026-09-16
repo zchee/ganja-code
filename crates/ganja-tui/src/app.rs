@@ -27,6 +27,12 @@ use ganja_core::{
     catalog,
     config::{NotificationEvent, StatuslineConfig},
     provider,
+    // The platform's own id, for the one notice that is written on it alone
+    // (**D563**), and the fast tiers themselves — read off the provider
+    // crate's own table rather than restated here, since a second list of
+    // which literals mean "fast" is a second list to forget when a model
+    // joins the first.
+    provider::responses::{self, options},
     // The one spelling of a span (**D557**): the same function that renders it
     // into the block the model reads, so the notice, the segment and the
     // request can never disagree about one clock.
@@ -42,9 +48,9 @@ use ganja_core::{
     },
 };
 use ganja_protocol::{
-    Command, Event as CoreEvent, FinishReason, HeldDecision, HeldId, HoldCause, Mention, Message,
-    MessageId, PartBody, PeerMessageId, PeerReceiptStatus, PermissionId, PermissionReply,
-    RevertScope, Role, ToolState, Usage,
+    Command, Event as CoreEvent, FastChoice, FinishReason, HeldDecision, HeldId, HoldCause,
+    Mention, Message, MessageId, PartBody, PeerMessageId, PeerReceiptStatus, PermissionId,
+    PermissionReply, RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::job::Jobs as _;
 use ganja_tool::tasklist::{Status as TaskStatus, Summary};
@@ -236,6 +242,23 @@ const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next tur
 /// switched to its second wording, so the model is now being asked to wrap up.
 /// Saying exactly that is what tells somebody whether to intervene.
 const DEADLINE_NOTICE: &str = "deadline passed; the model has been told to wrap up";
+
+/// What `/fast on` says on the **platform** (**D563**), where `tier` is what
+/// the choice resolved to.
+///
+/// Written on `openai` and never on the seat, because the two bill differently:
+/// the seat is a subscription and its tier costs nothing extra, where the
+/// platform charges the priority rate per request — one keystroke away, which
+/// is exactly the distance at which somebody should be told. The second clause
+/// says why the faster tier is not what was asked for, so nobody reads the
+/// bar's `fast` as the faster of the vendor's two fast tiers: the platform
+/// answered `ultrafast` with a 500 on `gpt-5.5` and on `gpt-5.6-sol` (probe
+/// 2026-09-17), so `/fast on` there resolves to `priority` on every model.
+fn fast_on_platform(tier: &str) -> String {
+    format!(
+        "fast on: service_tier {tier} bills at the platform's priority rate; ultrafast is refused there (a 500, \"Invalid service_tier argument\", probe 2026-09-17)"
+    )
+}
 
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
 /// honest split, verbatim. Hooks and the skill roots really are rebuilt
@@ -981,6 +1004,10 @@ pub struct App {
     /// keeping the instant would mean recomputing the comparison here as well
     /// as in the segment.
     deadline_passed: Option<bool>,
+    /// Whether the bar was last told the next request asks at a fast tier
+    /// (**D563**), so [`App::poll_fast`] repaints on the change rather than on
+    /// every tick. `false` on every provider that resolves no tier at all.
+    fast: bool,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -1202,6 +1229,11 @@ impl App {
             served_model: None,
             last_eviction: None,
             deadline_passed: None,
+            // Seeded here and resolved against the engine by the `poll_fast`
+            // `drive` runs before its first draw, which is what puts the cell
+            // on a `chatgpt` session's very first bar rather than on its
+            // second frame.
+            fast: false,
             wire_models: None,
             wire_fetch: None,
             file_walk: None,
@@ -1761,6 +1793,15 @@ impl App {
             self.engine.subscribe().await.context("failed to subscribe to engine events")?;
         let mut term_events = EventStream::new();
 
+        // Before the first draw rather than on the first `Tick` (**D563**):
+        // the tier a session asks at is settled by its configuration and its
+        // provider, both of which are known here, so a `chatgpt` session whose
+        // bar carries `fast` should not spend a frame saying it does not. The
+        // other polls beside it on the tick arm each wait on something this
+        // process has not got yet — a dial, a job, a reading — and have
+        // nothing to say before their first answer arrives.
+        self.poll_fast();
+
         loop {
             if self.needs_draw() {
                 self.draw(terminal)?;
@@ -1872,6 +1913,7 @@ impl App {
                 self.poll_served_model();
                 self.poll_eviction();
                 self.poll_deadline();
+                self.poll_fast();
                 self.poll_mcp_dialog();
                 self.poll_held();
                 self.poll_collision_scan();
@@ -2111,6 +2153,47 @@ impl App {
         if deadline.is_some() {
             self.dirty = true;
         }
+    }
+
+    /// Hands the bar whether the next request asks for a fast `service_tier`
+    /// (**D563**).
+    ///
+    /// Polled rather than folded off [`CoreEvent::FastChanged`], for
+    /// [`App::poll_deadline`]'s reason and one more: what this answers moves on
+    /// a `/model`, a `/plugin` Reload and a resumed row's restored choice as
+    /// well as on a `/fast`, and only the first of those four announces itself.
+    /// One poll of the engine's own resolution is what keeps the bar from
+    /// disagreeing with the request.
+    ///
+    /// No unconditional redraw beside it, unlike the deadline's: this segment's
+    /// text is a function of engine state alone, so a tick that found it
+    /// unchanged has nothing to repaint.
+    fn poll_fast(&mut self) {
+        let fast = self.asks_fast();
+        if fast != self.fast {
+            self.fast = fast;
+            self.status.set_fast(fast);
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the tier the next request carries is a fast one (**D563**).
+    ///
+    /// **The one predicate**, read by the bar above and by a bare `/fast`'s
+    /// toggle below — two answers here would be a bar drawing `fast` over a
+    /// command that turns it on.
+    ///
+    /// Derived from [`options::FAST_TIERS`] and [`options::DEFAULT_FAST_TIER`]
+    /// rather than spelled as "not `default`": on the platform a configured
+    /// `flex` is neither fast nor ordinary, and drawing `fast` over
+    /// one would be a claim about the bill that is not true. A provider that
+    /// sends no tier at all is not fast, which is every provider but the two
+    /// Responses ids.
+    fn asks_fast(&self) -> bool {
+        self.engine.service_tier().is_some_and(|tier| {
+            tier.requested == options::DEFAULT_FAST_TIER
+                || options::FAST_TIERS.iter().any(|(_, fast)| *fast == tier.requested)
+        })
     }
 
     /// The lead's side of the mailbox, once a tick (**D503**).
@@ -2778,6 +2861,85 @@ impl App {
             command::Deadline::Refused(refusal) => self.status.set_notice(Some(refusal)),
         }
         self.dirty = true;
+    }
+
+    /// Runs a typed `/fast` line (**D563**).
+    ///
+    /// [`App::run_deadline_line`]'s shape and its reason: every arm ends in the
+    /// notice slot, because what a tier change does is already drawn — on the
+    /// bar for the request, in `/usage` for the echo — and a session that
+    /// answered `/fast` with a turn would spend a request settling how the next
+    /// one is scheduled.
+    ///
+    /// The provider is checked **here rather than at the engine**, for one
+    /// arm's sake: every other arm would get [`EngineError::Fast`]'s sentence
+    /// back anyway, but `show` and a refused word send nothing at all, and a
+    /// person on `anthropic` asking about a tier deserves the same answer as
+    /// one setting it rather than silence. So the sentence is that error's,
+    /// **built from the error itself** rather than spelled a second time here:
+    /// two copies of one sentence is exactly how a session comes to answer one
+    /// situation in two wordings.
+    async fn run_fast_line(&mut self, line: command::Fast) {
+        if !options::speaks_options(&self.provider) {
+            let refusal = EngineError::Fast { provider: self.provider.clone() };
+            self.status.set_notice(Some(refusal.to_string()));
+            self.dirty = true;
+            return;
+        }
+
+        match line {
+            // Resolved against the engine rather than against a remembered
+            // choice: what a person toggling means is "stop asking fast" or
+            // "start", and a session whose *config* asks fast is already
+            // asking — so `Some(Off)` is what turns that one off, where
+            // `None` would hand it back to the very table it is asking under.
+            command::Fast::Toggle => {
+                let choice = if self.asks_fast() { FastChoice::Off } else { FastChoice::On };
+                self.send_fast(Some(choice)).await;
+            }
+            command::Fast::On => self.send_fast(Some(FastChoice::On)).await,
+            command::Fast::Off => self.send_fast(Some(FastChoice::Off)).await,
+            command::Fast::Reset => self.send_fast(None).await,
+            // The engine's own resolution, for `/deadline show`'s reason: what
+            // a person wants from this is the truth about the next request,
+            // not the last thing this frontend sent.
+            command::Fast::Show => {
+                let said = match self.engine.service_tier() {
+                    Some(tier) => {
+                        format!("service tier: {} ({})", tier.requested, tier.source.label())
+                    }
+                    None => "no service tier".to_owned(),
+                };
+                self.status.set_notice(Some(said));
+            }
+            // About the **words**, so nothing is sent and whatever is set stays
+            // set — `/deadline`'s and `/teammate`'s rule for the same case.
+            command::Fast::Refused(refusal) => self.status.set_notice(Some(refusal)),
+        }
+        self.dirty = true;
+    }
+
+    /// Sends the engine one [`Command::SetFast`] and says what it did
+    /// (**D563**).
+    ///
+    /// [`fast_on_platform`]'s sentence rides an `on` over `openai` and only
+    /// there: the
+    /// platform bills the tier per request at a premium rate, and one keystroke
+    /// away is exactly the distance at which somebody should be told so. The
+    /// seat is a subscription and gets no such sentence.
+    async fn send_fast(&mut self, fast: Option<FastChoice>) {
+        if let Err(refusal) = self.engine.send(Command::SetFast { fast }).await {
+            self.status.set_notice(Some(refusal.to_string()));
+            return;
+        }
+        // The bar follows the engine's own resolution on the next tick, the way
+        // it does after a `/model`; what is written here is only the sentence.
+        if fast == Some(FastChoice::On) && self.provider == responses::ID {
+            let tier = self.engine.fast_tier(&self.model).unwrap_or(options::DEFAULT_FAST_TIER);
+            self.status.set_notice(Some(fast_on_platform(tier)));
+        } else {
+            self.status.set_notice(None);
+        }
     }
 
     /// Sends the engine one [`Command::SetDeadline`], and folds the notice's
@@ -4704,6 +4866,11 @@ impl App {
             // this arm is `Show` rather than a notice about a missing
             // argument (**D557**).
             command::Action::Deadline => self.run_deadline_line(command::Deadline::Show).await,
+            // Bare `/fast` **toggles**, where bare `/deadline` above it shows,
+            // and the difference is what the two commands are: a deadline is a
+            // value somebody has to be told before they can change it, and this
+            // is a switch whose position is already on the bar (**D563**).
+            command::Action::Fast => self.run_fast_line(command::Fast::Toggle).await,
         }
     }
 
@@ -6122,6 +6289,10 @@ impl App {
             // Read at open time like everything else on this panel — a
             // snapshot, not a view. Empty for a wire that has heard no such
             // headers, which renders no section at all (**D484**).
+            // The tier ladder's own answer (**D563**), read at open beside
+            // them: the panel is where the request and the echo are drawn
+            // together, because the bar deliberately draws only the request.
+            tier: self.engine.service_tier(),
             rates: self.engine.rate_windows(),
             // The plan buckets beside them, read at the same moment
             // (**D485**). Empty renders no section and the honest tail
@@ -6570,6 +6741,10 @@ impl App {
     ///   and a skill tool over `instruction::skill_roots` — and the prompt's
     ///   environment half is recomposed with it, so `<available_skills>`
     ///   and the loadable roots move together.
+    /// - **Responses options tables** rebuild (**D563**): the fresh config's
+    ///   `[provider.<id>.options]` tables replace the engine's whole, read by
+    ///   the next turn's requests, its children, and every in-process teammate
+    ///   spawned after the swap — each resolves per turn and holds no copy.
     /// - **Agents, MCP dials and LSP servers do not**: the roster, the
     ///   dials and the spawns are assembled at startup, and half-reloading
     ///   any of them — an agent list that changed under a running roster, a
@@ -6581,9 +6756,13 @@ impl App {
     /// the way a fresh start would — discovered tiers plus the `GANJA_CONFIG`
     /// environment file — but a `--config` *flag* lives in the process's own
     /// argv, which this frontend was deliberately not handed. A session
-    /// launched with that flag reloads without the flagged file's hooks and
-    /// skills; the restart the dialog already recommends for the other three
-    /// surfaces is the accurate remedy for that edge too.
+    /// launched with that flag reloads without the flagged file's hooks,
+    /// skills and Responses options. The last of those is a bill rather than a
+    /// convenience: the tables are replaced whole, so a `service_tier =
+    /// "default"` that only the flagged file set is gone after the reload, and
+    /// a `chatgpt` session goes back to asking for the model's fast tier until
+    /// it is restarted. The restart the dialog already recommends for the other
+    /// three surfaces is the accurate remedy for that edge too.
     fn reload_plugins(&mut self) -> String {
         let config = match ganja_core::config::Config::load(&self.cwd) {
             Ok(config) => config,
@@ -6604,6 +6783,10 @@ impl App {
         // Swapped beside the registry so the next turn's `$` invocations read
         // the same list its rebuilt skill tool does.
         self.engine.replace_skill_roots(skill_roots);
+        // The fifth seam (**D563**): an edited `[provider.<id>.options]` table
+        // reaches the next turn's requests without a restart, since resolving
+        // it is per turn anyway and the provider it configures holds no copy.
+        self.engine.replace_provider_options(config.responses_options());
 
         let cwd = self.cwd.clone();
         self.engine.replace_environment(move |model| {
@@ -6709,6 +6892,17 @@ impl App {
             self.clear_composer();
             self.history.append(history::PromptInfo::text(&prompt));
             self.run_deadline_line(line).await;
+            return;
+        }
+
+        // The fourth, and the one whose bare form never reaches here: a bare
+        // `/fast` is `command::submitted`'s above, which dispatches
+        // `Action::Fast` and toggles, so what this door reads is a line that
+        // named one of the four words (**D563**).
+        if let Some(line) = command::fast(&prompt) {
+            self.clear_composer();
+            self.history.append(history::PromptInfo::text(&prompt));
+            self.run_fast_line(line).await;
             return;
         }
 
@@ -7391,6 +7585,15 @@ impl App {
                 self.effort = effort;
                 self.sync_effort_status();
             }
+            // The bar is repainted here as well as on the next tick
+            // (**D563**), and the two are not redundant: this arm is what
+            // catches a resume's restored choice and a `NewSession`'s clear —
+            // changes this frontend did not make and would otherwise draw up
+            // to a tick late. What it does *not* do is read the event's own
+            // choice: `fast` is an intent, and the tier it resolves to is the
+            // engine's answer over this model and this config, so the bar asks
+            // the same question `poll_fast` asks rather than a second one.
+            CoreEvent::FastChanged { .. } => self.poll_fast(),
             // Taken and drawn nowhere (**D496**): no frontend paints the
             // posture this announces and no test pins one — its place would be
             // beside the agent and the effort in the status bar. The arm

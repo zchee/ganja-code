@@ -233,6 +233,7 @@ async fn the_ring_keeps_distinct_running_calls_in_order_deduped_and_capped() {
                     metadata: serde_json::Value::Null,
                     started: 0,
                 },
+                custom: false,
             },
         },
     };

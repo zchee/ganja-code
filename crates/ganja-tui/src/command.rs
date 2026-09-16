@@ -98,6 +98,15 @@ pub enum Action {
     /// says what is set; [`deadline`] is the door that reads the argument off
     /// the buffer, the third and last builtin shaped that way.
     Deadline,
+    /// Ask the rest of this session's Responses requests at the fast
+    /// `service_tier`, or at the ordinary one (**D563**).
+    ///
+    /// Bare `/fast` **toggles**, where bare `/deadline` and bare `/teammate`
+    /// show: this is a two-state switch somebody flips while they wait, and a
+    /// bare line that only reported the state would make the common case cost
+    /// two commands. What it is now is on the bar. [`fast`] is the door that
+    /// reads the argument off the buffer, the fourth builtin shaped that way.
+    Fast,
 }
 
 impl Action {
@@ -138,7 +147,8 @@ impl Action {
             | Self::Redo
             | Self::Rewind
             | Self::Rename
-            | Self::Deadline => None,
+            | Self::Deadline
+            | Self::Fast => None,
         }
     }
 }
@@ -465,6 +475,20 @@ pub const COMMANDS: &[Entry] = &[
         category: Category::Session,
         suggested: false,
     },
+    // `Agent`, where `/deadline` above it is `Session`, and the difference is
+    // again the group's own definition: a time budget changes what the model
+    // does with the conversation, where this changes how the vendor schedules
+    // the request that carries it — which is the same shelf `/models` and
+    // `/effort` sit on, and what a person reads those two rows to find.
+    Entry {
+        action: Action::Fast,
+        name: "fast",
+        aliases: &[],
+        title: "Ask at the fast tier",
+        description: "Ask the rest of this session at the vendor's fast service tier, or at the ordinary one",
+        category: Category::Agent,
+        suggested: false,
+    },
 ];
 
 /// The words that quit when they are the whole prompt.
@@ -575,11 +599,11 @@ pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [
 
 /// The inline hint a builtin command shows once its name is typed (**D518**).
 ///
-/// `/teammate`, `/rename` and `/deadline` are the only builtins that read
-/// arguments off the buffer; everything else answers [`None`] and shows
+/// `/teammate`, `/rename`, `/deadline` and `/fast` are the only builtins that
+/// read arguments off the buffer; everything else answers [`None`] and shows
 /// nothing. Display-only, like a command file's `argument-hint` — the grammar
-/// that actually decides is [`team`]'s, [`rename`]'s and [`deadline`]'s
-/// respectively.
+/// that actually decides is [`team`]'s, [`rename`]'s, [`deadline`]'s and
+/// [`fast`]'s respectively.
 fn builtin_hint(name: &str) -> Option<&'static str> {
     match name {
         "teammate" => {
@@ -587,6 +611,7 @@ fn builtin_hint(name: &str) -> Option<&'static str> {
         }
         "rename" => Some("<name>"),
         "deadline" => Some(DEADLINE_GRAMMAR),
+        "fast" => Some(FAST_GRAMMAR),
         _ => None,
     }
 }
@@ -1075,6 +1100,73 @@ fn parse_span(text: &str) -> Option<Duration> {
 /// time.
 fn refused_deadline(reason: String) -> String {
     format!("{reason}. /deadline {DEADLINE_GRAMMAR}")
+}
+
+/// `/fast`'s grammar, spelled once: the composer's hint shows it and the
+/// refusal below is built out of the same four words, so a person who mistyped
+/// reads one vocabulary beside the cursor and in the answer.
+pub const FAST_GRAMMAR: &str = "on | off | reset | show";
+
+/// What a submitted `/fast` line asked for (**D563**).
+///
+/// [`Action::Fast`]'s second door, [`deadline`]'s arrangement exactly — with
+/// one difference the enum carries rather than hides: the bare line is
+/// [`Fast::Toggle`] and not [`Fast::Show`], because two of these five states
+/// are what somebody typing `/fast` while they wait actually wants, and the
+/// state itself is already on the status bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fast {
+    /// `/fast` alone: whichever of on and off this session is not.
+    ///
+    /// Which one that is cannot be decided here — it is the engine's resolved
+    /// tier, config and all — so the app resolves it at the moment the line is
+    /// run rather than the parser guessing from a word nobody typed.
+    Toggle,
+    /// `/fast on`: ask at the fast tier.
+    On,
+    /// `/fast off`: ask at the ordinary one, explicitly.
+    Off,
+    /// `/fast reset`: drop this session's choice and let the configuration
+    /// decide again.
+    ///
+    /// A word of its own rather than a second spelling of `off`, and the
+    /// difference is what the next `/model` does: an explicit `off` outranks
+    /// every configured tier on every model, where a reset session follows the
+    /// per-model table again.
+    Reset,
+    /// `/fast show`: say what is asked for, and change nothing.
+    Show,
+    /// The line said `/fast` and then a word this grammar has not got.
+    ///
+    /// One sentence, [`Deadline::Refused`]'s reason exactly: nothing
+    /// downstream branches on which word it was.
+    Refused(String),
+}
+
+/// The `/fast` command a submitted buffer names, or [`None`] when the buffer
+/// is not a `/fast` line at all — in which case it is prose, and nothing here
+/// has an opinion about it.
+///
+/// No clock and no engine: unlike [`deadline`], every word this grammar takes
+/// means the same thing whenever it is typed.
+#[must_use]
+pub fn fast(text: &str) -> Option<Fast> {
+    let (name, rest) = split_word(text.strip_prefix('/')?);
+    if lookup(name).is_none_or(|entry| entry.action != Action::Fast) {
+        return None;
+    }
+
+    let argument = rest.trim();
+    Some(match argument {
+        "" => Fast::Toggle,
+        "on" => Fast::On,
+        "off" => Fast::Off,
+        "reset" => Fast::Reset,
+        "show" => Fast::Show,
+        other => {
+            Fast::Refused(format!("/fast takes on, off, reset or show; {other:?} is none of them"))
+        }
+    })
 }
 
 /// The arguments after `/teammate spawn`, parsed — the same grammar the dialog's

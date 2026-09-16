@@ -39,6 +39,7 @@ fn searched() -> ProviderEvent {
         tool: "openrouter:web_search".to_owned(),
         input: json!({"query": "rust edition 2024"}),
         output: "3 results".to_owned(),
+        blob: None,
     }
 }
 

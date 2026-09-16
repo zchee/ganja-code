@@ -242,6 +242,7 @@ pub(crate) fn called(id: &str, call_id: &str, output: &str) -> Message {
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
 
@@ -265,6 +266,7 @@ pub(crate) fn request(messages: Vec<Message>, turn_start: usize) -> ChatRequest 
         messages,
         turn_start,
         tools: roster(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     }
 }
@@ -443,6 +445,7 @@ async fn a_title_request_spawns_a_process_that_enters_no_table_and_writes_no_bin
             messages: vec![user("m1", "name this"), user("m2", "in five words")],
             turn_start: 0,
             tools: Vec::new(),
+            responses: Default::default(),
             effort_options: serde_json::Map::new(),
         },
     )

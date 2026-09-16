@@ -207,8 +207,8 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     // endpoint would carry a key in the clear, so a file that got past both is
     // one the importer could not have written wrong.
     let local = &config.provider["local-llama"];
-    assert_eq!(local.dialect, Dialect::OpenaiChatCompletions);
-    assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(local.dialect, Some(Dialect::OpenaiChatCompletions));
+    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
     assert_eq!(local.headers["x-route"], "gpu-0");
     assert_eq!(
         local.key_env, None,

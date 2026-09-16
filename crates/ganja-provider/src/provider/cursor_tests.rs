@@ -871,7 +871,12 @@ async fn a_keyed_hit_still_lacking_a_result_opens_a_run_naming_what_it_has_and_w
     {
         reply.parts.push(Part {
             id: PartId::ascending(),
-            body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
+            body: PartBody::Tool {
+                call_id: call_id.to_owned(),
+                tool: "read".to_owned(),
+                state,
+                custom: false,
+            },
         });
     }
     partial.messages.push(reply);
@@ -1161,6 +1166,7 @@ pub(super) fn opening(model: &str) -> ChatRequest {
         messages: vec![crate::protocol::Message::user("read the file")],
         turn_start: 0,
         tools: roster(),
+        responses: Default::default(),
         effort_options: serde_json::Map::new(),
     }
 }
@@ -1324,7 +1330,12 @@ pub(super) fn answered(request: &ChatRequest, call_id: &str, state: ToolState) -
     let mut reply = Message::assistant(&request.model);
     reply.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: "read".to_owned(),
+            state,
+            custom: false,
+        },
     });
     resumed.messages.push(reply);
 

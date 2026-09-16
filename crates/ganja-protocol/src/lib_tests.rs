@@ -3,11 +3,11 @@ use std::sync::Mutex;
 use std::thread;
 
 use super::{
-    Command, Event, FinishReason, HeldDecision, HeldId, HeldOutcome, HoldCause, Mention, Message,
-    MessageId, MessageTime, Part, PartBody, PartId, PermissionId, PermissionMode, PermissionReply,
-    PolicySource, QuestionId, QuestionInfo, QuestionOption, QuestionSource, REASONING_TAG,
-    RedactedText, RevertInfo, RevertScope, Role, SessionId, ToolState, UnknownPermissionMode,
-    Usage, is_uuidv7, team, uuidv7,
+    Command, Event, FastChoice, FinishReason, HeldDecision, HeldId, HeldOutcome, HoldCause,
+    Mention, Message, MessageId, MessageTime, Part, PartBody, PartId, PermissionId, PermissionMode,
+    PermissionReply, PolicySource, QuestionId, QuestionInfo, QuestionOption, QuestionSource,
+    REASONING_TAG, RedactedText, RevertInfo, RevertScope, Role, SessionId, ToolState,
+    UnknownPermissionMode, Usage, is_uuidv7, team, uuidv7,
 };
 
 /// The session every pinned event happens in.
@@ -31,6 +31,7 @@ fn pinned_tool_part() -> Part {
                 started: 7,
                 completed: 9,
             },
+            custom: false,
         },
     }
 }
@@ -259,6 +260,9 @@ fn commands_round_trip_through_json() {
         Command::SwitchModel { model: "claude-haiku-4.5".to_owned() },
         Command::SwitchEffort { effort: Some("max".to_owned()) },
         Command::SwitchEffort { effort: None },
+        Command::SetFast { fast: Some(FastChoice::On) },
+        Command::SetFast { fast: Some(FastChoice::Off) },
+        Command::SetFast { fast: None },
         Command::SetPermissionMode { mode: PermissionMode::Ask },
         Command::SetPermissionMode { mode: PermissionMode::Bypass },
         Command::SetDeadline { until: Some(1_760_000_000_000) },
@@ -358,6 +362,9 @@ fn events_round_trip_through_json() {
         },
         Event::EffortChanged { session_id: pinned_session(), effort: Some("max".to_owned()) },
         Event::EffortChanged { session_id: pinned_session(), effort: None },
+        Event::FastChanged { session_id: pinned_session(), fast: Some(FastChoice::On) },
+        Event::FastChanged { session_id: pinned_session(), fast: Some(FastChoice::Off) },
+        Event::FastChanged { session_id: pinned_session(), fast: None },
         Event::PermissionModeChanged { session_id: pinned_session(), mode: PermissionMode::Bypass },
         Event::PeerHeld {
             session_id: pinned_session(),
@@ -821,6 +828,7 @@ fn the_wire_format_is_stable() {
                     call_id: "call_1".to_owned(),
                     tool: "read".to_owned(),
                     state: ToolState::Pending { input: None },
+                    custom: false,
                 },
             }),
             // Streaming-era pending: the settled-arguments field stays off
@@ -835,6 +843,7 @@ fn the_wire_format_is_stable() {
                     call_id: "call_1".to_owned(),
                     tool: "read".to_owned(),
                     state: ToolState::Pending { input: Some(serde_json::json!({"path": "a.rs"})) },
+                    custom: false,
                 },
             }),
             r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"pending","input":{"path":"a.rs"}}}"#,
@@ -855,6 +864,7 @@ fn the_wire_format_is_stable() {
                         started: 7,
                         completed: 9,
                     },
+                    custom: false,
                 },
             }),
             r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"shell","state":{"status":"error","input":{"command":"rm -rf /"},"error":"refused","started":7,"completed":9}}"#,
@@ -889,6 +899,7 @@ fn the_wire_format_is_stable() {
                             metadata: serde_json::Value::Null,
                             started: 7,
                         },
+                        custom: false,
                     },
                 },
             }),
@@ -907,6 +918,7 @@ fn the_wire_format_is_stable() {
                         metadata: serde_json::json!({"output": "a.rs\n"}),
                         started: 7,
                     },
+                    custom: false,
                 },
             }),
             r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"running","input":{"command":"ls"},"metadata":{"output":"a.rs\n"},"started":7}}"#,
@@ -1057,6 +1069,36 @@ fn the_wire_format_is_stable() {
                 effort: None,
             }),
             r#"{"type":"effort_changed","session_id":"ses_1"}"#,
+        ),
+        // The service-tier choice travels the same way, and its two values
+        // are the words a person says — never the tier literal a turn
+        // resolves them to, which is the model's to decide (**D563**).
+        (
+            serde_json::to_string(&Command::SetFast { fast: Some(FastChoice::On) }),
+            r#"{"type":"set_fast","fast":"on"}"#,
+        ),
+        (
+            serde_json::to_string(&Command::SetFast { fast: Some(FastChoice::Off) }),
+            r#"{"type":"set_fast","fast":"off"}"#,
+        ),
+        (serde_json::to_string(&Command::SetFast { fast: None }), r#"{"type":"set_fast"}"#),
+        (
+            serde_json::to_string(&Event::FastChanged {
+                session_id: pinned_session(),
+                fast: Some(FastChoice::On),
+            }),
+            r#"{"type":"fast_changed","session_id":"ses_1","fast":"on"}"#,
+        ),
+        (
+            serde_json::to_string(&Event::FastChanged {
+                session_id: pinned_session(),
+                fast: Some(FastChoice::Off),
+            }),
+            r#"{"type":"fast_changed","session_id":"ses_1","fast":"off"}"#,
+        ),
+        (
+            serde_json::to_string(&Event::FastChanged { session_id: pinned_session(), fast: None }),
+            r#"{"type":"fast_changed","session_id":"ses_1"}"#,
         ),
         // The posture a lead's `mode_set_request` ends up as, and the
         // acceptance that answers it. Two names, spelled as this crate
@@ -1758,6 +1800,60 @@ fn each_message_mark_is_written_when_set_and_survives_a_round_trip() {
     assert!(!Message::user("a prompt").compaction_summary);
     assert!(!Message::assistant("a-model").compaction_summary);
     assert!(!Message::request_only_user("the team is still working").compaction_summary);
+}
+
+/// **D563**: a tool call records how it was advertised, and the record is
+/// written only when it says something.
+///
+/// The three claims the `request_only` idiom makes, made here about a part:
+/// a set flag is written and reads back; an unset one is absent from the
+/// bytes, so a transcript written before the field existed is byte-identical
+/// to one written now; and a document with no such key reads as `false`,
+/// which is what every other wire's stored call is.
+#[test]
+fn a_tool_calls_advertisement_is_written_only_when_it_was_a_custom_one() {
+    let ordinary = Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "call_1".to_owned(),
+            tool: "bash".to_owned(),
+            state: ToolState::Pending { input: None },
+            custom: false,
+        },
+    };
+    let written = serde_json::to_string(&ordinary).expect("a part serializes");
+    assert!(!written.contains("custom"), "an ordinary call writes no mark: {written}");
+    assert_eq!(
+        written,
+        r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"pending"}}"#
+    );
+
+    let PartBody::Tool { call_id, tool, state, .. } = ordinary.body.clone() else {
+        unreachable!("the part above is a tool part")
+    };
+    let custom = Part {
+        id: ordinary.id.clone(),
+        body: PartBody::Tool { call_id, tool, state, custom: true },
+    };
+    let written = serde_json::to_string(&custom).expect("a part serializes");
+    assert!(written.contains(r#""custom":true"#), "a custom call writes its mark: {written}");
+    assert_eq!(serde_json::from_str::<Part>(&written).expect("and reads back"), custom);
+
+    // The pre-field spelling — which is also every other wire's — reads as an
+    // ordinary call rather than refusing.
+    assert_eq!(
+        serde_json::from_str::<Part>(
+            r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"pending"}}"#
+        )
+        .expect("a stored row from before the field reads"),
+        ordinary
+    );
+
+    // And the constructor every caller goes through never claims one.
+    let PartBody::Tool { custom, .. } = Part::tool("call_1", "bash").body else {
+        unreachable!("`Part::tool` builds a tool part")
+    };
+    assert!(!custom, "only the wire that advertised the call sets it");
 }
 
 /// The one constructor that mints a request-only message, so the flag is never

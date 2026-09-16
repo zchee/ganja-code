@@ -178,6 +178,9 @@ fn turn_with(
         identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
         receipts: Arc::default(),
         deadline: Arc::default(),
+        responses: Default::default(),
+        tier_source: None,
+        served: None,
         teamless: false,
         teamless_send: crate::config::TeamlessSend::default(),
         deferral: crate::tool::deferral::Deferral::none(),
@@ -935,6 +938,8 @@ fn parent_spawn(
         hooks: None,
         teammates: None,
         identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
+        responses: crate::responses_ladder::Seed::default(),
+        served: Some(Arc::default()),
     };
 
     let spawn = Spawn {

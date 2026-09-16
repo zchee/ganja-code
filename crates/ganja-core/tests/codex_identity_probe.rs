@@ -162,6 +162,16 @@ const IDENTITY: [&str; 3] = ["originator", "openai-beta", "user-agent"];
 /// Values are written down as a shape and never as bytes.
 const CREDENTIAL: [&str; 2] = ["authorization", "chatgpt-account-id"];
 
+/// Roster models no *parameter* probe has taken a turn on.
+///
+/// The ladder below reaches every offered model, so this is not about
+/// reachability: it is about the seat-parameter probe of 2026-09-16
+/// (`.omc/research/2026-09-16-chatgpt-seat-param-probe.md`), which measured
+/// `gpt-5.5`, `gpt-5.6-sol` and `gpt-6-astra` and nothing else. What a
+/// recording does not say is the part a reader most needs it to say, so these
+/// two are named in the header rather than left to be assumed covered.
+const UNMEASURED: [&str; 2] = ["gpt-5.6-terra", "gpt-5.6-luna"];
+
 /// How much of a token's head the leak check searches for on its own.
 ///
 /// Long enough that no ordinary English or JSON in a refusal body could collide
@@ -392,6 +402,7 @@ async fn turn(provider: &dyn Provider, model: &str) -> Outcome {
         .stream(
             ChatRequest {
                 turn_start: 0,
+                responses: Default::default(),
                 effort_options: Default::default(),
                 model: model.to_owned(),
                 system: Some("Answer with a single word.".to_owned()),
@@ -654,9 +665,9 @@ fn render(
         "\n== the live turn ==\n\
          # Against the real backend. The wire reports no served-model field, so\n\
          # what is recorded is the model asked for and whether it was accepted.\n\
-         # Offered is not servable: SUBSCRIPTION_DEFAULT is deliberately outside\n\
-         # the roster below, so unless GANJA_MODEL named a roster member this\n\
-         # turn is a sixth ask rather than one of the five.\n\
+         # SUBSCRIPTION_DEFAULT has been a roster member since 2026-09-16, so\n\
+         # unless GANJA_MODEL named another one this turn repeats a ladder row\n\
+         # rather than adding an ask the ladder does not make.\n\
          model asked: {model}\n\
          outcome: {}\n",
         taken.verdict()
@@ -669,9 +680,11 @@ fn render(
          # (D476). Recorded as what ganja volunteers, never as a measurement:\n\
          # the ladder below is the measured half.\n\
          notice: {}\n\
-         default: {}\n",
+         default: {}\n\
+         unmeasured: {}\n",
         offered.notice,
         responses::SUBSCRIPTION_DEFAULT,
+        UNMEASURED.join(", "),
     ));
     for listed in &offered.models {
         out.push_str(&format!("offered: {} ({})\n", listed.id, listed.name));

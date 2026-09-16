@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime};
 
 use super::{
     Action, BACKENDS, COMMANDS, Category, Choice, Completion, Deadline, EngineCommand,
-    SPAWN_GRAMMAR, Surface, Team, TeamSpawn, dropdown_matches, inline_hint, is_bare_exit, lookup,
-    matches, subcommands, submitted, team, team_completion, value_matches,
+    FAST_GRAMMAR, Fast, SPAWN_GRAMMAR, Surface, Team, TeamSpawn, dropdown_matches, inline_hint,
+    is_bare_exit, lookup, matches, subcommands, submitted, team, team_completion, value_matches,
 };
 
 /// The commands the engine offers a session that loaded no config: one,
@@ -217,6 +217,7 @@ fn the_command_names_and_aliases_match_their_surface_contract() {
         ("rewind", &[][..], Action::Rewind),
         ("rename", &[][..], Action::Rename),
         ("deadline", &[][..], Action::Deadline),
+        ("fast", &[][..], Action::Fast),
     ];
 
     for (name, aliases, action) in cases {
@@ -911,4 +912,39 @@ fn a_span_past_what_a_deadline_can_carry_is_refused_rather_than_cleared() {
     };
     assert!(refusal.contains("further off"), "{refusal:?} says why");
     assert!(refusal.ends_with(super::DEADLINE_GRAMMAR), "{refusal:?} ends with the grammar");
+}
+
+/// **D563, AC-28.** Each word of `/fast`'s grammar reaches its own request,
+/// the bare line toggles, and a word this grammar has not got is refused in
+/// the sentence a person reads — naming what they typed.
+#[test]
+fn the_fast_grammar_takes_four_words_and_refuses_the_rest() {
+    assert_eq!(super::fast("/fast"), Some(Fast::Toggle));
+    assert_eq!(super::fast("/fast   "), Some(Fast::Toggle), "trailing space is still bare");
+    assert_eq!(super::fast("/fast on"), Some(Fast::On));
+    assert_eq!(super::fast("/fast off"), Some(Fast::Off));
+    assert_eq!(super::fast("/fast reset"), Some(Fast::Reset));
+    assert_eq!(super::fast("/fast show"), Some(Fast::Show));
+
+    assert_eq!(
+        super::fast("/fast x"),
+        Some(Fast::Refused("/fast takes on, off, reset or show; \"x\" is none of them".to_owned()))
+    );
+}
+
+/// **D563.** A line that is not a `/fast` line at all is prose, and this door
+/// has no opinion about it — the rule every argument-carrying builtin keeps.
+#[test]
+fn a_line_that_is_not_a_fast_line_is_left_to_the_model() {
+    assert_eq!(super::fast("how fast is it"), None);
+    assert_eq!(super::fast("/deadline 5m"), None);
+    assert_eq!(super::fast("/fastidious"), None, "a longer name is another command, or prose");
+}
+
+/// **D563.** The composer's hint is the grammar, spelled once — so the words
+/// beside the cursor are the words the refusal above uses.
+#[test]
+fn the_fast_hint_is_the_grammar_itself() {
+    assert_eq!(inline_hint("/fast", &[]), Some(FAST_GRAMMAR.to_owned()));
+    assert_eq!(FAST_GRAMMAR, "on | off | reset | show");
 }

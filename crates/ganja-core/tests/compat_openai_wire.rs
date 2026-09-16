@@ -103,10 +103,11 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
     config.provider.insert(
         PROVIDER_ID.to_owned(),
         ProviderConfig {
-            dialect: Dialect::OpenaiChatCompletions,
-            base_url: base_url.clone(),
+            dialect: Some(Dialect::OpenaiChatCompletions),
+            base_url: Some(base_url.clone()),
             key_env: Some(KEY_VAR.to_owned()),
             headers: [(ROUTE.to_owned(), "gpu-0".to_owned())].into_iter().collect(),
+            options: None,
         },
     );
     // The config's own `model` tier names both halves, which is the route a
