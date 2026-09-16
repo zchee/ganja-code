@@ -260,9 +260,7 @@ pub const REFUSED_NO_BINARY: &str = "this session's PATH holds no executable nam
 /// the shell ask below still fired. And a shell command that writes still
 /// asks, inside the working tree as much as outside it, identically under
 /// `dontAsk` — so the ask is that vendor's command classifier, not the mode,
-/// and headless the ask is answered `Cancelled`, which ends the turn. D508(a)
-/// composed `dontAsk` here and this line said so; what it said about an
-/// explicit mode suppressing a config-level always-approve still holds.
+/// and headless the ask is answered `Cancelled`, which ends the turn.
 pub const GROK_MODE_LINE: &str = "permission-mode acceptEdits composed; grok's file tools edit unasked \
      and a config-level always-approve does not reach this launch, so a shell command that \
      writes still asks, which ends a headless turn";

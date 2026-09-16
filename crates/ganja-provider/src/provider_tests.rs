@@ -601,7 +601,7 @@ fn a_spliced_body_keeps_the_wires_fields_over_the_efforts() {
     assert_eq!(untouched, body, "no effort means the wire's body exactly");
 }
 
-/// **AC-19** (D563): a served echo is nothing a transcript draws, so a stream
+/// **D563**: a served echo is nothing a transcript draws, so a stream
 /// that has said only that may still be reopened; a custom-call marker belongs
 /// to a row already on screen, so one that has said it may not.
 #[test]

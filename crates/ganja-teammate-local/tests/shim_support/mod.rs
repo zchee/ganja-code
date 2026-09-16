@@ -501,6 +501,48 @@ pub fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// The **D560** measurement block of a posture-probe recording: everything
+/// after its `---- D560 re-probe` header, so a floor test reads what was
+/// measured under the floor and nothing an older section of the file says.
+pub fn d560_reprobe(probe: &'static str) -> &'static str {
+    probe
+        .split("---- D560 re-probe")
+        .nth(1)
+        .expect("the recording carries the D560 measurement block")
+}
+
+/// A live probe's directory, removed when this is dropped — on the ordinary
+/// exit and on a failed assertion alike — and its parent with it if that left
+/// the parent empty.
+///
+/// The live probes keep their directories under a person's cache directory,
+/// and a probe that leaves its own directory behind there is a probe that lied
+/// about cleaning up.
+pub struct RemoveOnDrop(pub PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(parent) = self.0.parent() {
+            // `remove_dir` refuses a non-empty directory, which is the point:
+            // only a `probes/` this run left empty goes with it.
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+/// A directory of this run's own under `~/.cache/ganja/probes/`, named
+/// `<cli>-<label>-<pid>`: outside the temporary directories every CLI's sandbox
+/// keeps writable, so a write that lands there lands for the reason measured.
+pub fn probe_directory(cli: &str, label: &str) -> RemoveOnDrop {
+    let directory = PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
+        .join(".cache/ganja/probes")
+        .join(format!("{cli}-{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a probe directory under the user's cache");
+
+    RemoveOnDrop(directory)
+}
+
 /// A fake `codex`, shaped like the real one (**W3**).
 ///
 /// Distinct from [`FakeCli`] in the one way that matters: it is driven by the
@@ -742,12 +784,6 @@ fi
 printf '{"type":"thread.started","thread_id":"%s"}\n' "$id"
 printf '{"type":"turn.started"}\n'
 printf '{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"thinking is not mail"}}\n'
-case "$args:$prompt" in
-  *'sandbox_mode="workspace-write"'*OUTSIDE*)
-    printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"refused: operation not permitted outside the working tree"}}\n'
-    printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
-    exit 0 ;;
-esac
 printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"starting on it"}}\n'
 printf '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}\n'
 printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
@@ -826,12 +862,6 @@ fi
 
 printf '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}\n'
 printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking is not mail"}}}\n'
-case "$sandbox:$text" in
-  workspace:*OUTSIDE*)
-    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"refused: operation not permitted outside the working tree"}],"stop_reason":"end_turn"}}\n'
-    printf '{"type":"result","subtype":"success","is_error":false,"result":"refused: operation not permitted outside the working tree","stop_reason":"end_turn"}\n'
-    exit 0 ;;
-esac
 printf '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answered"}}}\n'
 printf '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"thinking is not mail","signature":"x"},{"type":"text","text":"answered"}],"stop_reason":"end_turn"}}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":12,"num_turns":1,"result":"answered","stop_reason":"end_turn"}\n'

@@ -1498,11 +1498,14 @@ fn refusal(text: &str) -> String {
 fn options(text: &str, id: &str, model: &str) -> ResponsesOptions {
     parse(text)
         .expect("this document loads")
-        .provider_options(id, model)
+        .provider
+        .get(id)
+        .and_then(|entry| entry.options.as_ref())
         .expect("this id carries an options table")
+        .for_model(model)
 }
 
-/// **AC-1, AC-8.** A builtin's entry is an `options` table and nothing else,
+/// A builtin's entry is an `options` table and nothing else,
 /// and only on the two ids that read one (**D563**).
 #[test]
 fn a_builtin_provider_entry_may_carry_options_and_nothing_else() {
@@ -1523,7 +1526,7 @@ fn a_builtin_provider_entry_may_carry_options_and_nothing_else() {
     );
 }
 
-/// **AC-8.** The declared-endpoint arm keeps both of its requirements and
+/// The declared-endpoint arm keeps both of its requirements and
 /// gains one refusal: an endpoint this build has never spoken to has no
 /// measured option surface to curate.
 #[test]
@@ -1545,7 +1548,7 @@ fn a_config_declared_endpoint_still_needs_its_dialect_and_base_url() {
     );
 }
 
-/// **AC-10.** What a config *declares* is an endpoint, and a builtin's
+/// What a config *declares* is an endpoint, and a builtin's
 /// `options` entry declares none — so it never appears in a listing of what
 /// this project declares, where it would send somebody looking for an entry
 /// they did not write.
@@ -1561,7 +1564,7 @@ fn declared_endpoints_never_name_a_builtin() {
     assert_eq!(config.provider.len(), 2, "both are still entries in the table");
 }
 
-/// **AC-2, AC-4.** A key the seat rejects is refused under `chatgpt` naming
+/// A key the seat rejects is refused under `chatgpt` naming
 /// the key, the id and the probe — and loads under `openai`, where it is one
 /// of that id's own.
 ///
@@ -1610,7 +1613,7 @@ fn a_platform_only_key_under_chatgpt_is_refused_naming_the_probe() {
     );
 }
 
-/// **AC-3.** `fast` is a config spelling of `priority`: the backend answers
+/// `fast` is a config spelling of `priority`: the backend answers
 /// the word itself with `Unsupported service_tier: fast`, so it is rewritten
 /// at load and nothing ever writes it back out.
 #[test]
@@ -1638,7 +1641,7 @@ fn fast_is_read_as_priority_and_never_written() {
     );
 }
 
-/// **W6, probe 2026-09-17.** The two tiers the platform refused are refused
+/// **D563, probe 2026-09-17.** The two tiers the platform refused are refused
 /// under `openai` in the platform's own words — and `ultrafast` still loads
 /// under `chatgpt`, where it was taken — so a config never spends a request
 /// on a tier this build has already watched fail.
@@ -1674,7 +1677,7 @@ fn a_tier_the_platform_refused_is_refused_under_openai_naming_the_probe() {
     );
 }
 
-/// **W6, probe 2026-09-17; the AC-2/AC-4 shape.** Each id refuses one key the
+/// **D563, probe 2026-09-17.** Each id refuses one key the
 /// other takes, and says what its backend did with it: the platform refuses
 /// `access_programs` as not enabled for the organization, and the seat takes
 /// `context_management` and does nothing with it.
@@ -1699,7 +1702,7 @@ fn a_key_one_id_was_measured_to_refuse_or_ignore_loads_under_the_other() {
     assert!(parse(&format!("[provider.openai.options]\n{compaction}\n")).is_ok());
 }
 
-/// **AC-5.** A hosted tool's `type` is curated and everything else about it
+/// A hosted tool's `type` is curated and everything else about it
 /// passes through, because the settings a hosted tool takes move when the
 /// vendor moves them and the one thing a wrong value makes unrecoverable is
 /// the type.
@@ -1745,7 +1748,7 @@ fn a_hosted_tool_type_is_curated_and_the_rest_of_the_entry_is_not() {
     }
 }
 
-/// **AC-6.** Only a builtin a custom advertisement can actually carry may be
+/// Only a builtin a custom advertisement can actually carry may be
 /// named, and the refusal hands back the list rather than leaving somebody to
 /// guess which of their tools qualify.
 #[test]
@@ -1762,7 +1765,7 @@ fn a_custom_tool_must_be_a_builtin_with_one_required_string() {
     );
 }
 
-/// **AC-8.** Two more per-id narrowings, both unprobed rather than rejected
+/// Two more per-id narrowings, both unprobed rather than rejected
 /// on the seat — which is why the sentences say so instead of quoting a
 /// backend error nobody has seen.
 #[test]
@@ -1795,7 +1798,7 @@ fn a_hosted_tool_choice_and_a_platform_include_are_refused_under_chatgpt() {
     );
 }
 
-/// **AC-7.** The per-model overlay is field-wise and one deep: the entry for
+/// The per-model overlay is field-wise and one deep: the entry for
 /// the model a request names replaces what it sets, and leaves everything
 /// else the provider-wide table said.
 #[test]
@@ -1818,7 +1821,7 @@ fn a_per_model_table_wins_over_the_provider_wide_value() {
     );
 }
 
-/// **AC-7.** The overlay is one deep, and a second level is refused rather
+/// The overlay is one deep, and a second level is refused rather
 /// than ignored: nobody could read a two-level lookup off a config file, and
 /// an ignored table is a setting whose author still believes it applies.
 #[test]
@@ -1846,16 +1849,19 @@ fn a_per_model_entry_is_gated_exactly_as_the_table_around_it() {
 }
 
 /// An id that carries no `options` table answers nothing, which is every id
-/// but the two — and, for those two, every model of a config that wrote none.
+/// but the two — and, for those two, a config that wrote none.
 #[test]
 fn an_id_with_no_options_table_answers_nothing() {
     let config = parse("[provider.chatgpt.options]\nservice_tier = \"priority\"\n")
         .expect("the document loads");
+    let carries = |config: &Config, id: &str| {
+        config.provider.get(id).and_then(|entry| entry.options.as_ref()).is_some()
+    };
 
-    assert!(config.provider_options("chatgpt", "gpt-5.5").is_some());
-    assert!(config.provider_options("openai", "gpt-5.5").is_none());
-    assert!(config.provider_options("anthropic", "claude-sonnet-5").is_none());
-    assert!(Config::default().provider_options("chatgpt", "gpt-5.5").is_none());
+    assert!(carries(&config, "chatgpt"));
+    assert!(!carries(&config, "openai"));
+    assert!(!carries(&config, "anthropic"));
+    assert!(!carries(&Config::default(), "chatgpt"));
 }
 
 /// The same rule the provider endpoints obey, and the same reason twice
@@ -2614,17 +2620,9 @@ fn with_neither_on_disk_the_answer_is_the_one_a_writer_should_create() {
     assert_eq!(super::discovered(xdg.clone(), dotted), xdg);
 }
 
-/// **verify-w1's carry-forward (D563).** `ResponsesOptions::set_keys` is a
-/// hand-written list, so a field added to the struct and forgotten there would
-/// be a key that skips the per-id gate. Pinned from both ends: the fixture sets
-/// every field the struct serializes (so a new field without a fixture line
-/// fails here), and the keys it reports are both ids' vocabulary together,
-/// both ways (so a field without a `set_keys` line fails here too) — the union,
-/// since the 2026-09-17 probe left a key on each id's list alone.
-#[test]
-fn set_keys_reports_every_key_a_fully_populated_table_sets() {
-    let every: super::ResponsesOptions = toml::from_str(
-        r#"
+/// A `ResponsesOptions` table setting every field but `model`, which
+/// `set_keys_reports_every_key_a_fully_populated_table_sets` proves.
+const EVERY_FIELD: &str = r#"
 service_tier = "flex"
 reasoning = { context = "all_turns", summary = "concise", mode = "pro" }
 text = { verbosity = "low" }
@@ -2650,9 +2648,18 @@ safety_identifier = "s"
 user = "u"
 metadata = { team = "core" }
 moderation = { model = "omni", policy = "strict" }
-"#,
-    )
-    .expect("the fixture decodes");
+"#;
+
+/// **D563.** `ResponsesOptions::set_keys` is a hand-written list, so a field
+/// added to the struct and forgotten there would be a key that skips the
+/// per-id gate. Pinned from both ends: the fixture sets every field the struct
+/// serializes (so a new field without a fixture line fails here), and the keys
+/// it reports are both ids' vocabulary together, both ways (so a field without
+/// a `set_keys` line fails here too) — the union, since the 2026-09-17 probe
+/// left a key on each id's list alone.
+#[test]
+fn set_keys_reports_every_key_a_fully_populated_table_sets() {
+    let every: super::ResponsesOptions = toml::from_str(EVERY_FIELD).expect("the fixture decodes");
 
     let serde_json::Value::Object(fields) = serde_json::to_value(&every).expect("it serializes")
     else {
@@ -2688,4 +2695,23 @@ moderation = { model = "omni", policy = "strict" }
         Vec::<&&str>::new(),
         "a key a fully populated table sets is missing from set_keys"
     );
+}
+
+/// **D563.** `ResponsesOptions::for_model` is the third hand-written list over
+/// the struct, beside `set_keys` and the wire's `body()`, and a field it
+/// forgets is a per-model entry that loads and is silently ignored. Pinned from
+/// both sides with the fixture `set_keys` is pinned by: a per-model entry
+/// setting every field overlays all of them onto an empty table, and an empty
+/// per-model entry leaves a table setting every field as it was.
+#[test]
+fn for_model_carries_every_field_a_fully_populated_entry_sets() {
+    let every: super::ResponsesOptions = toml::from_str(EVERY_FIELD).expect("the fixture decodes");
+
+    let entry: super::ResponsesOptions = toml::from_str(&format!("[model.m]\n{EVERY_FIELD}"))
+        .expect("the fixture decodes as a per-model entry");
+    assert_eq!(entry.for_model("m"), every, "a field a per-model entry sets is not overlaid");
+
+    let wide: super::ResponsesOptions = toml::from_str(&format!("{EVERY_FIELD}\n[model.m]\n"))
+        .expect("the fixture decodes beside an empty per-model entry");
+    assert_eq!(wide.for_model("m"), every, "an empty per-model entry moved a provider-wide field");
 }

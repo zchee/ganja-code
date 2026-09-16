@@ -13,12 +13,12 @@
 //! A shim teammate is a foreign CLI in a pty. It has no `send_message` tool,
 //! no mailbox, and — for codex and grok — a sandbox that keeps its writes to
 //! the working tree and would refuse to write one, so **the agent itself
-//! cannot answer**: nothing this side asks it to do would reach the lead. What each of these CLIs does do,
-//! unasked, is write its own conversation to its own home. So the answer road
-//! is ganja reading that file and mailing what it finds, exactly as the
-//! headless shim mails what its child printed — the lead's side is unchanged,
-//! and a relayed answer arrives as the `PartBody::Peer` every teammate's words
-//! already arrive as.
+//! cannot answer**: nothing this side asks it to do would reach the lead. What
+//! each of these CLIs does do, unasked, is write its own conversation to its
+//! own home. So the answer road is ganja reading that file and mailing what it
+//! finds, exactly as the headless shim mails what its child printed — the
+//! lead's side is unchanged, and a relayed answer arrives as the
+//! `PartBody::Peer` every teammate's words already arrive as.
 //!
 //! Scraping the pane's screen was the other candidate and is deliberately not
 //! this: `capture-pane` shows a TUI's chrome — frames, spinners, folded tool

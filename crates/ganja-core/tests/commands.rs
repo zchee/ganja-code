@@ -13,7 +13,7 @@ use ganja_core::protocol::{Command, Event, FinishReason, Message, PartBody, Role
 use ganja_core::provider::ChatRequest;
 use ganja_core::tool::Registry;
 use ganja_core::{Config, Engine, EngineError, SessionId, Storage, command};
-use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
+use ganja_testkit::{ScriptedProvider, drain_allowing, prompt, says, tool_call};
 use serde_json::json;
 
 /// [`command::Registry::build`] against a config home this binary owns.
@@ -333,13 +333,7 @@ async fn a_command_expansion_carries_the_line_as_typed_and_a_typed_prompt_carrie
         minted.extend(user_messages(&drain_allowing(&engine, &mut events).await));
     }
     engine
-        .send(Command::SendPrompt {
-            text: "/review is only a word here".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            session_mentions: Vec::new(),
-            peers: Vec::new(),
-        })
+        .send(prompt("/review is only a word here"))
         .await
         .expect("an idle engine accepts a prompt");
     minted.extend(user_messages(&drain_allowing(&engine, &mut events).await));

@@ -52,15 +52,9 @@
 //! here and never left to hang the turn. The rulings behind both — D550's and
 //! D552's — are stated in full in `crates/ganja-provider/AGENTS.md`.
 //!
-//! **A call's row opens when the model begins it** (**D559**). The exec that
-//! bridges a call arrives only once the model has finished its arguments —
-//! 51 seconds after it began, for the recorded write — so the call's
-//! `partial_tool_call`, which arrives at the start, opens the row instead:
-//! `decode` announces it under [`COMPOSING`](crate::provider::COMPOSING) and
-//! the pause names it under the same id. The partial names no tool, so the
-//! row reads `…` until the exec lands; `cursor/history` leaves such a row out
-//! of every composed state, and the engine never runs one
-//! (`tests/fixtures/cursor-partial-tool-call-probe.txt`).
+//! **A call's row opens when the model begins it** (**D559**): `decode`
+//! announces it under [`COMPOSING`](crate::provider::COMPOSING) and the pause
+//! names it; the full account is `decode::Mapping`'s doc.
 //!
 //! **The conversation rides cursor's blob channel** (**D553**). Every message
 //! before the newest user run is composed into the run request's
@@ -1049,9 +1043,7 @@ fn exec(fold: &mut Fold, bridge: &mut Option<Bridge>, ask: decode::ExecAsk) -> E
     };
 
     // `exec_id` rides beside the call id so this line can be read against the
-    // tool-call updates `decode.rs` logs. The recording that settled which id
-    // an announcement keys on read it off exactly this pair: `call` repeats
-    // the partial's `call_id`, and `exec_id` is a separate uuid (**D559**).
+    // tool-call updates `decode.rs` logs.
     tracing::debug!(
         provider = ID,
         exec = ask.id,
@@ -1202,13 +1194,8 @@ fn refused_mcp(ask: &decode::ExecAsk, result: proto::McpResult) -> Vec<Vec<u8>> 
 /// arrived whole, so there is nothing to stream and nothing gained by
 /// pretending otherwise.
 ///
-/// **The start is also the naming (D559).** A call whose partial already
-/// opened its row under [`COMPOSING`](crate::provider::COMPOSING) gets this
-/// start under the same id — the partial's `call_id` is the exec's
-/// `tool_call_id`, recorded — and the real name, which the engine reads as a
-/// rename of the row it already holds, possibly steps after the partial
-/// arrived. So each exec is marked claimed on the mapping here, and an
-/// announced call still unclaimed when the turn ends is a row no exec named.
+/// Each exec is claimed on the mapping here, which is what names a row a
+/// partial opened (**D559**, `decode::Mapping`).
 ///
 /// Returns the events; the fold leaves with the held run.
 fn pause(

@@ -358,12 +358,10 @@ impl Wire {
 /// credential, and [`ProviderError::Transport`] when its `headers` are not
 /// headers or its endpoint is somewhere a credential may not travel. All of
 /// them fail at startup, where the message is readable.
-/// The endpoint arrives destructured rather than read off `entry` here,
-/// because since **D563** a `provider` entry does not have to declare one —
-/// `[provider.chatgpt.options]` is an entry that configures a builtin. The
-/// loader proves both fields present for every id that reaches this function,
-/// and [`ProviderConfig::endpoint`] is where the caller does the proving, so
-/// there is no half-declared endpoint left for this to have an opinion about.
+///
+/// `dialect` and `base_url` are [`ProviderConfig::endpoint`]'s, which the
+/// caller has already proved present: since **D563** an entry may configure a
+/// builtin and declare no endpoint.
 fn configured_provider(
     id: &str,
     entry: &ProviderConfig,

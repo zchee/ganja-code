@@ -97,7 +97,20 @@ async fn a_server_tools_bytes_land_on_disk_and_its_row_holds_a_path() {
         "the row is under the clamp: {} bytes",
         search_output.len()
     );
-    assert!(search_output.contains("truncated"), "and says it was cut: {search_output:.200}");
+    // One line longer than the whole budget keeps no preview, so the row is
+    // the clamp's notice followed by the spill hint.
+    let notice = format!(
+        "\n\n...{} bytes truncated...\n\nThe tool call succeeded but the output was truncated. \
+         Full output saved to: ",
+        long.len()
+    );
+    assert!(search_output.starts_with(&notice), "and says it was cut: {search_output:.200}");
+    assert!(
+        search_output.ends_with(
+            "Use Grep to search the full content or Read with offset/limit to view specific sections."
+        ),
+        "and where to read the rest: {search_output}"
+    );
 
     let stored = serde_json::to_string(&transcript).expect("the transcript serializes");
     assert!(!stored.contains(IMAGE), "no base64 reached a stored row");

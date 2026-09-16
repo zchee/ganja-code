@@ -50,14 +50,13 @@
 
 mod shim_support;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use ganja_teammate_local::codex::Codex;
 use ganja_testkit::AllowSpawn;
-use shim_support::until;
+use shim_support::{RemoveOnDrop, probe_directory, until};
 
 /// How long one real codex turn gets before this test gives up on it.
 ///
@@ -86,41 +85,11 @@ fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<S
         .unwrap_or_default()
 }
 
-/// A probe directory removed when this is dropped — on the ordinary exit and on
-/// a failed assertion alike — and its parent with it if that left the parent
-/// empty.
-///
-/// Both of this test's directories live under a person's cache directory, for
-/// the reason the module doc gives, and a probe that leaves its own directory
-/// behind there is a probe that lied about cleaning up.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        if let Some(parent) = self.0.parent() {
-            // `remove_dir` refuses a non-empty directory, which is the point:
-            // only a `probes/` this run left empty goes with it.
-            let _ = std::fs::remove_dir(parent);
-        }
-    }
-}
-
-/// A directory of this run's own under `~/.cache/ganja/probes/`.
-fn probe_directory(label: &str) -> RemoveOnDrop {
-    let directory = PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
-        .join(".cache/ganja/probes")
-        .join(format!("codex-{label}-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).expect("a probe directory under the user's cache");
-
-    RemoveOnDrop(directory)
-}
-
 /// A git repository of its own, so the vendor's own outside-a-repo refusal is
 /// not what this measures — `--skip-git-repo-check` is on the never-composed
 /// column precisely so that refusal stays the vendor's to give.
 fn workspace() -> RemoveOnDrop {
-    let directory = probe_directory("work");
+    let directory = probe_directory("codex", "work");
     for arguments in [
         vec!["init", "-q"],
         vec!["config", "user.email", "probe@example.invalid"],
@@ -170,7 +139,7 @@ async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_compose
 
     let home = ganja_testkit::temp_dir();
     let work = workspace();
-    let outside = probe_directory("outside");
+    let outside = probe_directory("codex", "outside");
     let (registry, door) = shim_support::lead(
         home.path(),
         &work.0,

@@ -40,7 +40,7 @@ moderation = { model = "omni", policy = "strict" }
 "#;
 
 /// The keys the wire's typed request body writes itself, which a layer must
-/// never supply (the list fix-w2's strip in `gated` holds).
+/// never supply (the list the strip in `gated` holds).
 const OWN_KEYS: &[&str] =
     &["tools", "include", "instructions", "model", "stream", "store", "input"];
 
@@ -61,8 +61,8 @@ fn tier(seed: &Seed, model: &str) -> (Option<String>, Option<Source>) {
 const SOL: &str = "gpt-5.6-sol";
 const FIVE: &str = "gpt-5.5";
 
-/// **AC-23**, at the resolver: the charter's own example, rung by rung, on
-/// both Responses ids.
+/// The tier ladder at the resolver, rung by rung, on both Responses ids
+/// (**D563**).
 #[test]
 fn the_tier_ladder_resolves_per_model_per_choice_and_per_provider() {
     let configured = table(
@@ -128,8 +128,8 @@ fn a_provider_that_does_not_speak_responses_resolves_nothing() {
     assert_eq!(fast_tier(responses::ID, SOL), Some("priority"));
 }
 
-/// **AC-3**, the half W1 could not reach: `fast` is read as `priority` and the
-/// resolved value never carries the word.
+/// `fast` at the resolver: it is read as `priority` and the resolved value
+/// never carries the word.
 #[test]
 fn fast_is_resolved_as_priority_and_never_reaches_the_request() {
     let (resolved, _) =
@@ -140,7 +140,7 @@ fn fast_is_resolved_as_priority_and_never_reaches_the_request() {
     assert!(!rendered.contains("fast"), "{rendered}");
 }
 
-/// The W2 review's hardening, from the side that builds the value: the body
+/// Hardening, from the side that builds the value: the body
 /// the wire splices carries no key its typed body writes itself, and no
 /// directive either — whatever a table sets.
 #[test]

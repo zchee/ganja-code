@@ -1008,7 +1008,7 @@ struct Body<'a> {
     /// Nothing, where nobody asked for anything — a body with no `include` at
     /// all is the shape every request on this wire carried before there was
     /// anything to opt into (**D563**). Otherwise the ordered,
-    /// deduplicated union of three askers (**D563**): the sealed reasoning
+    /// deduplicated union of three askers: the sealed reasoning
     /// this wire replays, whatever the effort's own map asks for, and a
     /// configured `include`. A union rather than a layer, because this field
     /// is a list and the splice replaces lists: the body is the last layer,
@@ -1366,23 +1366,18 @@ impl<'a> Body<'a> {
         // After every function entry rather than beside its twin, so that a
         // function tool's position never depends on a config key and a
         // request stays diffable against the same session without one.
-        for name in &request.responses.custom_tools {
-            let Some(tool) = request.tools.iter().find(|tool| tool.name == *name) else {
-                tracing::debug!(
-                    tool = name.as_str(),
-                    reason = "not on this request's roster",
-                    "a custom_tools name was advertised as a function"
-                );
-                continue;
+        for (name, advertised) in custom_advertisement(request) {
+            let tool = match advertised {
+                Ok((tool, _)) => tool,
+                Err(reason) => {
+                    tracing::debug!(
+                        tool = name.as_str(),
+                        reason,
+                        "a custom_tools name was advertised as a function"
+                    );
+                    continue;
+                }
             };
-            if single_string_argument(&tool.schema).is_none() {
-                tracing::debug!(
-                    tool = name.as_str(),
-                    reason = "its schema is not exactly one required string argument",
-                    "a custom_tools name was advertised as a function"
-                );
-                continue;
-            }
             tools.push(ToolSpec::Custom {
                 kind: CUSTOM,
                 name: alias(&tool.name, OPENAI_CAP),
@@ -2268,6 +2263,24 @@ fn single_string_argument(schema: &Value) -> Option<&str> {
     (schema["properties"][required]["type"].as_str() == Some("string")).then_some(required)
 }
 
+/// Each name `request` lists in `custom_tools`, beside the roster tool and the
+/// argument it is advertised custom with, or the reason it is not: listed, on
+/// the roster, and single-string. [`Body::new`] advertises by it and logs each
+/// miss; [`CustomArguments::of`] maps calls back by it.
+fn custom_advertisement(
+    request: &ChatRequest,
+) -> impl Iterator<Item = (&String, Result<(&ToolDefinition, &str), &'static str>)> {
+    request.responses.custom_tools.iter().map(|name| {
+        let Some(tool) = request.tools.iter().find(|tool| tool.name == *name) else {
+            return (name, Err("not on this request's roster"));
+        };
+        let advertised = single_string_argument(&tool.schema)
+            .map(|argument| (tool, argument))
+            .ok_or("its schema is not exactly one required string argument");
+        (name, advertised)
+    })
+}
+
 /// The argument each tool this request advertised as custom takes its `input`
 /// as, by registry name — what the mapper needs to turn a custom call back
 /// into an ordinary argument object.
@@ -2275,17 +2288,12 @@ fn single_string_argument(schema: &Value) -> Option<&str> {
 struct CustomArguments(HashMap<String, String>);
 
 impl CustomArguments {
-    /// The map for the custom tools `request` actually advertised: listed,
-    /// on the roster, and single-string — the same test [`Body::new`] makes.
+    /// The map for the custom tools `request` actually advertised.
     fn of(request: &ChatRequest) -> Self {
         Self(
-            request
-                .responses
-                .custom_tools
-                .iter()
-                .filter_map(|name| {
-                    let tool = request.tools.iter().find(|tool| tool.name == *name)?;
-                    let argument = single_string_argument(&tool.schema)?;
+            custom_advertisement(request)
+                .filter_map(|(name, advertised)| {
+                    let (_, argument) = advertised.ok()?;
                     Some((name.clone(), argument.to_owned()))
                 })
                 .collect(),
@@ -2425,7 +2433,7 @@ fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value>
             stream_options.insert("include_obfuscation".to_owned(), INCLUDE_OBFUSCATION.into());
             layer.insert("stream_options".to_owned(), Value::Object(stream_options));
             if roster > 0 {
-                layer.insert("tool_choice".to_owned(), TOOL_CHOICE_AUTO.into());
+                layer.insert(TOOL_CHOICE.to_owned(), TOOL_CHOICE_AUTO.into());
             }
             if seals_reasoning(model) {
                 let mut reasoning = Map::new();
@@ -2435,7 +2443,7 @@ fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value>
         }
         Backend::OpenRouter => {
             if roster > 0 {
-                layer.insert("tool_choice".to_owned(), TOOL_CHOICE_AUTO.into());
+                layer.insert(TOOL_CHOICE.to_owned(), TOOL_CHOICE_AUTO.into());
             }
         }
         Backend::Opencode(_) | Backend::Compat => {}

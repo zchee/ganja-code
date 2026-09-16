@@ -128,10 +128,8 @@ fn a_walk_forwards_steps_one_prompt_at_a_time_and_then_runs_out() {
     assert_eq!(redo_anchor(&history, &next), None);
 }
 
-/// **D561**. An undo hands the editor back what the person typed: the slash
-/// line for a command expansion, where the template it expanded to would be a
-/// page they never wrote and, sent again, a prompt that skips the command's
-/// own door; and the text itself for a prompt they typed.
+/// **D561**. An undo hands the editor back the slash line for a command
+/// expansion and the text itself for a typed prompt ([`prompt_at`]).
 #[test]
 fn an_undo_hands_back_the_line_a_command_was_typed_as_and_a_typed_prompt_as_itself() {
     let expansion = Message {

@@ -215,11 +215,6 @@ pub struct Data {
     /// served (**D563**), as `Engine::service_tier` last answered. [`None`] —
     /// every provider that sends no tier at all — renders no `Service tier:`
     /// row, the same honest-absence rule everything else here is drawn under.
-    ///
-    /// **This is where the served tier is.** The status bar draws the request
-    /// alone, because the seat was measured to echo `default` whatever it was
-    /// sent; the panel is the surface that can afford to say both without one
-    /// of them being mistaken for the other.
     pub tier: Option<ganja_core::responses_ladder::TierView>,
 }
 

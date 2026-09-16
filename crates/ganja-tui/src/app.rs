@@ -2160,9 +2160,9 @@ impl App {
     ///
     /// Polled rather than folded off [`CoreEvent::FastChanged`], for
     /// [`App::poll_deadline`]'s reason and one more: what this answers moves on
-    /// a `/model`, a `/plugin` Reload and a resumed row's restored choice as
-    /// well as on a `/fast`, and only the first of those four announces itself.
-    /// One poll of the engine's own resolution is what keeps the bar from
+    /// a `/fast`, a resumed row's restored choice and a new session, which
+    /// announce themselves, and on a `/model` and a `/plugin` Reload, which do
+    /// not. One poll of the engine's own resolution is what keeps the bar from
     /// disagreeing with the request.
     ///
     /// No unconditional redraw beside it, unlike the deadline's: this segment's
@@ -2919,14 +2919,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Sends the engine one [`Command::SetFast`] and says what it did
-    /// (**D563**).
-    ///
-    /// [`fast_on_platform`]'s sentence rides an `on` over `openai` and only
-    /// there: the
-    /// platform bills the tier per request at a premium rate, and one keystroke
-    /// away is exactly the distance at which somebody should be told so. The
-    /// seat is a subscription and gets no such sentence.
+    /// Sends the engine one [`Command::SetFast`] (**D563**); over `openai` an
+    /// `on` also writes [`fast_on_platform`]'s notice.
     async fn send_fast(&mut self, fast: Option<FastChoice>) {
         if let Err(refusal) = self.engine.send(Command::SetFast { fast }).await {
             self.status.set_notice(Some(refusal.to_string()));
@@ -2935,8 +2929,7 @@ impl App {
         // The bar follows the engine's own resolution on the next tick, the way
         // it does after a `/model`; what is written here is only the sentence.
         if fast == Some(FastChoice::On) && self.provider == responses::ID {
-            let tier = self.engine.fast_tier(&self.model).unwrap_or(options::DEFAULT_FAST_TIER);
-            self.status.set_notice(Some(fast_on_platform(tier)));
+            self.status.set_notice(Some(fast_on_platform(options::DEFAULT_FAST_TIER)));
         } else {
             self.status.set_notice(None);
         }

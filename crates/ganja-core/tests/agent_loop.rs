@@ -228,6 +228,24 @@ fn prompt() -> Command {
     }
 }
 
+/// An engine with no store whose only tool is a `lookup` recorder, and that
+/// recorder's log of the arguments each call ran with.
+fn lookup_engine(provider: Arc<dyn Provider>) -> (Engine, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+    );
+    (engine, calls)
+}
+
+/// The start that announces call `id` before the model has named its tool.
+fn composing(id: &str) -> ProviderEvent {
+    ProviderEvent::ToolCallStart { id: id.to_owned(), name: COMPOSING.to_owned() }
+}
+
 /// The loop advertises `Registry::definitions()` on every request, so the
 /// builtin set has to produce them without panicking — this is what makes it
 /// safe for a frontend to construct its engine over `with_builtins`.
@@ -994,7 +1012,7 @@ fn tool_names(request: &ChatRequest) -> Vec<(&str, &str)> {
 #[tokio::test]
 async fn a_call_announced_before_it_is_named_is_renamed_in_place_and_runs_under_its_name() {
     let step_one = vec![
-        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: COMPOSING.to_owned() },
+        composing("call_1"),
         ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "shell".to_owned() },
         ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: r#"{"key":"a"}"#.to_owned() },
         ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
@@ -1065,64 +1083,17 @@ async fn a_call_announced_before_it_is_named_is_renamed_in_place_and_runs_under_
     assert_eq!(tool_names(&requests[1]), vec![("call_1", "shell")], "and the transcript names it");
 }
 
-/// **D559, the other half of the rule.** A second start under the name the
-/// call already has says nothing new, so it draws nothing: one row, and the
-/// only update before it runs is the one its arguments completing earns.
-#[tokio::test]
-async fn a_second_start_under_the_same_name_changes_nothing() {
-    let step_one = vec![
-        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
-        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
-        ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: r#"{"key":"a"}"#.to_owned() },
-        ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ];
-    let (provider, _requests) = ScriptedProvider::strict(
-        "step-scripted",
-        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
-    );
-    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(vec![tool])),
-        Permissions::default(),
-    );
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
-
-    engine.send(prompt()).await.expect("an idle engine accepts");
-    let seen = drain(&mut events).await;
-
-    let shapes: Vec<String> = seen.iter().map(shape).collect();
-    assert_eq!(
-        shapes,
-        vec![
-            "started:user",
-            "started:assistant",
-            "part:step_start",
-            "part:tool_pending:call_1",
-            "updated:pending:call_1",
-            "part:step_finish:0/0",
-            "updated:running:call_1",
-            "updated:completed:call_1",
-            "part:step_start",
-            "part:step_finish:0/0",
-            "finished:completed",
-        ]
-    );
-    assert_eq!(calls.lock().expect("the call log is never poisoned").len(), 1);
-}
-
 /// **D559, scoped.** Only a call still held under `COMPOSING` is renamed. A
-/// second start that names a call already named — a degenerate wire reusing
-/// one id for two calls, as chat-completions does with `""` on parallel
-/// calls — changes nothing, exactly as before D559: one row, the first name,
-/// no redraw, and the call runs under the name it opened with. Nor can a
+/// second start on a call already named changes nothing, exactly as before
+/// D559: under the name it already has it says nothing new, and under another
+/// it is a degenerate wire reusing one id for two calls, as chat-completions
+/// does with `""` on parallel calls. Either way there is one row, the first
+/// name, no redraw, and the call runs under the name it opened with. Nor can a
 /// start under `COMPOSING` turn a named call back into a placeholder the
 /// engine would withhold.
 #[tokio::test]
-async fn a_second_start_naming_an_already_named_call_differently_changes_nothing() {
-    for second in ["shell", COMPOSING] {
+async fn a_second_start_on_an_already_named_call_changes_nothing() {
+    for second in ["lookup", "shell", COMPOSING] {
         let step_one = vec![
             ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
             ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: second.to_owned() },
@@ -1137,13 +1108,7 @@ async fn a_second_start_naming_an_already_named_call_differently_changes_nothing
             "step-scripted",
             vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
         );
-        let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-        let engine = Engine::new(
-            provider,
-            "scripted-model",
-            Arc::new(Registry::new(vec![tool])),
-            Permissions::default(),
-        );
+        let (engine, calls) = lookup_engine(provider);
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
         engine.send(prompt()).await.expect("an idle engine accepts");
@@ -1315,8 +1280,7 @@ async fn a_rename_is_stored_before_the_calls_arguments_end() {
 /// unknown-tool error.
 #[tokio::test]
 async fn a_call_announced_across_a_pause_keeps_its_row_and_runs_on_the_step_that_names_it() {
-    let mut step_one =
-        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    let mut step_one = vec![composing("call_w")];
     step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let mut step_two = call("call_w", "lookup", r#"{"key":"w"}"#);
@@ -1327,13 +1291,7 @@ async fn a_call_announced_across_a_pause_keeps_its_row_and_runs_on_the_step_that
     ];
     let (provider, requests) =
         ScriptedProvider::strict("step-scripted", vec![step_one, step_two, step_three]);
-    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(vec![tool])),
-        Permissions::default(),
-    );
+    let (engine, calls) = lookup_engine(provider);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
@@ -1413,18 +1371,12 @@ async fn a_call_announced_and_never_named_is_closed_unrun_when_the_stream_ends()
     let (provider, requests) = ScriptedProvider::strict(
         "step-scripted",
         vec![vec![
-            ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() },
+            composing("call_w"),
             ProviderEvent::TextDelta("On second thought, no.".to_owned()),
             ProviderEvent::Finish(FinishReason::Completed),
         ]],
     );
-    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(vec![tool])),
-        Permissions::default(),
-    );
+    let (engine, calls) = lookup_engine(provider);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
@@ -1460,8 +1412,7 @@ async fn a_call_announced_and_never_named_is_closed_unrun_when_the_stream_ends()
 /// one open, so a new turn never inherits one.
 #[tokio::test]
 async fn cancelling_while_an_announced_call_waits_across_a_pause_closes_it_cancelled() {
-    let mut step_one =
-        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    let mut step_one = vec![composing("call_w")];
     step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one]);
@@ -1501,20 +1452,13 @@ async fn cancelling_while_an_announced_call_waits_across_a_pause_closes_it_cance
 /// own: the step seeded it, so the step's interruption closes it.
 #[tokio::test]
 async fn a_provider_failure_on_the_step_after_a_pause_strands_the_announced_call() {
-    let mut step_one =
-        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    let mut step_one = vec![composing("call_w")];
     step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let step_two =
         vec![ProviderEvent::Failed(ProviderError::Transport("connection reset".to_owned()))];
     let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one, step_two]);
-    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(vec![tool])),
-        Permissions::default(),
-    );
+    let (engine, calls) = lookup_engine(provider);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
@@ -1544,21 +1488,14 @@ async fn a_provider_failure_on_the_step_after_a_pause_strands_the_announced_call
 /// would have seeded the row never began reading.
 #[tokio::test]
 async fn a_provider_refusing_the_step_after_a_pause_strands_the_announced_call() {
-    let mut step_one =
-        vec![ProviderEvent::ToolCallStart { id: "call_w".to_owned(), name: COMPOSING.to_owned() }];
+    let mut step_one = vec![composing("call_w")];
     step_one.extend(call("call_r", "lookup", r#"{"key":"r"}"#));
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let provider = Prepared::new(vec![
         Ok(stream::iter(step_one).boxed()),
         Err(ProviderError::Transport("connection refused".to_owned())),
     ]);
-    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(vec![tool])),
-        Permissions::default(),
-    );
+    let (engine, calls) = lookup_engine(provider);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");

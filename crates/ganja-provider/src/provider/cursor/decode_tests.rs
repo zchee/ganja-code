@@ -144,17 +144,25 @@ fn mapped(body: &[u8], eof: bool) -> Vec<ProviderEvent> {
 /// Like [`mapped`], also collecting what the mapping asked the caller
 /// to answer.
 fn mapped_asks(body: &[u8], eof: bool) -> (Vec<ProviderEvent>, Vec<Ask>) {
+    let mut mapping = Mapping::default();
+    let (mut events, asks) = fed(&mut mapping, body);
+    if eof {
+        mapping.truncated(&mut events);
+    }
+
+    (events, asks)
+}
+
+/// Runs `body` through the real splitter into a [`Mapping`] the test holds,
+/// so a test can claim or refuse ids between two bodies.
+fn fed(mapping: &mut Mapping, body: &[u8]) -> (Vec<ProviderEvent>, Vec<Ask>) {
     let mut splitter = connect::Splitter::default();
     splitter.push(body);
 
-    let mut mapping = Mapping::default();
     let mut events = Vec::new();
     let mut asks = Vec::new();
     while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
         asks.extend(mapping.frame(&frame, &mut events));
-    }
-    if eof {
-        mapping.truncated(&mut events);
     }
 
     (events, asks)
@@ -499,13 +507,20 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
     assert_eq!(super::update_arm(42), "field 42");
 }
 
+/// The start a partial opens a call's row with.
+fn composing(call_id: &str) -> ProviderEvent {
+    ProviderEvent::ToolCallStart { id: call_id.to_owned(), name: COMPOSING.to_owned() }
+}
+
 /// The three tool-call arms, sent the way the server sends them and read the
 /// way this build now does: each decodes into a field of its own — field 7 is
 /// no longer an unknown the skip log reports — carrying every member the
 /// descriptor gives it at the number it gives it. Only the partial becomes an
 /// event, the `COMPOSING` start that opens the call's row (**D559**); the
 /// started and completed arms hand the session nothing, and the turn goes on
-/// past all three to its own text and finish.
+/// past all three to its own text and finish. No exec claims the call, so its
+/// start is all the session hears of it, which is exactly what the engine
+/// closes a placeholder row unrun on.
 #[test]
 fn each_tool_call_update_decodes_into_its_own_field_and_only_the_partial_is_an_event() {
     let tool_call = mcp_write_tool_call();
@@ -531,7 +546,7 @@ fn each_tool_call_update_decodes_into_its_own_field_and_only_the_partial_is_an_e
     assert_eq!(
         events,
         vec![
-            ProviderEvent::ToolCallStart { id: "call-1".to_owned(), name: COMPOSING.to_owned() },
+            composing("call-1"),
             ProviderEvent::TextDelta("written".to_owned()),
             ProviderEvent::Finish(FinishReason::Completed),
         ],
@@ -615,11 +630,11 @@ fn a_tool_calls_arm_is_named_by_the_descriptor_by_its_number_or_as_missing() {
     assert_eq!(super::tool_call_arm(None), "absent");
 }
 
-/// The debug line is the measurement W1 exists for, so what it says is pinned:
-/// the ids, which tool, and a partial's argument text **by length only** —
-/// that text is the model's output, and a canary in it must never reach the
-/// log. The mcp members appear only on a call that is one, and the length only
-/// on the arm that has argument text.
+/// The debug line is the measurement D559 was decided from, so what it says is
+/// pinned: the ids, which tool, and a partial's argument text **by length
+/// only** — that text is the model's output, and a canary in it must never
+/// reach the log. The mcp members appear only on a call that is one, and the
+/// length only on the arm that has argument text.
 #[test]
 fn a_tool_call_update_is_logged_by_its_ids_and_its_tool_and_never_by_its_argument_text() {
     let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
@@ -644,7 +659,7 @@ fn a_tool_call_update_is_logged_by_its_ids_and_its_tool_and_never_by_its_argumen
 
     assert_eq!(
         mapped(&body, false),
-        vec![ProviderEvent::ToolCallStart { id: "call-1".to_owned(), name: COMPOSING.to_owned() }],
+        vec![composing("call-1")],
         "the mcp partial announces its call; the absent one and the started arm say nothing"
     );
 
@@ -706,11 +721,6 @@ fn recorded_partial(call_id: &str) -> Vec<u8> {
     )
 }
 
-/// The start a partial opens a call's row with.
-fn composing(call_id: &str) -> ProviderEvent {
-    ProviderEvent::ToolCallStart { id: call_id.to_owned(), name: COMPOSING.to_owned() }
-}
-
 /// **D559.** A partial on the bridged channel opens its call's row the moment
 /// it arrives, under `COMPOSING` and the call's own id — and only once: a
 /// second partial for an id already announced says nothing, while a second
@@ -756,51 +766,20 @@ fn a_partial_that_names_no_bridged_call_announces_nothing() {
 /// would turn a real call back into a placeholder the engine will not run.
 #[test]
 fn an_id_an_exec_has_claimed_is_never_announced_again() {
-    let mapping_of = |mapping: &mut Mapping, body: &[u8]| {
-        let mut splitter = connect::Splitter::default();
-        splitter.push(body);
-        let mut events = Vec::new();
-        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
-            assert!(mapping.frame(&frame, &mut events).is_none(), "a partial is not a question");
-        }
-
-        events
-    };
     let mut mapping = Mapping::default();
 
-    assert_eq!(mapping_of(&mut mapping, &recorded_partial("toolu_A")), vec![composing("toolu_A")]);
+    let (events, asks) = fed(&mut mapping, &recorded_partial("toolu_A"));
+    assert!(asks.is_empty(), "a partial is not a question: {asks:?}");
+    assert_eq!(events, vec![composing("toolu_A")]);
     mapping.claim("toolu_A");
-    assert!(
-        mapping_of(&mut mapping, &recorded_partial("toolu_A")).is_empty(),
-        "announced, then claimed: a repeat opens nothing"
-    );
+    let (events, asks) = fed(&mut mapping, &recorded_partial("toolu_A"));
+    assert!(asks.is_empty(), "a partial is not a question: {asks:?}");
+    assert!(events.is_empty(), "announced, then claimed: a repeat opens nothing");
 
     mapping.claim("toolu_R");
-    assert!(
-        mapping_of(&mut mapping, &recorded_partial("toolu_R")).is_empty(),
-        "bridged with no partial, then partialled: nothing either"
-    );
-}
-
-/// **D559.** A turn the server ends with an announced call no exec claimed
-/// hands the session that call's start and nothing more about it — no second
-/// start naming it, no argument, no end — which is exactly what the engine
-/// closes a placeholder row unrun on. The reply around it still arrives.
-#[test]
-fn a_turn_that_ends_with_an_announced_call_unclaimed_leaves_its_start_unanswered() {
-    let mut body = recorded_partial("toolu_A");
-    body.extend(framed(text("On second thought, no.")));
-    body.extend(framed(turn_ended()));
-    body.extend(end_stream("{}"));
-
-    assert_eq!(
-        mapped(&body, false),
-        vec![
-            composing("toolu_A"),
-            ProviderEvent::TextDelta("On second thought, no.".to_owned()),
-            ProviderEvent::Finish(FinishReason::Completed),
-        ]
-    );
+    let (events, asks) = fed(&mut mapping, &recorded_partial("toolu_R"));
+    assert!(asks.is_empty(), "a partial is not a question: {asks:?}");
+    assert!(events.is_empty(), "bridged with no partial, then partialled: nothing either");
 }
 
 /// **D559.** The turn's end names, sorted, exactly the announced calls no
@@ -811,25 +790,19 @@ fn a_turn_that_ends_with_an_announced_call_unclaimed_leaves_its_start_unanswered
 #[test]
 fn a_turn_that_ends_with_announced_calls_unclaimed_names_only_those_on_the_log() {
     let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
-    let feed = |mapping: &mut Mapping, body: &[u8]| {
-        let mut splitter = connect::Splitter::default();
-        splitter.push(body);
-        let mut events = Vec::new();
-        while let Some(frame) = splitter.frame().expect("the fixture bodies parse") {
-            assert!(mapping.frame(&frame, &mut events).is_none(), "no frame here is a question");
-        }
-
-        events
-    };
     let mut mapping = Mapping::default();
     for call_id in ["toolu_B", "toolu_A", "toolu_C", "toolu_D"] {
-        assert_eq!(feed(&mut mapping, &recorded_partial(call_id)), vec![composing(call_id)]);
+        let (events, asks) = fed(&mut mapping, &recorded_partial(call_id));
+        assert!(asks.is_empty(), "no frame here is a question: {asks:?}");
+        assert_eq!(events, vec![composing(call_id)]);
     }
     mapping.claim("toolu_C");
     mapping.refused("toolu_D");
     mapping.refused("toolu_R");
 
-    assert!(feed(&mut mapping, &framed(turn_ended())).is_empty(), "a turn's end is no event");
+    let (events, asks) = fed(&mut mapping, &framed(turn_ended()));
+    assert!(asks.is_empty(), "no frame here is a question: {asks:?}");
+    assert!(events.is_empty(), "a turn's end is no event");
 
     let logged = log.logged();
     let refusals: Vec<&str> = logged

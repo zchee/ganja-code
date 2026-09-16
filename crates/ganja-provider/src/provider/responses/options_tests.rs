@@ -101,7 +101,7 @@ fn the_custom_tool_list_is_exactly_the_builtins_with_one_required_string() {
     let derived: BTreeSet<String> = registry
         .definitions()
         .into_iter()
-        .filter(|definition| takes_one_required_string(&definition.schema))
+        .filter(|definition| super::super::single_string_argument(&definition.schema).is_some())
         .map(|definition| definition.name)
         .collect();
     let listed: BTreeSet<String> = CUSTOM_TOOLS.iter().map(|name| (*name).to_owned()).collect();
@@ -110,19 +110,6 @@ fn the_custom_tool_list_is_exactly_the_builtins_with_one_required_string() {
         listed, derived,
         "CUSTOM_TOOLS and the builtins with exactly one required string argument have drifted"
     );
-}
-
-/// The predicate [`CUSTOM_TOOLS`]' doc states, over a tool's generated schema.
-fn takes_one_required_string(schema: &Value) -> bool {
-    let required = schema["required"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let [only] = required else {
-        return false;
-    };
-    let Some(name) = only.as_str() else {
-        return false;
-    };
-
-    schema["properties"][name]["type"].as_str() == Some("string")
 }
 
 /// The one model measured to have a fast tier of its own answers it, and
@@ -171,19 +158,4 @@ fn only_the_two_responses_ids_read_options() {
     assert_eq!(include(CHATGPT_ID), Some(SEAT_INCLUDE));
     assert_eq!(include(ID), Some(PLATFORM_INCLUDE));
     assert_eq!(include("anthropic"), None);
-}
-
-/// A default [`RequestOptions`] asks for nothing at all — the shape every
-/// request that carries no configuration is built from.
-#[test]
-fn a_default_request_option_set_asks_for_nothing() {
-    let options = RequestOptions::default();
-
-    assert_eq!(options.service_tier, None);
-    assert_eq!(options.text_format, None);
-    assert_eq!(options.reasoning_summary, None);
-    assert!(options.custom_tools.is_empty());
-    assert!(options.server_tools.is_empty());
-    assert!(options.include.is_empty());
-    assert!(options.body.is_empty());
 }

@@ -247,12 +247,6 @@ pub struct Status {
     teammates: usize,
     /// Whether the next request asks for a fast `service_tier` (**D563**), as
     /// `App::poll_fast` last resolved it off `Engine::service_tier`.
-    ///
-    /// A bool rather than the tier literal, because the segment is the word
-    /// `fast` and nothing else: `priority` and `ultrafast` are two vendor
-    /// spellings of one fact a person acts on, and a bar that printed the
-    /// spelling would make somebody learn which of the two their model takes
-    /// to read it. The literal is `/usage`'s row, beside what was served.
     fast: bool,
     /// When this sitting's time budget runs out (**D557**), or [`None`] while
     /// nobody has set one — which is the absent-config bar and every session
