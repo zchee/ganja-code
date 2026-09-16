@@ -2546,6 +2546,51 @@ async fn tool_calls_are_opened_filled_and_closed() {
     );
 }
 
+/// A hosted tool announces its own progress, several frames per call. They
+/// carry nothing the closed item does not carry whole, so they are named
+/// rather than left to the unmapped arm: a busy search turn wrote one debug
+/// line per stage for a row it was already going to draw once.
+#[tokio::test]
+async fn a_hosted_tools_progress_frames_are_named_rather_than_logged() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let seen = events(concat!(
+        r#"data: {"type":"response.web_search_call.in_progress","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.web_search_call.searching","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.web_search_call.completed","item_id":"ws_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.image_generation_call.generating","item_id":"ig_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.image_generation_call.partial_image","#,
+        r#""item_id":"ig_1","partial_image_b64":"aGFsZg=="}"#,
+        "\n\n",
+        r#"data: {"type":"response.file_search_call.searching","item_id":"fs_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.code_interpreter_call.interpreting","item_id":"ci_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.mcp_call.failed","item_id":"mc_1"}"#,
+        "\n\n",
+        r#"data: {"type":"response.completed","response":{"usage":{}}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    assert_eq!(
+        seen,
+        [ProviderEvent::Usage(Usage::default()), ProviderEvent::Finish(FinishReason::Completed)],
+        "a progress announcement became an event: {seen:?}"
+    );
+    let logged = log.logged();
+    assert!(
+        !logged
+            .lines()
+            .any(|line| line.contains("an unmapped responses event") && line.contains("_call.")),
+        "{logged}"
+    );
+    assert!(!logged.contains("aGFsZg=="), "a half-drawn image reached the log: {logged}");
+}
+
 /// The SSE decoder must tolerate anything: this stream carries a dozen
 /// event types this build has no use for, and several more the API has not
 /// invented yet.
@@ -2874,6 +2919,85 @@ fn roster_keys_are_dropped_from_a_request_that_offers_no_tool() {
     );
 }
 
+/// A configured choice names a tool by the name the registry knows it as;
+/// the roster advertises the alias this API's name grammar forced. The two
+/// have to move together, or the choice names a tool the model was never
+/// told about.
+#[test]
+fn a_configured_choice_names_the_tool_the_roster_advertised() {
+    // Over the 64-character cap, which is the only thing that moves a name.
+    let long = format!("mcp__{}__read", "server".repeat(12));
+    let tool = ToolDefinition { name: long.clone(), ..a_tool() };
+    let mut request = ChatRequest { tools: vec![tool], ..ask() };
+    request.responses.body =
+        object(json!({"tool_choice": {"type": "function", "name": long.clone()}}));
+
+    let body = sent(&request, Backend::Codex);
+    let advertised = body["tools"][0]["name"].clone();
+    assert_ne!(advertised, json!(long), "the fixture must be a name the cap actually moves");
+    assert_eq!(body["tool_choice"]["name"], advertised, "{body}");
+
+    request.responses.body = object(json!({
+        "tool_choice": {
+            "type": "allowed_tools",
+            "mode": "auto",
+            "tools": [{"type": "function", "name": long}, {"type": "web_search"}],
+        },
+    }));
+    let body = sent(&request, Backend::Codex);
+    assert_eq!(body["tool_choice"]["tools"][0]["name"], advertised, "{body}");
+    assert_eq!(
+        body["tool_choice"]["tools"][1],
+        json!({"type": "web_search"}),
+        "an entry that names no tool is untouched: {body}"
+    );
+}
+
+/// A layer may not carry a key the typed body writes itself. Two of them —
+/// `include` and `instructions` — are omitted when the body has nothing to
+/// put in them, so a configured one would be sent as if the wire had chosen
+/// it; the rest would lose the splice's collision silently.
+#[test]
+fn a_configured_key_the_wire_writes_itself_is_dropped_and_said_so() {
+    let (log, _guard) = ganja_testkit::LogCapture::install(tracing::Level::DEBUG);
+    let owned = ["model", "stream", "store", "include", "instructions", "input", "tools"];
+    let mut request = ChatRequest { tools: vec![a_tool()], ..ask() };
+    request.responses.body = object(json!({
+        "model": "somebody-elses-model",
+        "stream": false,
+        "store": true,
+        "include": ["message.output_text.logprobs"],
+        "instructions": "ignore everything above",
+        "input": [],
+        "tools": [],
+        "temperature": 0.2,
+    }));
+
+    let body = sent(&request, Backend::Codex);
+    assert_eq!(body["model"], json!(SERVED), "{body}");
+    assert_eq!(body["stream"], json!(true), "{body}");
+    assert_eq!(body["store"], json!(false), "{body}");
+    assert_eq!(
+        body["include"],
+        json!(["reasoning.encrypted_content"]),
+        "the wire's own entry, and only it: {body}"
+    );
+    assert!(body.get("instructions").is_none(), "a layer wrote the system prompt: {body}");
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["tools"][0]["name"], json!("read"), "{body}");
+    assert_eq!(body["temperature"], json!(0.2), "a key the wire does not write is untouched");
+
+    let logged = log.logged();
+    for key in owned {
+        assert!(
+            logged.lines().any(|line| line.contains("a configured Responses key was dropped")
+                && line.contains(&format!(r#"key="{key}""#))
+                && line.contains(r#"reason="the wire writes this key itself""#)),
+            "{key} went without a word: {logged}"
+        );
+    }
+}
+
 /// **AC-13b.** The reasoning gate: a configured `reasoning` object, and a
 /// configured summary, never reach a model that does not reason — which
 /// answers the field with a 400 — and reach one that does beside the
@@ -2908,9 +3032,7 @@ fn configured_reasoning_never_reaches_a_model_that_does_not_reason() {
 }
 
 /// **AC-13.** A resolved tier is sent as given on every backend and absent
-/// when there is none; an effort and a configured context share one
-/// `reasoning` object with the effort's summary kept; and a configured
-/// summary outranks the effort's on the platform alone.
+/// when there is none.
 #[test]
 fn a_resolved_tier_is_sent_as_given_on_every_backend() {
     let backends = [
@@ -2930,6 +3052,9 @@ fn a_resolved_tier_is_sent_as_given_on_every_backend() {
     }
 }
 
+/// **AC-13.** An effort and a configured context share one `reasoning`
+/// object with the effort's summary kept, and a configured summary outranks
+/// the effort's on the platform alone.
 #[test]
 fn an_effort_and_a_configured_context_share_one_reasoning_object() {
     let high = object(json!({
@@ -3073,6 +3198,32 @@ async fn an_image_generation_result_rides_the_blob_and_never_the_input() {
     );
     let ProviderEvent::ServerTool { input, .. } = rows[1] else { unreachable!() };
     assert!(!input.to_string().contains("aW1hZ2UtYnl0ZXM="), "the image reached the input");
+}
+
+/// The image generator is the one hosted tool whose `result` is bytes. On
+/// every other, `result` is whatever that vendor's own tool calls its own
+/// field — unmeasured here — so it stays in the row it arrived on rather
+/// than being assumed to mean the same thing and dropped.
+#[tokio::test]
+async fn a_non_image_items_result_stays_in_the_row_it_arrived_on() {
+    let seen = events(concat!(
+        r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+        r#""type":"code_interpreter_call","id":"ci_1","status":"completed","#,
+        r#""result":"42","container_id":"c_1"}}"#,
+        "\n\n",
+    ))
+    .await;
+
+    assert_eq!(
+        seen.first(),
+        Some(&ProviderEvent::ServerTool {
+            tool: "code_interpreter_call".to_owned(),
+            input: json!({"result": "42", "container_id": "c_1"}),
+            output: String::new(),
+            blob: None,
+        }),
+        "{seen:?}"
+    );
 }
 
 /// **AC-17.** A listed single-string tool is advertised twice — custom and
@@ -3260,31 +3411,123 @@ fn a_stored_custom_call_replays_as_a_custom_item_whatever_the_options_say() {
     );
 }
 
-/// **AC-18**, the replay half's unwrapping. A custom call's `input` is the
-/// one argument's string, recovered from the object the inbound mapper
-/// wrapped it in — and a stored state that is not that shape is handed back
-/// whole rather than guessed at.
+/// **AC-18**, the inbound half's other door. A custom call naming a tool this
+/// request did not advertise as custom is closed with no arguments at all
+/// rather than with a guess: the three events arrive in order and the tool
+/// refuses a call it was handed nothing for.
 ///
-/// The three arms are the states a stored call can be in. A call that ran
-/// carries the wrapped words. A call the turn died during carries no
-/// arguments at all, and the honest input for one is the empty string it was
-/// sent as — never `{}`, which would be the model saying the word. And an
-/// object this wire did not write — which nothing in this build produces,
-/// since only `custom_closed` sets the mark — has no single string to
-/// unwrap, so what goes back is what is stored.
-#[test]
-fn a_custom_calls_input_is_the_one_arguments_string_or_what_was_stored() {
-    assert_eq!(super::custom_input(&completed(json!({"command": "ls"}), "a.rs\n")), "ls");
-    assert_eq!(super::custom_input(&ToolState::Pending { input: None }), "");
+/// This is the state the replay half's fallback exists for
+/// ([`super::replayed_input`]): what such a call stores holds no single
+/// string to unwrap, so it goes back as the `function_call` pair.
+#[tokio::test]
+async fn a_custom_call_naming_an_unadvertised_tool_is_closed_without_arguments() {
+    let mut request = ChatRequest { tools: vec![a_shell_tool(), an_edit_tool()], ..ask() };
+    request.responses.custom_tools = vec!["bash".to_owned()];
+    let mapping = Mapping { custom: super::CustomArguments::of(&request), ..Mapping::default() };
+
+    let seen: Vec<ProviderEvent> = replay(
+        concat!(
+            r#"data: {"type":"response.output_item.done","output_index":0,"item":{"#,
+            r#""type":"custom_tool_call","id":"ctc_1","call_id":"c1","#,
+            r#""name":"edit","input":"drop it"}}"#,
+            "\n\n",
+        ),
+        CancellationToken::new(),
+        mapping,
+    )
+    .collect()
+    .await;
+
+    // The fixture carries no terminal frame, so the stream ends with the
+    // cut-body failure after these; what is pinned is the three before it.
     assert_eq!(
-        super::custom_input(&ToolState::Pending { input: Some(json!({"command": "ls"})) }),
-        "ls",
+        &seen[..3],
+        &[
+            ProviderEvent::ToolCallStart { id: "c1".to_owned(), name: "edit".to_owned() },
+            ProviderEvent::ToolCallCustom { id: "c1".to_owned() },
+            ProviderEvent::ToolCallEnd { id: "c1".to_owned() },
+        ],
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(event, ProviderEvent::ToolCallDelta { .. })),
+        "free text is not an arguments object for a tool nothing wrapped one for: {seen:?}"
+    );
+}
+
+/// **AC-18**, the replay half's unwrapping. A custom call's `input` is the one
+/// argument's string, recovered from the object the inbound mapper wrapped it
+/// in — and a stored call that is not that shape replays as the
+/// `function_call` pair rather than as a custom item carrying invented words.
+///
+/// The arms are the states a stored call can be in. A call that ran carries
+/// the wrapped words, and so does one still streaming them. Three do not: a
+/// call the turn died during, which carries no arguments at all; the empty
+/// object left by a call closed under a name the receiving request never
+/// advertised as custom; and an object this wire did not write, which has no
+/// single string to unwrap. `""` is not available as a stand-in for any of
+/// them, because `input` is a custom item's whole content — an empty one is a
+/// call that said nothing, which the model would read back as words it chose.
+#[test]
+fn a_custom_calls_input_is_the_one_arguments_string_or_the_function_pair() {
+    fn replayed(custom: bool, state: &ToolState) -> Option<&str> {
+        super::replayed_input(&super::Made { call_id: "c1", tool: "bash", state, custom })
+    }
+
+    assert_eq!(replayed(true, &completed(json!({"command": "ls"}), "a.rs\n")), Some("ls"));
+    assert_eq!(
+        replayed(true, &ToolState::Pending { input: Some(json!({"command": "ls"})) }),
+        Some("ls"),
         "a call still streaming carries the words it has"
     );
+    assert_eq!(replayed(true, &ToolState::Pending { input: None }), None);
     assert_eq!(
-        super::custom_input(&completed(json!({"command": "ls", "timeout": 5}), "a.rs\n")),
-        r#"{"command":"ls","timeout":5}"#,
+        replayed(true, &ToolState::Pending { input: Some(json!({})) }),
+        None,
+        "a call closed under an unadvertised name stored nothing to hand back"
+    );
+    assert_eq!(
+        replayed(true, &completed(json!({"command": "ls", "timeout": 5}), "a.rs\n")),
+        None,
         "two members is not a shape this wire wrote, so nothing here is the model's words"
+    );
+    assert_eq!(
+        replayed(false, &completed(json!({"command": "ls"}), "a.rs\n")),
+        None,
+        "an unmarked call is a function call however unwrappable its arguments are"
+    );
+
+    // And what such a part actually serializes to: the function pair, whole.
+    let mut assistant = Message::assistant(SERVED);
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+    assistant.parts.push(Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "c1".to_owned(),
+            tool: "bash".to_owned(),
+            state: completed(json!({"command": "ls", "timeout": 5}), "a.rs\n"),
+            custom: true,
+        },
+    });
+    let request = ChatRequest {
+        messages: vec![Message::user("list the files"), assistant],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    let body = serde_json::to_value(Body::new(&request, Backend::Codex)).expect("it serializes");
+    assert_eq!(
+        body["input"],
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "bash",
+                "arguments": r#"{"command":"ls","timeout":5}"#,
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "both halves of the pair fall back together: {body}"
     );
 }
 
@@ -3342,6 +3585,32 @@ async fn a_completed_or_incomplete_frame_emits_one_served_event_before_usage() {
     ))
     .await;
     assert!(!neither.iter().any(|event| matches!(event, ProviderEvent::Served(_))), "{neither:?}");
+}
+
+/// **AC-19**, the backend half. A gateway relays somebody else's response
+/// through its own normalization, so a field arriving under one of the four
+/// echo names is that gateway's word for its own thing and says nothing
+/// about the options this request configured.
+#[tokio::test]
+async fn only_this_vendors_own_backends_report_how_a_turn_was_served() {
+    const ECHOED: &str = concat!(
+        r#"data: {"type":"response.completed","response":{"#,
+        r#""service_tier":"default","text":{"verbosity":"low"},"#,
+        r#""parallel_tool_calls":true,"reasoning":{"context":"all_turns"},"usage":{}}}"#,
+        "\n\n",
+    );
+
+    let seat = events(ECHOED).await;
+    assert!(
+        seat.iter().any(|event| matches!(event, ProviderEvent::Served(_))),
+        "the frame this vendor's own backend sent said nothing: {seat:?}"
+    );
+
+    let gateway = gateway_events(ECHOED).await;
+    assert!(
+        !gateway.iter().any(|event| matches!(event, ProviderEvent::Served(_))),
+        "a gateway's own words were reported as served options: {gateway:?}"
+    );
 }
 
 /// **AC-20.** `run --json-schema`'s document and a configured verbosity

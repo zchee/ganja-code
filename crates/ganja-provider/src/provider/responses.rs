@@ -244,6 +244,22 @@ impl Backend {
     pub(super) const fn replays_reasoning(self) -> bool {
         matches!(self, Self::Codex | Self::Platform)
     }
+
+    /// Whether a terminal frame's `service_tier`, `text.verbosity`,
+    /// `parallel_tool_calls` and `reasoning.context` mean what **D563** reads
+    /// them as: how *this vendor* served the options this request configured.
+    ///
+    /// The same two backends, and deliberately not the same predicate as
+    /// [`Self::replays_reasoning`]: this one is about a field's meaning rather
+    /// than a feature's pairing, and a gateway that starts echoing one of the
+    /// four moves this answer without moving that one. Everything else here
+    /// relays somebody else's response through its own normalization, so a
+    /// field arriving under one of those names is that gateway's word for its
+    /// own thing — reporting it as a served option would put a number in
+    /// `/usage` that nothing this build sent can be compared against.
+    const fn echoes_options(self) -> bool {
+        matches!(self, Self::Codex | Self::Platform)
+    }
 }
 
 /// Which of a person's ChatGPT accounts to bill (`codex.ts:406-408`).
@@ -990,8 +1006,8 @@ struct Body<'a> {
     /// What the backend should hand back beside the reply.
     ///
     /// Nothing, where nobody asked for anything — a body with no `include` at
-    /// all is the shape upstream sends where nobody opted in
-    /// (`test/provider/openai-responses.test.ts:638`). Otherwise the ordered,
+    /// all is the shape every request on this wire carried before there was
+    /// anything to opt into (**D563**). Otherwise the ordered,
     /// deduplicated union of three askers (**D563**): the sealed reasoning
     /// this wire replays, whatever the effort's own map asks for, and a
     /// configured `include`. A union rather than a layer, because this field
@@ -1058,8 +1074,9 @@ enum ToolSpec<'a> {
     ///
     /// Only a tool whose argument schema has exactly one required property,
     /// and it a string, can be advertised this way: the call's `input` is
-    /// mapped onto that one argument and onto nothing else, so optional arguments are unreachable through the custom advertisement.
-    /// That is why the function twin stays on the roster beside it.
+    /// mapped onto that one argument and onto nothing else, so optional
+    /// arguments are unreachable through the custom advertisement. That is why
+    /// the function twin stays on the roster beside it.
     Custom {
         #[serde(rename = "type")]
         kind: &'static str,
@@ -1123,8 +1140,10 @@ enum Item<'a> {
         name: Cow<'a, str>,
         /// The one argument's value, unwrapped from the arguments object the
         /// inbound mapper wrapped it in — the model's own words, which is
-        /// what it was sent as.
-        input: String,
+        /// what it was sent as. Borrowed from the stored call, because
+        /// [`replayed_input`] admits this item only when those words are
+        /// there to borrow.
+        input: &'a str,
     },
     /// What that call produced (`convert-to-openai-responses-input.ts:3740-3743`).
     Answered {
@@ -1303,25 +1322,26 @@ impl<'a> Body<'a> {
                     // How the call was advertised decides how it replays, and
                     // that is the part's own record rather than this
                     // request's options (**D563**).
-                    input.push(if part.custom {
-                        Item::CustomCalled {
+                    input.push(match replayed_input(part) {
+                        Some(words) => Item::CustomCalled {
                             kind: CUSTOM_TOOL_CALL,
                             call_id: part.call_id,
                             name: alias(part.tool, OPENAI_CAP),
-                            input: custom_input(part.state),
-                        }
-                    } else {
-                        Item::Called {
+                            input: words,
+                        },
+                        None => Item::Called {
                             kind: "function_call",
                             call_id: part.call_id,
                             name: alias(part.tool, OPENAI_CAP),
                             arguments: arguments(part.state),
-                        }
+                        },
                     });
                 }
                 for part in &calls {
                     input.push(Item::Answered {
-                        kind: if part.custom {
+                        // The same predicate the call item was written from,
+                        // so a pair can never be half custom.
+                        kind: if replayed_input(part).is_some() {
                             CUSTOM_TOOL_CALL_OUTPUT
                         } else {
                             "function_call_output"
@@ -1558,6 +1578,10 @@ struct Mapping {
     /// The `service_tier` this request carried, for the same line: what was
     /// served is only worth logging beside what was asked.
     requested: Option<String>,
+    /// Whether this stream's four echo fields mean what [`Mapping::served`]
+    /// reads them as — [`Backend::echoes_options`]'s reading half, the way
+    /// `seals` is [`Backend::replays_reasoning`]'s.
+    echoes: bool,
 }
 
 impl Default for Mapping {
@@ -1572,6 +1596,7 @@ impl Default for Mapping {
             opened_custom: HashSet::new(),
             model: String::new(),
             requested: None,
+            echoes: true,
         }
     }
 }
@@ -1583,7 +1608,12 @@ impl Mapping {
     /// The `seals` field is the reading half of the same decision the encoder
     /// makes: ask for state and keep it, or do neither.
     fn for_backend(backend: Backend, aliases: Aliases) -> Self {
-        Self { seals: backend.replays_reasoning(), aliases, ..Self::default() }
+        Self {
+            seals: backend.replays_reasoning(),
+            echoes: backend.echoes_options(),
+            aliases,
+            ..Self::default()
+        }
     }
 }
 
@@ -1649,6 +1679,32 @@ impl Mapper for Mapping {
             // complete.
             | "response.custom_tool_call_input.delta"
             | "response.custom_tool_call_input.done"
+            // A hosted tool's own progress, one lifecycle frame per stage, for
+            // each of the five item kinds [`HOSTED_TOOL_ITEMS`] lists. Every
+            // one of them is an announcement about work happening on the
+            // vendor's side: the call, its arguments and its answer arrive
+            // whole on the item's own `response.output_item.done`, which is
+            // where [`server_tool`] reads them, and a hosted call has no row
+            // to open early because there is no dialog and nothing to run.
+            // `partial_image` is dropped for the same reason and one more —
+            // the whole image arrives as the closed item's `result`, so a
+            // half-drawn one would be bytes nobody ever replaces.
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.web_search_call.completed"
+            | "response.file_search_call.in_progress"
+            | "response.file_search_call.searching"
+            | "response.file_search_call.completed"
+            | "response.image_generation_call.in_progress"
+            | "response.image_generation_call.generating"
+            | "response.image_generation_call.partial_image"
+            | "response.image_generation_call.completed"
+            | "response.code_interpreter_call.in_progress"
+            | "response.code_interpreter_call.interpreting"
+            | "response.code_interpreter_call.completed"
+            | "response.mcp_call.in_progress"
+            | "response.mcp_call.completed"
+            | "response.mcp_call.failed"
             | "keepalive" => {}
             "response.output_item.added" => self.opened(&chunk["item"], events),
             "response.function_call_arguments.delta" => self.filled(&chunk, events),
@@ -1945,9 +2001,14 @@ impl Mapping {
     /// served, when it echoed anything.
     ///
     /// Nothing is said for a frame that echoed none of the four fields —
-    /// every gateway's, and every recorded fixture's — because an empty
-    /// report is not a report that the backend served the defaults.
+    /// every recorded fixture's — because an empty report is not a report that
+    /// the backend served the defaults. Nothing is said on a backend that does
+    /// not speak about these options at all ([`Backend::echoes_options`]),
+    /// whatever its terminal frame happens to carry under those names.
     fn served(&self, response: &Value, events: &mut Vec<ProviderEvent>) {
+        if !self.echoes {
+            return;
+        }
         let served = ServedOptions {
             service_tier: response["service_tier"].as_str().map(str::to_owned),
             verbosity: response["text"]["verbosity"].as_str().map(str::to_owned),
@@ -2058,12 +2119,17 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
     /// The keys that identify an item rather than describing the call it made.
     /// `output` is here because it is the *answer*: it has a row of its own,
     /// and a fallback that swept it in would show it twice.
-    /// `result` is here because it is the binary answer, carried as the
-    /// [`Blob`] and never as text a row would print.
-    const ENVELOPE: [&str; 6] = ["type", "id", "status", "call_id", "output", "result"];
+    const ENVELOPE: [&str; 5] = ["type", "id", "status", "call_id", "output"];
+
+    /// The image generator's answer, which is bytes: it rides the [`Blob`] and
+    /// never the text a row would print. Dropped for that item kind alone —
+    /// on any other hosted tool `result` is whatever that vendor's tool calls
+    /// its own field, and this wire has measured none of them, so the
+    /// fallback shows it rather than deciding it means the same thing.
+    const BINARY_ANSWER: &str = "result";
 
     let blob = (kind == IMAGE_GENERATION_CALL)
-        .then(|| item["result"].as_str())
+        .then(|| item[BINARY_ANSWER].as_str())
         .flatten()
         .filter(|base64| !base64.is_empty())
         .map(|base64| Blob {
@@ -2089,6 +2155,9 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
                     object
                         .iter()
                         .filter(|(key, _)| !ENVELOPE.contains(&key.as_str()))
+                        .filter(|(key, _)| {
+                            kind != IMAGE_GENERATION_CALL || key.as_str() != BINARY_ANSWER
+                        })
                         // Already the blob's mime, and a row showing it
                         // beside an image nobody can see says nothing.
                         .filter(|(key, _)| blob.is_none() || key.as_str() != "output_format")
@@ -2126,32 +2195,45 @@ const CUSTOM_TOOL_CALL_OUTPUT: &str = "custom_tool_call_output";
 const CUSTOM: &str = "custom";
 
 /// The model's own words behind a stored custom call — its `input`, recovered
-/// from the arguments object the inbound mapper wrapped it in (**D563**).
+/// from the arguments object the inbound mapper wrapped it in (**D563**) —
+/// and `None` for a stored call that cannot be replayed as a custom item at
+/// all.
 ///
 /// The wrapping is this wire's own and has exactly one member: a tool can only
 /// be advertised as custom when its schema has one required string argument
 /// ([`single_string_argument`]), and [`Mapping::custom_closed`] writes the
 /// call's `input` under that one name. So the single string member is the
 /// words that were sent, and handing the backend anything else would hand it
-/// an item it never produced. A call the model never finished streaming has no
-/// arguments at all, and replays as the empty input it was.
-fn custom_input(state: &ToolState) -> String {
-    let input = match state {
-        ToolState::Pending { input: None } => return String::new(),
+/// an item it never produced.
+///
+/// Every other state replays as the `function_call` pair instead. A custom
+/// item's `input` is the call's whole content, so writing `""` would put a
+/// call that said nothing into the transcript and the model would read it
+/// back as words it chose; the stored arguments object says exactly what the
+/// record says. Three states reach that fallback: a call whose name the
+/// request that received it never advertised as custom, which
+/// [`Mapping::custom_closed`] closes with no arguments; a call the model never
+/// finished streaming ([`ToolState::Pending`] with none); and an object this
+/// wire did not write, which has no single string to unwrap.
+///
+/// Both replay loops read this one predicate, so a call item and its output
+/// twin can never disagree about which pair a stored call is.
+fn replayed_input<'a>(made: &Made<'a>) -> Option<&'a str> {
+    if !made.custom {
+        return None;
+    }
+    let input = match made.state {
+        ToolState::Pending { input: None } => return None,
         ToolState::Pending { input: Some(input) }
         | ToolState::Running { input, .. }
         | ToolState::Completed { input, .. }
         | ToolState::Error { input, .. } => input,
     };
 
-    match input.as_object().map(serde_json::Map::values) {
-        Some(mut values) => match (values.next().and_then(Value::as_str), values.next()) {
-            (Some(one), None) => one.to_owned(),
-            // Not the shape this wire wrote, so nothing here is the model's
-            // words: the object itself is the most honest thing to hand back.
-            _ => arguments(state),
-        },
-        None => arguments(state),
+    let mut values = input.as_object()?.values();
+    match (values.next().and_then(Value::as_str), values.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
     }
 }
 
@@ -2231,13 +2313,30 @@ const TOOL_CHOICE_AUTO: &str = "auto";
 /// seat (probe 2026-09-16, row 22: the deltas lose `obfuscation`).
 const INCLUDE_OBFUSCATION: bool = false;
 
-/// What `reasoning.summary` defaults to for a model that reasons: what the
-/// Codex CLI itself sends, and the vendor's own spelling of "show the
-/// thinking".
+/// What `reasoning.summary` defaults to for a model that reasons: the
+/// vendor's own spelling of "show the thinking", and the one value the seat
+/// has been measured serving (probe 2026-09-16), which is why **D563** refuses
+/// to make the key configurable there at all.
 const REASONING_SUMMARY: &str = "auto";
 
+/// The body key that names one tool, or a list of them.
+const TOOL_CHOICE: &str = "tool_choice";
+
 /// The two body keys that mean something only beside a tool roster.
-const ROSTER_KEYS: [&str; 2] = ["tool_choice", "parallel_tool_calls"];
+const ROSTER_KEYS: [&str; 2] = [TOOL_CHOICE, "parallel_tool_calls"];
+
+/// Every key the typed [`Body`] writes itself, in the order it writes them.
+///
+/// A layer may not carry one. Most of them are already unmakeable — the body
+/// is the last layer, so its `model`, `stream`, `store`, `input` and `tools`
+/// win the collision — but `include` and `instructions` are omitted when the
+/// body has nothing to put in them, and a layer's value would then be sent as
+/// if the wire had chosen it. The others are stripped for the reason a
+/// no-op deserves to be visible at all: a configured key that silently does
+/// nothing costs somebody an afternoon, and one that says why costs a log
+/// line.
+const OWN_KEYS: [&str; 7] =
+    ["model", "stream", "store", "include", "instructions", "input", "tools"];
 
 /// The item kind sealed thinking arrives as, and goes back as.
 const REASONING: &str = "reasoning";
@@ -2345,7 +2444,7 @@ fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value>
     layer
 }
 
-/// The configured body, less what this one request cannot carry (**D563**).
+/// The configured body, as this one request can carry it (**D563**).
 ///
 /// Two checks only the wire can make, because only the wire sees a request's
 /// roster and model: the engine hands every request of a turn the same body,
@@ -2358,11 +2457,47 @@ fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value>
 ///   kept.
 /// - `reasoning` goes whole when the model does not reason, for the 400
 ///   [`defaulted`] avoids.
+/// - A key the typed [`Body`] writes itself goes always ([`OWN_KEYS`]).
+///
+/// And one translation, for the same reason: a tool the config named by its
+/// registry name is on the roster under [`alias`]'s spelling of it, which
+/// only this side knows. `tool_choice.name` and each `allowed_tools`
+/// entry's move with it, so a configured choice keeps naming a tool the
+/// request actually offered rather than one the model was never told about.
+/// The names are deliberately not validated here — the roster is per turn,
+/// and the config surface says so.
 ///
 /// Every drop is logged, one line per key, so a configured value that did
 /// nothing on a request says why.
 fn gated(body: &Map<String, Value>, offered: bool, model: &str) -> Map<String, Value> {
+    /// The aliased spelling of whatever `entry` names, where it names
+    /// anything and the alias differs.
+    fn realias(entry: &mut Value) {
+        let Some(entry) = entry.as_object_mut() else {
+            return;
+        };
+        let Some(Cow::Owned(aliased)) =
+            entry.get("name").and_then(Value::as_str).map(|name| alias(name, OPENAI_CAP))
+        else {
+            return;
+        };
+        entry.insert("name".to_owned(), Value::String(aliased));
+    }
+
     let mut body = body.clone();
+    for key in OWN_KEYS {
+        if body.remove(key).is_some() {
+            dropped(key, "the wire writes this key itself");
+        }
+    }
+    if let Some(choice) = body.get_mut(TOOL_CHOICE) {
+        realias(choice);
+        if let Some(entries) = choice.get_mut("tools").and_then(Value::as_array_mut) {
+            for entry in entries {
+                realias(entry);
+            }
+        }
+    }
     if !offered {
         for key in ROSTER_KEYS {
             if body.remove(key).is_some() {

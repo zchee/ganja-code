@@ -286,10 +286,14 @@ pub struct ChatRequest {
     /// What the engine resolved for this request out of
     /// `[provider.<id>.options]`, `/fast` and `run --json-schema` (**D563**).
     ///
-    /// Read by the Responses wire alone, and there only on the two ids that
-    /// speak OpenAI's own Responses API; every other wire ignores it, and
-    /// [`Default`] — what every request carried before the options existed —
-    /// sends nothing.
+    /// Read by the Responses wire alone, and there applied on **every**
+    /// backend it is handed: the wire sends what it is given rather than
+    /// deciding who may be given it, which is why a resolved `service_tier`
+    /// rides a gateway request too. What keeps a gateway's body unchanged is
+    /// the engine, which hands a non-default value only to the two ids that
+    /// speak OpenAI's own Responses API (W3b). Every other wire ignores the
+    /// field, and [`Default`] — what every request carried before the options
+    /// existed — sends nothing.
     pub responses: responses::options::RequestOptions,
 }
 

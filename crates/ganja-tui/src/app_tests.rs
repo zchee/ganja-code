@@ -367,7 +367,8 @@ fn palette_transcript(app: &mut App) {
                     }),
                     started: 0,
                     completed: 1,
-                }, custom: false
+                },
+                custom: false,
             },
         });
     reply.parts.push(Part {
@@ -1202,7 +1203,8 @@ fn stored_transcript(count: usize) -> Vec<Message> {
                                 metadata: serde_json::json!({}),
                                 started: 0,
                                 completed: 1,
-                            }, custom: false
+                            },
+                            custom: false,
                         },
                     });
                     reply.parts.push(Part::text(
