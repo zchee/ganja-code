@@ -297,6 +297,27 @@ fn the_subscription_backends_default_is_one_that_backend_serves() {
     );
 }
 
+/// The seat serves what its rows and its own gate agree on (**D563**'s find):
+/// `chatgpt` is cataloged through `openai`'s rows, and a lookup that ignored
+/// the alias refused every model the seat offers — so a `/model` switch and a
+/// subagent's `chatgpt/…` pin never took.
+#[test]
+fn the_seat_serves_the_models_it_offers_through_the_row_alias() {
+    for model in responses::SEAT_ROSTER {
+        assert!(super::serves(responses::CHATGPT_ID, model), "{model} is on the seat's roster");
+        assert_eq!(
+            super::adopt(responses::CHATGPT_ID, &format!("chatgpt/{model}")).as_deref(),
+            Some(model)
+        );
+    }
+    assert!(super::serves(responses::ID, "gpt-5.4"), "the platform sells what its rows list");
+    assert!(
+        !super::serves(responses::CHATGPT_ID, "gpt-5.4"),
+        "a row the seat's own gate refuses is not a model the seat serves"
+    );
+    assert!(!super::serves(responses::CHATGPT_ID, "no-such-model"));
+}
+
 /// Emits whatever a frame's data spells, so that the plumbing can be
 /// tested without a provider's JSON in the way.
 struct Echo;

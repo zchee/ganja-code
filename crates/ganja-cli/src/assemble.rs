@@ -94,6 +94,11 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     // auto-refuse permission rules, so the seed has exactly one road.
     .with_inbound_policy(config.inbound_policy(), config.dialog_expiry())
     .with_small_model(config.small_model.clone())
+    // The Responses options tables (**D563**), installed here once for both
+    // headless doors — `run` and `serve` build their engine through this
+    // function and nowhere else, so a line at either call site would be a
+    // second road to the same value.
+    .with_provider_options(config.responses_options())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.
     .with_skill_roots(skill_roots);

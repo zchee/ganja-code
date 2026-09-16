@@ -2429,6 +2429,18 @@ impl Config {
         Some(self.provider.get(id)?.options.as_ref()?.for_model(model))
     }
 
+    /// Every id's `options` table as written, per-model entries included,
+    /// keyed by id (**D563**) — what `Engine::with_provider_options` installs
+    /// and a `/plugin` reload swaps in. Unoverlaid, because which model a
+    /// request asks is decided per turn, long after this was read.
+    #[must_use]
+    pub fn responses_options(&self) -> BTreeMap<String, ResponsesOptions> {
+        self.provider
+            .iter()
+            .filter_map(|(id, entry)| Some((id.clone(), entry.options.clone()?)))
+            .collect()
+    }
+
     /// The directories `skills.paths` named, resolved and existing.
     ///
     /// A path that names nothing is warned about and dropped rather than

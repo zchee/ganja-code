@@ -1670,7 +1670,14 @@ pub fn serves(provider_id: &str, model: &str) -> bool {
         return !model.trim().is_empty();
     }
 
-    catalog::models().any(|known| known.provider_id == provider_id && known.id == model)
+    // Through `model_for`, which resolves the row alias: `chatgpt` is cataloged
+    // by `openai`'s rows (**D555**), and a bare `provider_id` comparison could
+    // never find one, so every `/model` switch and every subagent pin on the
+    // seat was refused. Found by **D563**'s per-model resolution, which is the
+    // first thing to switch models on a seat under test. The seat additionally
+    // holds its rows to what it runs, which the platform's rows do not.
+    catalog::model_for(provider_id, model).is_some()
+        && (provider_id != responses::CHATGPT_ID || responses::serves(model))
 }
 
 /// Reads `variable`, treating an empty value as unset.

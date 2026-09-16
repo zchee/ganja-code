@@ -268,6 +268,11 @@ pub async fn run(
     // App's own, and the approval dialog it must not answer is B1's.
     .with_inbound_bypass(yolo)
     .with_small_model(config.small_model.clone())
+    // The Responses options tables (**D563**), for the concurrency knob's
+    // reason: this frontend builds its own engine, so a table wired only into
+    // `ganja-cli`'s assembly would leave every interactive session resolving
+    // its tier from `/fast` and the chatgpt default alone.
+    .with_provider_options(config.responses_options())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.
     .with_skill_roots(skill_roots);

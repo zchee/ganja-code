@@ -6604,6 +6604,10 @@ impl App {
         // Swapped beside the registry so the next turn's `$` invocations read
         // the same list its rebuilt skill tool does.
         self.engine.replace_skill_roots(skill_roots);
+        // The fifth seam (**D563**): an edited `[provider.<id>.options]` table
+        // reaches the next turn's requests without a restart, since resolving
+        // it is per turn anyway and the provider it configures holds no copy.
+        self.engine.replace_provider_options(config.responses_options());
 
         let cwd = self.cwd.clone();
         self.engine.replace_environment(move |model| {

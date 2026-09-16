@@ -283,6 +283,39 @@ pub struct RequestOptions {
     pub body: Map<String, Value>,
 }
 
+impl RequestOptions {
+    /// What a session's **compaction** request carries of a resolved turn:
+    /// the tier and the configured body, and none of the directives.
+    ///
+    /// A summary is the same model answering in the same session, so it is
+    /// billed and scheduled the way the steps are and reads the same `text`
+    /// and `reasoning` settings. What it does not share is anything about the
+    /// conversation's own shape: it offers no tools (so neither a custom
+    /// advertisement nor a hosted tool has anywhere to go), a `run
+    /// --json-schema` document describes the answer to the person's prompt
+    /// rather than a summary of it, and an `include` asks for fields of a
+    /// tool-bearing response. The roster keys left in `body` are this wire's
+    /// own to drop, because only the wire sees that the request offers nothing.
+    #[must_use]
+    pub fn summary_view(&self) -> Self {
+        Self { service_tier: self.service_tier.clone(), body: self.body.clone(), ..Self::default() }
+    }
+
+    /// What a **subagent's** requests carry, from a value resolved for the
+    /// child's own model: the same two halves [`summary_view`](Self::summary_view)
+    /// keeps.
+    ///
+    /// The same shape for a different reason. A child is offered its own
+    /// roster by its own agent, so a custom or hosted advertisement configured
+    /// against the session's tools is not a statement about the child's; a
+    /// JSON schema belongs to the headless run's own answer; and a child's
+    /// transcript is not the one an `include` was configured to enrich.
+    #[must_use]
+    pub fn child_view(&self) -> Self {
+        self.summary_view()
+    }
+}
+
 #[cfg(test)]
 #[path = "options_tests.rs"]
 mod tests;

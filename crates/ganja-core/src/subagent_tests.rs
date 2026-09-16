@@ -652,6 +652,8 @@ fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammat
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
         teammates: Some(teammates),
         identity: Arc::new(identity::Identity::new(std::env::temp_dir())),
+        responses: crate::responses_ladder::Seed::default(),
+        served: Arc::default(),
     })
 }
 

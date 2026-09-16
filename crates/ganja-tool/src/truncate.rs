@@ -69,6 +69,13 @@ const DIRECTORY: &str = "ganja";
 /// Upstream's `TRUNCATION_DIR`.
 const TOOL_OUTPUT: &str = "tool-output";
 
+/// Where a provider-run tool's binary output is written (**D563**), under
+/// [`DIRECTORY`] and beside [`TOOL_OUTPUT`] rather than inside it: [`sweep`]
+/// deletes what it finds there after a week, and an image a person asked a
+/// model to draw is not a spill somebody else's housekeeping should decide
+/// the lifetime of.
+const SERVER_TOOL_OUTPUT: &str = "server-tool-output";
+
 /// What every spilled file is called first, and the only thing [`sweep`] will
 /// delete. Upstream's own prefix, and its own sweep's filter.
 const PREFIX: &str = "tool_";
@@ -260,6 +267,57 @@ pub fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
 /// `clamp_with`, which exists for the same reason.
 pub fn open_spill_in(dir: &Path, head: &[u8]) -> Option<(PathBuf, fs::File)> {
     write_overflow(dir, head)
+}
+
+/// Writes a provider-run tool's binary output to
+/// `<XDG data home>/ganja/server-tool-output/<name>`, owner-only, and answers
+/// with the path (**D563**).
+///
+/// Here rather than in the engine that calls it because the file creation is
+/// this module's symlink-safe, mode-at-creation one, and a second copy of that
+/// is a second place a security review has to read. There is no temp-directory
+/// fallback, unlike [`clamp`]: the path is what the transcript row records in
+/// place of the bytes, and a row pointing into a world-readable `/tmp` would be
+/// a promise about privacy this build cannot keep.
+///
+/// # Errors
+///
+/// When there is no data home to resolve, when `name` is anything but one
+/// plain path component, and whenever the directory or the file cannot be
+/// created or written.
+pub fn write_server_tool_output(name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    let base = Xdg::new().map_err(|error| io::Error::other(error.to_string()))?;
+
+    write_server_tool_output_in(
+        &base.data_dir().join(DIRECTORY).join(SERVER_TOOL_OUTPUT),
+        name,
+        bytes,
+    )
+}
+
+/// [`write_server_tool_output`] into exactly `dir`, for the reason
+/// [`open_spill_in`] exists.
+fn write_server_tool_output_in(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    // The name is the part id plus an extension the wire derived from a
+    // vendor's media type, so it is checked rather than trusted: anything
+    // that is not exactly one normal component could put the file somewhere
+    // other than this directory.
+    let mut components = Path::new(name).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name:?} is not a plain file name"),
+        ));
+    }
+
+    create_dir_private(dir)?;
+    let path = dir.join(name);
+    write_private(&path, bytes)?;
+
+    Ok(path)
 }
 
 /// Writes `bytes` to a fresh file under `dir`, creating `dir` first if it

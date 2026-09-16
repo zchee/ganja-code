@@ -650,3 +650,28 @@ fn a_write_that_cannot_succeed_degrades_to_the_pathless_notice_rather_than_faili
         clamped.text
     );
 }
+
+/// **D563.** A provider-run tool's image lands owner-only, in a directory
+/// created owner-only, under exactly the name it was given — and a name that
+/// could walk out of that directory is refused before anything is created.
+#[cfg(unix)]
+#[test]
+fn a_server_tool_output_is_written_owner_only_and_only_under_a_plain_name() {
+    let home = tempfile::tempdir().expect("a scratch directory");
+    let dir = home.path().join("server-tool-output");
+
+    let path = super::write_server_tool_output_in(&dir, "prt_1.png", b"\x89PNG")
+        .expect("a plain name under a fresh directory is written");
+
+    assert_eq!(path, dir.join("prt_1.png"));
+    assert_eq!(std::fs::read(&path).expect("the file reads back"), b"\x89PNG");
+    assert_eq!(mode(&path), 0o600, "the bytes are the owner's alone");
+    assert_eq!(mode(&dir), 0o700, "and so is the directory this created");
+
+    for name in ["../escape.png", "nested/prt_1.png", "/abs.png", "", ".."] {
+        let refused = super::write_server_tool_output_in(&dir, name, b"x")
+            .expect_err("only a plain file name is written");
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput, "{name:?}: {refused}");
+    }
+    assert!(!home.path().join("escape.png").exists(), "nothing was written outside the directory");
+}

@@ -397,6 +397,19 @@ pub enum EngineError {
         /// What the hook said — its stderr, or the reason it denied with.
         reason: String,
     },
+    /// [`Command::SetFast`] reached a provider that does not speak the
+    /// Responses API (**D563**), where a service tier means nothing at all.
+    ///
+    /// Refused rather than stored: a choice that no request could ever carry
+    /// would sit on the session row claiming something about a bill that is
+    /// not true.
+    #[error(
+        "/fast moves service_tier on the chatgpt and openai providers; this session is on {provider}"
+    )]
+    Fast {
+        /// The provider this session is on.
+        provider: String,
+    },
 }
 
 /// [`EngineError::ProviderToolReach`]'s whole sentence, derived from the reach
@@ -730,6 +743,11 @@ struct Active {
     /// change runs [`Engine::reconcile_effort`] so a model that lacks the
     /// name clears it (upstream `prompt.ts:654`).
     effort: Option<String>,
+    /// The session's `/fast` choice (**D563**), [`None`] while the
+    /// configuration decides. An intent rather than a tier literal: the literal
+    /// is resolved per turn from the model then active, so a model switch
+    /// re-resolves it and never has to clear it.
+    fast: Option<crate::protocol::FastChoice>,
     /// Agent whose prompt and rules the next turn runs under. [`None`] on an
     /// engine built without a registry, where there is nothing to run as.
     agent: Option<String>,
@@ -1446,6 +1464,29 @@ pub struct Engine {
     /// alone: a member is offered `send_message` from its first turn and
     /// must keep it.
     cross_session_postbox: AtomicBool,
+    /// Each Responses id's configured `options` table (**D563**), keyed by
+    /// provider id — installed by [`Engine::with_provider_options`] and
+    /// swapped by [`Engine::replace_provider_options`], the `/plugin`
+    /// dialog's fifth reload seam. Read once at a turn's start, so a swap
+    /// reaches the next turn and never the one in flight. Locked for
+    /// `environment`'s reason.
+    provider_options: std::sync::Mutex<BTreeMap<String, crate::config::ResponsesOptions>>,
+    /// What the backend last said it served this session (**D563**), written by
+    /// the turn loop off each terminal frame's echo and read by
+    /// [`Engine::service_tier`]. The `deadline` cell's shape, shared with each
+    /// root turn rather than copied, and cleared with the conversation it
+    /// describes by [`Command::NewSession`] and by a resume.
+    served: Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>,
+    /// The `text.format` document `ganja run --json-schema` holds the answer
+    /// to (**D563**), riding every step request of the turns that follow and
+    /// never a title, compaction or subagent request. Engine-level and not
+    /// persisted: it is a property of one headless invocation, not of the
+    /// conversation it happens to continue.
+    text_format: std::sync::Mutex<Option<serde_json::Value>>,
+    /// Whether this session has already said that server-side compaction is
+    /// configured beside ganja's own (**D563**), which it says once per
+    /// session rather than once per turn.
+    server_compaction_noted: AtomicBool,
 }
 
 /// This session's team as the offered `send_message` describes it
@@ -1568,6 +1609,7 @@ impl Engine {
             active: std::sync::Mutex::new(Active {
                 model,
                 effort: None,
+                fast: None,
                 agent: None,
                 previous_agent: None,
             }),
@@ -1637,6 +1679,10 @@ impl Engine {
             settled_receipts: Arc::default(),
             socket_directory: crate::tool::socket::directory(),
             cross_session_postbox: AtomicBool::new(false),
+            provider_options: std::sync::Mutex::new(BTreeMap::new()),
+            served: Arc::default(),
+            text_format: std::sync::Mutex::new(None),
+            server_compaction_noted: AtomicBool::new(false),
         };
         // The builder-time run of the shared composition path, for the one
         // engine no rebuild ever reaches: a fixture whose `mcp__*` names
@@ -3153,6 +3199,36 @@ impl Engine {
         *self.skill_roots.lock().expect("the skill roots are never poisoned") = roots;
     }
 
+    /// The Responses options each id's config carries (**D563**) — the
+    /// `[provider.chatgpt.options]` and `[provider.openai.options]` tables,
+    /// keyed by id, per-model entries and all.
+    ///
+    /// A resolver layer rather than a seeded selection: nothing here is copied
+    /// into session state, and the session's own `/fast` choice outranks
+    /// whatever the table says. An engine never given one resolves every
+    /// request from the session's choice alone — and, on `chatgpt`, the fast
+    /// tier that provider defaults to.
+    #[must_use]
+    pub fn with_provider_options(
+        self,
+        table: BTreeMap<String, crate::config::ResponsesOptions>,
+    ) -> Self {
+        self.replace_provider_options(table);
+
+        self
+    }
+
+    /// Replaces the Responses options tables in place — the fifth `/plugin`
+    /// Reload seam (**D474**, **D563**). A running turn keeps what it resolved
+    /// at its start, and so do the children it spawns; the next turn reads
+    /// this.
+    pub fn replace_provider_options(
+        &self,
+        table: BTreeMap<String, crate::config::ResponsesOptions>,
+    ) {
+        *self.provider_options.lock().expect("the provider options are never poisoned") = table;
+    }
+
     /// The roots [`Engine::with_skill_roots`] installed, for a frontend
     /// composing `$name` invocations against the same list a turn will
     /// expand them from.
@@ -3767,7 +3843,11 @@ impl Engine {
         // A resumed conversation has read nothing yet in this process: what
         // the session it replaced had open says nothing about these files.
         self.files.clear();
+        let fast_before = self.active().fast;
         self.restore_selection(&info);
+        // What the backend served the conversation being left is not what it
+        // serves this one (**D563**).
+        self.forget_served();
         // The slot moves before anything is announced: the resumed revert
         // below must carry the resumed session's id, not the one this engine
         // minted at birth or was on a moment ago.
@@ -3795,6 +3875,14 @@ impl Engine {
                     prompt: None,
                 })
                 .await;
+        }
+        // A frontend's `fast` indicator follows the resumed row (**D563**),
+        // announced only when the choice actually moved: one that is already
+        // showing the right answer has nothing to redraw.
+        let fast = self.active().fast;
+        if fast != fast_before {
+            let _ =
+                self.fanout.send(Event::FastChanged { session_id: self.session_id(), fast }).await;
         }
         drop(slot);
 
@@ -3864,6 +3952,10 @@ impl Engine {
                  resuming without one"
             );
         }
+
+        // The `/fast` choice needs no reconciling against the model (**D563**):
+        // it is an intent, resolved per turn for whichever model is active.
+        self.active().fast = info.fast;
 
         // Nothing in the transcript says which agent produced which message,
         // so a resumed session has no previous turn to compare against and
@@ -4011,13 +4103,9 @@ impl Engine {
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
-            // The choice exists as a type before anything resolves it: this
-            // wave landed the protocol and the storage field, and the wave
-            // that owns the ladder replaces this arm with the switch that
-            // announces, stores and resolves the tier. Nothing in this build
-            // constructs the command yet — every frontend door is that wave's
-            // too — so the arm is unreachable rather than quietly wrong.
-            Command::SetFast { .. } => Ok(()),
+            // Stored as an intent and resolved per turn (**D563**) — see
+            // `switch_fast`.
+            Command::SetFast { fast } => self.switch_fast(fast).await,
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
             // Taken while a turn streams, like the posture above, and
             // announced by nothing (**D557**) — see the doc on the `deadline` field.
@@ -4417,6 +4505,17 @@ impl Engine {
         // A time budget belongs to the sitting that set it, unlike the
         // posture (**D557**) — see the doc on the `deadline` field.
         self.set_deadline(None);
+        // A `/fast` choice is stored on the row of the conversation it was made
+        // in (**D563**), so a new conversation starts back under the
+        // configuration, and announces that when it moved something.
+        self.forget_served();
+        let had_fast = self.active().fast.take().is_some();
+        if had_fast {
+            let _ = self
+                .fanout
+                .send(Event::FastChanged { session_id: self.session_id(), fast: None })
+                .await;
+        }
         drop(turn);
 
         Ok(())
@@ -5220,6 +5319,9 @@ impl Engine {
             // engine is built without a team of its own.
             teammates: self.teammates.clone(),
             identity: Arc::clone(&self.identity),
+            // Snapshotted with the rest of the host, per turn (**D563**).
+            responses: self.responses_seed(),
+            served: Arc::clone(&self.served),
         }))
     }
 
@@ -5407,6 +5509,109 @@ impl Engine {
         Ok(())
     }
 
+    /// Asks the rest of the session's requests at the fast tier, explicitly at
+    /// the ordinary one, or back under the configuration (**D563**).
+    ///
+    /// [`Engine::switch_effort`]'s shape, for its reasons: taken between turns
+    /// and refused while one streams, written onto the row so a resume
+    /// reopens it, and announced to every subscriber. What is stored is the
+    /// choice and never a tier — see [`crate::responses_ladder`] for where the
+    /// literal comes from. Refused on a provider that does not speak the
+    /// Responses API, clearing included: there is no configuration there for
+    /// a clear to fall back to either.
+    async fn switch_fast(
+        &self,
+        fast: Option<crate::protocol::FastChoice>,
+    ) -> Result<(), EngineError> {
+        let turn = self.lock_entry(PendingPolicy::Apply).await?;
+
+        if !crate::provider::responses::options::speaks_options(self.provider.id()) {
+            return Err(EngineError::Fast { provider: self.provider.id().to_owned() });
+        }
+
+        self.active().fast = fast;
+        self.remember_selection();
+        let _ = self.fanout.send(Event::FastChanged { session_id: self.session_id(), fast }).await;
+        drop(turn);
+
+        Ok(())
+    }
+
+    /// The session's `/fast` choice, or [`None`] while the configuration
+    /// decides (**D563**).
+    #[must_use]
+    pub fn fast(&self) -> Option<crate::protocol::FastChoice> {
+        self.active().fast
+    }
+
+    /// The tier `/fast on` resolves to for `model` on this engine's provider,
+    /// or [`None`] on one that has no tier to move (**D563**).
+    #[must_use]
+    pub fn fast_tier(&self, model: &str) -> Option<&'static str> {
+        crate::responses_ladder::fast_tier(self.provider.id(), model)
+    }
+
+    /// What the next request to the active model asks for as its
+    /// `service_tier`, which rung decided it, and what the backend last said
+    /// it served (**D563**) — or [`None`] where no tier is sent at all: every
+    /// provider but the two Responses ids, and `openai` with nothing configured
+    /// or chosen.
+    ///
+    /// The same resolution a turn's request is built from, so what this
+    /// reports is what is sent. Polled rather than pushed, for
+    /// [`Engine::deadline`]'s reason: what it answers moves on a model switch,
+    /// a `/fast`, a reload and a served frame alike, and a frontend reading it
+    /// on its tick needs no event for any of them.
+    #[must_use]
+    pub fn service_tier(&self) -> Option<crate::responses_ladder::TierView> {
+        let model = self.active().model.clone();
+        let (resolved, source) = crate::responses_ladder::resolve(&self.responses_seed(), &model);
+        let served = self
+            .served
+            .lock()
+            .expect("the served slot is never poisoned")
+            .as_ref()
+            .and_then(|served| served.service_tier.clone());
+
+        Some(crate::responses_ladder::TierView {
+            requested: resolved.service_tier?,
+            source: source?,
+            served,
+        })
+    }
+
+    /// Holds the answers of the turns that follow to `format`, a Responses
+    /// `text.format` document, or stops holding them (**D563**).
+    ///
+    /// `ganja run --json-schema`'s door, set before its prompt. It rides every
+    /// step request of those turns and never a title, compaction or subagent
+    /// request, whose answers are not the one the schema describes. Ignored by
+    /// every wire but the Responses one.
+    pub fn set_text_format(&self, format: Option<serde_json::Value>) {
+        *self.text_format.lock().expect("the text format is never poisoned") = format;
+    }
+
+    /// What a resolution reads right now: this provider's table and the
+    /// session's choice.
+    fn responses_seed(&self) -> crate::responses_ladder::Seed {
+        let provider = self.provider.id().to_owned();
+        let table = self
+            .provider_options
+            .lock()
+            .expect("the provider options are never poisoned")
+            .get(&provider)
+            .cloned();
+
+        crate::responses_ladder::Seed { table, fast: self.active().fast, provider }
+    }
+
+    /// Forgets what the backend said it served and whether server-side
+    /// compaction has been mentioned — both are facts about one conversation.
+    fn forget_served(&self) {
+        *self.served.lock().expect("the served slot is never poisoned") = None;
+        self.server_compaction_noted.store(false, Ordering::Relaxed);
+    }
+
     /// Takes the posture the next turn runs under (**D-15**, **D496**).
     ///
     /// **No [`Engine::lock_entry`], deliberately**, where the three switches
@@ -5562,9 +5767,9 @@ impl Engine {
         let Some(state) = &self.persistence else {
             return;
         };
-        let (model, effort, agent) = {
+        let (model, effort, agent, fast) = {
             let active = self.active();
-            (active.model.clone(), active.effort.clone(), active.agent.clone())
+            (active.model.clone(), active.effort.clone(), active.agent.clone(), active.fast)
         };
 
         let mut live = state.live.lock().expect("the live session is never poisoned");
@@ -5574,6 +5779,7 @@ impl Engine {
         info.model = Some(model);
         info.effort = effort;
         info.agent = agent;
+        info.fast = fast;
         info.updated = now();
 
         if let Err(error) = state.storage.save_info(info) {
@@ -5712,7 +5918,7 @@ impl Engine {
         // spend a notice that was never delivered (deviation:
         // build-switch-counts-only-turns-that-ask).
         let asks_the_model = matches!(kind, TurnKind::Prompt { .. });
-        let (mut model, effort, name, previous) = {
+        let (mut model, effort, name, previous, fast) = {
             let mut active = self.active();
             let name = active.agent.clone();
             let previous = if asks_the_model {
@@ -5721,7 +5927,7 @@ impl Engine {
                 active.previous_agent.clone()
             };
 
-            (active.model.clone(), active.effort.clone(), name, previous)
+            (active.model.clone(), active.effort.clone(), name, previous, active.fast)
         };
         let session_agent = self
             .agents
@@ -5767,6 +5973,21 @@ impl Engine {
             .as_ref()
             .and_then(|name| crate::provider::efforts_for(self.provider.id(), &model).remove(name))
             .unwrap_or_default();
+        // The Responses ladder (**D563**), resolved the same way and for the
+        // same model: a `/command`'s one-turn model takes that model's tier and
+        // per-model entry for this turn alone. The `--json-schema` document is
+        // the root turn's, added here and never by the resolver a child shares.
+        let (mut responses, tier_source) =
+            crate::responses_ladder::resolve(&self.responses_seed(), &model);
+        responses.text_format =
+            self.text_format.lock().expect("the text format is never poisoned").clone();
+        if responses.body.contains_key("context_management")
+            && !self.server_compaction_noted.swap(true, Ordering::Relaxed)
+        {
+            tracing::info!(
+                "server-side compaction is configured; ganja's own compaction still runs off the reported input tokens"
+            );
+        }
 
         let system = self.system_for(agent);
         // A command that runs as another agent is not the session switching to
@@ -5823,6 +6044,7 @@ impl Engine {
                             name.clone(),
                             model.clone(),
                             effort.clone(),
+                            fast,
                         )
                     })
                     .id
@@ -5872,6 +6094,9 @@ impl Engine {
             identity: Arc::clone(&self.identity),
             receipts: Arc::clone(&self.settled_receipts),
             deadline: Arc::clone(&self.deadline),
+            responses,
+            tier_source,
+            served: Some(Arc::clone(&self.served)),
             teamless: self.teamless(),
             teamless_send: self.teamless_send,
             spec,
@@ -6233,6 +6458,7 @@ fn fresh_session(
     agent: Option<String>,
     model: String,
     effort: Option<String>,
+    fast: Option<crate::protocol::FastChoice>,
 ) -> SessionInfo {
     let created = now();
     let info = SessionInfo {
@@ -6252,9 +6478,9 @@ fn fresh_session(
         parent: None,
         // Nothing has been undone in a session that has not run a turn.
         revert: None,
-        // No service-tier choice has been made in one either; what a fresh
-        // session asks for is whatever the configuration resolves (**D563**).
-        fast: None,
+        // Whatever `/fast` was chosen before the first prompt minted the row
+        // (**D563**), the way the effort above is.
+        fast,
     };
 
     if let Err(error) = storage.save_info(&info) {

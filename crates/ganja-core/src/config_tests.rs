@@ -2552,3 +2552,74 @@ fn with_neither_on_disk_the_answer_is_the_one_a_writer_should_create() {
 
     assert_eq!(super::discovered(xdg.clone(), dotted), xdg);
 }
+
+/// **verify-w1's carry-forward (D563).** `ResponsesOptions::set_keys` is a
+/// hand-written list, so a field added to the struct and forgotten there would
+/// be a key that skips the per-id gate. Pinned from both ends: the fixture sets
+/// every field the struct serializes (so a new field without a fixture line
+/// fails here), and the keys it reports are the platform's whole vocabulary,
+/// both ways (so a field without a `set_keys` line fails here too).
+#[test]
+fn set_keys_reports_every_key_a_fully_populated_table_sets() {
+    let every: super::ResponsesOptions = toml::from_str(
+        r#"
+service_tier = "flex"
+reasoning = { context = "all_turns", summary = "concise", mode = "pro" }
+text = { verbosity = "low" }
+parallel_tool_calls = false
+stream_options = { include_obfuscation = true }
+tool_choice = "required"
+custom_tools = ["bash"]
+server_tools = [{ type = "web_search" }]
+include = ["web_search_call.action.sources"]
+context_management = [{ type = "compaction", compact_threshold = 1000 }]
+client_metadata = { origin = "ganja" }
+access_programs = { program = "research" }
+max_output_tokens = 100
+max_tool_calls = 3
+prompt_cache_key = "k"
+prompt_cache_retention = "24h"
+prompt_cache_options = { mode = "explicit", ttl = "1h", comparison_response_id = "r" }
+temperature = 0.2
+top_p = 0.9
+top_logprobs = 2
+truncation = "auto"
+safety_identifier = "s"
+user = "u"
+metadata = { team = "core" }
+moderation = { model = "omni", policy = "strict" }
+"#,
+    )
+    .expect("the fixture decodes");
+
+    let serde_json::Value::Object(fields) = serde_json::to_value(&every).expect("it serializes")
+    else {
+        panic!("a struct serializes as an object");
+    };
+    for (field, value) in &fields {
+        if field == "model" {
+            continue;
+        }
+        let unset = match value {
+            serde_json::Value::Null => true,
+            serde_json::Value::Array(items) => items.is_empty(),
+            serde_json::Value::Object(members) => members.is_empty(),
+            _ => false,
+        };
+        assert!(!unset, "the fixture leaves `{field}` unset, so this pin cannot see it");
+    }
+
+    let reported: std::collections::BTreeSet<&str> = every.set_keys().into_iter().collect();
+    let accepted: std::collections::BTreeSet<&str> =
+        crate::provider::responses::options::PLATFORM_ACCEPTED.iter().copied().collect();
+    assert_eq!(
+        reported.difference(&accepted).collect::<Vec<_>>(),
+        Vec::<&&str>::new(),
+        "set_keys reports a key the platform list does not name"
+    );
+    assert_eq!(
+        accepted.difference(&reported).collect::<Vec<_>>(),
+        Vec::<&&str>::new(),
+        "a platform key a fully populated table sets is missing from set_keys"
+    );
+}

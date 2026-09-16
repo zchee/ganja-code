@@ -820,6 +820,73 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
         "a frontend applying every event has to hold exactly what the next \
          request will carry, and this is now part of that: {seen:?}"
     );
+
+    // ---- 11. Configured options reach the step, the summary and not the title.
+    // **D563, AC-21.** The table installed the way a frontend installs it, and
+    // the bytes read off the socket: the step carries everything, the title
+    // carries none of the session's options, and the compaction carries the
+    // tier and the body but not a roster key its empty `tools` could not honor.
+    endpoint.forget();
+    endpoint.answers_turns_with(a_closing_reply());
+    let options: ganja_core::config::ResponsesOptions = toml::from_str(
+        "service_tier = \"default\"\ntext = { verbosity = \"low\" }\ntool_choice = \"required\"\n",
+    )
+    .expect("the table decodes");
+    let store_dir = tempfile::tempdir().expect("a temporary directory");
+    let (tool, _) = RecorderTool::new("lookup", "lookup ran", "found it");
+    let engine = Engine::persistent(
+        Arc::new(responses(&endpoint)),
+        SUBSCRIPTION_MODEL,
+        Arc::new(Registry::new(vec![tool])),
+        Permissions::default(),
+        ganja_core::Storage::open(store_dir.path().join("storage")),
+    )
+    .with_provider_options(std::collections::BTreeMap::from([(
+        responses::CHATGPT_ID.to_owned(),
+        options,
+    )]));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.send(prompt("what is the weather")).await.expect("an idle engine accepts");
+    drain(&mut events).await;
+    let is_title = |body: &serde_json::Value| {
+        body["instructions"].as_str().is_some_and(|text| text.contains("title generator"))
+    };
+    let mut titled = false;
+    for _ in 0..500 {
+        if endpoint.seen().iter().any(|request| is_title(&request.json())) {
+            titled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(titled, "the first turn earns a title request");
+    assert!(engine.settle(std::time::Duration::from_secs(10)).await);
+    engine.send(Command::Compact).await.expect("an idle engine compacts");
+    drain(&mut events).await;
+
+    let bodies: Vec<serde_json::Value> =
+        endpoint.seen().iter().map(ganja_testkit::responses_server::Recorded::json).collect();
+    let [step, title, summary] = bodies.as_slice() else {
+        panic!("a step, a title and a summary: {bodies:?}");
+    };
+    assert!(is_title(title), "the second request is the title: {title}");
+    assert_eq!(step["service_tier"], json!("default"), "{step}");
+    assert_eq!(step["text"], json!({"verbosity": "low"}), "{step}");
+    assert_eq!(step["tool_choice"], json!("required"), "the step offers a tool: {step}");
+
+    for key in ["service_tier", "text", "tool_choice"] {
+        assert!(title.get(key).is_none(), "the title carries no `{key}`: {title}");
+    }
+    assert_eq!(
+        title["stream_options"],
+        json!({"include_obfuscation": false}),
+        "and exactly the wire's own default beside today's body: {title}"
+    );
+
+    assert!(summary.get("tools").is_none(), "the summary offers nothing: {summary}");
+    assert_eq!(summary["service_tier"], json!("default"), "{summary}");
+    assert_eq!(summary["text"], json!({"verbosity": "low"}), "no `format` beside it: {summary}");
+    assert!(summary.get("tool_choice").is_none(), "the wire dropped the roster key: {summary}");
 }
 
 /// A first reply: a thought the backend seals, then the call it led to.

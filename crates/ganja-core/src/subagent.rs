@@ -235,6 +235,20 @@ pub(crate) struct Host {
     /// default socket directory — keeps a test's `--socket-dir` override
     /// reaching a child the same way it reaches the parent.
     pub(crate) identity: Arc<identity::Identity>,
+    /// What the parent turn resolves its Responses options from (**D563**):
+    /// the provider's configured table and the session's `/fast` choice,
+    /// snapshotted when the turn started.
+    ///
+    /// Carried as inputs rather than as a resolved value because a child may
+    /// run a model of its own agent's choosing, and both the per-model entry
+    /// and the fast tier are keyed on the model — so `Turn::child` resolves
+    /// for the child's model from this. Snapshotted per turn, so a table
+    /// replaced mid-turn reaches the next turn's children and never this one's.
+    pub(crate) responses: crate::responses_ladder::Seed,
+    /// The session's served-options slot, which a child writes only when it
+    /// ran the parent's own model: an echo about another model's request is
+    /// not a statement about what the session is being served.
+    pub(crate) served: Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>,
 }
 
 impl std::fmt::Debug for Host {
