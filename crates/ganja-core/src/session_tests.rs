@@ -1715,3 +1715,21 @@ fn a_span_is_spelled_with_two_units_at_most_and_rounds_down() {
         );
     }
 }
+
+/// **D563.** A provider-run tool's blob that cannot be kept records why on the
+/// row, as `server-tool-output: <error>`, rather than failing the turn or
+/// leaving the row empty. Bytes that are not base64 fail at the decode, before
+/// anything is written, so the recorded text is the decoder's own error.
+#[tokio::test]
+async fn a_server_tool_blob_that_cannot_be_kept_records_why() {
+    use base64::Engine as _;
+
+    let blob = crate::provider::Blob { mime: "image/png".to_owned(), base64: "!!!!".to_owned() };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&blob.base64)
+        .expect_err("the fixture is not base64");
+
+    let recorded = super::server_tool_blob(&crate::protocol::PartId::ascending(), blob).await;
+
+    assert_eq!(recorded, format!("server-tool-output: {decoded}"));
+}

@@ -3955,18 +3955,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                         continue;
                     };
                     held.name = name;
-                    turn.persist_part(assistant, &renamed);
-
-                    if let ControlFlow::Break(stop) = deliver(
-                        turn,
-                        Event::PartUpdated {
-                            session_id: turn.session_id.clone(),
-                            message_id: assistant.id.clone(),
-                            part: renamed,
-                        },
-                    )
-                    .await
-                    {
+                    if let ControlFlow::Break(stop) = update_part(turn, assistant, renamed).await {
                         interrupt!(stop, &ToolError::Cancelled.to_string());
                     }
                     continue;
@@ -4033,18 +4022,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                     }
                     None => continue,
                 };
-                turn.persist_part(assistant, &updated);
-
-                if let ControlFlow::Break(stop) = deliver(
-                    turn,
-                    Event::PartUpdated {
-                        session_id: turn.session_id.clone(),
-                        message_id: assistant.id.clone(),
-                        part: updated,
-                    },
-                )
-                .await
-                {
+                if let ControlFlow::Break(stop) = update_part(turn, assistant, updated).await {
                     interrupt!(stop, &ToolError::Cancelled.to_string());
                 }
             }
@@ -4124,18 +4102,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                     }
                     None => continue,
                 };
-                turn.persist_part(assistant, &updated);
-
-                if let ControlFlow::Break(stop) = deliver(
-                    turn,
-                    Event::PartUpdated {
-                        session_id: turn.session_id.clone(),
-                        message_id: assistant.id.clone(),
-                        part: updated,
-                    },
-                )
-                .await
-                {
+                if let ControlFlow::Break(stop) = update_part(turn, assistant, updated).await {
                     interrupt!(stop, &ToolError::Cancelled.to_string());
                 }
             }
@@ -5786,6 +5753,21 @@ async fn deliver(turn: &Turn, event: Event) -> ControlFlow<Option<Outcome>> {
     }
 }
 
+/// Writes `part` through and tells subscribers it changed, breaking as
+/// [`deliver`] does.
+async fn update_part(turn: &Turn, assistant: &Message, part: Part) -> ControlFlow<Option<Outcome>> {
+    turn.persist_part(assistant, &part);
+    deliver(
+        turn,
+        Event::PartUpdated {
+            session_id: turn.session_id.clone(),
+            message_id: assistant.id.clone(),
+            part,
+        },
+    )
+    .await
+}
+
 /// Says, at debug, which `service_tier` a Responses request carries and which
 /// rung of the ladder decided it (**D563**) — the requested half of what
 /// `/usage` shows, beside the wire's own line about what was served.
@@ -5815,13 +5797,20 @@ fn log_tier(turn: &Turn, responses: &crate::provider::responses::options::Reques
 /// sharing its worker thread — for as long as they take.
 async fn server_tool_blob(part: &crate::protocol::PartId, blob: crate::provider::Blob) -> String {
     let name = part.as_str().to_owned();
-    tokio::task::spawn_blocking(move || write_server_tool_blob(&name, &blob))
-        .await
-        .unwrap_or_else(|error| format!("server-tool-output: {error}"))
+    let joined = tokio::task::spawn_blocking(move || write_server_tool_blob(&name, &blob)).await;
+    let written = match joined {
+        Ok(written) => written,
+        Err(error) => Err(std::io::Error::other(error)),
+    };
+
+    match written {
+        Ok(path) => path.display().to_string(),
+        Err(error) => format!("server-tool-output: {error}"),
+    }
 }
 
 /// [`server_tool_blob`]'s blocking half.
-fn write_server_tool_blob(part: &str, blob: &crate::provider::Blob) -> String {
+fn write_server_tool_blob(part: &str, blob: &crate::provider::Blob) -> std::io::Result<PathBuf> {
     use base64::Engine as _;
 
     // The extension is the media type's subtype when it is a plain word, which
@@ -5834,17 +5823,12 @@ fn write_server_tool_blob(part: &str, blob: &crate::provider::Blob) -> String {
         .filter(|subtype| !subtype.is_empty() && subtype.bytes().all(|b| b.is_ascii_alphanumeric()))
         .unwrap_or("bin");
 
-    let written = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(&blob.base64)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         .and_then(|bytes| {
             crate::tool::truncate::write_server_tool_output(&format!("{part}.{extension}"), &bytes)
-        });
-
-    match written {
-        Ok(path) => path.display().to_string(),
-        Err(error) => format!("server-tool-output: {error}"),
-    }
+        })
 }
 
 #[cfg(test)]

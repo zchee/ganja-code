@@ -580,11 +580,10 @@ impl ProviderConfig {
 /// calls. Which of these keys each id takes is
 /// [`responses::options`]' answer, not
 /// this struct's: the struct is the **shape** a document decodes to, and the
-/// per-id gate in `check_providers` reads the wire's own measured lists so
-/// that the two can never disagree about what a backend accepts.
+/// per-id gate in `check_responses_options` reads the wire's own measured
+/// lists so that the two can never disagree about what a backend accepts.
 ///
-/// Every field is optional and nothing here is sent unless it is set. Two
-/// things follow from that and are worth saying once:
+/// Every field is optional and nothing here is sent unless it is set, so:
 ///
 /// - **a key the backend refuses is refused at load**, by name and with the
 ///   probe date beside it, because the seat answers an unknown key with a 400
@@ -613,7 +612,7 @@ pub struct ResponsesOptions {
     pub text: Option<TextOptions>,
     /// Whether the model may call several tools in one step.
     pub parallel_tool_calls: Option<bool>,
-    /// Stream-level settings; one key so far.
+    /// Stream-level settings.
     pub stream_options: Option<StreamOptions>,
     /// Which tool the model must call, if any.
     ///
@@ -708,9 +707,7 @@ impl ResponsesOptions {
     /// answer for one model, and a table inside it would invite a second
     /// lookup nobody performs.
     ///
-    /// Defined once and called from both sides — [`Config::provider_options`]
-    /// and the engine's per-turn resolver — because two spellings of an
-    /// overlay are two overlays.
+    /// Its caller is `responses_ladder::resolve`, for the model a request asks.
     #[must_use]
     pub fn for_model(&self, model: &str) -> Self {
         let mut merged = self.clone();
@@ -914,9 +911,7 @@ pub enum ReasoningContext {
 pub enum ReasoningSummary {
     /// The backend chooses — what the wire sends when nothing says otherwise.
     Auto,
-    /// Short.
     Concise,
-    /// Long.
     Detailed,
 }
 
@@ -924,9 +919,7 @@ pub enum ReasoningSummary {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningMode {
-    /// The ordinary one.
     Standard,
-    /// The heavier one.
     Pro,
 }
 
@@ -945,11 +938,9 @@ pub struct TextOptions {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verbosity {
-    /// Terse.
     Low,
     /// The default.
     Medium,
-    /// Expansive.
     High,
 }
 
@@ -2441,18 +2432,6 @@ impl Config {
             .collect()
     }
 
-    /// The Responses options configured for `id`, overlaid for `model`
-    /// (**D563**).
-    ///
-    /// [`None`] when the id carries no `options` table at all, which is every
-    /// id but the two the loader admits one on. The overlay is
-    /// [`ResponsesOptions::for_model`]'s, called here and by the engine's
-    /// per-turn resolver so that both sides read one rule.
-    #[must_use]
-    pub fn provider_options(&self, id: &str, model: &str) -> Option<ResponsesOptions> {
-        Some(self.provider.get(id)?.options.as_ref()?.for_model(model))
-    }
-
     /// Every id's `options` table as written, per-model entries included,
     /// keyed by id (**D563**) — what `Engine::with_provider_options` installs
     /// and a `/plugin` reload swaps in. Unoverlaid, because which model a
@@ -3316,13 +3295,11 @@ fn check_lsp(config: Option<&LspConfig>) -> Result<(), String> {
 ///
 /// No message quotes the URL. A provider entry is configuration, and
 /// configuration is allowed to carry a credential in its userinfo.
+///
 /// Since **D563** the function is two arms rather than one, keyed on whether
 /// the id names a builtin — see [`ProviderConfig`]'s own doc for the two
-/// shapes a `provider` entry can now be. The builtin arm was the early
-/// `return Err` above until that decision gave two builtins something they can
-/// legitimately carry; everything it used to refuse it still refuses, and the
-/// declared arm is unchanged except that its two required fields are now
-/// proved here rather than by serde.
+/// shapes a `provider` entry can now be. The declared arm proves its two
+/// required fields here rather than through serde.
 fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), String> {
     for (id, entry) in providers {
         if crate::provider::PROVIDERS.contains(&id.as_str()) {
