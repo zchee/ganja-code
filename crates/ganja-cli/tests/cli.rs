@@ -739,10 +739,7 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 /// since **D555** the seat arm reaches no credential either — the id is the
 /// whole question, which is why this arranges no store at all. What proves
 /// membership is not the catalog's is `gpt-5.4`: this build's table carries the
-/// row and the listing leaves it out. It used to be proved the other way round,
-/// by `gpt-5.6-sol` being listed with no row at all — until 2026-09-16 gave the
-/// four roster models rows of their own, so a seat started offline has a window
-/// for the model it is about to ask.
+/// row and the listing leaves it out.
 #[test]
 fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
     offline(&cache()).args(["models", "chatgpt"]).assert().success().stdout(

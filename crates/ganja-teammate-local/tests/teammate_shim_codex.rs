@@ -451,10 +451,7 @@ fn the_codex_posture_sentence_is_the_one_its_probe_recorded() {
 /// prose around it: that line is what codex said the turn ran under.
 #[test]
 fn the_floor_codex_composes_is_the_one_its_probe_measured_writing_under() {
-    let block = PROBE
-        .split("---- D560 re-probe")
-        .nth(1)
-        .expect("the recording carries the D560 measurement block");
+    let block = shim_support::d560_reprobe(PROBE);
     let rollout =
         format!(r#""sandbox_policy":{{"type":"{}""#, ganja_teammate_local::codex::SANDBOX_VALUE);
 

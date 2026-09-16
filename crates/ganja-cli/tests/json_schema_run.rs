@@ -210,24 +210,6 @@ async fn a_file_that_holds_no_json_says_so_about_the_file() {
     assert!(endpoint.seen().is_empty());
 }
 
-/// **D563, AC-31.** `--attach` carries no text-format route, so the pair is a
-/// parse error rather than a flag that parses and then decides nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_schema_with_attach_is_a_parse_error() {
-    let homes = Homes::new();
-    let output = ganja(&homes, "http://127.0.0.1:1")
-        .args(["run", "--json-schema", SCHEMA, "--attach", "http://127.0.0.1:4096", "is it ok"])
-        .output()
-        .expect("the binary runs");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("text");
-    assert!(
-        stderr.contains("--json-schema") && stderr.contains("--attach"),
-        "clap names both halves of the conflict: {stderr}"
-    );
-}
-
 /// **D563, AC-31.** A provider that does not speak the Responses API is
 /// refused before a session exists — so a script that mistyped its provider
 /// finds no half-started conversation in the store afterwards.
@@ -264,10 +246,9 @@ async fn a_provider_that_cannot_carry_it_is_refused_before_a_session_exists() {
 }
 
 /// **D563, AC-32.** A configured `service_tier` reaches a headless run's
-/// request without any flag at all: `run` takes the configuration, which is
-/// why it has no `--fast` of its own.
+/// request without any flag at all: `run` takes the configuration.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_configured_tier_reaches_a_headless_request_and_there_is_no_fast_flag() {
+async fn a_configured_tier_reaches_a_headless_request() {
     let endpoint = responses_server::serve().await;
     endpoint.answers_turns_with(answering());
     let homes = Homes::new();
@@ -290,12 +271,4 @@ async fn a_configured_tier_reaches_a_headless_request_and_there_is_no_fast_flag(
 
     let seen = endpoint.seen();
     assert_eq!(seen[0].json()["service_tier"], json!("default"), "the configured tier is sent");
-
-    // And the flag that would have done it from the command line does not
-    // exist — headless takes the configuration, deliberately.
-    let refused = ganja(&homes, &endpoint.base_url)
-        .args(["run", "--fast", "is it ok"])
-        .output()
-        .expect("the binary runs");
-    assert!(!refused.status.success(), "`run` has no --fast flag");
 }

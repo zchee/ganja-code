@@ -735,10 +735,7 @@ fn the_grok_deadline_is_the_value_its_own_probes_derived() {
 /// again cannot ship without a new recording.
 #[test]
 fn the_floor_grok_composes_is_the_one_its_probe_measured_writing_under() {
-    let block = PROBE
-        .split("---- D560 re-probe")
-        .nth(1)
-        .expect("the recording carries the D560 measurement block");
+    let block = shim_support::d560_reprobe(PROBE);
     let event = format!(r#""profile":"{}""#, ganja_teammate_local::grok::SANDBOX_VALUE);
     let mode = format!("--permission-mode {}", ganja_teammate_local::grok::PERMISSION_MODE);
 

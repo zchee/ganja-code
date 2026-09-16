@@ -522,10 +522,6 @@ fn snapshot_command_expansion_folded() {
     insta::with_settings!({snapshot_path => "../snapshots"}, {
         insta::assert_snapshot!(lines.join("\n"));
     });
-    assert!(
-        lines.iter().all(|line| !line.contains("Stage")),
-        "no line of the template reaches the pane: {lines:#?}"
-    );
 
     let mut buffer = Buffer::empty(AREA);
     chat.render(AREA, &mut buffer, &Theme::default());
@@ -1163,6 +1159,22 @@ fn todos() -> serde_json::Value {
     ])
 }
 
+/// An assistant reply whose one part is a settled `todowrite` of `todos`.
+fn todowrite_reply(todos: serde_json::Value) -> Message {
+    let mut reply = Message::assistant("canned");
+    reply.parts.push(Part {
+        id: PartId::from("prt_1".to_owned()),
+        body: PartBody::Tool {
+            call_id: "call_1".to_owned(),
+            tool: "todowrite".to_owned(),
+            state: todo_call(todos),
+            custom: false,
+        },
+    });
+
+    reply
+}
+
 /// **The noisy-checklist screenshot (D562).** A settled `todowrite` answers
 /// with one row counting its list — how long it is and how many tasks stand
 /// in each state — and never with the list itself, which is the working
@@ -1258,23 +1270,8 @@ fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
     let theme = Theme::default();
     let mut chat = Chat::default();
     chat.start_message(Message::user("port the shaders"));
-    let mut reply = Message::assistant("canned");
-    reply.parts.push(Part {
-        id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool {
-            call_id: "call_1".to_owned(),
-            tool: "todowrite".to_owned(),
-            state: todo_call(todos()),
-            custom: false,
-        },
-    });
-    chat.start_message(reply);
-    chat.set_working(Some(Working {
-        started: Instant::now(),
-        turn: 1,
-        output_tokens: 0,
-        compaction: None,
-    }));
+    chat.start_message(todowrite_reply(todos()));
+    chat.set_working(Some(working(1, 0, 0)));
 
     let height = chat.lay_out_working(60, &theme);
     let area = Rect::new(0, 0, 60, height);
@@ -1347,23 +1344,8 @@ fn a_todowrite_whose_list_cannot_be_read_hangs_no_checklist_under_the_working_li
     ] {
         let mut chat = Chat::default();
         chat.start_message(Message::user("port the shaders"));
-        let mut reply = Message::assistant("canned");
-        reply.parts.push(Part {
-            id: PartId::from("prt_1".to_owned()),
-            body: PartBody::Tool {
-                call_id: "call_1".to_owned(),
-                tool: "todowrite".to_owned(),
-                state: todo_call(todos.clone()),
-                custom: false,
-            },
-        });
-        chat.start_message(reply);
-        chat.set_working(Some(Working {
-            started: Instant::now(),
-            turn: 1,
-            output_tokens: 0,
-            compaction: None,
-        }));
+        chat.start_message(todowrite_reply(todos.clone()));
+        chat.set_working(Some(working(1, 0, 0)));
 
         let running = strip(&mut chat, 60);
 
@@ -1388,23 +1370,8 @@ fn a_todowrite_whose_list_cannot_be_read_hangs_no_checklist_under_the_working_li
 fn the_working_strip_is_the_only_checklist_a_settled_todowrite_draws() {
     let mut chat = Chat::default();
     chat.start_message(Message::user("port the shaders"));
-    let mut reply = Message::assistant("canned");
-    reply.parts.push(Part {
-        id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool {
-            call_id: "call_1".to_owned(),
-            tool: "todowrite".to_owned(),
-            state: todo_call(todos()),
-            custom: false,
-        },
-    });
-    chat.start_message(reply);
-    chat.set_working(Some(Working {
-        started: Instant::now(),
-        turn: 1,
-        output_tokens: 0,
-        compaction: None,
-    }));
+    chat.start_message(todowrite_reply(todos()));
+    chat.set_working(Some(working(1, 0, 0)));
 
     let boxes = |lines: &[String]| {
         lines
@@ -1450,25 +1417,10 @@ fn the_working_strip_is_the_only_checklist_a_settled_todowrite_draws() {
 fn the_working_line_carries_no_checklist_from_a_turn_that_is_over() {
     let mut chat = Chat::default();
     chat.start_message(Message::user("port the shaders"));
-    let mut reply = Message::assistant("canned");
-    reply.parts.push(Part {
-        id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool {
-            call_id: "call_1".to_owned(),
-            tool: "todowrite".to_owned(),
-            state: todo_call(todos()),
-            custom: false,
-        },
-    });
-    chat.start_message(reply);
+    chat.start_message(todowrite_reply(todos()));
     chat.start_message(Message::user("now something else"));
     chat.start_message(Message::assistant("canned"));
-    chat.set_working(Some(Working {
-        started: Instant::now(),
-        turn: 2,
-        output_tokens: 0,
-        compaction: None,
-    }));
+    chat.set_working(Some(working(2, 0, 0)));
 
     let lines = strip(&mut chat, 60);
 

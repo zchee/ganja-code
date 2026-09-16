@@ -1164,7 +1164,10 @@ pub fn fast(text: &str) -> Option<Fast> {
         "reset" => Fast::Reset,
         "show" => Fast::Show,
         other => {
-            Fast::Refused(format!("/fast takes on, off, reset or show; {other:?} is none of them"))
+            let (head, last) =
+                FAST_GRAMMAR.rsplit_once(" | ").expect("the grammar lists more than one word");
+            let words = head.replace(" | ", ", ");
+            Fast::Refused(format!("/fast takes {words} or {last}; {other:?} is none of them"))
         }
     })
 }

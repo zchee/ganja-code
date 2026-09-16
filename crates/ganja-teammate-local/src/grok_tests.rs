@@ -417,7 +417,7 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
         TUI_PROBE.lines().filter(|line| line.trim_start().starts_with("outcome (")).collect();
     assert_eq!(outcomes.len(), 3, "{outcomes:?}");
     // Keyed on what each recording says about the home rather than on
-    // position, so a third recording fails this loudly instead of
+    // position, so another recording fails this loudly instead of
     // shifting which line answers which question.
     let symlinked = outcomes
         .iter()

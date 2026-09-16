@@ -93,7 +93,7 @@ use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, recor
 use ganja_teammate_local::grok::Grok;
 use ganja_teammate_local::shim::{self, Driver as _, Prompt, Turn};
 use ganja_testkit::AllowSpawn;
-use shim_support::until;
+use shim_support::{probe_directory, until};
 
 /// How long one real grok turn gets before this test gives up on it.
 ///
@@ -288,27 +288,6 @@ fn collect_results(value: &serde_json::Value, found: &mut Vec<String>) {
     }
 }
 
-/// A probe directory removed when this is dropped — on the ordinary exit and
-/// on a failed assertion alike — and its parent with it if that left the
-/// parent empty.
-///
-/// The working tree and the outside-the-set arms' target both sit under a
-/// person's cache directory, and a probe that leaves its own directory behind
-/// there is a probe that lied about cleaning up; a *file* left behind is a different
-/// thing, and is exactly what those arms assert against before this runs.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        if let Some(parent) = self.0.parent() {
-            // `remove_dir` refuses a non-empty directory, which is the point:
-            // only a `probes/` this run left empty goes with it.
-            let _ = std::fs::remove_dir(parent);
-        }
-    }
-}
-
 /// One turn, composed by the shipped driver and run through the shipped launch.
 async fn run(cwd: &std::path::Path, text: &str, session: Option<&str>) -> Ran {
     let spec = spec(cwd);
@@ -337,17 +316,6 @@ async fn run(cwd: &std::path::Path, text: &str, session: Option<&str>) -> Ran {
     }
 }
 
-/// A directory of this run's own under `~/.cache/ganja/probes/`, outside every
-/// path grok's profiles keep writable by default.
-fn probe_directory(label: &str) -> RemoveOnDrop {
-    let directory = PathBuf::from(std::env::var_os("HOME").expect("a HOME"))
-        .join(".cache/ganja/probes")
-        .join(format!("grok-{label}-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).expect("a probe directory under the user's cache");
-
-    RemoveOnDrop(directory)
-}
-
 /// The gating ladder: viability, what edits and what asks, the cost of an
 /// unapproved ask, the resume composition, the two drift questions, and the
 /// network bound.
@@ -366,7 +334,7 @@ async fn what_a_workspace_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
          refusal rather than anything about a turn"
     );
 
-    let work = probe_directory("work");
+    let work = probe_directory("grok", "work");
     let work = work.0.as_path();
     std::fs::write(
         work.join("NOTES.txt"),
@@ -472,7 +440,7 @@ async fn what_a_workspace_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // beside it cancelled. If the sandbox ever let it through, the stray file
     // is the evidence and the assertion is what reports it; the directory
     // itself goes on every exit.
-    let outside = probe_directory("outside");
+    let outside = probe_directory("grok", "outside");
     let outside_target = outside.0.join("PROBE_OUTSIDE.txt");
     let outside_write = run(
         work,

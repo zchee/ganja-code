@@ -365,20 +365,17 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // it yields to both: a resumed row's own effort is already on the engine
     // here, and this seeds only a session that carries none.
     engine.seed_effort(config.effort).await;
+    // Held on the engine before the prompt, so the turn's very first request
+    // carries the schema. Not a command — nothing about it is session state a
+    // resume would restore (**D563**), which is why it is the one door `run`
+    // has and `/`-commands have none.
+    engine.set_text_format(text_format);
     // After the session, so the flag outranks whatever effort a resumed row
     // restored; before the turn, so a bad name is this refusal — listing the
     // model's real names — and never a request built around it. The deadline
     // after it and before the prompt, so the turn's very first request
     // carries the block: a budget that bit from the second step on would
     // leave the step most likely to wander unhurried.
-    // Beside the deadline and for its reason: held on the engine before the
-    // prompt, so the turn's very first request carries the schema. Not a
-    // command — nothing about it is session state a resume would restore
-    // (**D563**), which is why it is the one door `run` has and `/`-commands
-    // have none.
-    if let Some(format) = text_format {
-        engine.set_text_format(Some(format));
-    }
     let outcome = async {
         effort_switch(&engine, args.effort).await?;
         seed_deadline(&engine, args.deadline).await?;
@@ -484,10 +481,10 @@ const JSON_SCHEMA_NAME: &str = "ganja_run";
 /// `E2` when `argument` is neither a file that is there nor a JSON document; a
 /// sentence naming the file when one is there and could not be read or parsed —
 /// which is **not** `E2`, because "no such file" would be false about exactly
-/// the case a person most needs told apart from a missing one; and a third
-/// naming the JSON type that arrived when the document parsed and is not an
-/// object; and a fifth, [`closed`]'s, naming the first object node that does
-/// not set `additionalProperties: false`.
+/// the case a person most needs told apart from a missing one; a third naming
+/// the JSON type that arrived when the document parsed and is not an object;
+/// and a fourth, [`closed`]'s, naming the first object node that does not set
+/// `additionalProperties: false`.
 fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
     let path = std::path::Path::new(argument);
     if path.exists() {
@@ -581,6 +578,14 @@ fn open_object(node: &Value, path: String) -> Option<String> {
 
     for (keyword, value) in members {
         let here = format!("{path}{}", segment(keyword));
+        let in_list = || {
+            value.as_array().and_then(|listed| {
+                listed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
+            })
+        };
         let found = match keyword.as_str() {
             "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
                 value.as_object().and_then(|named| {
@@ -589,20 +594,10 @@ fn open_object(node: &Value, path: String) -> Option<String> {
                     })
                 })
             }
-            "anyOf" | "allOf" | "oneOf" | "prefixItems" => value.as_array().and_then(|listed| {
-                listed
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
-            }),
+            "anyOf" | "allOf" | "oneOf" | "prefixItems" => in_list(),
             // `items` was an array of schemas before draft 2020-12, and a
             // document written to an older draft is still somebody's schema.
-            "items" if value.is_array() => value.as_array().and_then(|listed| {
-                listed
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
-            }),
+            "items" if value.is_array() => in_list(),
             "items"
             | "additionalItems"
             | "additionalProperties"
