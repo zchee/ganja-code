@@ -35,12 +35,12 @@ Three modules and a private fourth. `provider/` is the wires; `auth` is where a 
 
 ## Identity on the wire
 
+What each credential-bearing host is told this build is (**D521**), and the
+constant that decides it — because the answer is the host's and not the crate's:
+
 The statement in full — the rule, the refused impersonation and the deviations
 ratified with it — is the "**D521** — what this build tells each host it is"
 block in `../AGENTS.md`; this table adds the constant behind each row.
-
-What each credential-bearing host is told this build is (**D521**), and the
-constant that decides it — because the answer is the host's and not the crate's:
 
 | Host | Told | Constant | Why |
 |---|---|---|---|
