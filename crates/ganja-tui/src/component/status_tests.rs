@@ -1051,3 +1051,40 @@ fn a_roster_decides_whether_the_deadline_draws_at_all() {
         rendered(&silent, 120)
     );
 }
+
+/// **D563, AC-29.** The `fast` cell is on the default walk, ahead of every
+/// work count — and a session whose next request asks at no fast tier draws
+/// the bar this build always drew, cell for cell.
+#[test]
+fn the_default_bar_gains_the_fast_cell_only_while_a_fast_tier_is_asked_for() {
+    let mut status = Status::new(None);
+    status.set_queued(2);
+    let ordinary = rendered(&status, 120);
+    assert!(!ordinary.contains("fast"), "got {ordinary:?}");
+
+    status.set_fast(true);
+    let line = rendered(&status, 120);
+    assert!(line.contains("fast"), "got {line:?}");
+    assert!(line.find("fast") < line.find("2 queued"), "the cell leads the work counts: {line:?}");
+
+    // And back: the tier is a thing that moves, so the cell has to as well.
+    status.set_fast(false);
+    assert_eq!(rendered(&status, 120), ordinary, "the absent-tier bar is unchanged cell for cell");
+}
+
+/// **D563, AC-29.** Ordinary roster vocabulary beside it: a roster that does
+/// not name `fast` never draws it however the tier resolved, and one that
+/// names nothing else draws it alone.
+#[test]
+fn a_roster_draws_the_fast_cell_only_where_it_named_it() {
+    let mut unnamed = roster(&[StatuslineElement::Activity, StatuslineElement::Tokens]);
+    unnamed.set_fast(true);
+    assert!(!rendered(&unnamed, 120).contains("fast"));
+
+    let mut named = roster(&[StatuslineElement::Fast]);
+    named.set_fast(true);
+    assert_eq!(rendered(&named, 120), "fast");
+
+    named.set_fast(false);
+    assert_eq!(rendered(&named, 120), "", "and nothing at all while none is asked for");
+}

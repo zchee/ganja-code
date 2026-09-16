@@ -2182,6 +2182,24 @@ pub enum StatuslineElement {
     Agent,
     /// The `model (effort)` pair, shown only while an effort is selected.
     Effort,
+    /// Whether the next request asks the Responses API for a fast
+    /// `service_tier`, as the bare word `fast` (**D563**) — present only while
+    /// it does.
+    ///
+    /// **What is asked for, never what was served.** The ChatGPT seat was
+    /// measured to echo `default` whatever it was sent (probe 2026-09-16), so a
+    /// bar that drew the echo would tell every seat session it is not fast when
+    /// nobody knows that; what was served is `/usage`'s row and a debug line.
+    ///
+    /// Named the way [`Self::Deadline`] and [`Self::Held`] are — it draws on
+    /// both render paths — but with a **departure from their discipline that is
+    /// deliberate**: those two leave the absent-config bar unchanged because a
+    /// session that set no deadline and holds no message yields no cell, where
+    /// a `chatgpt` session's resolved default *is* a fast tier, so that bar
+    /// gains a cell by design. On every other provider — and on `openai` with
+    /// nothing configured — no tier is resolved at all and the bar is unchanged
+    /// cell for cell.
+    Fast,
     /// How many messages are waiting for the running turn.
     Queued,
     /// How many background `bash` jobs are running.

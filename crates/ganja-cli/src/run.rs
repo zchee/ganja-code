@@ -233,6 +233,23 @@ pub struct RunArgs {
         conflicts_with = "attach"
     )]
     deadline: Option<u64>,
+    /// Hold this turn's answer to a JSON Schema: a path to a `.json` file, or
+    /// the document inline. Every request of the turn carries it as the
+    /// Responses API's `text.format`, and the assistant's text is the document.
+    // Resolved at the clap boundary (`json_schema_flag`), `--deadline`'s own
+    // precedent: a value that is neither a readable file nor JSON is refused
+    // before any engine is assembled. The *provider* it needs cannot be
+    // checked here — it is not known until `select` has run — so that refusal
+    // is `json_schema_provider`'s, below, and is still ahead of any session.
+    // Refused together with `--attach` for `--effort`'s reason: the client's
+    // surface carries no text-format route (**D563**).
+    #[arg(
+        long,
+        value_name = "FILE|JSON",
+        value_parser = json_schema_flag,
+        conflicts_with = "attach"
+    )]
+    json_schema: Option<serde_json::Value>,
     /// Merge exactly this config file, outranking `GANJA_CONFIG` and discovery.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -317,7 +334,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
         &Overrides { model: args.model, agent: args.agent, config_file: args.config },
     )
     .await?;
-    let Assembled { engine, servers, config, .. } = assembled;
+    let Assembled { engine, servers, config, provider, .. } = assembled;
+    // Before the session and before the hooks (**D563**): a flag the selected
+    // provider cannot carry is a run that would answer in prose whatever the
+    // schema said, and saying so costs nothing here where saying it later
+    // costs a stored session and a spent request.
+    let text_format = json_schema_format(args.json_schema, &provider)?;
     // The D479 trio reaches the receiver classifier (D523): a `run --auto`
     // session is bypass-classed for cross-session admission, exactly as the
     // UI's `--yolo` session is. Classification only — what `auto` does to
@@ -347,6 +369,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // after it and before the prompt, so the turn's very first request
     // carries the block: a budget that bit from the second step on would
     // leave the step most likely to wander unhurried.
+    // Beside the deadline and for its reason: held on the engine before the
+    // prompt, so the turn's very first request carries the schema. Not a
+    // command — nothing about it is session state a resume would restore
+    // (**D563**), which is why it is the one door `run` has and `/`-commands
+    // have none.
+    if let Some(format) = text_format {
+        engine.set_text_format(Some(format));
+    }
     let outcome = async {
         effort_switch(&engine, args.effort).await?;
         seed_deadline(&engine, args.deadline).await?;
@@ -420,6 +450,76 @@ fn deadline_flag(argument: &str) -> Result<u64, String> {
     // a deadline nobody chose.
     ganja_tui::command::wire_millis(until)
         .ok_or_else(|| format!("{argument:?} names an instant a deadline cannot carry"))
+}
+
+/// The name a `--json-schema` document is sent under (**D563**).
+///
+/// The Responses API takes a name beside the schema and echoes it back on the
+/// item it produced. It names *this door* rather than the schema, because the
+/// document is the caller's and nothing here knows what it describes.
+const JSON_SCHEMA_NAME: &str = "ganja_run";
+
+/// `--json-schema`'s value parser: the document, from a file at `argument` if
+/// one is there, and otherwise from `argument` itself (**D563**).
+///
+/// The file is tried first, and the reason is which mistake each ordering
+/// makes unreadable: a path is never valid JSON, so trying JSON first would
+/// report a typo'd filename as a JSON syntax error at column 1.
+///
+/// # Errors
+///
+/// `E2` when `argument` is neither a file that is there nor a JSON document,
+/// and a sentence naming the file when one is there and could not be read or
+/// parsed — which is **not** `E2`, because "no such file" would be false about
+/// exactly the case a person most needs told apart from a missing one.
+fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
+    let path = std::path::Path::new(argument);
+    if path.is_file() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("--json-schema could not read {argument:?}: {error}"))?;
+
+        return serde_json::from_str(&text).map_err(|error| {
+            format!("--json-schema could not read the JSON in {argument:?}: {error}")
+        });
+    }
+
+    serde_json::from_str(argument).map_err(|error| {
+        format!(
+            "--json-schema takes a path to a JSON file or an inline JSON document; {argument:?} is neither: no such file, and not JSON ({error})"
+        )
+    })
+}
+
+/// The `text.format` document `--json-schema` rides as, or [`None`] when the
+/// flag was not given (**D563**).
+///
+/// # Errors
+///
+/// `E3` on a provider that does not speak the Responses API. Refused rather
+/// than ignored, for the reason every other unusable flag here is refused: a
+/// run that quietly dropped it would answer in whatever prose the model felt
+/// like and exit 0, and a script reading that answer as JSON is the failure
+/// this sentence exists to prevent.
+fn json_schema_format(schema: Option<serde_json::Value>, provider: &str) -> Result<Option<Value>> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    if !ganja_core::provider::responses::options::speaks_options(provider) {
+        bail!(
+            "--json-schema rides the Responses API's text.format; the selected provider {provider} does not speak it"
+        );
+    }
+
+    Ok(Some(serde_json::json!({
+        "type": "json_schema",
+        "name": JSON_SCHEMA_NAME,
+        "schema": schema,
+        // The vendor's own word for "answer exactly this or fail", which is
+        // the only reading of a schema somebody passed on the command line:
+        // a best-effort shape would put the burden of checking back on the
+        // script this flag exists to serve.
+        "strict": true,
+    })))
 }
 
 /// Installs [`REFUSED`] as standing rules the engine re-applies itself.

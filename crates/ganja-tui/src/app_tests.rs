@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use futures::stream::BoxStream;
 use futures::{FutureExt as _, StreamExt as _};
-use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::provider::{FakeProvider, fake, responses};
 use ganja_core::storage::VERSION;
 use ganja_core::{Engine, SessionId, SessionInfo, Storage};
 use ganja_protocol::{
-    Event as CoreEvent, FinishReason, HeldId, HeldOutcome, HoldCause, Message, Part, PartBody,
-    PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption, RedactedText,
-    ToolState, Usage,
+    Event as CoreEvent, FastChoice, FinishReason, HeldId, HeldOutcome, HoldCause, Message, Part,
+    PartBody, PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
+    RedactedText, ToolState, Usage,
 };
 use ganja_testkit::{StaticTasks, task};
 use ganja_tool::tasklist::Status;
@@ -8025,8 +8025,9 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
     app.run_command(command::Action::Help).await;
 
     // One row per help item, so the card grows with the roster this card
-    // lists — which is what "the whole card" means.
-    let mut terminal = terminal(90, 44);
+    // lists — which is what "the whole card" means, and why this height
+    // moves whenever a command is added (`/fast`, **D563**).
+    let mut terminal = terminal(90, 45);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
 
@@ -11764,4 +11765,131 @@ async fn the_served_model_is_withheld_from_the_bar_while_a_child_runs() {
     app.dirty = false;
     app.poll_served_model();
     assert!(!app.dirty, "a tick that changed nothing redraws nothing");
+}
+
+/// An app over a provider that answers to `id`, which is what every `/fast`
+/// test needs: the tier ladder resolves off the provider's own name, so the
+/// fake's `"fake"` would resolve nothing at all (**D563**).
+fn app_on(id: &'static str) -> App {
+    let (provider, _requests) = ganja_testkit::ScriptedProvider::named(id, Vec::new());
+    let engine = Engine::new(
+        provider,
+        fake::MODEL,
+        Arc::new(ganja_tool::Registry::new(Vec::new())),
+        ganja_permission::Permissions::default(),
+    );
+
+    App::new(engine, None, Themes::builtin()).with_provider(id)
+}
+
+/// **D563, AC-28.** A bare `/fast` is a toggle read off the engine's own
+/// resolution: a seat session is already asking at a fast tier, so the first
+/// one turns it off and the second turns it back on — and the bar follows the
+/// resolution rather than the choice.
+#[tokio::test]
+async fn a_bare_fast_toggles_against_the_tier_the_next_request_would_carry() {
+    let mut app = app_on(responses::CHATGPT_ID);
+
+    app.poll_fast();
+    assert!(app.fast, "the premise: a chatgpt session's default is a fast tier");
+
+    app.run_fast_line(command::Fast::Toggle).await;
+    assert_eq!(app.engine.fast(), Some(FastChoice::Off), "the first toggle turns it off");
+    app.poll_fast();
+    assert!(!app.fast, "and the bar loses the cell");
+
+    app.run_fast_line(command::Fast::Toggle).await;
+    assert_eq!(app.engine.fast(), Some(FastChoice::On), "the second turns it back on");
+    app.poll_fast();
+    assert!(app.fast, "and the cell returns");
+}
+
+/// **D563, AC-28.** The four words each reach their own choice, and `show`
+/// reaches none: it answers out of the engine and sends nothing.
+#[tokio::test]
+async fn each_word_of_the_grammar_reaches_its_own_choice() {
+    let mut app = app_on(responses::CHATGPT_ID);
+
+    app.run_fast_line(command::Fast::On).await;
+    assert_eq!(app.engine.fast(), Some(FastChoice::On));
+    app.run_fast_line(command::Fast::Off).await;
+    assert_eq!(app.engine.fast(), Some(FastChoice::Off));
+    app.run_fast_line(command::Fast::Reset).await;
+    assert_eq!(app.engine.fast(), None, "`reset` hands the tier back to the configuration");
+
+    app.run_fast_line(command::Fast::Show).await;
+    assert_eq!(app.engine.fast(), None, "`show` changes nothing");
+    assert_eq!(
+        app.status.notice(),
+        Some("service tier: priority (chatgpt default)"),
+        "and says what the next request would carry, and which rung decided it"
+    );
+}
+
+/// **D563, AC-28.** A word this grammar has not got is answered in the notice
+/// and sends nothing — the refusal is about the words, so whatever was chosen
+/// stays chosen.
+#[tokio::test]
+async fn a_word_the_fast_grammar_has_not_got_sends_nothing() {
+    let mut app = app_on(responses::CHATGPT_ID);
+    app.run_fast_line(command::Fast::On).await;
+
+    let line = command::fast("/fast x").expect("a `/fast` line");
+    app.run_fast_line(line).await;
+    assert_eq!(
+        app.status.notice(),
+        Some("/fast takes on, off, reset or show; \"x\" is none of them"),
+        "the grammar's own sentence, naming what was typed"
+    );
+    assert_eq!(app.engine.fast(), Some(FastChoice::On), "and the choice is left alone");
+}
+
+/// **D563, AC-28.** On a provider with no service tier to move, `/fast`
+/// answers with `EngineError::Fast`'s own sentence and sends nothing.
+#[tokio::test]
+async fn fast_on_another_provider_says_so_and_sends_nothing() {
+    let mut app = app_on("anthropic");
+
+    app.run_fast_line(command::Fast::Toggle).await;
+    assert_eq!(
+        app.status.notice(),
+        Some(
+            "/fast moves service_tier on the chatgpt and openai providers; this session is on anthropic"
+        ),
+        "the frontend's sentence is the engine's, byte for byte"
+    );
+    assert_eq!(app.engine.fast(), None, "nothing was sent");
+    app.poll_fast();
+    assert!(!app.fast, "and no cell is drawn for a tier that is not resolved");
+}
+
+/// **D563, AC-28.** `/fast on` over the **platform** warns what it costs, and
+/// says what it is not sending; the seat's own `on` says nothing, because a
+/// subscription's tier bills nothing extra.
+#[tokio::test]
+async fn fast_on_warns_on_the_platform_and_only_there() {
+    let mut platform = app_on(responses::ID);
+
+    platform.run_fast_line(command::Fast::On).await;
+    assert_eq!(platform.engine.fast(), Some(FastChoice::On), "the choice is still taken");
+    assert_eq!(
+        platform.status.notice(),
+        Some(
+            "fast on: service_tier priority bills at the platform's priority rate; ultrafast is unmeasured there and is not sent"
+        ),
+    );
+
+    // And on a toggle that lands on `on`, which is the other way in.
+    platform.run_fast_line(command::Fast::Off).await;
+    platform.status.set_notice(None);
+    platform.run_fast_line(command::Fast::Toggle).await;
+    assert!(
+        platform.status.notice().is_some_and(|said| said.starts_with("fast on: service_tier")),
+        "a toggle that turns it on is an `on`"
+    );
+
+    let mut seat = app_on(responses::CHATGPT_ID);
+    seat.run_fast_line(command::Fast::On).await;
+    assert_eq!(seat.engine.fast(), Some(FastChoice::On));
+    assert_eq!(seat.status.notice(), None, "the seat's tier costs nothing extra, and says nothing");
 }

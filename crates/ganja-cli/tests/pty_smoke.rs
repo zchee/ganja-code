@@ -130,7 +130,16 @@ impl Ganja {
     /// selection is made here rather than by each caller: none of them may
     /// reach a network or read a credential.
     fn spawn(mut command: Command, rows: u16) -> Self {
-        command.env("GANJA_PROVIDER", "fake");
+        // The fake unless the caller already chose, which is the same rule
+        // the homes and the probe below are read back under. One caller does
+        // choose (**D563**): the tier ladder resolves off the provider's own
+        // name, so a drill about it cannot run on a provider that has none —
+        // and that one reaches no network either, because it takes no turn.
+        let chosen =
+            command.get_envs().any(|(key, _)| key == std::ffi::OsStr::new("GANJA_PROVIDER"));
+        if !chosen {
+            command.env("GANJA_PROVIDER", "fake");
+        }
         // A bare spawn gets its own throwaway homes: prompt history,
         // permission answers and spilled output all land under the data
         // home, and a run that does not redirect them types its test
@@ -709,4 +718,64 @@ fn an_always_answer_lets_the_next_shell_command_run_unasked() {
         json!([{ "permission": "bash", "pattern": "cat *", "action": "allow" }]),
         "an always answer is stored as the command it named, not the whole tool"
     );
+}
+
+/// **D563, AC-29/AC-28 end to end.** `/fast` on a real terminal: the bar of a
+/// session whose configuration asks at a fast tier carries the cell from its
+/// first frame, and the typed command moves the tier in both directions.
+///
+/// The provider is the **platform**, because the ladder resolves off the
+/// provider's own name and the fake every other drill here runs has no tier at
+/// all. It reaches no network: this drill submits no prompt, and
+/// `OPENAI_BASE_URL` names a loopback port nothing listens on, so a request
+/// that somehow escaped could not leave the machine. A recorder is therefore
+/// not stood up — there is nothing for it to record.
+///
+/// The tier is read back in **words** rather than off the bar's cells: `/fast
+/// show` answers out of the engine's own resolution, so what this asserts is
+/// the whole chain — typed line, engine, ladder — in a string a pty can match
+/// without decoding a frame.
+///
+/// **One toggle, not two**, and this file's own opening paragraph is the
+/// reason: a second reading would be drawn *over* the first, so the terminal
+/// would be sent only the cells the two sentences differ in and neither string
+/// could be waited for whole. What arrives whole is a notice drawn into blank
+/// cells, which is the first one. The toggle's other direction — and every
+/// other arm of the grammar — is pinned in `app_tests.rs`, where the state is
+/// read rather than rendered.
+#[test]
+fn typing_fast_moves_the_tier_and_the_bar_says_so() {
+    let project = TempDir::new().expect("a project directory");
+    let data = TempDir::new().expect("a data home");
+    fs::write(
+        project.path().join("ganja.toml"),
+        "[provider.openai.options]\nservice_tier = \"priority\"\n",
+    )
+    .expect("the config is writable");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+    command
+        .current_dir(project.path())
+        .env("GANJA_PROVIDER", "openai")
+        .env("GANJA_MODEL", "gpt-5.5")
+        .env("OPENAI_API_KEY", "x")
+        // Loopback, and deliberately dead: the check this wire runs on the
+        // variable admits it, and nothing here asks anything of it.
+        .env("OPENAI_BASE_URL", "http://127.0.0.1:1")
+        .env("XDG_DATA_HOME", data.path())
+        .env("HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env_remove("GANJA_CONFIG_HOME")
+        .env_remove("GANJA_FAKE_SCRIPT");
+    let mut session = Ganja::spawn(command, SMOKE_ROWS);
+
+    session.expect("fast").expect("the configured tier puts the cell on the bar");
+
+    session.send("/fast\r").expect("failed to type the toggle");
+    session.send("/fast show\r").expect("failed to ask what is set");
+    session
+        .expect("service tier: default (/fast)")
+        .expect("the toggle turned the configured fast tier off, and named the rung that did it");
+
+    session.quit_and_assert_clean_exit();
 }

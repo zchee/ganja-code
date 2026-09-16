@@ -520,3 +520,76 @@ fn attaching_with_a_deadline_fails_to_parse() {
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{error}");
 }
+
+/// **D563, AC-31.** The three shapes `--json-schema` takes at the clap
+/// boundary: a file that is there, a document typed inline, and a value that
+/// is neither — refused there, so no engine is ever assembled around it.
+#[test]
+fn a_json_schema_is_read_from_a_file_or_from_the_value_itself() {
+    let inline = r#"{"type":"object"}"#;
+    let parsed = Flags::try_parse_from(["run", "--json-schema", inline, "hello"])
+        .unwrap_or_else(|error| panic!("an inline document parses: {error}"));
+    assert_eq!(
+        parsed.run.json_schema,
+        Some(serde_json::json!({"type": "object"})),
+        "the document is held decoded, not as the text that spelled it"
+    );
+
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("schema.json");
+    std::fs::write(&path, inline).expect("the fixture is writable");
+    let from_file =
+        Flags::try_parse_from(["run", "--json-schema", &path.display().to_string(), "hello"])
+            .unwrap_or_else(|error| panic!("a file that is there parses: {error}"));
+    assert_eq!(from_file.run.json_schema, parsed.run.json_schema, "one document, two spellings");
+
+    assert_eq!(
+        Flags::try_parse_from(["run", "hello"]).expect("a plain run parses").run.json_schema,
+        None,
+        "no flag, no format"
+    );
+}
+
+/// **D563, AC-31.** A value that is neither a file nor JSON is refused by the
+/// **value parser**, in the sentence that names it and both ways it failed.
+#[test]
+fn a_json_schema_that_is_neither_a_file_nor_json_is_refused_at_the_flag() {
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema=nope", "hello"]) else {
+        panic!("a value the flag cannot read starts no run");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+    assert!(
+        error.to_string().contains(
+            "--json-schema takes a path to a JSON file or an inline JSON document; \"nope\" is neither: no such file, and not JSON"
+        ),
+        "got {error}"
+    );
+}
+
+/// **D563, AC-31.** `--attach` carries no text-format route, so the pair is
+/// refused exactly as `--deadline` and `--effort` are there.
+#[test]
+fn attaching_with_a_json_schema_fails_to_parse() {
+    let Err(error) = Flags::try_parse_from([
+        "run",
+        "--attach",
+        "http://127.0.0.1:4096",
+        "--json-schema",
+        r#"{"type":"object"}"#,
+        "hello",
+    ]) else {
+        panic!("a schema the attached client cannot carry is refused");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{error}");
+}
+
+/// **D563, AC-32.** There is no `--fast`: a headless run takes its tier from
+/// the configuration, which is what makes `/fast` a screen's command rather
+/// than a flag pair to keep in step.
+#[test]
+fn run_takes_no_fast_flag() {
+    let Err(error) = Flags::try_parse_from(["run", "--fast", "hello"]) else {
+        panic!("`run` has no --fast flag");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument, "{error}");
+}

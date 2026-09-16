@@ -33,6 +33,14 @@ pub(crate) struct Assembled {
     pub(crate) root: PathBuf,
     pub(crate) data: PathBuf,
     pub(crate) config: Config,
+    /// Which provider the engine was built on, as the selection named it.
+    ///
+    /// Kept beside the engine because the engine does not answer for it: a
+    /// flag that is only meaningful on some providers — `run --json-schema`
+    /// (**D563**) — has to be able to refuse before a session exists, and the
+    /// selection is where that id is known. The same value the TUI hands its
+    /// `App` through `with_provider`, from the same place.
+    pub(crate) provider: String,
 }
 
 /// Builds the engine a headless subcommand drives.
@@ -43,6 +51,8 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     // compiled-in snapshot's numbers instead.
     catalog::load_cached();
     let selection = provider::select(&config).await.context("failed to select a provider")?;
+    // Read before the provider is handed to the engine, which takes it whole.
+    let provider_id = selection.provider.id().to_owned();
     if let Some(notice) = &selection.notice {
         // stderr, so it cannot land in the middle of an nd-JSON stream.
         eprintln!("note: {notice}");
@@ -124,7 +134,15 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
             move |model| instruction::suffix(&config, &cwd, model)
         });
 
-    Ok(Assembled { engine, servers, storage, root: project.root().to_owned(), data, config })
+    Ok(Assembled {
+        engine,
+        servers,
+        storage,
+        root: project.root().to_owned(),
+        data,
+        config,
+        provider: provider_id,
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,5 @@
 ---
 source: crates/ganja-tui/src/app_tests.rs
-assertion_line: 4945
 expression: screen(&terminal)
 ---
 > show me every color you have                                                  
@@ -18,8 +17,8 @@ expression: screen(&terminal)
 │  /copy          Put the whole conversation on the clipboard, as markdown     │
 │  /deadline      Tell the model how long this sitting has, so every request sa│
 │  /effort        Run the model under one of its catalog efforts               │
+│  /fast          Ask the rest of this session at the vendor's fast service tie│
 │  /init          guided AGENTS.md setup                                       │
-│  /mcp           See what every configured server lends, and reconnect a faile│
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ message ─────────────────────────────────────────────────────────────────────┐
 │/s                                                                            │
