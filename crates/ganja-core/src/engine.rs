@@ -1015,6 +1015,10 @@ impl TurnSlot {
 /// would start reading other answers out of.
 type Environment = dyn Fn(&str) -> Option<String> + Send + Sync;
 
+/// Each Responses id's configured `options` table, keyed by provider id,
+/// behind the lock the engine and its in-process teammates share (**D563**).
+type ProviderOptions = Arc<std::sync::Mutex<BTreeMap<String, crate::config::ResponsesOptions>>>;
+
 /// Owns the turn lifecycle and publishes what happens during it.
 pub struct Engine {
     provider: Arc<dyn Provider>,
@@ -1469,8 +1473,11 @@ pub struct Engine {
     /// swapped by [`Engine::replace_provider_options`], the `/plugin`
     /// dialog's fifth reload seam. Read once at a turn's start, so a swap
     /// reaches the next turn and never the one in flight. Locked for
-    /// `environment`'s reason.
-    provider_options: std::sync::Mutex<BTreeMap<String, crate::config::ResponsesOptions>>,
+    /// `environment`'s reason. Shared, because the in-process teammate
+    /// backend reads the same table at each spawn: a teammate on this
+    /// provider is billed at the tier this session's config names, not at a
+    /// default nobody configured.
+    provider_options: ProviderOptions,
     /// What the backend last said it served this session (**D563**), written by
     /// the turn loop off each terminal frame's echo and read by
     /// [`Engine::service_tier`]. The `deadline` cell's shape, shared with each
@@ -1679,7 +1686,7 @@ impl Engine {
             settled_receipts: Arc::default(),
             socket_directory: crate::tool::socket::directory(),
             cross_session_postbox: AtomicBool::new(false),
-            provider_options: std::sync::Mutex::new(BTreeMap::new()),
+            provider_options: Arc::default(),
             served: Arc::default(),
             text_format: std::sync::Mutex::new(None),
             server_compaction_noted: AtomicBool::new(false),
@@ -2286,6 +2293,13 @@ impl Engine {
                 // The lead's own budget, so a teammate offered the lead's MCP
                 // tools defers the same set of them (**D492**).
                 self.defer_threshold,
+                // The lead's own Responses tables, read per spawn (**D563**):
+                // installed after the team or swapped by a reload, a teammate
+                // started afterwards still resolves its tier from them.
+                {
+                    let table = Arc::clone(&self.provider_options);
+                    move || table.lock().expect("the provider options are never poisoned").clone()
+                },
             )),
             None => Arc::new(Storeless),
         };
@@ -5274,7 +5288,19 @@ impl Engine {
 
     /// What a `task` call needs to run a child loop, or [`None`] when this
     /// engine has no agents to spawn.
-    fn spawn_host(&self, model: String) -> Option<Arc<subagent::Host>> {
+    ///
+    /// `responses` is the seed the root turn resolved its own request from,
+    /// handed in rather than read again, so one turn's steps and its children
+    /// resolve from one table and one `/fast` choice (**D563**). `served` is
+    /// the root turn's own slot handle — [`None`] when that turn asks another
+    /// model than the session's — so a child can never write where its parent
+    /// was not allowed to.
+    fn spawn_host(
+        &self,
+        model: String,
+        responses: crate::responses_ladder::Seed,
+        served: Option<Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>>,
+    ) -> Option<Arc<subagent::Host>> {
         let deferral = self.deferral();
         // A subagent is offered this build's tools minus the one that
         // spawns subagents, which is the whole of the depth limit (D9).
@@ -5319,9 +5345,9 @@ impl Engine {
             // engine is built without a team of its own.
             teammates: self.teammates.clone(),
             identity: Arc::clone(&self.identity),
-            // Snapshotted with the rest of the host, per turn (**D563**).
-            responses: self.responses_seed(),
-            served: Arc::clone(&self.served),
+            // The root turn's own snapshot (**D563**).
+            responses,
+            served,
         }))
     }
 
@@ -5960,7 +5986,13 @@ impl Engine {
                 (Some(agent), Arc::new(std::sync::Mutex::new(derived)))
             }
         };
+        // Whether this turn asks the session's own model: a `/command`'s
+        // one-turn model is not what the session is being served, so its echo
+        // must not land in the slot `/usage` pairs with the session's request
+        // (**D563**) — the rule a child running another model already keeps.
+        let mut asks_own_model = true;
         if let Some(asked) = overrides.as_ref().and_then(|it| it.model.clone()) {
+            asks_own_model = asked == model;
             model = asked;
         }
         // Resolved per turn against the model this turn will actually ask —
@@ -5977,8 +6009,10 @@ impl Engine {
         // same model: a `/command`'s one-turn model takes that model's tier and
         // per-model entry for this turn alone. The `--json-schema` document is
         // the root turn's, added here and never by the resolver a child shares.
-        let (mut responses, tier_source) =
-            crate::responses_ladder::resolve(&self.responses_seed(), &model);
+        // Read once: the children this turn spawns resolve from this same seed.
+        let seed = self.responses_seed();
+        let (mut responses, tier_source) = crate::responses_ladder::resolve(&seed, &model);
+        let served = asks_own_model.then(|| Arc::clone(&self.served));
         responses.text_format =
             self.text_format.lock().expect("the text format is never poisoned").clone();
         if responses.body.contains_key("context_management")
@@ -6080,7 +6114,7 @@ impl Engine {
         // terminal event.
         let turn = Turn {
             provider: Arc::clone(&self.provider),
-            spawn: self.spawn_host(model.clone()),
+            spawn: self.spawn_host(model.clone(), seed, served.clone()),
             concurrency: self.concurrency,
             session_id: self.session_id(),
             model,
@@ -6096,7 +6130,7 @@ impl Engine {
             deadline: Arc::clone(&self.deadline),
             responses,
             tier_source,
-            served: Some(Arc::clone(&self.served)),
+            served,
             teamless: self.teamless(),
             teamless_send: self.teamless_send,
             spec,

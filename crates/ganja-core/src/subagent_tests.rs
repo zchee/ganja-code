@@ -653,7 +653,7 @@ fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammat
         teammates: Some(teammates),
         identity: Arc::new(identity::Identity::new(std::env::temp_dir())),
         responses: crate::responses_ladder::Seed::default(),
-        served: Arc::default(),
+        served: Some(Arc::default()),
     })
 }
 

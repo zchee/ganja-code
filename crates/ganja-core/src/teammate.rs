@@ -1211,6 +1211,11 @@ pub struct InProcess {
     /// The lead's own `tool_defer_threshold`, so a teammate offered the lead's
     /// MCP tools defers the same set of them (**D492**).
     defer_threshold: usize,
+    /// The lead's own Responses options tables, read at each spawn for the
+    /// reason `tools` is: a reload swaps them after the backend was built
+    /// (**D563**).
+    provider_options:
+        Box<dyn Fn() -> BTreeMap<String, crate::config::ResponsesOptions> + Send + Sync>,
 }
 
 impl fmt::Debug for InProcess {
@@ -1240,6 +1245,7 @@ impl InProcess {
             storage,
             permissions,
             crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+            BTreeMap::new,
         )
     }
 
@@ -1253,7 +1259,8 @@ impl InProcess {
     /// an engine has, and what a test wants.
     ///
     /// `defer_threshold` is the lead's own; see [`Teammate`]'s `deferring` for
-    /// why a teammate must not be given a different one.
+    /// why a teammate must not be given a different one. `provider_options`
+    /// is the lead's too, for the tier its requests are billed at.
     ///
     /// `pub(crate)` for the same reason `install_postbox` is: the live tool
     /// handle it closes over is the *engine's* own, so the only caller that
@@ -1265,6 +1272,10 @@ impl InProcess {
         storage: Storage,
         permissions: impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static,
         defer_threshold: usize,
+        provider_options: impl Fn() -> BTreeMap<String, crate::config::ResponsesOptions>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         Self {
             provider,
@@ -1272,6 +1283,7 @@ impl InProcess {
             storage,
             permissions: Box::new(permissions),
             defer_threshold,
+            provider_options: Box::new(provider_options),
         }
     }
 }
@@ -1289,16 +1301,23 @@ impl TeammateBackend for InProcess {
     }
 
     async fn spawn(&self, spec: &SpawnSpec, lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        let teammate = Teammate::deferring(
+            spec.name.as_str(),
+            Arc::clone(&self.provider),
+            spec.model.clone(),
+            (self.tools)(),
+            (self.permissions)(spec),
+            self.storage.clone(),
+            self.defer_threshold,
+        );
+        // The lead's own Responses tables (**D563**): a teammate asks the
+        // lead's provider, so the tier the lead's config names is the tier its
+        // requests are billed at — a teammate on `chatgpt` given no table would
+        // resolve the fast default somebody configured away.
+        teammate.engine().replace_provider_options((self.provider_options)());
+
         Ok(Arc::new(InProcessMember {
-            teammate: Arc::new(Teammate::deferring(
-                spec.name.as_str(),
-                Arc::clone(&self.provider),
-                spec.model.clone(),
-                (self.tools)(),
-                (self.permissions)(spec),
-                self.storage.clone(),
-                self.defer_threshold,
-            )),
+            teammate: Arc::new(teammate),
             spec: spec.clone(),
             lent,
             recent: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS))),

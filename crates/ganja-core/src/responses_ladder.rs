@@ -121,8 +121,8 @@ pub(crate) fn resolve(seed: &Seed, model: &str) -> (RequestOptions, Option<Sourc
         return (RequestOptions::default(), None);
     }
 
-    let tier = tier(seed, model);
     let overlaid = seed.table.as_ref().map(|table| table.for_model(model)).unwrap_or_default();
+    let tier = tier(seed, &overlaid, model);
     let resolved = RequestOptions {
         service_tier: tier.map(|(literal, _)| literal.to_owned()),
         text_format: None,
@@ -142,19 +142,26 @@ pub(crate) fn resolve(seed: &Seed, model: &str) -> (RequestOptions, Option<Sourc
 }
 
 /// The tier ladder, highest rung first.
-fn tier(seed: &Seed, model: &str) -> Option<(&'static str, Source)> {
+///
+/// `overlaid` is the table [`ResponsesOptions::for_model`] already merged for
+/// `model`, so the per-model rule lives in one place; the rung is then named
+/// by whether the model's own entry is what set the value.
+fn tier(seed: &Seed, overlaid: &ResponsesOptions, model: &str) -> Option<(&'static str, Source)> {
     match seed.fast {
         Some(FastChoice::Off) => return Some(("default", Source::Fast)),
         Some(FastChoice::On) => return fast_tier(&seed.provider, model).map(|t| (t, Source::Fast)),
         None => {}
     }
 
-    let table = seed.table.as_ref();
-    if let Some(tier) = table.and_then(|it| it.model.get(model)).and_then(|it| it.service_tier) {
-        return Some((tier.as_str(), Source::PerModel));
-    }
-    if let Some(tier) = table.and_then(|it| it.service_tier) {
-        return Some((tier.as_str(), Source::ProviderWide));
+    if let Some(tier) = overlaid.service_tier {
+        let per_model = seed
+            .table
+            .as_ref()
+            .and_then(|table| table.model.get(model))
+            .is_some_and(|entry| entry.service_tier.is_some());
+        let source = if per_model { Source::PerModel } else { Source::ProviderWide };
+
+        return Some((tier.as_str(), source));
     }
 
     // The platform is billed per request at whatever tier it is asked for, so

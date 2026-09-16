@@ -939,7 +939,7 @@ fn parent_spawn(
         teammates: None,
         identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
         responses: crate::responses_ladder::Seed::default(),
-        served: Arc::default(),
+        served: Some(Arc::default()),
     };
 
     let spawn = Spawn {

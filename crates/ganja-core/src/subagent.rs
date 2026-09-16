@@ -247,8 +247,10 @@ pub(crate) struct Host {
     pub(crate) responses: crate::responses_ladder::Seed,
     /// The session's served-options slot, which a child writes only when it
     /// ran the parent's own model: an echo about another model's request is
-    /// not a statement about what the session is being served.
-    pub(crate) served: Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>,
+    /// not a statement about what the session is being served. [`None`] when
+    /// the parent turn itself asked another model than the session's (a
+    /// `/command`'s one-turn model), so no child of that turn writes it either.
+    pub(crate) served: Option<Arc<std::sync::Mutex<Option<crate::provider::ServedOptions>>>>,
 }
 
 impl std::fmt::Debug for Host {

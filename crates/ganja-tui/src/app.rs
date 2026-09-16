@@ -6739,6 +6739,10 @@ impl App {
     ///   and a skill tool over `instruction::skill_roots` — and the prompt's
     ///   environment half is recomposed with it, so `<available_skills>`
     ///   and the loadable roots move together.
+    /// - **Responses options tables** rebuild (**D563**): the fresh config's
+    ///   `[provider.<id>.options]` tables replace the engine's whole, read by
+    ///   the next turn's requests, its children, and every in-process teammate
+    ///   spawned after the swap — each resolves per turn and holds no copy.
     /// - **Agents, MCP dials and LSP servers do not**: the roster, the
     ///   dials and the spawns are assembled at startup, and half-reloading
     ///   any of them — an agent list that changed under a running roster, a
@@ -6750,9 +6754,13 @@ impl App {
     /// the way a fresh start would — discovered tiers plus the `GANJA_CONFIG`
     /// environment file — but a `--config` *flag* lives in the process's own
     /// argv, which this frontend was deliberately not handed. A session
-    /// launched with that flag reloads without the flagged file's hooks and
-    /// skills; the restart the dialog already recommends for the other three
-    /// surfaces is the accurate remedy for that edge too.
+    /// launched with that flag reloads without the flagged file's hooks,
+    /// skills and Responses options. The last of those is a bill rather than a
+    /// convenience: the tables are replaced whole, so a `service_tier =
+    /// "default"` that only the flagged file set is gone after the reload, and
+    /// a `chatgpt` session goes back to asking for the model's fast tier until
+    /// it is restarted. The restart the dialog already recommends for the other
+    /// three surfaces is the accurate remedy for that edge too.
     fn reload_plugins(&mut self) -> String {
         let config = match ganja_core::config::Config::load(&self.cwd) {
             Ok(config) => config,

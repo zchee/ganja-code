@@ -1113,7 +1113,7 @@ impl Turn {
         // against one model is not handed to another.
         let (responses, tier_source) =
             crate::responses_ladder::resolve(&host.responses, &parts.model);
-        let served = (parts.model == host.model).then(|| Arc::clone(&host.served));
+        let served = host.served.as_ref().filter(|_| parts.model == host.model).map(Arc::clone);
 
         Self {
             provider: Arc::clone(&host.provider),
@@ -4073,7 +4073,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             ProviderEvent::ServerTool { tool, input, output, blob } => {
                 let mut part = Part::server_tool(tool, input, String::new());
                 let output = match blob {
-                    Some(blob) => server_tool_blob(&part.id, &blob),
+                    Some(blob) => server_tool_blob(&part.id, blob).await,
                     None => output,
                 };
                 if let PartBody::ServerTool { output: recorded, .. } = &mut part.body {
@@ -5808,7 +5808,20 @@ fn log_tier(turn: &Turn, responses: &crate::provider::responses::options::Reques
 /// vendor's side, and a row that says the image could not be kept is honest
 /// about that, where a failed turn would throw away the reply that followed.
 /// The bytes go either way — they never reach the transcript.
-fn server_tool_blob(part: &crate::protocol::PartId, blob: &crate::provider::Blob) -> String {
+///
+/// The decode and the write run on the blocking pool: an image is megabytes
+/// of base64 and a synchronous file write, and doing either on the task that
+/// drains the provider's stream would stall that stream — and every other task
+/// sharing its worker thread — for as long as they take.
+async fn server_tool_blob(part: &crate::protocol::PartId, blob: crate::provider::Blob) -> String {
+    let name = part.as_str().to_owned();
+    tokio::task::spawn_blocking(move || write_server_tool_blob(&name, &blob))
+        .await
+        .unwrap_or_else(|error| format!("server-tool-output: {error}"))
+}
+
+/// [`server_tool_blob`]'s blocking half.
+fn write_server_tool_blob(part: &str, blob: &crate::provider::Blob) -> String {
     use base64::Engine as _;
 
     // The extension is the media type's subtype when it is a plain word, which
@@ -5825,10 +5838,7 @@ fn server_tool_blob(part: &crate::protocol::PartId, blob: &crate::provider::Blob
         .decode(&blob.base64)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         .and_then(|bytes| {
-            crate::tool::truncate::write_server_tool_output(
-                &format!("{}.{extension}", part.as_str()),
-                &bytes,
-            )
+            crate::tool::truncate::write_server_tool_output(&format!("{part}.{extension}"), &bytes)
         });
 
     match written {

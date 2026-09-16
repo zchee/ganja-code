@@ -25,10 +25,13 @@ use ganja_core::protocol::{Command, Event, FastChoice, FinishReason, PartBody};
 use ganja_core::provider::responses::CHATGPT_ID;
 use ganja_core::provider::{ChatRequest, ProviderError, ProviderEvent};
 use ganja_core::responses_ladder::{Source, TierView};
+use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
 use ganja_core::{Config, Engine, EngineError, Storage};
+use ganja_team::{TeamName, TeamsRoot};
 use ganja_testkit::{
-    LogCapture, ScriptedProvider, drain, drain_allowing, prompt, says, served, tool_call,
+    LogCapture, RecordedSpawns, ScriptedProvider, caller, drain, drain_allowing, prompt, says,
+    served, spawn_with_prompt, tool_call,
 };
 use serde_json::json;
 
@@ -614,4 +617,159 @@ async fn configured_server_compaction_is_mentioned_once_per_session() {
         })
         .count();
     assert_eq!(said, 1, "{}", capture.logged());
+}
+
+/// An in-process teammate asks the lead's provider, so it is billed at the tier
+/// the lead's config names (**D563**, review note on W3b): a `chatgpt` table
+/// saying `service_tier = "default"` reaches the teammate's own request, where
+/// a teammate engine given no table would have resolved the fast default
+/// nobody configured.
+#[tokio::test]
+async fn an_in_process_teammate_resolves_its_tier_from_the_leads_table() {
+    const TEAMMATE_PROMPT: &str = "the teammate's instructions, quux";
+
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let (provider, requests) = ScriptedProvider::named(CHATGPT_ID, Vec::new());
+    let registry = Arc::new(TeammateRegistry::new(
+        TeamsRoot::new(home.path().join("teams")),
+        TeamName::parse(ganja_testkit::TEAM).expect("a team name"),
+        ganja_testkit::LEAD_SESSION_ID,
+        home.path(),
+    ));
+    let lead = Engine::persistent(
+        provider,
+        FIVE,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(home.path().join("storage")),
+    )
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals())
+    // Installed after the team, as `ganja-tui` and `assemble.rs` are free to:
+    // the backend reads the table at the spawn, not when it was built.
+    .with_provider_options(tables(CHATGPT_ID, "service_tier = \"default\""));
+    let mut events = lead.subscribe().await.expect("the first subscriber wins");
+    tokio::spawn(async move { while events.next().await.is_some() {} });
+
+    let asker = RecordedSpawns::default();
+    lead.teammates()
+        .expect("this session leads a team")
+        .start(
+            spawn_with_prompt("worker", Some("in-process"), TEAMMATE_PROMPT),
+            &caller(home.path()),
+            &asker,
+        )
+        .await
+        .expect("an in-process teammate starts on a session that has a store");
+
+    let step = ganja_testkit::eventually(
+        Duration::from_secs(20),
+        "the teammate to have asked about its task",
+        async || {
+            requests.lock().expect("the request log is never poisoned").iter().find_map(|request| {
+                let about =
+                    request.messages.iter().flat_map(|message| &message.parts).any(|part| {
+                        part.as_text().is_some_and(|text| text.contains(TEAMMATE_PROMPT))
+                    });
+
+                (about && !is_title(request)).then(|| request.clone())
+            })
+        },
+    )
+    .await;
+    assert_eq!(
+        step.responses.service_tier.as_deref(),
+        Some("default"),
+        "the lead's configured tier, not the seat's fast default for {:?}",
+        step.model
+    );
+
+    lead.shutdown_teammates().await;
+}
+
+/// A new session is a new conversation, so the `/fast` choice made in the one
+/// being left does not follow it: the choice clears and the clear is announced,
+/// so a frontend's bar stops drawing it (**D563**).
+#[tokio::test]
+async fn a_new_session_clears_the_fast_choice_and_announces_it() {
+    let (provider, _) = ScriptedProvider::named(CHATGPT_ID, Vec::new());
+    let engine = in_memory(provider, FIVE, Vec::new());
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(Command::SetFast { fast: Some(FastChoice::On) }).await.expect("idle takes it");
+    assert_eq!(engine.fast(), Some(FastChoice::On));
+    engine.send(Command::NewSession).await.expect("an idle engine starts a new session");
+
+    let announced = tokio::time::timeout(SETTLE, async {
+        let mut seen = Vec::new();
+        loop {
+            let event = events.next().await.expect("the stream stays open");
+            if let Event::FastChanged { fast, .. } = &event
+                && seen.iter().any(|it| matches!(it, Event::FastChanged { fast: Some(_), .. }))
+            {
+                return *fast;
+            }
+            seen.push(event);
+        }
+    })
+    .await
+    .expect("the clear is announced after the choice was");
+    assert_eq!(announced, None, "the announcement carries the cleared choice");
+    assert_eq!(engine.fast(), None, "the new session has no choice of its own");
+    assert_eq!(
+        engine.service_tier().map(|view| view.source),
+        Some(Source::ChatgptDefault),
+        "and resolves as a session nobody chose for"
+    );
+}
+
+/// What the backend served and whether server-side compaction was mentioned
+/// are facts about one conversation (Dv-27): a `NewSession` and a resume each
+/// forget both, so `/usage` never pairs the next request with the last
+/// conversation's echo, and the next conversation is told about compaction
+/// once of its own.
+#[tokio::test]
+async fn a_new_session_and_a_resume_forget_the_served_echo_and_the_compaction_notice() {
+    const NOTICE: &str = "server-side compaction is configured; ganja's own compaction still runs off the reported input tokens";
+
+    let (capture, _guard) = LogCapture::install(tracing::Level::INFO);
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    // Every request is answered with an echo, so whichever order the detached
+    // title requests take, each step is answered with one; a title's echo is
+    // never the session's to report.
+    let echoing = vec![
+        ProviderEvent::TextDelta("ok".to_owned()),
+        served("default"),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ];
+    let (provider, _) = ScriptedProvider::named(CHATGPT_ID, vec![echoing; 8]);
+    let engine = Engine::persistent(
+        provider,
+        FIVE,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_provider_options(tables(
+        CHATGPT_ID,
+        "context_management = [{ type = \"compaction\", compact_threshold = 1000 }]",
+    ));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    let echoed = |engine: &Engine| engine.service_tier().and_then(|view| view.served);
+    let noticed = || capture.logged().lines().filter(|line| line.contains(NOTICE)).count();
+
+    turn(&engine, &mut events, "one").await;
+    assert_eq!(echoed(&engine).as_deref(), Some("default"), "the first turn's echo is reported");
+    assert_eq!(noticed(), 1, "{}", capture.logged());
+    let first = engine.current_session().expect("the prompt minted a session").id;
+
+    engine.send(Command::NewSession).await.expect("an idle engine starts a new session");
+    assert_eq!(echoed(&engine), None, "a new session forgets the last conversation's echo");
+    turn(&engine, &mut events, "two").await;
+    assert_eq!(echoed(&engine).as_deref(), Some("default"));
+    assert_eq!(noticed(), 2, "the new session is told once of its own: {}", capture.logged());
+
+    engine.resume(&first).await.expect("the first session loads");
+    assert_eq!(echoed(&engine), None, "a resume forgets the conversation being left's echo");
+    turn(&engine, &mut events, "three").await;
+    assert_eq!(noticed(), 3, "the resumed session is told once of its own: {}", capture.logged());
 }
