@@ -29,8 +29,8 @@ const ACCOUNT: &str = "acct_2f7QpL9";
 /// An API key no other value in this module could be mistaken for.
 const KEY: &str = "sk-responses-key-canary-3131";
 
-/// A model this backend serves (`codex.ts:15`).
-const SERVED: &str = "gpt-5.4";
+/// A model this backend serves, named outright by [`ALLOWED_MODELS`].
+const SERVED: &str = "gpt-5.5";
 
 /// One it does not, and the one the live pass actually named
 /// (`codex.ts:289`).
@@ -858,7 +858,7 @@ fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
 
 /// The obligation [`SEAT_ROSTER`] carries: an offer this backend would
 /// then refuse is a listing that lies, and the two halves of the roster
-/// reach [`serves`] by different routes — three are named by
+/// reach [`serves`] by different routes — two are named by
 /// [`ALLOWED_MODELS`], three are admitted by the generation rule — so the
 /// pin has to be asserted over the whole list rather than over either.
 #[test]
@@ -869,19 +869,26 @@ fn every_model_the_seat_offers_is_one_the_seat_serves() {
 }
 
 /// The other half of **D476**: the pin narrows what is *offered*, never
-/// what is *servable*. Somebody who types `--model openai/gpt-5.4` on a
-/// seat still takes their turn, although no listing volunteered it — which
-/// is why the roster is a separate constant rather than a shorter
-/// [`ALLOWED_MODELS`].
+/// what is *servable*, which is why the roster is a separate constant
+/// rather than a shorter [`ALLOWED_MODELS`].
+///
+/// It used to be said with `gpt-5.4` and `gpt-5.4-mini`, two models the seat
+/// served and no listing volunteered. The 2026-09-16 probe found the backend
+/// refusing both, so the served-and-unoffered set is empty today and the
+/// claim is asserted structurally instead: [`serves`] never reads
+/// [`SEAT_ROSTER`], so a model reaches a turn through the allow-list or the
+/// generation rule with no roster row anywhere in the argument.
 #[test]
-fn a_model_the_roster_leaves_out_is_still_one_an_explicit_request_may_name() {
-    for unoffered in ["gpt-5.4", "gpt-5.4-mini"] {
-        assert!(!SEAT_ROSTER.contains(&unoffered), "`{unoffered}` is deliberately unoffered");
-        assert!(
-            serves(unoffered),
-            "and deliberately still servable: the pin is an offer, not a gate"
-        );
-    }
+fn an_explicitly_named_served_model_needs_no_roster_row() {
+    assert!(
+        serves("gpt-6-astra") && ALLOWED_MODELS.contains(&"gpt-6-astra"),
+        "the allow-list is one route to a turn, and it is not the roster"
+    );
+    assert!(
+        serves("gpt-5.7") && !SEAT_ROSTER.contains(&"gpt-5.7"),
+        "the generation rule is the other, and a model it admits is servable \
+             although nothing offers it"
+    );
 }
 
 /// The split that makes "display-only" a fact about this build rather
@@ -1431,13 +1438,11 @@ fn the_backend_serves_a_pinned_list_and_the_order_of_the_rules_is_the_rule() {
     for served in ALLOWED_MODELS {
         assert!(serves(served), "codex.ts:15 names {served}");
     }
-    // Three of those five are older than the floor, so a check that read
-    // the generation rule first would refuse the models the list exists to
-    // allow — including the one this build now defaults to.
+    // The floor is what refuses the three ids the seat stopped serving on
+    // 2026-09-16, now that no allow-list entry admits them ahead of it.
     assert!(
-        serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
-        "gpt-5.4 is not newer than 5.4 and is served anyway, which is what \
-             makes the list order load-bearing"
+        !serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
+        "gpt-5.4 is not newer than 5.4, and nothing names it any more"
     );
     // And one of them the generation rule cannot read at all: no `N.M`
     // follows its `gpt-`, so the list is the only route it has.

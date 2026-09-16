@@ -1,7 +1,7 @@
 //! What a stored credential can and cannot do to the wire model listing.
 //!
 //! Since **D555** the seam's answer is a fact about the **provider id**, not
-//! about the credential: `chatgpt` is offered the pinned six and `openai` is
+//! about the credential: `chatgpt` is offered the pinned roster and `openai` is
 //! the catalog's to describe, whatever either one has stored beside it. That
 //! makes the listing itself a crate-local test (`provider_tests.rs`), and
 //! leaves this binary the half that needs a real store to say anything at all —
@@ -18,28 +18,22 @@
 //!
 //! Nothing here reaches the network, and that is the point rather than a
 //! convenience: membership in the roster is compile-time, so fetching is
-//! disabled and the cache home redirected, and the six still come back in
-//! their order.
+//! disabled and the cache home redirected, and the roster still comes back in
+//! its order.
 
 use std::env;
 
 use ganja_core::{catalog, provider};
 
-/// The six, in the order the seam must offer them. Spelled out rather than
+/// The roster, in the order the seam must offer them. Spelled out rather than
 /// imported from the constant: a test that read the same array it is checking
 /// would pass however that array was reordered, and the order is half of what
 /// was pinned.
-const OFFERED: [&str; 6] = [
-    "gpt-6-astra",
-    "gpt-5.5",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.3-codex-spark",
-];
+const OFFERED: [&str; 5] =
+    ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 #[tokio::test]
-async fn the_seat_lists_the_pinned_six_and_no_stored_credential_moves_either_id() {
+async fn the_seat_lists_the_pinned_roster_and_no_stored_credential_moves_either_id() {
     let store = tempfile::tempdir().expect("a temp directory");
     let cache = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
@@ -84,7 +78,10 @@ async fn assert_offering() {
         .expect("the seat arm reaches nothing that could fail");
 
     let offered: Vec<&str> = listed.models.iter().map(|model| model.id.as_str()).collect();
-    assert_eq!(offered, OFFERED, "the seat is offered exactly the pinned six, in the pinned order");
+    assert_eq!(
+        offered, OFFERED,
+        "the seat is offered exactly the pinned roster, in the pinned order"
+    );
     assert!(
         listed.notice.contains("pinned") && listed.notice.contains("--refresh"),
         "and the notice says so rather than claiming a live wire: {}",

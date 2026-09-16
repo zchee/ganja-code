@@ -583,9 +583,9 @@ fn a_named_provider_is_the_only_one_the_listing_carries() {
         .args(["models", "openai"])
         .assert()
         .success()
-        // The starred row is openai's default, `gpt-5.6`; the previous default
-        // stays listed beside it, unstarred — it is still what a ChatGPT seat
-        // runs.
+        // The starred row is openai's default, `gpt-5.6`; `gpt-5.4` stays
+        // listed beside it, unstarred — a platform row is not removed because
+        // the ChatGPT seat stopped serving it.
         .stdout(
             predicate::str::contains("gpt-5.6*")
                 .and(predicate::str::contains("gpt-5.4 "))
@@ -698,8 +698,11 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 /// Offline in the strong sense: fetching is off, every home is this test's, and
 /// since **D555** the seat arm reaches no credential either — the id is the
 /// whole question, which is why this arranges no store at all. What proves
-/// membership is not the catalog's is `gpt-5.6-sol`: no row of this build's
-/// table carries it, and it is listed regardless.
+/// membership is not the catalog's is `gpt-5.4`: this build's table carries the
+/// row and the listing leaves it out. It used to be proved the other way round,
+/// by `gpt-5.6-sol` being listed with no row at all — until 2026-09-16 gave the
+/// four roster models rows of their own, so a seat started offline has a window
+/// for the model it is about to ask.
 #[test]
 fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
     offline(&cache()).args(["models", "chatgpt"]).assert().success().stdout(
@@ -711,9 +714,9 @@ fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
             .and(predicate::str::contains("gpt-5.6-sol"))
             .and(predicate::str::contains("gpt-5.6-terra"))
             .and(predicate::str::contains("gpt-5.6-luna"))
-            .and(predicate::str::contains("gpt-5.3-codex-spark"))
-            // The catalog header, and the two rows a seat is not offered:
-            // this listing is the roster alone.
+            .and(predicate::str::contains("gpt-5.3-codex-spark").not())
+            // The catalog header, and the rows a seat is not offered: this
+            // listing is the roster alone.
             .and(predicate::str::contains("PROVIDER").not())
             .and(predicate::str::contains("gpt-5.4 ").not()),
     );

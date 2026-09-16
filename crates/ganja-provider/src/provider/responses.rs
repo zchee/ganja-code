@@ -289,48 +289,50 @@ const BETA_HEADER: &str = "openai-beta";
 /// The value [`BETA_HEADER`] carries.
 const BETA: &str = "responses=experimental";
 
-/// The models the **codex backend** serves a ChatGPT seat outright
-/// (`codex.ts:15`).
-///
-/// A positive list, and the reason it is spelled out rather than derived: three
-/// of upstream's four are *older* than the floor [`NEWER_THAN`] sets, so the
-/// rule below would refuse them.
+/// The models the **codex backend** serves a ChatGPT seat outright.
 ///
 /// **Scope: [`Backend::Codex`] only.** This is a subscription's offering, not
-/// the API's — upstream filters the model list on the same `auth.type ===
-/// "oauth"` condition the fetch override branches on (`codex.ts:281`), so a
-/// session holding a key sees whatever the platform sells. The list is a
-/// snapshot of somebody else's product decision as of v1.18.22 and **will
-/// drift**; [`NEWER_THAN`] is what keeps it from aging badly, and when the
-/// seat's offering changes these lines are what to re-read against
-/// `codex.ts:15-16`.
+/// the API's: a session holding a key sees whatever the platform sells, and
+/// [`ResponsesProvider::refuses`] is where that scoping is spelled. A seat's
+/// offering is somebody else's product decision and **will drift**;
+/// [`NEWER_THAN`] is what keeps this from aging badly, and a probe against the
+/// live backend is the only thing that can settle a drift.
 ///
-/// **`gpt-6-astra` is the owner's own addition (2026-09-07), not `codex.ts:15`'s**,
-/// and it is here rather than left to the generation rule because that rule
-/// cannot read it: the id carries no `N.M` after `gpt-`, so [`generation`]
-/// answers [`None`] and `serves` would refuse the one gpt-6 the seat offers.
-/// A drift that made the id readable (`gpt-6.0-astra`) would not need this
-/// line; a drift that removed the model from the seat would need it gone.
-const ALLOWED_MODELS: [&str; 5] =
-    ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra"];
+/// **Three ids left on 2026-09-16** — `gpt-5.3-codex-spark`, `gpt-5.4` and
+/// `gpt-5.4-mini` — because the seat-parameter probe
+/// (`.omc/research/2026-09-16-chatgpt-seat-param-probe.md`, 120 live calls)
+/// found the backend refusing them. Keeping a refused id here is worse than
+/// dropping it: it makes the wire promise a turn the backend will not take, and
+/// it makes [`unsupported`]'s sentence — which is this list, joined — name
+/// models nobody can run.
+///
+/// The two that stay are not redundant even though [`generation`] reads both
+/// numbers. `gpt-6-astra` carries no `N.M` after `gpt-`, so the rule below
+/// answers [`None`] and `serves` would refuse the newest model the seat offers.
+/// `gpt-5.5` clears [`NEWER_THAN`] on its own, and is spelled anyway because
+/// this list is also the refusal sentence's roster and because it is
+/// [`SUBSCRIPTION_DEFAULT`]: a default the rule alone admits is one line away
+/// from a floor bump refusing it silently.
+const ALLOWED_MODELS: [&str; 2] = ["gpt-5.5", "gpt-6-astra"];
 
 /// The models a ChatGPT seat is **offered**, in the order to offer them
 /// (**D476**, `seat-roster-pinned`).
 ///
-/// No upstream counterpart: `codex.ts` filters the vendor's catalog through
-/// `serves` and offers whatever survives, so the roster a seat browses drifts
-/// with `models.dev`. This is the owner's own pin instead — these ids, this
-/// order, decided once and answered from the binary (`gpt-6-astra` joined on
-/// 2026-09-07, first because it is the newest generation the seat offers).
+/// A roster a listing derives from the catalog drifts with the catalog. This is
+/// the owner's own pin instead — these ids, this order, decided once and
+/// answered from the binary (`gpt-6-astra` joined on 2026-09-07, first because
+/// it is the newest generation the seat offers).
 ///
-/// **Offered is not servable, and the split is the whole point.** `serves`
-/// stays the `codex.ts:281-292` port it always was, so a session that names
-/// `--model openai/gpt-5.4` explicitly still takes its turn; what this narrows
-/// is only what a listing *volunteers*. `gpt-5.4` and `gpt-5.4-mini` are
-/// therefore servable and deliberately unoffered, and
-/// [`SUBSCRIPTION_DEFAULT`] — one of them — is deliberately not first here,
-/// because what a seat defaults to and what it offers to browse are two
+/// **Offered is not servable, and the split is the whole point.** A session
+/// that names a model explicitly still takes its turn if `serves` admits it;
+/// what this narrows is only what a listing *volunteers*, which is why
+/// [`SUBSCRIPTION_DEFAULT`] being second rather than first is not a
+/// contradiction — what a seat defaults to and what it offers to browse are two
 /// decisions.
+///
+/// **`gpt-5.3-codex-spark` left on 2026-09-16**, with the two ids the same
+/// probe found refused (`ALLOWED_MODELS`'s own doc has the report): a roster
+/// row the backend answers with 400 is an offer that cannot be taken.
 ///
 /// **The catalog cannot move this list.** Membership is these lines;
 /// `ganja models --refresh` re-reads sizing and pricing and never this. A
@@ -341,14 +343,8 @@ const ALLOWED_MODELS: [&str; 5] =
 /// refuse is a lie the listing tells, and the test in `responses_tests.rs`
 /// is what keeps it honest — which is why `gpt-6-astra` is also in
 /// `ALLOWED_MODELS`, the only route `serves` has to an id with no `N.M`.
-pub const SEAT_ROSTER: [&str; 6] = [
-    "gpt-6-astra",
-    "gpt-5.5",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.3-codex-spark",
-];
+pub const SEAT_ROSTER: [&str; 5] =
+    ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 /// What a subscription session asks for when nothing named a model.
 ///
@@ -361,11 +357,13 @@ pub const SEAT_ROSTER: [&str; 6] = [
 /// somebody who asked for `gpt-5.6` on a ChatGPT login is told what the seat
 /// serves (`unsupported`) rather than quietly answered by something else.
 ///
-/// The one this names is the model the P8 live pass measured taking a whole
-/// tool-calling turn on this backend, and it has to satisfy `serves` — pinned
-/// below, because a default this backend refuses is the bug this constant
-/// exists to prevent.
-pub const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
+/// The one this names has to satisfy `serves` — pinned below, because a default
+/// this backend refuses is the bug this constant exists to prevent. It said
+/// `gpt-5.4` until 2026-09-16, when the seat-parameter probe found the backend
+/// answering that id with a 400: exactly the bug, arrived by drift rather than
+/// by a typo, which is why the pin is over both this constant and
+/// [`SEAT_ROSTER`].
+pub const SUBSCRIPTION_DEFAULT: &str = "gpt-5.5";
 
 /// Models this vendor publishes that no Responses request can name
 /// (`plugin/provider/openai.ts:164-171`).

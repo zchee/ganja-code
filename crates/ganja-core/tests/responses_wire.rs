@@ -109,10 +109,11 @@ const KEY: &str = "sk-key-canary-DDDD";
 /// The model the subscription phases ask for.
 ///
 /// A real catalog row, so a turn that reaches the session layer has a context
-/// window and a price to report — and one the ChatGPT backend actually serves
-/// (`codex.ts:15`), which is a second requirement the live pass discovered the
-/// hard way.
-const SUBSCRIPTION_MODEL: &str = "gpt-5.4";
+/// window and a price to report — and one the ChatGPT backend actually serves,
+/// which is a second requirement the live pass discovered the hard way and the
+/// 2026-09-16 probe made it pay again: this said `gpt-5.4` until the seat
+/// started refusing that id.
+const SUBSCRIPTION_MODEL: &str = "gpt-5.5";
 
 /// The model the key phases ask for.
 ///
