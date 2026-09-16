@@ -428,7 +428,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
                     texts.push(text);
                 }
             }
-            PartBody::Tool { call_id, tool, state } => {
+            PartBody::Tool { call_id, tool, state, .. } => {
                 calls.push(Call {
                     id: call_id,
                     kind: "function",

@@ -87,6 +87,7 @@ fn turn() -> Vec<Event> {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
     let message_id = MessageId::from("msg_1".to_owned());
@@ -283,6 +284,7 @@ fn a_failed_call_is_a_tool_use_object_and_its_reason_goes_to_stderr() {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
     let events = [Event::PartUpdated {
@@ -321,6 +323,7 @@ fn a_tool_title_cannot_move_the_terminals_cursor() {
                 started: 1,
                 completed: 2,
             },
+            custom: false,
         },
     };
 

@@ -48,6 +48,7 @@ fn stored(directory: &TempDir, prompt: &str) -> String {
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     };
     let message = Message::user(prompt);
 

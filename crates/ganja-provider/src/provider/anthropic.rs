@@ -547,7 +547,7 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                     blocks.push(Block::Text { text });
                 }
             }
-            PartBody::Tool { call_id, tool, state } => {
+            PartBody::Tool { call_id, tool, state, .. } => {
                 blocks.push(Block::ToolUse {
                     id: call_id,
                     name: alias(tool, ANTHROPIC_CAP),

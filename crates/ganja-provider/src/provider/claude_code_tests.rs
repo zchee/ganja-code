@@ -242,6 +242,7 @@ pub(crate) fn called(id: &str, call_id: &str, output: &str) -> Message {
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
 

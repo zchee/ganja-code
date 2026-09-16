@@ -531,6 +531,7 @@ fn a_resume_goes_out_as_a_fieldless_resume_action_over_the_composed_state() {
                 started: 0,
                 completed: 0,
             },
+            custom: false,
         },
     });
     let resuming = turn(vec![Message::user("Read a.rs."), stepped], 0);

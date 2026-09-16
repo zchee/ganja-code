@@ -2812,6 +2812,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
                 metadata: serde_json::Value::Null,
                 started,
             },
+            custom: false,
         },
     };
     let part_id = part.id.clone();
@@ -5511,7 +5512,7 @@ fn composing(assistant: &Message) -> Vec<BufferedCall> {
         .parts
         .iter()
         .filter_map(|part| match &part.body {
-            PartBody::Tool { call_id, tool, state: ToolState::Pending { input: None } }
+            PartBody::Tool { call_id, tool, state: ToolState::Pending { input: None }, .. }
                 if tool == COMPOSING =>
             {
                 Some(BufferedCall {

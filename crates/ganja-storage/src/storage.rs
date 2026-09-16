@@ -71,7 +71,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::{fs, io, thread};
 
 use ganja_protocol::{
-    Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
+    FastChoice, Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
 };
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
@@ -333,6 +333,17 @@ pub struct SessionInfo {
     /// carries the name, the same rule a live model switch applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Service-tier choice this session was last running under (**D563**).
+    ///
+    /// The **intent**, not the tier literal, which is why it survives a model
+    /// switch: the word the vendor is actually sent is resolved per turn from
+    /// the model then active, so a row saying "fast" resumes asking for
+    /// whichever tier the resumed model's fast lane is spelled with. Absent on
+    /// every session written before the choice existed and on every session
+    /// that never made one — where the configuration decides — so a
+    /// pre-feature row stays byte-stable and an absent key reads as no choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<FastChoice>,
     /// Deferred-roster names this session has activated — by a `tool_search`
     /// hit, by an executed `mcp__*` call, or by resume seeding (**D492**).
     ///

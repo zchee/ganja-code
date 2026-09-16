@@ -934,6 +934,7 @@ fn store(storage: &Storage, id: &str, parent: Option<&str>) {
             activated_tools: std::collections::BTreeSet::new(),
             parent: parent.map(|parent| SessionId::from(parent.to_owned())),
             revert: None,
+            fast: None,
         })
         .expect("a session stores");
 }

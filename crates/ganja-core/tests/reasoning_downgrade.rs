@@ -163,6 +163,7 @@ fn stored_step() -> Message {
                         started: 1,
                         completed: 2,
                     },
+                    custom: false,
                 },
             },
             Part {

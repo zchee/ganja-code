@@ -1104,6 +1104,28 @@ enum Item<'a> {
         /// too — the model streams them as text.
         arguments: String,
     },
+    /// A call the model made through a **custom** tool advertisement
+    /// (**D563**) — the free-text twin of [`Item::Called`].
+    ///
+    /// Its own shape because this API's custom item carries the model's words
+    /// as `input`, a bare string, where a function call carries an arguments
+    /// object encoded as one. Which of the two a stored call replays as is
+    /// read off the call's own record ([`PartBody::Tool::custom`]) and never
+    /// off this request's `custom_tools`: the configuration may have changed
+    /// between the turn that made the call and the turn that replays it, and
+    /// an item the backend is handed has to match the item it sent.
+    CustomCalled {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        call_id: &'a str,
+        /// Under the same [`alias`] the custom advertisement carried, which is
+        /// its function twin's.
+        name: Cow<'a, str>,
+        /// The one argument's value, unwrapped from the arguments object the
+        /// inbound mapper wrapped it in — the model's own words, which is
+        /// what it was sent as.
+        input: String,
+    },
     /// What that call produced (`convert-to-openai-responses-input.ts:3740-3743`).
     Answered {
         #[serde(rename = "type")]
@@ -1278,16 +1300,32 @@ impl<'a> Body<'a> {
                     });
                 }
                 for part in &calls {
-                    input.push(Item::Called {
-                        kind: "function_call",
-                        call_id: part.call_id,
-                        name: alias(part.tool, OPENAI_CAP),
-                        arguments: arguments(part.state),
+                    // How the call was advertised decides how it replays, and
+                    // that is the part's own record rather than this
+                    // request's options (**D563**).
+                    input.push(if part.custom {
+                        Item::CustomCalled {
+                            kind: CUSTOM_TOOL_CALL,
+                            call_id: part.call_id,
+                            name: alias(part.tool, OPENAI_CAP),
+                            input: custom_input(part.state),
+                        }
+                    } else {
+                        Item::Called {
+                            kind: "function_call",
+                            call_id: part.call_id,
+                            name: alias(part.tool, OPENAI_CAP),
+                            arguments: arguments(part.state),
+                        }
                     });
                 }
                 for part in &calls {
                     input.push(Item::Answered {
-                        kind: "function_call_output",
+                        kind: if part.custom {
+                            CUSTOM_TOOL_CALL_OUTPUT
+                        } else {
+                            "function_call_output"
+                        },
                         call_id: part.call_id,
                         output: result(part.state),
                     });
@@ -1391,6 +1429,9 @@ struct Made<'a> {
     call_id: &'a str,
     tool: &'a str,
     state: &'a ToolState,
+    /// Whether the model made it through this wire's custom advertisement
+    /// (**D563**), which is what decides the pair of items it replays as.
+    custom: bool,
 }
 
 /// One step's sealed thinking, borrowed from the part that recorded it.
@@ -1425,7 +1466,9 @@ fn split(
                     texts.push(text);
                 }
             }
-            PartBody::Tool { call_id, tool, state } => calls.push(Made { call_id, tool, state }),
+            PartBody::Tool { call_id, tool, state, custom } => {
+                calls.push(Made { call_id, tool, state, custom: *custom })
+            }
             PartBody::Reasoning { provider, item, encrypted } => {
                 thoughts.push(Thought { provider, item, encrypted: encrypted.as_deref() })
             }
@@ -2071,11 +2114,46 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
     events.push(ProviderEvent::ServerTool { tool: kind.to_owned(), input, output, blob });
 }
 
-/// The item a Responses custom tool call arrives as (**D563**).
+/// The item a Responses custom tool call arrives as, and replays as
+/// (**D563**).
 const CUSTOM_TOOL_CALL: &str = "custom_tool_call";
+
+/// The item a replayed custom call's result rides, the custom twin of
+/// `function_call_output` (**D563**).
+const CUSTOM_TOOL_CALL_OUTPUT: &str = "custom_tool_call_output";
 
 /// The `type` a custom tool is advertised under.
 const CUSTOM: &str = "custom";
+
+/// The model's own words behind a stored custom call — its `input`, recovered
+/// from the arguments object the inbound mapper wrapped it in (**D563**).
+///
+/// The wrapping is this wire's own and has exactly one member: a tool can only
+/// be advertised as custom when its schema has one required string argument
+/// ([`single_string_argument`]), and [`Mapping::custom_closed`] writes the
+/// call's `input` under that one name. So the single string member is the
+/// words that were sent, and handing the backend anything else would hand it
+/// an item it never produced. A call the model never finished streaming has no
+/// arguments at all, and replays as the empty input it was.
+fn custom_input(state: &ToolState) -> String {
+    let input = match state {
+        ToolState::Pending { input: None } => return String::new(),
+        ToolState::Pending { input: Some(input) }
+        | ToolState::Running { input, .. }
+        | ToolState::Completed { input, .. }
+        | ToolState::Error { input, .. } => input,
+    };
+
+    match input.as_object().map(serde_json::Map::values) {
+        Some(mut values) => match (values.next().and_then(Value::as_str), values.next()) {
+            (Some(one), None) => one.to_owned(),
+            // Not the shape this wire wrote, so nothing here is the model's
+            // words: the object itself is the most honest thing to hand back.
+            _ => arguments(state),
+        },
+        None => arguments(state),
+    }
+}
 
 /// The item a hosted web search closes as.
 const WEB_SEARCH_CALL: &str = "web_search_call";

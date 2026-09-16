@@ -7391,6 +7391,11 @@ impl App {
                 self.effort = effort;
                 self.sync_effort_status();
             }
+            // Announced by nothing yet: the engine wave that resolves the
+            // service tier emits it, and the frontend wave after that draws
+            // it beside the effort. The arm exists so the match stays
+            // exhaustive across the two.
+            CoreEvent::FastChanged { .. } => {}
             // Taken and drawn nowhere (**D496**): no frontend paints the
             // posture this announces and no test pins one — its place would be
             // beside the agent and the effort in the status bar. The arm

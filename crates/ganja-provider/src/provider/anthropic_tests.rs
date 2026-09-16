@@ -453,7 +453,12 @@ fn the_wire_accepts_the_mimes_the_api_documents_and_no_others() {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     }
 }
 

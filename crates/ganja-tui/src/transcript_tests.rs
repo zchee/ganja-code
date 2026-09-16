@@ -22,6 +22,7 @@ fn session(title: Option<&str>) -> SessionInfo {
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn completed(tool: &str, input: serde_json::Value, output: &str) -> Part {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     }
 }
@@ -263,6 +265,7 @@ fn a_failed_call_carries_what_went_wrong() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     }];
 

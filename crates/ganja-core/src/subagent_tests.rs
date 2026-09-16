@@ -154,6 +154,7 @@ async fn the_watcher_logs_the_childs_calls_in_order_and_keeps_the_newest() {
             call_id: format!("call_{index}"),
             tool: format!("tool-{index}"),
             state,
+            custom: false,
         },
     };
     for index in 0..105 {

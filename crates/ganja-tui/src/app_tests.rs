@@ -114,6 +114,7 @@ fn store_session(
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     };
     let message = Message::user("what the picker is choosing between");
 
@@ -142,6 +143,7 @@ fn store_child(directory: &TempDir, id: &str, parent: &str) {
         activated_tools: std::collections::BTreeSet::new(),
         parent: Some(SessionId::from(parent.to_owned())),
         revert: None,
+        fast: None,
     };
 
     storage.save_info(&info).expect("the info stores");
@@ -365,7 +367,7 @@ fn palette_transcript(app: &mut App) {
                     }),
                     started: 0,
                     completed: 1,
-                },
+                }, custom: false
             },
         });
     reply.parts.push(Part {
@@ -379,6 +381,7 @@ fn palette_transcript(app: &mut App) {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     app.chat.start_message(reply);
@@ -1199,7 +1202,7 @@ fn stored_transcript(count: usize) -> Vec<Message> {
                                 metadata: serde_json::json!({}),
                                 started: 0,
                                 completed: 1,
-                            },
+                            }, custom: false
                         },
                     });
                     reply.parts.push(Part::text(
@@ -1443,6 +1446,7 @@ async fn a_finished_todowrite_fills_the_bars_todo_element() {
                     started: 0,
                     completed: 1,
                 },
+                custom: false,
             },
         },
     }))
@@ -1491,6 +1495,7 @@ async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
                     metadata: serde_json::Value::Null,
                     started: 0,
                 },
+                custom: false,
             },
         },
     }))
@@ -1515,6 +1520,7 @@ async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
                     started: 0,
                     completed: 1,
                 },
+                custom: false,
             },
         },
     }))
@@ -1593,6 +1599,7 @@ async fn a_part_updated_for_an_unseen_id_is_appended_not_dropped() {
                     metadata: serde_json::Value::Null,
                     started: 0,
                 },
+                custom: false,
             },
         },
     }))
@@ -2437,6 +2444,7 @@ fn snapshot_read_row() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     app.chat.start_message(message);
@@ -2474,6 +2482,7 @@ fn snapshot_tool_running() {
                 metadata: serde_json::Value::Null,
                 started: 0,
             },
+            custom: false,
         },
     });
     app.chat.start_message(message);
@@ -2503,6 +2512,7 @@ fn snapshot_tool_completed_with_a_diff() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     app.chat.start_message(message);
@@ -2528,6 +2538,7 @@ fn snapshot_tool_error() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     app.chat.start_message(message);
@@ -6021,7 +6032,12 @@ async fn task_part(app: &mut App, state: ToolState) {
         message_id: reply.id,
         part: Part {
             id: PartId::from("prt_1".to_owned()),
-            body: PartBody::Tool { call_id: "call_1".to_owned(), tool: "task".to_owned(), state },
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "task".to_owned(),
+                state,
+                custom: false,
+            },
         },
     }))
     .await
@@ -6117,6 +6133,7 @@ async fn snapshot_shell_output_streaming() {
                     }),
                     started: 0,
                 },
+                custom: false,
             },
         },
     }))

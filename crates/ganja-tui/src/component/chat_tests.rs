@@ -25,7 +25,12 @@ fn tool_call_at(tool: &str, state: ToolState, width: u16) -> Vec<String> {
     let mut reply = Message::assistant("canned");
     reply.parts.push(Part {
         id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool { call_id: "call_1".to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: "call_1".to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     });
     chat.start_message(reply);
 
@@ -705,6 +710,7 @@ fn a_running_tool_call_shows_a_title_derived_from_its_input() {
                 metadata: serde_json::Value::Null,
                 started: 0,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -736,6 +742,7 @@ fn an_in_flight_calls_point_winks_and_its_words_hold_still() {
                 metadata: serde_json::Value::Null,
                 started: 0,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -888,6 +895,7 @@ fn a_completed_tool_call_renders_as_a_bullet_a_result_marker_and_a_hanging_previ
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1257,6 +1265,7 @@ fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
             call_id: "call_1".to_owned(),
             tool: "todowrite".to_owned(),
             state: todo_call(todos()),
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1345,6 +1354,7 @@ fn a_todowrite_whose_list_cannot_be_read_hangs_no_checklist_under_the_working_li
                 call_id: "call_1".to_owned(),
                 tool: "todowrite".to_owned(),
                 state: todo_call(todos.clone()),
+                custom: false,
             },
         });
         chat.start_message(reply);
@@ -1385,6 +1395,7 @@ fn the_working_strip_is_the_only_checklist_a_settled_todowrite_draws() {
             call_id: "call_1".to_owned(),
             tool: "todowrite".to_owned(),
             state: todo_call(todos()),
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1446,6 +1457,7 @@ fn the_working_line_carries_no_checklist_from_a_turn_that_is_over() {
             call_id: "call_1".to_owned(),
             tool: "todowrite".to_owned(),
             state: todo_call(todos()),
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1598,6 +1610,7 @@ fn a_wrapped_preview_line_keeps_hanging_under_its_own_marker() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1630,6 +1643,7 @@ fn a_completed_tool_call_shows_its_title_and_a_clamped_output_preview() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1670,6 +1684,7 @@ fn a_completed_tool_call_prefers_its_diff_over_plain_output() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1700,6 +1715,7 @@ fn an_errored_tool_call_shows_only_the_first_line_of_the_error() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     chat.start_message(reply);
@@ -1743,6 +1759,7 @@ fn update_part_replaces_a_known_id_and_appends_an_unknown_one() {
                     started: 0,
                     completed: 1,
                 },
+                custom: false,
             },
         },
     );
@@ -1754,6 +1771,7 @@ fn update_part_replaces_a_known_id_and_appends_an_unknown_one() {
                 call_id: "call_2".to_owned(),
                 tool: "read".to_owned(),
                 state: ToolState::Pending { input: None },
+                custom: false,
             },
         },
     );
@@ -2287,7 +2305,12 @@ fn running_tasks_counts_delegated_children_and_not_teammate_spawns() {
     for (id, state) in [("prt_1", delegated), ("prt_2", spawn)] {
         reply.parts.push(Part {
             id: PartId::from(id.to_owned()),
-            body: PartBody::Tool { call_id: id.to_owned(), tool: "task".to_owned(), state },
+            body: PartBody::Tool {
+                call_id: id.to_owned(),
+                tool: "task".to_owned(),
+                state,
+                custom: false,
+            },
         });
     }
     chat.start_message(reply);

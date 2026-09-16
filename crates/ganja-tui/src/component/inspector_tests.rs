@@ -29,6 +29,7 @@ fn session(title: Option<&str>) -> ganja_core::SessionInfo {
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn the_transcript_tab_matches_the_copy_renderer_for_the_same_part() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     let messages = [(Role::Assistant, reply.parts.as_slice(), None)];
@@ -140,6 +142,7 @@ fn the_transcript_tab_shows_every_task_a_counted_todowrite_wrote() {
                 started: 0,
                 completed: 1,
             },
+            custom: false,
         },
     });
     let messages = [(Role::Assistant, reply.parts.as_slice(), None)];

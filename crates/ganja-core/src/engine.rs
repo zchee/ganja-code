@@ -4011,6 +4011,13 @@ impl Engine {
             Command::SwitchAgent { name } => self.switch_agent(name).await,
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
+            // The choice exists as a type before anything resolves it: this
+            // wave landed the protocol and the storage field, and the wave
+            // that owns the ladder replaces this arm with the switch that
+            // announces, stores and resolves the tier. Nothing in this build
+            // constructs the command yet — every frontend door is that wave's
+            // too — so the arm is unreachable rather than quietly wrong.
+            Command::SetFast { .. } => Ok(()),
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
             // Taken while a turn streams, like the posture above, and
             // announced by nothing (**D557**) — see the doc on the `deadline` field.
@@ -6050,7 +6057,7 @@ fn message_chars(message: &Message) -> (usize, usize) {
     for part in &message.parts {
         match &part.body {
             PartBody::Text { text } => generated += text.chars().count(),
-            PartBody::Tool { call_id, tool, state } => {
+            PartBody::Tool { call_id, tool, state, .. } => {
                 generated += call_id.chars().count() + tool.chars().count();
                 match state {
                     ToolState::Pending { .. } => {}
@@ -6245,6 +6252,9 @@ fn fresh_session(
         parent: None,
         // Nothing has been undone in a session that has not run a turn.
         revert: None,
+        // No service-tier choice has been made in one either; what a fresh
+        // session asks for is whatever the configuration resolves (**D563**).
+        fast: None,
     };
 
     if let Err(error) = storage.save_info(&info) {

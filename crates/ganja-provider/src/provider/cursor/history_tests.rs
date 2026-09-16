@@ -38,7 +38,12 @@ fn part(body: PartBody) -> Part {
 }
 
 fn call(call_id: &str, tool: &str, state: ToolState) -> Part {
-    part(PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state })
+    part(PartBody::Tool {
+        call_id: call_id.to_owned(),
+        tool: tool.to_owned(),
+        state,
+        custom: false,
+    })
 }
 
 fn completed(input: serde_json::Value, output: &str) -> ToolState {

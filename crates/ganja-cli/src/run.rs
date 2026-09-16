@@ -878,6 +878,11 @@ impl<'a> Reporter<'a> {
             // the six nd-JSON type names have no room for a shape no consumer
             // was promised.
             | Event::EffortChanged { .. }
+            // A service-tier choice (**D563**) is session state for the same
+            // reason, and a headless run has no door that moves one: what
+            // resolves the tier here is the configuration, read before the
+            // turn opens.
+            | Event::FastChanged { .. }
             // A permission-mode change (**D496**) is the same kind of thing
             // and unreachable besides: what sends one is a team's lead
             // answering a teammate mid-session, and a headless run holds no

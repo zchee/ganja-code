@@ -27,6 +27,7 @@ fn info(id: &str, title: Option<&str>, updated: u64, tokens: u64) -> SessionInfo
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     }
 }
 

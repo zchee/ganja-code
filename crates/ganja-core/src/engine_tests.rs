@@ -149,7 +149,8 @@ fn replay(events: &[Event]) -> String {
                 // `<peer_receipt>` text part (D534); the event itself
                 // carries nothing this replay collects.
                 | Event::PeerReceipt { .. }
-                | Event::EffortChanged { .. } => {}
+                | Event::EffortChanged { .. }
+                | Event::FastChanged { .. } => {}
             }
     }
 
@@ -383,6 +384,7 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     };
     storage.save_info(&info).expect("the seeded record writes");
     let earlier = Message::user("the objective");
@@ -606,6 +608,7 @@ async fn the_context_estimate_reports_the_stored_measure_against_the_catalog_win
         activated_tools: std::collections::BTreeSet::new(),
         parent: None,
         revert: None,
+        fast: None,
     };
     storage.save_info(&info).expect("the seeded record writes");
 

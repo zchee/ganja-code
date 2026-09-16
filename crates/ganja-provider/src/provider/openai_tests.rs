@@ -466,7 +466,12 @@ fn an_effort_passes_through_but_cannot_claim_the_model() {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     }
 }
 

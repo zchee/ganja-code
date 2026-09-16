@@ -2165,7 +2165,12 @@ fn a_tool() -> ToolDefinition {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
+        body: PartBody::Tool {
+            call_id: call_id.to_owned(),
+            tool: tool.to_owned(),
+            state,
+            custom: false,
+        },
     }
 }
 
@@ -3180,6 +3185,107 @@ async fn a_custom_tool_call_becomes_an_ordinary_argument_object_and_says_so() {
     // The fixture carries no terminal frame, so the stream ends with the
     // cut-body failure after these; what is pinned is the four before it.
     assert_eq!(&seen[..4], &expected, "{seen:?}");
+}
+
+/// **AC-18**, the replay half. A stored call replays as the pair its own
+/// record names, and the request's `custom_tools` has no say in it.
+///
+/// The two directions are the whole point: a call the model made as a custom
+/// one replays as the custom pair even where nothing is advertised as custom
+/// any more, and an ordinary call replays as the function pair even where its
+/// tool is. What would break otherwise is a resumed session — the
+/// configuration the call was made under is not the configuration the replay
+/// is built under, and the backend is owed the items it sent.
+#[test]
+fn a_stored_custom_call_replays_as_a_custom_item_whatever_the_options_say() {
+    let stored = |custom: bool| {
+        let mut assistant = Message::assistant(SERVED);
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+        assistant.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "c1".to_owned(),
+                tool: "bash".to_owned(),
+                state: completed(json!({"command": "ls"}), "a.rs\n"),
+                custom,
+            },
+        });
+        assistant
+    };
+    let input = |request: &ChatRequest| {
+        serde_json::to_value(Body::new(request, Backend::Codex)).expect("the body serializes")
+            ["input"]
+            .clone()
+    };
+
+    // A custom call, replayed by a request that advertises no custom tool at
+    // all — the case a `/fast`-less resume or a changed config produces.
+    let custom = ChatRequest {
+        messages: vec![Message::user("list the files"), stored(true)],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    assert!(custom.responses.custom_tools.is_empty(), "nothing is advertised as custom here");
+    assert_eq!(
+        input(&custom),
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {"type": "custom_tool_call", "call_id": "c1", "name": "bash", "input": "ls"},
+            {"type": "custom_tool_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "the call's own record decides, and its input is the words the model sent"
+    );
+
+    // And the other direction: an ordinary call, replayed by a request that
+    // does advertise its tool as custom.
+    let mut function = ChatRequest {
+        messages: vec![Message::user("list the files"), stored(false)],
+        tools: vec![a_shell_tool()],
+        ..ask()
+    };
+    function.responses.custom_tools = vec!["bash".to_owned()];
+    assert_eq!(
+        input(&function),
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "list the files"}]},
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "bash",
+                "arguments": r#"{"command":"ls"}"#,
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": "a.rs\n"},
+        ]),
+        "an unmarked call is a function call whatever this request advertises"
+    );
+}
+
+/// **AC-18**, the replay half's unwrapping. A custom call's `input` is the
+/// one argument's string, recovered from the object the inbound mapper
+/// wrapped it in — and a stored state that is not that shape is handed back
+/// whole rather than guessed at.
+///
+/// The three arms are the states a stored call can be in. A call that ran
+/// carries the wrapped words. A call the turn died during carries no
+/// arguments at all, and the honest input for one is the empty string it was
+/// sent as — never `{}`, which would be the model saying the word. And an
+/// object this wire did not write — which nothing in this build produces,
+/// since only `custom_closed` sets the mark — has no single string to
+/// unwrap, so what goes back is what is stored.
+#[test]
+fn a_custom_calls_input_is_the_one_arguments_string_or_what_was_stored() {
+    assert_eq!(super::custom_input(&completed(json!({"command": "ls"}), "a.rs\n")), "ls");
+    assert_eq!(super::custom_input(&ToolState::Pending { input: None }), "");
+    assert_eq!(
+        super::custom_input(&ToolState::Pending { input: Some(json!({"command": "ls"})) }),
+        "ls",
+        "a call still streaming carries the words it has"
+    );
+    assert_eq!(
+        super::custom_input(&completed(json!({"command": "ls", "timeout": 5}), "a.rs\n")),
+        r#"{"command":"ls","timeout":5}"#,
+        "two members is not a shape this wire wrote, so nothing here is the model's words"
+    );
 }
 
 /// **AC-19.** A completed or incomplete frame that echoes how it was served
