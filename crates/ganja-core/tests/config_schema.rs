@@ -177,7 +177,6 @@ text = { verbosity = "low" }
 stream_options = { include_obfuscation = false }
 tool_choice = "auto"
 server_tools = [{ type = "web_search", search_context_size = "low" }]
-context_management = [{ type = "compaction", compact_threshold = 400000 }]
 client_metadata = { lane = "w1" }
 access_programs = { beta = true }
 
@@ -202,6 +201,7 @@ moderation = { model = "omni-moderation-latest", policy = "default" }
 reasoning = { summary = "concise", mode = "standard" }
 include = ["message.output_text.logprobs"]
 tool_choice = { type = "web_search" }
+context_management = [{ type = "compaction", compact_threshold = 400000 }]
 
 [webfetch]
 allow_private = true
@@ -382,6 +382,27 @@ fn the_loader_refuses_the_per_id_narrowing_the_schema_alone_cannot_express(proje
              seat rejects it (`Unsupported service_tier: flex`, probe 2026-09-16); the seat takes \
              default, priority, ultrafast",
         ),
+        // Since the 2026-09-17 probe the narrowing runs both ways: the
+        // platform refuses a tier and a key the seat takes, and the seat
+        // refuses a key the platform takes.
+        (
+            "[provider.openai.options]\nservice_tier = \"ultrafast\"\n",
+            "provider \"openai\" cannot carry `options.service_tier = \"ultrafast\"`: the OpenAI \
+             platform rejects it (a 500, `Invalid service_tier argument`, probe 2026-09-17); the \
+             platform takes auto, default, flex, priority",
+        ),
+        (
+            "[provider.openai.options]\naccess_programs = { cyber = \"standard\" }\n",
+            "provider \"openai\" cannot carry `options.access_programs`: the OpenAI platform \
+             rejects it (`The access_programs parameter is not enabled for this organization.`, \
+             probe 2026-09-17); it is a `chatgpt` key",
+        ),
+        (
+            "[provider.chatgpt.options]\ncontext_management = [{ type = \"compaction\" }]\n",
+            "provider \"chatgpt\" cannot carry `options.context_management`: the ChatGPT seat \
+             accepts it and does nothing with it (no compaction item and no fewer input tokens on \
+             a 56k-token transcript past a 20k threshold, probe 2026-09-17); it is an `openai` key",
+        ),
     ] {
         let message = bogus_key_error(project, document);
         assert_eq!(message, expected);
@@ -415,6 +436,32 @@ fn the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(project: &Path) 
         !validator.is_valid(&instance),
         "additionalProperties: false on ResponsesOptions should refuse it too"
     );
+
+    // A *value* neither id takes is the same case one level down: `scale` was
+    // refused by the seat (2026-09-16) and by the platform (2026-09-17), so the
+    // schema's enum drops it while the decode type keeps it, which is what lets
+    // the loader say which backend refused it.
+    for (id, expected) in [
+        (
+            "chatgpt",
+            "provider \"chatgpt\" cannot carry `options.service_tier = \"scale\"`: the ChatGPT \
+             seat rejects it (`Unsupported service_tier: scale`, probe 2026-09-16); the seat takes \
+             default, priority, ultrafast",
+        ),
+        (
+            "openai",
+            "provider \"openai\" cannot carry `options.service_tier = \"scale\"`: the OpenAI \
+             platform rejects it (`Invalid value: 'scale'. Supported values are: 'auto', \
+             'default', 'fast', 'flex', and 'priority'.`, probe 2026-09-17); the platform takes \
+             auto, default, flex, priority",
+        ),
+    ] {
+        let document = format!("[provider.{id}.options]\nservice_tier = \"scale\"\n");
+        assert_eq!(bogus_key_error(project, &document), expected);
+
+        let instance = json!({ "provider": { id: { "options": { "service_tier": "scale" } } } });
+        assert!(!validator.is_valid(&instance), "the schema's ServiceTier enum refuses scale");
+    }
 }
 
 /// A document naming every top-level key, and both MCP shapes with every

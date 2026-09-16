@@ -1136,7 +1136,7 @@
         },
         "context_management": {
           "type": "array",
-          "description": "Server-side transcript compaction, passed through. Independent of ganja's own compaction, which keeps running off the reported input tokens.",
+          "description": "Server-side transcript compaction, passed through. openai only — the seat takes it and does nothing with it (probe 2026-09-17). Independent of ganja's own compaction, which keeps running off the reported input tokens.",
           "default": [],
           "items": {
             "$ref": "#/$defs/Compaction",
@@ -1153,7 +1153,7 @@
         },
         "access_programs": {
           "type": "object",
-          "description": "Access-program settings, passed through."
+          "description": "Access-program settings, passed through. chatgpt only — the platform refuses it as not enabled for the organization (probe 2026-09-17)."
         },
         "max_output_tokens": {
           "type": "integer",
@@ -1226,13 +1226,12 @@
     },
     "ServiceTier": {
       "title": "Service tier",
-      "description": "The seat takes default, priority and ultrafast; the platform documents all six. `fast` is an alias of `priority`, rewritten at load and never sent.",
+      "description": "The seat takes default, priority and ultrafast; the platform takes auto, default, flex and priority (probe 2026-09-17). `scale` is refused by both, and the loader names which backend said so. `fast` is an alias of `priority`, rewritten at load and never sent.",
       "type": "string",
       "enum": [
         "auto",
         "default",
         "flex",
-        "scale",
         "priority",
         "ultrafast",
         "fast"

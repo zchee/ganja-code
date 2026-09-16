@@ -638,7 +638,8 @@ pub struct ResponsesOptions {
     /// rather than replacing them.
     #[serde(default)]
     pub include: Vec<String>,
-    /// Server-side transcript compaction, passed through.
+    /// Server-side transcript compaction, passed through. Platform only: the
+    /// seat took it and did nothing with it (probe 2026-09-17).
     ///
     /// Independent of ganja's own compaction, which keeps running off the
     /// reported input tokens; a session with both active says so once in the
@@ -648,7 +649,8 @@ pub struct ResponsesOptions {
     /// Free-form client metadata, passed through.
     #[serde(default)]
     pub client_metadata: BTreeMap<String, String>,
-    /// Access-program settings, passed through.
+    /// Access-program settings, passed through. Seat only: the platform
+    /// refused it as not enabled for the organization (probe 2026-09-17).
     pub access_programs: Option<toml::Table>,
     /// Ceiling on the tokens one response may generate. Platform only — the
     /// seat rejected it.
@@ -832,7 +834,9 @@ fn replace_if_filled<T: Clone>(base: &mut Vec<T>, over: &[T]) {
 /// How a turn is scheduled and billed.
 ///
 /// The seat takes three of these (`default`, `priority`, `ultrafast`) and the
-/// platform documents all six. `fast` is an **alias** rather than a value: it
+/// platform four (`auto`, `default`, `flex`, `priority`; probe 2026-09-17).
+/// `scale` is taken by neither and stays decodable so that the loader can say
+/// which backend refused it and in what words. `fast` is an **alias** rather than a value: it
 /// is the word somebody reaches for, the backend answers it with
 /// `Unsupported service_tier: fast`, and rewriting it at load costs nothing
 /// and saves a turn. Nothing ever writes the string `fast` back out.
@@ -845,12 +849,14 @@ pub enum ServiceTier {
     Default,
     /// Cheaper, slower, best-effort. Platform only.
     Flex,
-    /// Reserved capacity. Platform only.
+    /// Reserved capacity. Refused on both ids: the seat answered
+    /// `Unsupported service_tier: scale` and the platform `Invalid value`.
     Scale,
     /// The fast tier, and what `fast` means.
     #[serde(alias = "fast")]
     Priority,
-    /// The faster tier above [`Priority`](Self::Priority).
+    /// The faster tier above [`Priority`](Self::Priority). Seat only: the
+    /// platform answered it with a 500 (probe 2026-09-17).
     Ultrafast,
 }
 
@@ -3412,9 +3418,13 @@ fn check_builtin_options(id: &str, entry: &ProviderConfig) -> Result<(), String>
 /// The measurement is the wire's, read out of
 /// [`responses::options`] rather than
 /// restated here, which is what stops the loader and the wire from disagreeing
-/// about what a backend takes. Three keys get sentences of their own because
-/// the seat's refusal of them was not a bare `Unsupported parameter` and a
-/// reader deserves to know what actually happened.
+/// about what a backend takes. Five keys get sentences of their own because
+/// the backend's answer to them was not a bare `Unsupported parameter` and a
+/// reader deserves to know what actually happened: three the seat refused
+/// otherwise, `context_management`, which the seat took and ignored, and
+/// `access_programs`, the one key the platform refuses (probe 2026-09-17). Each
+/// refused key is refused on exactly one id, which is why the arms are keyed on
+/// the key alone.
 fn check_responses_options(
     id: &str,
     options: &ResponsesOptions,
@@ -3441,6 +3451,17 @@ fn check_responses_options(
                  been measured on the ChatGPT seat (probe 2026-09-16) and the wire already \
                  sends it; the key is configurable on `openai`"
             ),
+            "context_management" => format!(
+                "provider \"{id}\" cannot carry `options.context_management`: the ChatGPT seat \
+                 accepts it and does nothing with it (no compaction item and no fewer input \
+                 tokens on a 56k-token transcript past a 20k threshold, probe 2026-09-17); it is \
+                 an `openai` key"
+            ),
+            "access_programs" => format!(
+                "provider \"{id}\" cannot carry `options.access_programs`: the OpenAI platform \
+                 rejects it (`The access_programs parameter is not enabled for this \
+                 organization.`, probe 2026-09-17); it is a `chatgpt` key"
+            ),
             _ => format!(
                 "provider \"{id}\" cannot carry `options.{key}`: the ChatGPT seat rejects it \
                  (`Unsupported parameter: {key}`, probe 2026-09-16); it is an `openai` key"
@@ -3450,6 +3471,27 @@ fn check_responses_options(
 
     if let Some(tier) = options.service_tier {
         let tiers = responses::options::tiers(id).unwrap_or_default();
+        if !tiers.contains(&tier.as_str()) && id == responses::ID {
+            let answer = match tier {
+                ServiceTier::Scale => {
+                    "`Invalid value: 'scale'. Supported values are: 'auto', 'default', 'fast', \
+                     'flex', and 'priority'.`"
+                }
+                ServiceTier::Ultrafast => "a 500, `Invalid service_tier argument`",
+                // The platform took these four; a tier refused later brings
+                // its own sentence rather than borrowing one of the two above.
+                ServiceTier::Auto
+                | ServiceTier::Default
+                | ServiceTier::Flex
+                | ServiceTier::Priority => "a refusal this build has not recorded",
+            };
+            return Err(format!(
+                "provider \"{id}\" cannot carry `options.service_tier = \"{}\"`: the OpenAI \
+                 platform rejects it ({answer}, probe 2026-09-17); the platform takes {}",
+                tier.as_str(),
+                responses::options::PLATFORM_TIERS.join(", ")
+            ));
+        }
         if !tiers.contains(&tier.as_str()) {
             return Err(format!(
                 "provider \"{id}\" cannot carry `options.service_tier = \"{}\"`: the ChatGPT \

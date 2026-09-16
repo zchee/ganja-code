@@ -236,6 +236,8 @@ pub struct RunArgs {
     /// Hold this turn's answer to a JSON Schema: a path to a `.json` file, or
     /// the document inline. Every request of the turn carries it as the
     /// Responses API's `text.format`, and the assistant's text is the document.
+    /// It is sent strict, so every object in it must set
+    /// `additionalProperties: false`.
     // Resolved at the clap boundary (`json_schema_flag`), `--deadline`'s own
     // precedent: a value that is neither a readable file nor JSON is refused
     // before any engine is assembled. The *provider* it needs cannot be
@@ -484,7 +486,8 @@ const JSON_SCHEMA_NAME: &str = "ganja_run";
 /// which is **not** `E2`, because "no such file" would be false about exactly
 /// the case a person most needs told apart from a missing one; and a third
 /// naming the JSON type that arrived when the document parsed and is not an
-/// object.
+/// object; and a fifth, [`closed`]'s, naming the first object node that does
+/// not set `additionalProperties: false`.
 fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
     let path = std::path::Path::new(argument);
     if path.exists() {
@@ -494,7 +497,7 @@ fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
             format!("--json-schema could not read the JSON in {argument:?}: {error}")
         })?;
 
-        return object(document, &format!("the JSON in {argument:?}"));
+        return object(document, &format!("the JSON in {argument:?}")).and_then(closed);
     }
 
     let document: serde_json::Value = serde_json::from_str(argument).map_err(|error| {
@@ -503,7 +506,7 @@ fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
         )
     })?;
 
-    object(document, &format!("{argument:?}"))
+    object(document, &format!("{argument:?}")).and_then(closed)
 }
 
 /// `document` when it is a JSON object, and otherwise the sentence saying what
@@ -528,6 +531,110 @@ fn object(document: serde_json::Value, source: &str) -> Result<serde_json::Value
     };
 
     Err(format!("--json-schema takes a JSON Schema, which is an object; {source} is {kind}"))
+}
+
+/// `schema` when every object node in it sets `additionalProperties: false`,
+/// and otherwise the sentence naming the first node that does not, by its JSON
+/// path (**D563**, the fifth sentence).
+///
+/// The wrap in [`json_schema_format`] is `strict: true`, and strict mode needs
+/// every object closed. Measured on the ChatGPT seat on 2026-09-17: AC-31's
+/// own fixture, which left the key out, came back a 400 reading `Invalid
+/// schema for response_format 'ganja_run': In context=(), 'additionalProperties'
+/// is required to be supplied and to be false.` — and the same schema with the
+/// key answered. Refused here rather than relaxed to `strict: false`, because a
+/// best-effort shape hands the checking back to the script this flag serves,
+/// and refused at the flag because the answer is already known before a
+/// request is spent. The sentence ends in the vendor's own words so that
+/// somebody who has met the 400 recognizes it.
+///
+/// An object node is one whose `type` is or includes `"object"`, or which has
+/// `properties`. The walk follows the schema keywords that hold subschemas and
+/// nothing else, so a `const`, an `enum` or a `default` whose *value* happens
+/// to look like a schema is data, not a node.
+fn closed(schema: serde_json::Value) -> Result<serde_json::Value, String> {
+    match open_object(&schema, "$".to_owned()) {
+        None => Ok(schema),
+        Some(path) => Err(format!(
+            "--json-schema is sent strict, so every object in it must close itself; the object at {path} does not: 'additionalProperties' is required to be supplied and to be false"
+        )),
+    }
+}
+
+/// The JSON path of the first object node at or under `node` that does not set
+/// `additionalProperties: false`, walked in document order, or [`None`].
+fn open_object(node: &Value, path: String) -> Option<String> {
+    let Value::Object(members) = node else {
+        return None;
+    };
+
+    let typed_object = match members.get("type") {
+        Some(Value::String(kind)) => kind == "object",
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
+        _ => false,
+    };
+    if (typed_object || members.contains_key("properties"))
+        && members.get("additionalProperties") != Some(&Value::Bool(false))
+    {
+        return Some(path);
+    }
+
+    for (keyword, value) in members {
+        let here = format!("{path}{}", segment(keyword));
+        let found = match keyword.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                value.as_object().and_then(|named| {
+                    named.iter().find_map(|(name, schema)| {
+                        open_object(schema, format!("{here}{}", segment(name)))
+                    })
+                })
+            }
+            "anyOf" | "allOf" | "oneOf" | "prefixItems" => value.as_array().and_then(|listed| {
+                listed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
+            }),
+            // `items` was an array of schemas before draft 2020-12, and a
+            // document written to an older draft is still somebody's schema.
+            "items" if value.is_array() => value.as_array().and_then(|listed| {
+                listed
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, schema)| open_object(schema, format!("{here}[{index}]")))
+            }),
+            "items"
+            | "additionalItems"
+            | "additionalProperties"
+            | "unevaluatedItems"
+            | "unevaluatedProperties"
+            | "contains"
+            | "propertyNames"
+            | "not"
+            | "if"
+            | "then"
+            | "else" => open_object(value, here),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    None
+}
+
+/// One step of a JSON path: `.name` for a key a reader could type bare, and
+/// `["name"]` for one that needs quoting.
+fn segment(key: &str) -> String {
+    let bare = key
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '$'
+        });
+    if bare { format!(".{key}") } else { format!("[{key:?}]") }
 }
 
 /// The `text.format` document `--json-schema` rides as, or [`None`] when the

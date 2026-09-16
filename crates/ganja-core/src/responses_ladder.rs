@@ -95,9 +95,10 @@ pub struct TierView {
 /// The tier `/fast on` resolves to on `provider` for `model`, or [`None`] on a
 /// provider that has no tier to move.
 ///
-/// On `openai` this is `priority` for every model: the platform has never been
-/// sent `ultrafast`, and until a live measurement says it takes it, one keystroke
-/// sends the one value somebody has seen work.
+/// On `openai` this is `priority` for every model: the platform answered
+/// `ultrafast` with a 500, `Invalid service_tier argument`, on `gpt-5.5` and on
+/// `gpt-5.6-sol` (probe 2026-09-17), so one keystroke sends the one fast value
+/// it was measured to take.
 #[must_use]
 pub fn fast_tier(provider: &str, model: &str) -> Option<&'static str> {
     if provider == responses::CHATGPT_ID {

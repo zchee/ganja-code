@@ -1634,8 +1634,69 @@ fn fast_is_read_as_priority_and_never_written() {
     );
     assert!(
         parse("[provider.openai.options]\nservice_tier = \"flex\"\n").is_ok(),
-        "the platform documents all six"
+        "the platform takes flex"
     );
+}
+
+/// **W6, probe 2026-09-17.** The two tiers the platform refused are refused
+/// under `openai` in the platform's own words — and `ultrafast` still loads
+/// under `chatgpt`, where it was taken — so a config never spends a request
+/// on a tier this build has already watched fail.
+#[test]
+fn a_tier_the_platform_refused_is_refused_under_openai_naming_the_probe() {
+    assert_eq!(
+        refusal("[provider.openai.options]\nservice_tier = \"scale\"\n"),
+        "provider \"openai\" cannot carry `options.service_tier = \"scale\"`: the OpenAI platform \
+         rejects it (`Invalid value: 'scale'. Supported values are: 'auto', 'default', 'fast', \
+         'flex', and 'priority'.`, probe 2026-09-17); the platform takes auto, default, flex, \
+         priority"
+    );
+    assert_eq!(
+        refusal("[provider.openai.options]\nservice_tier = \"ultrafast\"\n"),
+        "provider \"openai\" cannot carry `options.service_tier = \"ultrafast\"`: the OpenAI \
+         platform rejects it (a 500, `Invalid service_tier argument`, probe 2026-09-17); the \
+         platform takes auto, default, flex, priority"
+    );
+    assert_eq!(
+        refusal("[provider.openai.options.model.\"gpt-5.6-sol\"]\nservice_tier = \"ultrafast\"\n"),
+        "provider \"openai\" cannot carry `options.service_tier = \"ultrafast\"`: the OpenAI \
+         platform rejects it (a 500, `Invalid service_tier argument`, probe 2026-09-17); the \
+         platform takes auto, default, flex, priority",
+        "measured on gpt-5.6-sol itself, so a per-model entry is no way around it"
+    );
+    assert!(parse("[provider.chatgpt.options]\nservice_tier = \"ultrafast\"\n").is_ok());
+    assert_eq!(
+        refusal("[provider.chatgpt.options]\nservice_tier = \"scale\"\n"),
+        "provider \"chatgpt\" cannot carry `options.service_tier = \"scale\"`: the ChatGPT seat \
+         rejects it (`Unsupported service_tier: scale`, probe 2026-09-16); the seat takes default, \
+         priority, ultrafast",
+        "the seat's own refusal is unchanged"
+    );
+}
+
+/// **W6, probe 2026-09-17; the AC-2/AC-4 shape.** Each id refuses one key the
+/// other takes, and says what its backend did with it: the platform refuses
+/// `access_programs` as not enabled for the organization, and the seat takes
+/// `context_management` and does nothing with it.
+#[test]
+fn a_key_one_id_was_measured_to_refuse_or_ignore_loads_under_the_other() {
+    let access = "access_programs = { cyber = \"standard\" }";
+    assert_eq!(
+        refusal(&format!("[provider.openai.options]\n{access}\n")),
+        "provider \"openai\" cannot carry `options.access_programs`: the OpenAI platform rejects \
+         it (`The access_programs parameter is not enabled for this organization.`, probe \
+         2026-09-17); it is a `chatgpt` key"
+    );
+    assert!(parse(&format!("[provider.chatgpt.options]\n{access}\n")).is_ok());
+
+    let compaction = "context_management = [{ type = \"compaction\", compact_threshold = 20000 }]";
+    assert_eq!(
+        refusal(&format!("[provider.chatgpt.options]\n{compaction}\n")),
+        "provider \"chatgpt\" cannot carry `options.context_management`: the ChatGPT seat accepts \
+         it and does nothing with it (no compaction item and no fewer input tokens on a 56k-token \
+         transcript past a 20k threshold, probe 2026-09-17); it is an `openai` key"
+    );
+    assert!(parse(&format!("[provider.openai.options]\n{compaction}\n")).is_ok());
 }
 
 /// **AC-5.** A hosted tool's `type` is curated and everything else about it
@@ -2557,8 +2618,9 @@ fn with_neither_on_disk_the_answer_is_the_one_a_writer_should_create() {
 /// hand-written list, so a field added to the struct and forgotten there would
 /// be a key that skips the per-id gate. Pinned from both ends: the fixture sets
 /// every field the struct serializes (so a new field without a fixture line
-/// fails here), and the keys it reports are the platform's whole vocabulary,
-/// both ways (so a field without a `set_keys` line fails here too).
+/// fails here), and the keys it reports are both ids' vocabulary together,
+/// both ways (so a field without a `set_keys` line fails here too) — the union,
+/// since the 2026-09-17 probe left a key on each id's list alone.
 #[test]
 fn set_keys_reports_every_key_a_fully_populated_table_sets() {
     let every: super::ResponsesOptions = toml::from_str(
@@ -2611,15 +2673,19 @@ moderation = { model = "omni", policy = "strict" }
 
     let reported: std::collections::BTreeSet<&str> = every.set_keys().into_iter().collect();
     let accepted: std::collections::BTreeSet<&str> =
-        crate::provider::responses::options::PLATFORM_ACCEPTED.iter().copied().collect();
+        crate::provider::responses::options::PLATFORM_ACCEPTED
+            .iter()
+            .chain(crate::provider::responses::options::SEAT_ACCEPTED)
+            .copied()
+            .collect();
     assert_eq!(
         reported.difference(&accepted).collect::<Vec<_>>(),
         Vec::<&&str>::new(),
-        "set_keys reports a key the platform list does not name"
+        "set_keys reports a key neither id's list names"
     );
     assert_eq!(
         accepted.difference(&reported).collect::<Vec<_>>(),
         Vec::<&&str>::new(),
-        "a platform key a fully populated table sets is missing from set_keys"
+        "a key a fully populated table sets is missing from set_keys"
     );
 }

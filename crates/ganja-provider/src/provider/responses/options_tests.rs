@@ -2,42 +2,51 @@ use std::collections::BTreeSet;
 
 use super::*;
 
-/// The seat is the narrowed list and the platform is the wide one, so every
-/// key the seat takes the platform takes too.
+/// The seat's key list is the narrow one, and the only name it holds that
+/// the platform's does not is the one the platform was measured to refuse:
+/// `access_programs` (probe 2026-09-17, organization-gated).
 ///
 /// Written out separately rather than concatenated (a `const` cannot
 /// concatenate slices), which is exactly why this has to be a test: a key
 /// added to the seat's list and forgotten in the platform's would make a
-/// document that loads under `chatgpt` refuse under `openai`.
+/// document that loads under `chatgpt` refuse under `openai`, and only a
+/// measurement is allowed to do that.
 #[test]
-fn every_key_the_seat_takes_the_platform_takes_too() {
+fn the_seat_takes_no_key_the_platform_refuses_but_the_one_measured() {
     let seat: BTreeSet<&str> = SEAT_ACCEPTED.iter().copied().collect();
     let platform: BTreeSet<&str> = PLATFORM_ACCEPTED.iter().copied().collect();
 
+    assert_eq!(
+        seat.difference(&platform).copied().collect::<Vec<_>>(),
+        ["access_programs"],
+        "the seat's list holds a key the platform's is missing"
+    );
     assert!(
-        seat.is_subset(&platform),
-        "the platform list is missing {:?}",
-        seat.difference(&platform).collect::<Vec<_>>()
+        platform.contains("context_management") && !seat.contains("context_management"),
+        "context_management was measured to do nothing on the seat (probe 2026-09-17)"
     );
 }
 
-/// The same claim for the three value lists, for the same reason.
+/// The same claim for the three value lists: the platform takes every value
+/// the seat does, except `ultrafast`, which it answered with a 500 (probe
+/// 2026-09-17).
 #[test]
-fn every_value_the_seat_takes_the_platform_takes_too() {
-    for (name, seat, platform) in [
-        ("service_tier", SEAT_TIERS, PLATFORM_TIERS),
-        ("server_tools", SEAT_SERVER_TOOLS, PLATFORM_SERVER_TOOLS),
-        ("include", SEAT_INCLUDE, PLATFORM_INCLUDE),
+fn the_seat_takes_no_value_the_platform_refuses_but_ultrafast() {
+    for (name, seat, platform, measured) in [
+        ("service_tier", SEAT_TIERS, PLATFORM_TIERS, &["ultrafast"][..]),
+        ("server_tools", SEAT_SERVER_TOOLS, PLATFORM_SERVER_TOOLS, &[][..]),
+        ("include", SEAT_INCLUDE, PLATFORM_INCLUDE, &[][..]),
     ] {
         let seat: BTreeSet<&str> = seat.iter().copied().collect();
         let platform: BTreeSet<&str> = platform.iter().copied().collect();
 
-        assert!(
-            seat.is_subset(&platform),
-            "the platform's {name} list is missing {:?}",
-            seat.difference(&platform).collect::<Vec<_>>()
+        assert_eq!(
+            seat.difference(&platform).copied().collect::<Vec<_>>(),
+            measured,
+            "the platform's {name} list is missing a value the seat takes"
         );
     }
+    assert!(!PLATFORM_TIERS.contains(&"scale"), "scale was refused on the platform too");
 }
 
 /// No list holds a name twice, and none is empty — a duplicate would make a

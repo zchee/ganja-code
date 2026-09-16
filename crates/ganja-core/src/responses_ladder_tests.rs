@@ -7,7 +7,7 @@ use crate::config::ResponsesOptions;
 use crate::protocol::FastChoice;
 use crate::provider::responses::{self, options};
 
-/// Every key the decode struct has, set — the platform's whole vocabulary.
+/// Every key the decode struct has, set — both ids' vocabulary together.
 ///
 /// Decoded straight into the struct rather than through the loader, whose
 /// per-id gate is not what these tests are about.
@@ -161,10 +161,11 @@ fn the_body_carries_no_directive_and_no_key_the_wire_writes_itself() {
     }
 }
 
-/// The completeness half of the same boundary: on the platform, every key the
-/// loader admits reaches the request exactly once — as a body leaf or as a
+/// The completeness half of the same boundary: every key either id's loader
+/// admits reaches the request exactly once — as a body leaf or as a
 /// directive — so a field added to the decode struct and forgotten here is a
-/// test failure rather than a setting that silently does nothing.
+/// test failure rather than a setting that silently does nothing. Resolved
+/// under the platform id because the resolver does not gate; the loader does.
 #[test]
 fn every_platform_key_reaches_the_request_exactly_once() {
     let (resolved, _) = resolve(&seed(responses::ID, Some(table(EVERY_KEY)), None), FIVE);
@@ -189,7 +190,9 @@ fn every_platform_key_reaches_the_request_exactly_once() {
 
     let unique: BTreeSet<&str> = reached.iter().map(String::as_str).collect();
     assert_eq!(unique.len(), reached.len(), "a key reached the request twice: {reached:?}");
-    assert_eq!(unique, options::PLATFORM_ACCEPTED.iter().copied().collect::<BTreeSet<_>>());
+    let vocabulary: BTreeSet<&str> =
+        options::PLATFORM_ACCEPTED.iter().chain(options::SEAT_ACCEPTED).copied().collect();
+    assert_eq!(unique, vocabulary);
 }
 
 #[test]

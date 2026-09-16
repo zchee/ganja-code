@@ -526,12 +526,12 @@ fn attaching_with_a_deadline_fails_to_parse() {
 /// is neither — refused there, so no engine is ever assembled around it.
 #[test]
 fn a_json_schema_is_read_from_a_file_or_from_the_value_itself() {
-    let inline = r#"{"type":"object"}"#;
+    let inline = r#"{"type":"object","additionalProperties":false}"#;
     let parsed = Flags::try_parse_from(["run", "--json-schema", inline, "hello"])
         .unwrap_or_else(|error| panic!("an inline document parses: {error}"));
     assert_eq!(
         parsed.run.json_schema,
-        Some(serde_json::json!({"type": "object"})),
+        Some(serde_json::json!({"type": "object", "additionalProperties": false})),
         "the document is held decoded, not as the text that spelled it"
     );
 
@@ -619,6 +619,87 @@ fn a_file_that_is_not_an_object_and_a_directory_each_say_what_they_are() {
     assert!(!error.to_string().contains("no such file"), "got {error}");
 }
 
+/// **D563, W6 (probe 2026-09-17).** The wrap is `strict: true`, and the seat
+/// refused AC-31's own schema for leaving an object open — so the flag refuses
+/// one at the boundary, naming the first open object by its JSON path and
+/// ending in the vendor's own words.
+///
+/// Walked through the keywords that hold subschemas, in document order, so the
+/// path points at the node somebody has to edit; and **only** through those,
+/// so an `enum` or `const` whose value merely looks like a schema is data.
+#[test]
+fn a_json_schema_with_an_open_object_is_refused_at_the_flag_naming_its_path() {
+    let sentence = |path: &str| {
+        format!(
+            "--json-schema is sent strict, so every object in it must close itself; the object at {path} does not: 'additionalProperties' is required to be supplied and to be false"
+        )
+    };
+    let cases = [
+        (r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#, "$"),
+        (r#"{"type":"object","additionalProperties":true}"#, "$"),
+        (r#"{"type":["object","null"]}"#, "$"),
+        (r#"{"properties":{"ok":{"type":"boolean"}}}"#, "$"),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"address":{"type":"object","properties":{}}}}"#,
+            "$.properties.address",
+        ),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"tags":{"type":"array","items":{"type":"object"}}}}"#,
+            "$.properties.tags.items",
+        ),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"x":{"anyOf":[{"type":"string"},{"type":"object"}]}}}"#,
+            "$.properties.x.anyOf[1]",
+        ),
+        (r##"{"$ref":"#/$defs/item","$defs":{"item":{"type":"object"}}}"##, "$.$defs.item"),
+        (
+            r#"{"type":"object","additionalProperties":false,"properties":{"first name":{"type":"object"}}}"#,
+            "$.properties[\"first name\"]",
+        ),
+    ];
+
+    for (schema, path) in cases {
+        let Err(error) = Flags::try_parse_from(["run", "--json-schema", schema, "hello"]) else {
+            panic!("{schema} leaves the object at {path} open, which the seat refuses strict");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+        assert!(error.to_string().contains(&sentence(path)), "{schema}: got {error}");
+    }
+
+    for closed in [
+        r#"{"type":"object","additionalProperties":false,"properties":{"tags":{"type":"array","items":{"type":"string"}}}}"#,
+        r#"{"type":"string"}"#,
+        r#"{"type":"object","additionalProperties":false,"properties":{"kind":{"const":{"type":"object"}},"shape":{"enum":[{"properties":{}}]}}}"#,
+    ] {
+        assert!(
+            Flags::try_parse_from(["run", "--json-schema", closed, "hello"]).is_ok(),
+            "{closed} closes every object it declares"
+        );
+    }
+}
+
+/// The same refusal about a **file**: the check runs on what the file held,
+/// so a schema too long to type is held to the same rule.
+#[test]
+fn a_json_schema_file_with_an_open_object_is_refused_the_same_way() {
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("open.json");
+    std::fs::write(&path, r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#)
+        .expect("the fixture is writable");
+
+    let Err(error) =
+        Flags::try_parse_from(["run", "--json-schema", &path.display().to_string(), "hello"])
+    else {
+        panic!("a file holding an open object is refused");
+    };
+    assert!(
+        error.to_string().contains(
+            "the object at $ does not: 'additionalProperties' is required to be supplied and to be false"
+        ),
+        "got {error}"
+    );
+}
+
 /// **D563, AC-31.** `--attach` carries no text-format route, so the pair is
 /// refused exactly as `--deadline` and `--effort` are there.
 #[test]
@@ -628,7 +709,7 @@ fn attaching_with_a_json_schema_fails_to_parse() {
         "--attach",
         "http://127.0.0.1:4096",
         "--json-schema",
-        r#"{"type":"object"}"#,
+        r#"{"type":"object","additionalProperties":false}"#,
         "hello",
     ]) else {
         panic!("a schema the attached client cannot carry is refused");

@@ -21,9 +21,10 @@ use ganja_testkit::{Homes, responses_server};
 use serde_json::{Value, json};
 
 /// The schema every case passes, small enough to read in a failure message and
-/// shaped like what a script would really ask for.
-const SCHEMA: &str =
-    r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#;
+/// shaped like what a script would really ask for — closed with
+/// `additionalProperties: false`, which the seat's strict mode requires
+/// (probe 2026-09-17) and the flag refuses a schema without.
+const SCHEMA: &str = r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}"#;
 
 /// What the scripted turn answers, which is the document the schema describes:
 /// the assistant's text *is* the answer under this flag, so a case that could

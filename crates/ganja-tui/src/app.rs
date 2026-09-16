@@ -250,12 +250,13 @@ const DEADLINE_NOTICE: &str = "deadline passed; the model has been told to wrap 
 /// the seat is a subscription and its tier costs nothing extra, where the
 /// platform charges the priority rate per request — one keystroke away, which
 /// is exactly the distance at which somebody should be told. The second clause
-/// says what is *not* sent, so nobody reads the bar's `fast` as the faster of
-/// the vendor's two fast tiers: `ultrafast` has never been measured on the
-/// platform, and this build does not send a tier nobody has seen work.
+/// says why the faster tier is not what was asked for, so nobody reads the
+/// bar's `fast` as the faster of the vendor's two fast tiers: the platform
+/// answered `ultrafast` with a 500 on `gpt-5.5` and on `gpt-5.6-sol` (probe
+/// 2026-09-17), so `/fast on` there resolves to `priority` on every model.
 fn fast_on_platform(tier: &str) -> String {
     format!(
-        "fast on: service_tier {tier} bills at the platform's priority rate; ultrafast is unmeasured there and is not sent"
+        "fast on: service_tier {tier} bills at the platform's priority rate; ultrafast is refused there (a 500, \"Invalid service_tier argument\", probe 2026-09-17)"
     )
 }
 
@@ -2184,7 +2185,7 @@ impl App {
     ///
     /// Derived from [`options::FAST_TIERS`] and [`options::DEFAULT_FAST_TIER`]
     /// rather than spelled as "not `default`": on the platform a configured
-    /// `flex` or `scale` is neither fast nor ordinary, and drawing `fast` over
+    /// `flex` is neither fast nor ordinary, and drawing `fast` over
     /// one would be a claim about the bill that is not true. A provider that
     /// sends no tier at all is not fast, which is every provider but the two
     /// Responses ids.

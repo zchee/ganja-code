@@ -6,9 +6,30 @@
 //! `gpt-6-astra`, whose vocabulary every list here is written in: **honored**
 //! (the echo moved), **recognized** (200, the echo shows the default or
 //! nothing), **rejected** (400, with the backend's own sentence). The platform
-//! id's list is the vendor's SDK surface and is **unprobed**; the live test
-//! that measures it is this plan's W6, and a refusal there moves a name from
-//! one list to the other by one edit.
+//! id's lists started as the vendor's SDK surface and were measured by W6:
+//! `.omc/research/2026-09-16-openai-platform-param-probe.md`, run 2026-09-17 on
+//! `gpt-5.5` and `gpt-5.6-sol`, which moved three names — `scale` and
+//! `ultrafast` out of [`PLATFORM_TIERS`], `access_programs` out of
+//! [`PLATFORM_ACCEPTED`] — and one more on the seat: `context_management` out
+//! of [`SEAT_ACCEPTED`], measured to do nothing there.
+//!
+//! # Rejections that moved nothing, on purpose
+//!
+//! Five platform keys were refused by that run and are **kept** in
+//! [`PLATFORM_ACCEPTED`], because each refusal names the model rather than the
+//! key, and reaching a model the seat does not serve is what the `openai` id is
+//! for. The loader stays silent about them by choice; the sentences, verbatim
+//! from `gpt-5.5`:
+//!
+//! - `reasoning.mode = "pro"`: `` `reasoning.mode` is not supported with this
+//!   model. ``
+//! - `prompt_cache_options`: `prompt_cache_options is not supported on this
+//!   model` (the SDK documents it for `gpt-5.6` and later).
+//! - `temperature`: `Unsupported parameter: 'temperature' is not supported with
+//!   this model.`
+//! - `top_p`: `Unsupported parameter: 'top_p' is not supported with this model.`
+//! - `top_logprobs`, and `include = ["message.output_text.logprobs"]` it comes
+//!   back through: `logprobs are not supported with reasoning models.`
 //!
 //! # Why the lists live in this crate and the decode struct lives in core
 //!
@@ -38,7 +59,10 @@ use super::{CHATGPT_ID, ID};
 /// `Unsupported parameter` — `reasoning.mode`, `prompt_cache_key`,
 /// `reasoning.summary` — get refusal sentences of their own in the loader, so
 /// that somebody reading one learns what the backend actually did rather than
-/// a generic "not here".
+/// a generic "not here". `context_management` is missing for the opposite
+/// reason and gets a sentence too: the seat takes it and, on a 56k-token
+/// transcript under a 20k threshold, neither compacted nor echoed anything
+/// (probe 2026-09-17), so sending it would spend bytes to say nothing.
 pub const SEAT_ACCEPTED: &[&str] = &[
     "service_tier",
     "reasoning.context",
@@ -49,23 +73,25 @@ pub const SEAT_ACCEPTED: &[&str] = &[
     "custom_tools",
     "server_tools",
     "include",
-    "context_management",
     "client_metadata",
     "access_programs",
 ];
 
-/// Keys the **platform** takes: [`SEAT_ACCEPTED`] plus everything the seat
-/// rejected and `api.openai.com` documents.
+/// Keys the **platform** takes: what `api.openai.com` documents and the
+/// 2026-09-17 probe did not refuse by name.
 ///
 /// Spelled out in full rather than concatenated, because a `const` cannot
 /// concatenate slices — and because a reader of either list should be able to
-/// see the whole answer without holding the other one in their head. That the
-/// seat's list is a subset is a test, not a comment.
+/// see the whole answer without holding the other one in their head. The
+/// overlap with [`SEAT_ACCEPTED`] is a test, not a comment, and it is no longer
+/// a plain subset in either direction: `access_programs` is the seat's alone,
+/// refused here with `The access_programs parameter is not enabled for this
+/// organization.`, and `context_management` is the platform's alone.
 ///
-/// **Unprobed.** No call in the 2026-09-16 probe went to `api.openai.com`; the
-/// names below are the vendor's `response_create_params` surface, which is why
-/// nothing here is sent by default and why the platform gets no spending
-/// default at all.
+/// **Measured, not defaulted.** Every name below was sent to the platform on
+/// 2026-09-17; the module doc lists the five kept despite a model-dependent
+/// refusal. Nothing here is sent unless configured, and the platform still gets
+/// no spending default at all.
 pub const PLATFORM_ACCEPTED: &[&str] = &[
     "service_tier",
     "reasoning.context",
@@ -80,7 +106,6 @@ pub const PLATFORM_ACCEPTED: &[&str] = &[
     "include",
     "context_management",
     "client_metadata",
-    "access_programs",
     "max_output_tokens",
     "max_tool_calls",
     "prompt_cache_key",
@@ -110,14 +135,22 @@ pub const PLATFORM_ACCEPTED: &[&str] = &[
 /// status bar draws what was *asked* and `/usage` draws what was served.
 pub const SEAT_TIERS: &[&str] = &["default", "priority", "ultrafast"];
 
-/// `service_tier` values the platform documents. Unprobed, like every other
-/// platform list here.
-pub const PLATFORM_TIERS: &[&str] = &["auto", "default", "flex", "scale", "priority", "ultrafast"];
+/// `service_tier` values the platform took (probe 2026-09-17).
+///
+/// `auto` was recognized (it echoed the project's own tier) and the other three
+/// honored. `scale` and `ultrafast` are **absent** because they were refused:
+/// `scale` with `Invalid value: 'scale'. Supported values are: 'auto',
+/// 'default', 'fast', 'flex', and 'priority'.`, and `ultrafast` with a 500,
+/// `Invalid service_tier argument`, on `gpt-5.5` and twice on `gpt-5.6-sol`.
+/// That second refusal is why `/fast on` over `openai` resolves to `priority`
+/// on every model.
+pub const PLATFORM_TIERS: &[&str] = &["auto", "default", "flex", "priority"];
 
 /// Hosted tool types the seat registered (probe rows 32 and 35).
 pub const SEAT_SERVER_TOOLS: &[&str] = &["web_search", "image_generation"];
 
-/// Hosted tool types the platform documents.
+/// Hosted tool types the platform took (probe 2026-09-17; `file_search`'s one
+/// refusal was about a missing store, not the type).
 pub const PLATFORM_SERVER_TOOLS: &[&str] =
     &["web_search", "image_generation", "file_search", "code_interpreter", "mcp"];
 

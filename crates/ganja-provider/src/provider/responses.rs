@@ -2454,7 +2454,11 @@ fn defaulted(backend: Backend, roster: usize, model: &str) -> Map<String, Value>
 /// - `tool_choice` and `parallel_tool_calls` go when `offered` is false —
 ///   when the serialized `tools` array is empty, hosted entries included, so
 ///   a hosted `tool_choice` beside a hosted tool and no function roster is
-///   kept.
+///   kept. Measured, not guessed: the seat answered a tool-less request
+///   carrying `tool_choice = "required"`, sent ungated, with a 400 reading
+///   `Tool choice 'required' must be specified with 'tools' parameter.`
+///   (probe 2026-09-17), so without this drop a configured `required` would
+///   fail every compaction request.
 /// - `reasoning` goes whole when the model does not reason, for the 400
 ///   [`defaulted`] avoids.
 /// - A key the typed [`Body`] writes itself goes always ([`OWN_KEYS`]).

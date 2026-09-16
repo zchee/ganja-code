@@ -11864,7 +11864,8 @@ async fn fast_on_another_provider_says_so_and_sends_nothing() {
 }
 
 /// **D563, AC-28.** `/fast on` over the **platform** warns what it costs, and
-/// says what it is not sending; the seat's own `on` says nothing, because a
+/// says why `ultrafast` is not what it asked for (refused there, probe
+/// 2026-09-17); the seat's own `on` says nothing, because a
 /// subscription's tier bills nothing extra.
 #[tokio::test]
 async fn fast_on_warns_on_the_platform_and_only_there() {
@@ -11875,7 +11876,7 @@ async fn fast_on_warns_on_the_platform_and_only_there() {
     assert_eq!(
         platform.status.notice(),
         Some(
-            "fast on: service_tier priority bills at the platform's priority rate; ultrafast is unmeasured there and is not sent"
+            "fast on: service_tier priority bills at the platform's priority rate; ultrafast is refused there (a 500, \"Invalid service_tier argument\", probe 2026-09-17)"
         ),
     );
 
