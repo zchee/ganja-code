@@ -35,6 +35,10 @@ Three modules and a private fourth. `provider/` is the wires; `auth` is where a 
 
 ## Identity on the wire
 
+The statement in full — the rule, the refused impersonation and the deviations
+ratified with it — is the "**D521** — what this build tells each host it is"
+block in `../AGENTS.md`; this table adds the constant behind each row.
+
 What each credential-bearing host is told this build is (**D521**), and the
 constant that decides it — because the answer is the host's and not the crate's:
 
@@ -45,6 +49,7 @@ constant that decides it — because the answer is the host's and not the crate'
 | x.ai (`auth.x.ai`) | `referrer=ganja-code`, `ganja-code/<version>` | `grok::REFERRER`, `grok::XAI_USER_AGENT` | the same, after a real browser login and a turn on the credential it minted — `crates/ganja-core/tests/fixtures/grok-identity-probe.txt` |
 | `github.com` device endpoints | `opencode/1.18.22` | `device::UPSTREAM_USER_AGENT` | **borrowed, deliberately.** Left alone on blast radius, not on inertia |
 | `api.githubcopilot.com` | `opencode/1.18.22` | the same, pinned as a literal beside it | the same reason: this is the one host whose failure mode is a suspended GitHub account rather than a visible refusal |
+| the `claude` CLI, spawned locally (the API host is reached by the CLI, never by ganja) | `CLAUDE_CODE_ENTRYPOINT=sdk-ts`, `CLAUDE_AGENT_SDK_CLIENT_APP=ganja-code/<version>` | `claude_code::argv::SET`'s first two entries, the second `device::GANJA_USER_AGENT` | ganja's own name in the slot documented for a host app, appended to the CLI's own `claude-cli/<v> (external, sdk-ts)` — `crates/ganja-provider/tests/fixtures/claude-code-sdk-mcp-probe.txt` |
 
 Two rules the tests hold rather than the prose. **Identity fields on one host
 move together or not at all** — a request naming itself one thing in a header
