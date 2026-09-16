@@ -291,7 +291,7 @@ pub struct ChatRequest {
     /// deciding who may be given it, which is why a resolved `service_tier`
     /// rides a gateway request too. What keeps a gateway's body unchanged is
     /// the engine, which hands a non-default value only to the two ids that
-    /// speak OpenAI's own Responses API (W3b). Every other wire ignores the
+    /// speak OpenAI's own Responses API (**D563**). Every other wire ignores the
     /// field, and [`Default`] — what every request carried before the options
     /// existed — sends nothing.
     pub responses: responses::options::RequestOptions,

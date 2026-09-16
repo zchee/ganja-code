@@ -1418,12 +1418,9 @@ pub enum Command {
     /// configuration says (**D563**). Takes effect at the next turn, and is
     /// refused while one is streaming, exactly as [`Command::SwitchEffort`].
     ///
-    /// What is stored is the **intent**, never a tier literal: the tier a
-    /// vendor spells its fast lane with differs per model, so the literal is
-    /// resolved per turn from the model then active, and a [`Command::SwitchModel`]
-    /// re-resolves it without the choice being touched. Refused on any
-    /// provider that does not speak the Responses API, where the tier has no
-    /// meaning at all.
+    /// What is stored is the intent ([`FastChoice`]), never a tier literal.
+    /// Refused on any provider that does not speak the Responses API, where
+    /// the tier has no meaning at all.
     SetFast {
         /// The choice, or [`None`] to clear it and fall back to whatever the
         /// configuration resolves. Absent from the wire when [`None`], so the
@@ -1602,11 +1599,6 @@ pub enum PermissionReply {
 /// vendor's ordinary tier **explicitly**, outranking a configuration that
 /// asks for a fast one. Clearing the choice is [`None`] in the command that
 /// carries it.
-///
-/// The rename attribute is this crate's `snake_case` rule, not a choice
-/// between spellings: two one-word variants are written identically by
-/// `snake_case` and `kebab-case`, so the rule that governs every other enum
-/// here governs this one too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FastChoice {

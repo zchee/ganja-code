@@ -1805,11 +1805,10 @@ fn each_message_mark_is_written_when_set_and_survives_a_round_trip() {
 /// **D563**: a tool call records how it was advertised, and the record is
 /// written only when it says something.
 ///
-/// The three claims the `request_only` idiom makes, made here about a part:
-/// a set flag is written and reads back; an unset one is absent from the
-/// bytes, so a transcript written before the field existed is byte-identical
-/// to one written now; and a document with no such key reads as `false`,
-/// which is what every other wire's stored call is.
+/// A set flag is written and reads back, and a document with no such key
+/// reads as `false`, which is what every other wire's stored call is. That an
+/// unset flag writes no key is pinned by `the_wire_format_is_stable`'s pending
+/// tool part.
 #[test]
 fn a_tool_calls_advertisement_is_written_only_when_it_was_a_custom_one() {
     let ordinary = Part {
@@ -1821,12 +1820,6 @@ fn a_tool_calls_advertisement_is_written_only_when_it_was_a_custom_one() {
             custom: false,
         },
     };
-    let written = serde_json::to_string(&ordinary).expect("a part serializes");
-    assert!(!written.contains("custom"), "an ordinary call writes no mark: {written}");
-    assert_eq!(
-        written,
-        r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"bash","state":{"status":"pending"}}"#
-    );
 
     let PartBody::Tool { call_id, tool, state, .. } = ordinary.body.clone() else {
         unreachable!("the part above is a tool part")
@@ -1878,7 +1871,7 @@ fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() 
 /// [`pinned_message`] already keeps: its bytes are pinned by
 /// `the_wire_format_is_stable` with no `command` key in them, so a
 /// transcript written before this field existed is byte-identical to one
-/// written now — asserted again here so a reader of this test sees it.
+/// written now.
 #[test]
 fn a_command_expansion_carries_its_typed_line_and_every_other_message_carries_none() {
     let typed = "/team 1 --backend codex port the loader";
@@ -1901,12 +1894,6 @@ fn a_command_expansion_carries_its_typed_line_and_every_other_message_carries_no
     );
     let decoded: Message = serde_json::from_str(&written).expect("and reads back");
     assert_eq!(decoded, message, "the typed line survives a round trip");
-
-    let unset = serde_json::to_string(&pinned_message()).expect("a message serializes");
-    assert!(!unset.contains("command"), "an unset line writes no key at all: {unset}");
-    let without: serde_json::Value = serde_json::from_str(&unset).expect("json");
-    let read: Message = serde_json::from_value(without).expect("a document with no key reads");
-    assert_eq!(read.command, None, "and a document without the key reads as None");
 
     assert_eq!(Message::user("a prompt").command, None, "no other constructor sets it");
     assert_eq!(Message::assistant("a-model").command, None);

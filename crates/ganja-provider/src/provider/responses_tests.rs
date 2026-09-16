@@ -2791,7 +2791,7 @@ fn sent(request: &ChatRequest, backend: Backend) -> serde_json::Value {
 /// chat model.
 const NOT_REASONING: &str = "gpt-5-chat-latest";
 
-/// **AC-11.** The whole body per backend with nothing configured. This
+/// The whole body per backend with nothing configured. This
 /// vendor's two gain exactly one key over what they sent before D563 — and
 /// no tier, because the engine resolves that one — and every other backend
 /// is sent what it was sent before, to the byte.
@@ -2824,7 +2824,7 @@ fn every_codex_and_platform_request_carries_no_obfuscation_and_no_tier() {
     );
 }
 
-/// **AC-11**, the byte half. A gateway row and a config-named endpoint get no
+/// The byte half. A gateway row and a config-named endpoint get no
 /// default at all, so their request never takes the map round trip: the
 /// bytes are the typed body's own, field order included, with a roster and
 /// without one.
@@ -2847,7 +2847,7 @@ fn the_opencode_and_compat_bodies_are_unchanged_with_and_without_a_roster() {
     }
 }
 
-/// **AC-12.** `tool_choice: "auto"` beside a roster on this vendor's two and
+/// `tool_choice: "auto"` beside a roster on this vendor's two and
 /// the gateway, never on a gateway row or a config-named endpoint; and a
 /// configured choice replaces the default whole.
 #[test]
@@ -2875,7 +2875,7 @@ fn a_roster_is_offered_with_auto_unless_a_choice_was_configured() {
     assert_eq!(body["tool_choice"], allowed, "sent verbatim: {body}");
 }
 
-/// **AC-12b.** The roster gate: a configured `tool_choice` and
+/// The roster gate: a configured `tool_choice` and
 /// `parallel_tool_calls` go when the request offers no tool, each dropped
 /// with a line that says so, and stay when it offers one — a hosted tool
 /// alone counting as one.
@@ -2998,7 +2998,7 @@ fn a_configured_key_the_wire_writes_itself_is_dropped_and_said_so() {
     }
 }
 
-/// **AC-13b.** The reasoning gate: a configured `reasoning` object, and a
+/// The reasoning gate: a configured `reasoning` object, and a
 /// configured summary, never reach a model that does not reason — which
 /// answers the field with a 400 — and reach one that does beside the
 /// default summary.
@@ -3031,7 +3031,7 @@ fn configured_reasoning_never_reaches_a_model_that_does_not_reason() {
     );
 }
 
-/// **AC-13.** A resolved tier is sent as given on every backend and absent
+/// A resolved tier is sent as given on every backend and absent
 /// when there is none.
 #[test]
 fn a_resolved_tier_is_sent_as_given_on_every_backend() {
@@ -3052,7 +3052,7 @@ fn a_resolved_tier_is_sent_as_given_on_every_backend() {
     }
 }
 
-/// **AC-13.** An effort and a configured context share one `reasoning`
+/// An effort and a configured context share one `reasoning`
 /// object with the effort's summary kept, and a configured summary outranks
 /// the effort's on the platform alone.
 #[test]
@@ -3080,7 +3080,7 @@ fn an_effort_and_a_configured_context_share_one_reasoning_object() {
     );
 }
 
-/// **AC-14.** A configured `include` joins the wire's own entry and the
+/// A configured `include` joins the wire's own entry and the
 /// effort's rather than replacing either, once each.
 #[test]
 fn a_configured_include_joins_the_efforts_own_entry() {
@@ -3105,7 +3105,7 @@ fn a_configured_include_joins_the_efforts_own_entry() {
     );
 }
 
-/// **AC-15.** A hosted entry rides the `tools` array verbatim after the
+/// A hosted entry rides the `tools` array verbatim after the
 /// function tools, and no directive reaches the body as a key of its own.
 #[test]
 fn a_server_tool_entry_is_sent_verbatim_after_the_function_tools() {
@@ -3150,7 +3150,7 @@ fn no_directive_reaches_the_body_as_a_key() {
     assert_eq!(gateway["tools"], json!([{"type": "openrouter:web_search"}]));
 }
 
-/// **AC-16.** A hosted web search's `action` is the row's input; an image
+/// A hosted web search's `action` is the row's input; an image
 /// generation's result rides the blob, with its format as the mime, and
 /// never the input.
 #[tokio::test]
@@ -3226,7 +3226,7 @@ async fn a_non_image_items_result_stays_in_the_row_it_arrived_on() {
     );
 }
 
-/// **AC-17.** A listed single-string tool is advertised twice — custom and
+/// A listed single-string tool is advertised twice — custom and
 /// function — and a listed name that is not on the roster, or not
 /// single-string, is advertised as a function alone and logged.
 #[test]
@@ -3290,7 +3290,7 @@ fn a_custom_tool_is_advertised_beside_its_function_twin() {
     );
 }
 
-/// **AC-18**, the inbound half. A custom call arrives as the four events an
+/// The inbound half. A custom call arrives as the four events an
 /// ordinary call does, with the marker between its start and its arguments,
 /// and its free-text input mapped onto the tool's one required argument.
 #[tokio::test]
@@ -3338,7 +3338,7 @@ async fn a_custom_tool_call_becomes_an_ordinary_argument_object_and_says_so() {
     assert_eq!(&seen[..4], &expected, "{seen:?}");
 }
 
-/// **AC-18**, the replay half. A stored call replays as the pair its own
+/// The replay half. A stored call replays as the pair its own
 /// record names, and the request's `custom_tools` has no say in it.
 ///
 /// The two directions are the whole point: a call the model made as a custom
@@ -3411,7 +3411,7 @@ fn a_stored_custom_call_replays_as_a_custom_item_whatever_the_options_say() {
     );
 }
 
-/// **AC-18**, the inbound half's other door. A custom call naming a tool this
+/// The inbound half's other door. A custom call naming a tool this
 /// request did not advertise as custom is closed with no arguments at all
 /// rather than with a guess: the three events arrive in order and the tool
 /// refuses a call it was handed nothing for.
@@ -3455,7 +3455,7 @@ async fn a_custom_call_naming_an_unadvertised_tool_is_closed_without_arguments()
     );
 }
 
-/// **AC-18**, the replay half's unwrapping. A custom call's `input` is the one
+/// The replay half's unwrapping. A custom call's `input` is the one
 /// argument's string, recovered from the object the inbound mapper wrapped it
 /// in — and a stored call that is not that shape replays as the
 /// `function_call` pair rather than as a custom item carrying invented words.
@@ -3531,7 +3531,7 @@ fn a_custom_calls_input_is_the_one_arguments_string_or_the_function_pair() {
     );
 }
 
-/// **AC-19.** A completed or incomplete frame that echoes how it was served
+/// A completed or incomplete frame that echoes how it was served
 /// says so once, immediately before its bill; a stream with neither frame
 /// says nothing; and the served tier is logged beside the requested one.
 #[tokio::test]
@@ -3587,7 +3587,7 @@ async fn a_completed_or_incomplete_frame_emits_one_served_event_before_usage() {
     assert!(!neither.iter().any(|event| matches!(event, ProviderEvent::Served(_))), "{neither:?}");
 }
 
-/// **AC-19**, the backend half. A gateway relays somebody else's response
+/// The backend half. A gateway relays somebody else's response
 /// through its own normalization, so a field arriving under one of the four
 /// echo names is that gateway's word for its own thing and says nothing
 /// about the options this request configured.
@@ -3613,7 +3613,7 @@ async fn only_this_vendors_own_backends_report_how_a_turn_was_served() {
     );
 }
 
-/// **AC-20.** `run --json-schema`'s document and a configured verbosity
+/// `run --json-schema`'s document and a configured verbosity
 /// share one `text` object.
 #[test]
 fn a_text_format_and_a_configured_verbosity_share_one_text_object() {

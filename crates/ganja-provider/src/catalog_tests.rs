@@ -929,24 +929,19 @@ fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
     }
 }
 
-/// The offline title model is decided by this table's order, not only by its
-/// prices.
-///
-/// `title_model` takes the *first* minimum of `min_by(pricing.input)`, and
-/// `gpt-5.6-luna` charges the 0.2 `gpt-5.4-nano` already charged, so a row
-/// inserted above nano would move what an offline session titles with and say
-/// nothing. The four 2026-09-16 rows sit after `gpt-5.3-codex` for this reason.
+/// Pins the row order the comment above the `gpt-5.5` row in `catalog.rs`
+/// explains: nano is the cheapest openai row and the first of its price.
 #[test]
 fn the_cheapest_openai_snapshot_row_is_still_nano() {
     let snapshot = snapshot();
-    let cheapest = snapshot
+    let cheapest: Vec<&str> = snapshot
         .models
         .iter()
-        .filter(|model| model.provider_id == "openai")
-        .min_by(|left, right| left.pricing.input.total_cmp(&right.pricing.input))
-        .expect("the snapshot carries openai rows");
+        .filter(|model| model.provider_id == "openai" && model.pricing.input <= 0.2)
+        .map(|model| model.id.as_str())
+        .collect();
 
-    assert_eq!(cheapest.id, "gpt-5.4-nano");
+    assert_eq!(cheapest, ["gpt-5.4-nano", "gpt-5.6-luna"]);
 }
 
 /// The recording's two served spellings, a row published below a million

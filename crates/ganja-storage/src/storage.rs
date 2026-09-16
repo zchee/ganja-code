@@ -335,13 +335,10 @@ pub struct SessionInfo {
     pub effort: Option<String>,
     /// Service-tier choice this session was last running under (**D563**).
     ///
-    /// The **intent**, not the tier literal, which is why it survives a model
-    /// switch: the word the vendor is actually sent is resolved per turn from
-    /// the model then active, so a row saying "fast" resumes asking for
-    /// whichever tier the resumed model's fast lane is spelled with. Absent on
-    /// every session written before the choice existed and on every session
-    /// that never made one — where the configuration decides — so a
-    /// pre-feature row stays byte-stable and an absent key reads as no choice.
+    /// The intent ([`FastChoice`]), not the tier literal. Absent on every
+    /// session written before the choice existed and on every session that
+    /// never made one — where the configuration decides — so a pre-feature
+    /// row stays byte-stable and an absent key reads as no choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast: Option<FastChoice>,
     /// Deferred-roster names this session has activated — by a `tool_search`

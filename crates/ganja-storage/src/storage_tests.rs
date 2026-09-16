@@ -65,16 +65,18 @@ fn info(id: &str, updated: u64) -> SessionInfo {
     }
 }
 
-/// Every persisted shape of the effort field, pinned where the row lives:
-/// a session running Default writes the exact bytes it always wrote, a
-/// selected effort survives the round trip, and a row from before the
-/// field existed parses through the serde default — which is also how a
-/// row written under the field's old name reads, as effort-unselected.
+/// Every persisted shape of the effort field and the fast choice (**D563**),
+/// pinned where the row lives: a session running Default writes the exact
+/// bytes it always wrote, a selected effort and fast choice survive the round
+/// trip, and a row from before either field existed parses through the serde
+/// default — which is also how a row written under the effort field's old
+/// name reads, as effort-unselected.
 #[test]
 fn the_session_row_preserves_default_bytes_round_trips_effort_and_reads_older_rows() {
     let mut carried = info("ses_effort", 2);
     carried.model = Some("claude-opus-5".to_owned());
     carried.effort = Some("max".to_owned());
+    carried.fast = Some(FastChoice::On);
 
     let encoded = serde_json::to_string(&carried).expect("the row serializes");
     assert!(encoded.contains(r#""effort":"max""#), "got {encoded}");
@@ -93,43 +95,6 @@ fn the_session_row_preserves_default_bytes_round_trips_effort_and_reads_older_ro
     let decoded: SessionInfo =
         serde_json::from_str(older).expect("the default reads a row from before the field existed");
     assert_eq!(decoded.effort, None);
-}
-
-/// The same three shapes for the service-tier choice (**D563**), which is the
-/// same kind of thing and earns the same three claims: both words survive the
-/// round trip, a session that made no choice writes no key — the bare bytes
-/// above are the proof, and they are what they always were — and a row from
-/// before the field existed reads as no choice rather than refusing.
-///
-/// What is stored is the choice, never the tier a turn resolves it to, so a
-/// row saying `fast` resumes asking for whichever tier the resumed model's
-/// fast lane is spelled with.
-#[test]
-fn the_session_row_round_trips_the_fast_choice_and_reads_rows_from_before_it() {
-    for choice in [FastChoice::On, FastChoice::Off] {
-        let mut carried = info("ses_fast", 2);
-        carried.fast = Some(choice);
-
-        let encoded = serde_json::to_string(&carried).expect("the row serializes");
-        let spelled = match choice {
-            FastChoice::On => "on",
-            FastChoice::Off => "off",
-        };
-        assert!(encoded.contains(&format!(r#""fast":"{spelled}""#)), "got {encoded}");
-        let decoded: SessionInfo = serde_json::from_str(&encoded).expect("the row parses back");
-        assert_eq!(decoded, carried);
-    }
-
-    assert!(
-        !serde_json::to_string(&info("ses_default", 2))
-            .expect("the row serializes")
-            .contains("fast"),
-        "no choice is the field's absence"
-    );
-
-    let older = r#"{"id":"ses_older","version":1,"created":1,"updated":2}"#;
-    let decoded: SessionInfo =
-        serde_json::from_str(older).expect("the default reads a row from before the field existed");
     assert_eq!(decoded.fast, None);
 }
 
@@ -303,13 +268,6 @@ fn a_command_expansions_typed_line_survives_a_store_and_a_row_without_one_reads_
 
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded, vec![expanded, typed], "both come back exactly as they were stored");
-    assert_eq!(loaded[0].command.as_deref(), Some("/team 1 --backend codex port the loader"));
-    assert_eq!(
-        loaded[0].parts[0].as_text(),
-        Some("You are the lead of a team.\nStage one."),
-        "and the expansion is still the message's text"
-    );
-    assert_eq!(loaded[1].command, None, "a row without the key reads as None");
 }
 
 #[test]

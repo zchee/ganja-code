@@ -6,10 +6,10 @@
 //! `gpt-6-astra`, whose vocabulary every list here is written in: **honored**
 //! (the echo moved), **recognized** (200, the echo shows the default or
 //! nothing), **rejected** (400, with the backend's own sentence). The platform
-//! id's lists started as the vendor's SDK surface and were measured by W6:
-//! `.omc/research/2026-09-16-openai-platform-param-probe.md`, run 2026-09-17 on
-//! `gpt-5.5` and `gpt-5.6-sol`, which moved three names — `scale` and
-//! `ultrafast` out of [`PLATFORM_TIERS`], `access_programs` out of
+//! id's lists started as the vendor's SDK surface and were measured by the
+//! platform probe, `.omc/research/2026-09-16-openai-platform-param-probe.md`,
+//! run 2026-09-17 on `gpt-5.5` and `gpt-5.6-sol`, which moved three names —
+//! `scale` and `ultrafast` out of [`PLATFORM_TIERS`], `access_programs` out of
 //! [`PLATFORM_ACCEPTED`] — and one more on the seat: `context_management` out
 //! of [`SEAT_ACCEPTED`], measured to do nothing there.
 //!

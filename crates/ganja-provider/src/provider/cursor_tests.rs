@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use buffa::Message as _;
 use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
 use super::super::PROVIDERS;
@@ -574,11 +575,7 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
         "the call was bridged: {paused:?}"
     );
 
-    let resumed = answered(&request, "call-1", completed("the file's contents"));
-    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
-        panic!("the result keys the held run");
-    };
-    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+    let stream = resumed(held, &request, key, cancel, "call-1");
 
     let mut tail = kv_get(9, &composed_id);
     tail.extend(framed(text("Done.")));
@@ -667,19 +664,8 @@ async fn a_partial_and_its_exec_reach_the_engine_as_two_starts_under_one_id_the_
 /// and the fold is what the pause carried.
 #[tokio::test]
 async fn a_call_announced_before_another_exec_is_named_by_its_own_exec_after_the_pause() {
-    let held = Arc::new(super::bridge::HeldRuns::default());
-    let request = opening("auto");
-    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
-    let cancel = CancellationToken::new();
-
-    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
-    let (answers, _written) = futures::channel::mpsc::unbounded();
-    let stream = super::events(
-        chunks,
-        cancel.clone(),
-        super::Duplex::for_tests(answers, roster()),
-        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
-    );
+    let HeldRun { held, request, key, cancel, body, written: _written, stream } =
+        held_run(roster());
 
     let mut first = framed(partial("toolu_W"));
     first.extend(mcp_framed(74, read_args("toolu_R")));
@@ -702,11 +688,7 @@ async fn a_call_announced_before_another_exec_is_named_by_its_own_exec_after_the
         "nothing the engine could run arrived for the write: {paused:?}"
     );
 
-    let resumed = answered(&request, "toolu_R", completed("the file's contents"));
-    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
-        panic!("the read's result keys the held run");
-    };
-    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+    let stream = resumed(held, &request, key, cancel, "toolu_R");
     body.unbounded_send(Ok(mcp_framed(2, read_args("toolu_W")))).expect("the body is open");
     let named: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), stream.collect())
         .await
@@ -732,19 +714,8 @@ async fn a_call_announced_before_another_exec_is_named_by_its_own_exec_after_the
 /// from turning a finished call back into a placeholder.
 #[tokio::test]
 async fn a_partial_arriving_after_its_own_exec_opens_no_row() {
-    let held = Arc::new(super::bridge::HeldRuns::default());
-    let request = opening("auto");
-    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
-    let cancel = CancellationToken::new();
-
-    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
-    let (answers, _written) = futures::channel::mpsc::unbounded();
-    let stream = super::events(
-        chunks,
-        cancel.clone(),
-        super::Duplex::for_tests(answers, roster()),
-        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
-    );
+    let HeldRun { held, request, key, cancel, body, written: _written, stream } =
+        held_run(roster());
     body.unbounded_send(Ok(mcp_framed(74, read_args("toolu_R")))).expect("the body is open");
     let paused: Vec<ProviderEvent> =
         tokio::time::timeout(Duration::from_secs(10), stream.collect())
@@ -752,11 +723,7 @@ async fn a_partial_arriving_after_its_own_exec_opens_no_row() {
             .expect("a bridged exec pauses the stream rather than hanging it");
     assert_eq!(starts(&paused), vec![("toolu_R", "read")], "{paused:?}");
 
-    let resumed = answered(&request, "toolu_R", completed("the file's contents"));
-    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
-        panic!("the read's result keys the held run");
-    };
-    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+    let stream = resumed(held, &request, key, cancel, "toolu_R");
     let mut tail = framed(partial("toolu_R"));
     tail.extend(framed(text("Read it.")));
     tail.extend(framed(turn_ended()));
@@ -1397,6 +1364,51 @@ fn mcp_framed(id: u32, args: proto::McpArgs) -> Vec<u8> {
     connect::envelope(&message.encode_to_vec())
 }
 
+/// A bridging `events` stream over a fresh held table, keyed by an `auto`
+/// opening with `declared` on the roster. `written` is the answers receiver:
+/// keep it bound, because dropping it closes the channel the fold writes to.
+struct HeldRun {
+    held: Arc<super::bridge::HeldRuns>,
+    request: ChatRequest,
+    key: super::bridge::Key,
+    cancel: CancellationToken,
+    body: futures::channel::mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+    written: Answered,
+    stream: BoxStream<'static, ProviderEvent>,
+}
+
+fn held_run(declared: Vec<ToolDefinition>) -> HeldRun {
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, written) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        chunks,
+        cancel.clone(),
+        super::Duplex::for_tests(answers, declared),
+        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
+    );
+    HeldRun { held, request, key, cancel, body, written, stream }
+}
+
+/// Answers the held run's `call_id` with a completed read and resumes it.
+fn resumed(
+    held: Arc<super::bridge::HeldRuns>,
+    request: &ChatRequest,
+    key: super::bridge::Key,
+    cancel: CancellationToken,
+    call_id: &str,
+) -> BoxStream<'static, ProviderEvent> {
+    let result = answered(request, call_id, completed("the file's contents"));
+    let super::bridge::Resolution::Resume(fold) = held.resolve(&result) else {
+        panic!("the result for {call_id} keys the held run");
+    };
+    super::run(*fold, cancel, Some(super::Bridge::new(held, key)))
+}
+
 /// Drives one exec frame through a **bridging** fold with `declared` on the
 /// roster, and returns the events it produced beside what it wrote back.
 ///
@@ -1414,18 +1426,8 @@ async fn bridged_exec(
     // could pause — which is what makes "this call was bridged rather than
     // answered" observable instead of indistinguishable from "this wire cannot
     // bridge".
-    let held = Arc::new(super::bridge::HeldRuns::default());
-    let request = opening("auto");
-    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
-
-    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
-    let (answers, mut answered) = futures::channel::mpsc::unbounded();
-    let stream = super::events(
-        receiver,
-        CancellationToken::new(),
-        super::Duplex::for_tests(answers, declared),
-        Some(super::Bridge::new(Arc::clone(&held), key)),
-    );
+    let HeldRun { held: _held, body: sender, written: mut answered, stream, .. } =
+        held_run(declared);
 
     sender.unbounded_send(Ok(exec)).expect("the body is open");
 
