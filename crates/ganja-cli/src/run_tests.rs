@@ -566,6 +566,59 @@ fn a_json_schema_that_is_neither_a_file_nor_json_is_refused_at_the_flag() {
     );
 }
 
+/// **D563, AC-31.** A document that parses and is not an **object** is refused
+/// at the same boundary: a schema is an object, and a number, a bare `true` or
+/// an array would otherwise reach the vendor and come back as somebody else's
+/// error about a request this build assembled.
+#[test]
+fn a_json_schema_that_is_not_an_object_is_refused_at_the_flag() {
+    for (value, kind) in [("42", "a number"), ("true", "a boolean"), ("[]", "an array")] {
+        let Err(error) = Flags::try_parse_from(["run", "--json-schema", value, "hello"]) else {
+            panic!("{value} is JSON, but it is not a schema");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation, "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "--json-schema takes a JSON Schema, which is an object; {value:?} is {kind}"
+            )),
+            "the sentence names the value and the type that arrived: {error}"
+        );
+    }
+}
+
+/// **D563, AC-31.** The same refusal about a **file** names the file rather
+/// than the value, so a person who passed a path is not left guessing whether
+/// this build read their file or their filename. And a **directory** is a
+/// mistyped path, answered by the read rather than by "no such file", which
+/// would be false about something plainly there.
+#[test]
+fn a_file_that_is_not_an_object_and_a_directory_each_say_what_they_are() {
+    let directory = ganja_testkit::temp_dir();
+    let path = directory.path().join("array.json");
+    std::fs::write(&path, "[]").expect("the fixture is writable");
+    let named = path.display().to_string();
+
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema", &named, "hello"]) else {
+        panic!("a file holding an array is not a schema");
+    };
+    assert!(
+        error.to_string().contains(&format!(
+            "--json-schema takes a JSON Schema, which is an object; the JSON in {named:?} is an array"
+        )),
+        "the file is named as the source, not the value: {error}"
+    );
+
+    let folder = directory.path().display().to_string();
+    let Err(error) = Flags::try_parse_from(["run", "--json-schema", &folder, "hello"]) else {
+        panic!("a directory is not a document");
+    };
+    assert!(
+        error.to_string().contains(&format!("--json-schema could not read {folder:?}")),
+        "a directory is read and fails as one: {error}"
+    );
+    assert!(!error.to_string().contains("no such file"), "got {error}");
+}
+
 /// **D563, AC-31.** `--attach` carries no text-format route, so the pair is
 /// refused exactly as `--deadline` and `--effort` are there.
 #[test]

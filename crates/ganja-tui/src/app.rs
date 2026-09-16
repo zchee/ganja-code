@@ -243,20 +243,6 @@ const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next tur
 /// Saying exactly that is what tells somebody whether to intervene.
 const DEADLINE_NOTICE: &str = "deadline passed; the model has been told to wrap up";
 
-/// What `/fast` answers on a provider that has no service tier to move
-/// (**D563**), for `provider`.
-///
-/// `EngineError::Fast`'s own sentence, byte for byte, and deliberately so: the
-/// arms that send would read it back off a refusal anyway, and the two that
-/// send nothing — `show` and a refused word — must not answer the same
-/// situation in different words. A divergence here is a test failure rather
-/// than a surprise, which is what the pin in `app_tests.rs` is for.
-fn fast_elsewhere(provider: &str) -> String {
-    format!(
-        "/fast moves service_tier on the chatgpt and openai providers; this session is on {provider}"
-    )
-}
-
 /// What `/fast on` says on the **platform** (**D563**), where `tier` is what
 /// the choice resolved to.
 ///
@@ -1242,8 +1228,10 @@ impl App {
             served_model: None,
             last_eviction: None,
             deadline_passed: None,
-            // The first `poll_fast` resolves it against the engine, which is
-            // what puts the cell on a `chatgpt` session's very first bar.
+            // Seeded here and resolved against the engine by the `poll_fast`
+            // `drive` runs before its first draw, which is what puts the cell
+            // on a `chatgpt` session's very first bar rather than on its
+            // second frame.
             fast: false,
             wire_models: None,
             wire_fetch: None,
@@ -1803,6 +1791,15 @@ impl App {
         let mut core_events =
             self.engine.subscribe().await.context("failed to subscribe to engine events")?;
         let mut term_events = EventStream::new();
+
+        // Before the first draw rather than on the first `Tick` (**D563**):
+        // the tier a session asks at is settled by its configuration and its
+        // provider, both of which are known here, so a `chatgpt` session whose
+        // bar carries `fast` should not spend a frame saying it does not. The
+        // other polls beside it on the tick arm each wait on something this
+        // process has not got yet — a dial, a job, a reading — and have
+        // nothing to say before their first answer arrives.
+        self.poll_fast();
 
         loop {
             if self.needs_draw() {
@@ -2875,13 +2872,16 @@ impl App {
     ///
     /// The provider is checked **here rather than at the engine**, for one
     /// arm's sake: every other arm would get [`EngineError::Fast`]'s sentence
-    /// back anyway — [`FAST_ELSEWHERE`] is that sentence, byte for byte — but
-    /// `show` and a refused word send nothing at all, and a person on
-    /// `anthropic` asking about a tier deserves the same answer as one setting
-    /// it rather than silence.
+    /// back anyway, but `show` and a refused word send nothing at all, and a
+    /// person on `anthropic` asking about a tier deserves the same answer as
+    /// one setting it rather than silence. So the sentence is that error's,
+    /// **built from the error itself** rather than spelled a second time here:
+    /// two copies of one sentence is exactly how a session comes to answer one
+    /// situation in two wordings.
     async fn run_fast_line(&mut self, line: command::Fast) {
         if !options::speaks_options(&self.provider) {
-            self.status.set_notice(Some(fast_elsewhere(&self.provider)));
+            let refusal = EngineError::Fast { provider: self.provider.clone() };
+            self.status.set_notice(Some(refusal.to_string()));
             self.dirty = true;
             return;
         }
@@ -2921,7 +2921,8 @@ impl App {
     /// Sends the engine one [`Command::SetFast`] and says what it did
     /// (**D563**).
     ///
-    /// [`FAST_ON_PLATFORM`] rides an `on` over `openai` and only there: the
+    /// [`fast_on_platform`]'s sentence rides an `on` over `openai` and only
+    /// there: the
     /// platform bills the tier per request at a premium rate, and one keystroke
     /// away is exactly the distance at which somebody should be told so. The
     /// seat is a subscription and gets no such sentence.

@@ -108,6 +108,18 @@ async fn an_inline_schema_rides_the_request_and_its_answer_is_the_document() {
         "the document is wrapped, not sent bare"
     );
 
+    // Whatever else the run asked for — a title is the one other request a
+    // headless turn can make — carries no `text` at all: the caller's schema
+    // holds *this turn's answer*, and a summary written to it would be neither
+    // a title nor the document the flag was passed for.
+    if let Some(other) = endpoint.seen().get(1) {
+        assert!(
+            other.json().get("text").is_none(),
+            "only the turn's own request carries the format; got {}",
+            other.json()
+        );
+    }
+
     let said: Vec<String> = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())

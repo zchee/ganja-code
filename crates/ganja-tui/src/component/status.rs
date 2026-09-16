@@ -671,7 +671,8 @@ impl Status {
             // First on the walk, and the one element here that can change a
             // bar nobody configured (**D563**): on a `chatgpt` session the
             // resolved default *is* a fast tier, so the cell is there from the
-            // first frame. It leads rather than sitting with the work counts
+            // first frame — `App::drive` resolves it before that frame is
+            // drawn. It leads rather than sitting with the work counts
             // because it is about the request the activity segment beside it
             // is running — the same reason the agent and the effort precede
             // that segment in the head above.
@@ -858,7 +859,13 @@ impl Status {
             // seat echoes `default` whatever it is sent, so a segment drawn
             // from the echo would tell every seat session it is not fast when
             // nobody has established that. What came back is `/usage`'s row.
-            StatuslineElement::Fast => self.fast.then(|| plain("fast".to_owned())).flatten(),
+            StatuslineElement::Fast => {
+                if self.fast {
+                    plain("fast".to_owned())
+                } else {
+                    None
+                }
+            }
             // What is waiting sits beside what is happening, because the
             // two together are the answer to "where is my message": a queue
             // with a depth and no visible strip row would otherwise be the

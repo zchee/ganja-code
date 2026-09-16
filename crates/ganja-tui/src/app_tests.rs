@@ -11893,3 +11893,76 @@ async fn fast_on_warns_on_the_platform_and_only_there() {
     assert_eq!(seat.engine.fast(), Some(FastChoice::On));
     assert_eq!(seat.status.notice(), None, "the seat's tier costs nothing extra, and says nothing");
 }
+
+/// **D563, AC-29.** The `FastChanged` arm repaints the bar for a change this
+/// frontend did not make — a resumed row's restored choice, which arrives as
+/// an announcement and never as an answer to a typed line.
+///
+/// Read through `handle_core` rather than by calling `poll_fast`, because the
+/// arm is what the event actually reaches; and the engine's choice is moved
+/// underneath it first, so the assertion is that the bar caught up with the
+/// engine rather than with the event's own payload.
+#[tokio::test]
+async fn the_fast_changed_arm_repaints_a_bar_this_frontend_did_not_move() {
+    let mut app = app_on(responses::CHATGPT_ID);
+    app.poll_fast();
+    assert!(app.fast, "the premise: a chatgpt session's default is a fast tier");
+
+    // What a resume does: the engine's own choice moves with no `/fast` typed
+    // here, and the announcement is all this side is given.
+    app.engine
+        .send(ganja_core::protocol::Command::SetFast { fast: Some(FastChoice::Off) })
+        .await
+        .expect("a fresh engine takes a choice");
+    app.dirty = false;
+
+    app.handle_core(CoreEvent::FastChanged {
+        session_id: app.engine.session_id(),
+        fast: Some(FastChoice::Off),
+    });
+    assert!(!app.fast, "the arm resolved the new tier rather than waiting for a tick");
+    assert!(app.dirty, "and asked for the frame that shows it");
+}
+
+/// **D563, AC-28.** `/fast` while a turn streams is refused by the engine's
+/// one-turn-at-a-time rule, and the refusal is shown rather than swallowed:
+/// a person whose keystroke did nothing is owed the sentence saying why.
+#[tokio::test]
+async fn fast_while_a_turn_streams_shows_the_engine_s_refusal() {
+    // The turn is held on a **permission dialog** rather than mid-stream: the
+    // engine's event queue is deep enough to take a whole scripted turn before
+    // this side reads a byte of it, so a turn that only streams has let the
+    // slot go by the time anything here could type. A call waiting to be
+    // answered holds it for as long as the dialog is open, which is the state
+    // somebody typing `/fast` at a busy session is actually in.
+    let (provider, _requests) = ganja_testkit::ScriptedProvider::named(
+        responses::CHATGPT_ID,
+        vec![ganja_testkit::tool_call("bash", serde_json::json!({"command": "true"}))],
+    );
+    let engine = Engine::new(
+        provider,
+        fake::MODEL,
+        Arc::new(ganja_tool::Registry::with_builtins()),
+        ganja_permission::Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the test subscribes first");
+    let mut app = App::new(engine, None, Themes::builtin()).with_provider(responses::CHATGPT_ID);
+
+    typed(&mut app, "the turn that holds the engine").await;
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+    for _ in 0..32 {
+        if app.permission.is_some() {
+            break;
+        }
+        pump(&mut app, &mut events, 1).await;
+    }
+    assert!(app.permission.is_some(), "the premise: a turn is holding the engine on a dialog");
+
+    app.run_fast_line(command::Fast::On).await;
+    assert_eq!(
+        app.status.notice(),
+        Some("a turn is already streaming; cancel it before sending another prompt"),
+        "the engine's own refusal, shown whole"
+    );
+    assert_eq!(app.engine.fast(), None, "and nothing was chosen");
+}

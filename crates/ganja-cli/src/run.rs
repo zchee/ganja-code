@@ -466,28 +466,68 @@ const JSON_SCHEMA_NAME: &str = "ganja_run";
 /// makes unreadable: a path is never valid JSON, so trying JSON first would
 /// report a typo'd filename as a JSON syntax error at column 1.
 ///
+/// A path that **exists** is read, rather than one that is a regular file: a
+/// directory named here is a mistyped path, and the read that follows says so
+/// in the same sentence a permission error does. Testing for a file instead
+/// would send a directory down the inline branch and answer "no such file"
+/// about something that is plainly there.
+///
+/// Whatever the source, the document must be a JSON **object**. A schema is one
+/// by definition, and the three values this refuses — a number, a bare `true`,
+/// an array — would otherwise travel all the way to the vendor and come back as
+/// somebody else's error message about a request this build assembled.
+///
 /// # Errors
 ///
-/// `E2` when `argument` is neither a file that is there nor a JSON document,
-/// and a sentence naming the file when one is there and could not be read or
-/// parsed — which is **not** `E2`, because "no such file" would be false about
-/// exactly the case a person most needs told apart from a missing one.
+/// `E2` when `argument` is neither a file that is there nor a JSON document; a
+/// sentence naming the file when one is there and could not be read or parsed —
+/// which is **not** `E2`, because "no such file" would be false about exactly
+/// the case a person most needs told apart from a missing one; and a third
+/// naming the JSON type that arrived when the document parsed and is not an
+/// object.
 fn json_schema_flag(argument: &str) -> Result<serde_json::Value, String> {
     let path = std::path::Path::new(argument);
-    if path.is_file() {
+    if path.exists() {
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("--json-schema could not read {argument:?}: {error}"))?;
-
-        return serde_json::from_str(&text).map_err(|error| {
+        let document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             format!("--json-schema could not read the JSON in {argument:?}: {error}")
-        });
+        })?;
+
+        return object(document, &format!("the JSON in {argument:?}"));
     }
 
-    serde_json::from_str(argument).map_err(|error| {
+    let document: serde_json::Value = serde_json::from_str(argument).map_err(|error| {
         format!(
             "--json-schema takes a path to a JSON file or an inline JSON document; {argument:?} is neither: no such file, and not JSON ({error})"
         )
-    })
+    })?;
+
+    object(document, &format!("{argument:?}"))
+}
+
+/// `document` when it is a JSON object, and otherwise the sentence saying what
+/// arrived instead (**D563**), where `source` names where it came from — the
+/// file, or the value typed on the command line.
+///
+/// The source is named rather than left implicit for [`json_schema_flag`]'s own
+/// reason: a person who passed a path and is told `[] is not an object` has to
+/// guess whether this build read their file or their filename.
+fn object(document: serde_json::Value, source: &str) -> Result<serde_json::Value, String> {
+    if document.is_object() {
+        return Ok(document);
+    }
+
+    let kind = match &document {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => unreachable!("answered above"),
+    };
+
+    Err(format!("--json-schema takes a JSON Schema, which is an object; {source} is {kind}"))
 }
 
 /// The `text.format` document `--json-schema` rides as, or [`None`] when the
