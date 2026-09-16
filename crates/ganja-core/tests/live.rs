@@ -12,8 +12,8 @@
 //! deliberate: a contributor running the full suite spends nothing, and CI can
 //! opt in without the suite failing on a machine that simply has no key.
 //!
-//! The six **D563 W6 probes** at the bottom are a different kind of test under
-//! the same gate: measurements rather than smoke checks. Each prints markdown
+//! The six **D563** platform and seat probes at the bottom are a different kind
+//! of test under the same gate: measurements rather than smoke checks. Each prints markdown
 //! rows for `.omc/research/2026-09-16-openai-platform-param-probe.md` and
 //! asserts only that it ran, because what it measures moves a `const` rather
 //! than failing a build. Run them one at a time and with output shown, or the
@@ -21,12 +21,12 @@
 //!
 //! ```sh
 //! GANJA_LIVE_TEST=1 OPENAI_API_KEY=… cargo test -p ganja-core --test live \
-//!     -- --ignored --nocapture --test-threads=1 openai_accepts_every_platform_option_this_build_sends
+//!     -- --ignored --nocapture --test-threads=1 probe_every_platform_option_this_build_sends
 //! ```
 //!
-//! The four `chatgpt_…`/seat probes need `ganja auth login chatgpt` instead of
-//! a key. One offline pin rides beside them and runs in the ordinary suite:
-//! the platform probe's rows cover every name this build would send.
+//! The four seat probes need `ganja auth login chatgpt` instead of a key. One
+//! offline pin rides beside them and runs in the ordinary suite: the platform
+//! probe's rows cover exactly the names this build would send.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -405,12 +405,11 @@ fn a_live_turn_gives_up_after_a_bounded_number_of_attempts() {
 }
 
 // ---------------------------------------------------------------------------
-// D563, W6: what the platform and the seat do with the Responses options.
+// D563: what the platform and the seat do with the Responses options.
 //
-// Six probes the user runs by hand (`.omc/plans/2026-09-16-responses-provider-
-// options.md` §8a). Each prints markdown table rows for
-// `.omc/research/2026-09-16-openai-platform-param-probe.md` and asserts only
-// that the run itself completed: an answer here moves a name between two
+// Six probes the user runs by hand. Each prints markdown table rows for the
+// probe record the module doc names, and asserts only that the run itself
+// completed: an answer here moves a name between two
 // `const`s in `provider/responses/options.rs`, and a refusal is a finding
 // rather than a failure. Run them one at a time with `--nocapture`, or the
 // rows are swallowed and interleaved.
@@ -732,7 +731,7 @@ impl Exchange {
 
     /// Whether the wire built this one as a title request rather than a step.
     fn is_title(&self) -> bool {
-        self.from_wire["instructions"].as_str().is_some_and(|text| text.contains("title generator"))
+        ganja_testkit::is_title_body(&self.from_wire)
     }
 }
 
@@ -1074,10 +1073,13 @@ fn platform_probes() -> Vec<PlatformProbe> {
     probes.push(PlatformProbe {
         key: "custom_tools",
         sent: "custom_tools = [\"bash\"] (custom beside its function twin)".to_owned(),
-        options: RequestOptions { custom_tools: vec!["bash".to_owned()], ..RequestOptions::default() },
+        options: RequestOptions {
+            custom_tools: vec!["bash".to_owned()],
+            ..RequestOptions::default()
+        },
         roster: vec![bash.clone()],
         raw: json!({"tools": [
-            {"type": "function", "name": bash.name, "description": bash.description, "parameters": bash.schema},
+            function_entry(&bash),
             {"type": "custom", "name": bash.name, "description": bash.description},
         ]}),
         echo: Echo::Tools,
@@ -1134,7 +1136,6 @@ fn platform_probes() -> Vec<PlatformProbe> {
     ));
     for (key, value) in [
         ("client_metadata", json!({"probe": "ganja"})),
-        ("access_programs", json!({"cyber": "standard"})),
         ("max_output_tokens", json!(512)),
         ("prompt_cache_key", json!("ganja-probe-2026-09-16")),
         ("prompt_cache_retention", json!("24h")),
@@ -1189,6 +1190,11 @@ struct RawAnswer {
     events: Vec<Value>,
 }
 
+/// `tool` as the raw leg advertises it: a Responses function entry.
+fn function_entry(tool: &ToolDefinition) -> Value {
+    json!({"type": "function", "name": tool.name, "description": tool.description, "parameters": tool.schema})
+}
+
 /// Sends the raw leg: a baseline one-word request with `fragment` merged in
 /// and `roster` advertised, straight to the platform with `key`.
 async fn raw_platform(
@@ -1206,12 +1212,7 @@ async fn raw_platform(
         "stream": true,
     });
     if !roster.is_empty() {
-        let tools: Vec<Value> = roster
-            .iter()
-            .map(|tool| {
-                json!({"type": "function", "name": tool.name, "description": tool.description, "parameters": tool.schema})
-            })
-            .collect();
+        let tools: Vec<Value> = roster.iter().map(function_entry).collect();
         request["tools"] = Value::Array(tools);
     }
     merge(&mut request, fragment);
@@ -1272,7 +1273,7 @@ fn judged(probe: &PlatformProbe, wire: &WireOutcome, raw: &RawAnswer) -> (String
     echo
 }
 
-/// Probe 1 (§8a): every key the platform list names, every tier, every hosted
+/// Probe 1: every key the platform list names, every tier, every hosted
 /// tool type, and the two defaults this build injects.
 ///
 /// **Needs** `GANJA_LIVE_TEST=1` and an exported `OPENAI_API_KEY` (a stored
@@ -1287,13 +1288,12 @@ fn judged(probe: &PlatformProbe, wire: &WireOutcome, raw: &RawAnswer) -> (String
 /// is the report's table as-is. A row marked `CHECK BY HAND` is one where the
 /// two legs disagreed. Every row costs one wire call and one raw call.
 ///
-/// What moves on each answer is §8a step 1's: a rejected key leaves
-/// [`PLATFORM_ACCEPTED`], a rejected tier leaves [`PLATFORM_TIERS`], a rejected
-/// hosted type leaves [`PLATFORM_SERVER_TOOLS`], and a rejected default moves
-/// its `const` in `defaulted()`.
+/// Recorded 2026-09-17 on `gpt-5.5`: the `scale` and `ultrafast` tiers and
+/// `access_programs` were refused and left their lists; five more refusals
+/// named the model rather than the key, and those keys stayed.
 #[tokio::test]
 #[ignore = "talks to OpenAI's platform; needs GANJA_LIVE_TEST=1 and an exported OPENAI_API_KEY"]
-async fn openai_accepts_every_platform_option_this_build_sends() {
+async fn probe_every_platform_option_this_build_sends() {
     let Some(key) = key("OPENAI_API_KEY") else {
         return;
     };
@@ -1303,17 +1303,18 @@ async fn openai_accepts_every_platform_option_this_build_sends() {
     let probes = platform_probes();
 
     let baseline = raw_platform(&client, &key, &model, &json!({}), &[]).await;
+    let echoed = |name| cell(baseline.response.as_ref().and_then(|response| response.get(name)));
     eprintln!("## platform key set on {model} ({} probes)\n", probes.len());
     eprintln!(
         "baseline: HTTP {}; echo service_tier={} reasoning={} text={} parallel_tool_calls={} truncation={} temperature={} top_p={}\n",
         baseline.status,
-        cell(baseline.response.as_ref().and_then(|r| r.get("service_tier"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("reasoning"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("text"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("parallel_tool_calls"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("truncation"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("temperature"))),
-        cell(baseline.response.as_ref().and_then(|r| r.get("top_p"))),
+        echoed("service_tier"),
+        echoed("reasoning"),
+        echoed("text"),
+        echoed("parallel_tool_calls"),
+        echoed("truncation"),
+        echoed("temperature"),
+        echoed("top_p"),
     );
     eprintln!("| key | sent | wire (this build's bytes) | echo (raw leg) | verdict |");
     eprintln!("|---|---|---|---|---|");
@@ -1336,7 +1337,7 @@ async fn openai_accepts_every_platform_option_this_build_sends() {
     }
 }
 
-/// Probe 2 (§8a): whether the platform serves `ultrafast` on
+/// Probe 2: whether the platform serves `ultrafast` on
 /// [`SOL`], and what `/fast on` there would be buying.
 ///
 /// **Needs** `GANJA_LIVE_TEST=1` and `OPENAI_API_KEY`. Two rounds of
@@ -1345,12 +1346,11 @@ async fn openai_accepts_every_platform_option_this_build_sends() {
 /// `ultrafast` sample was the slowest of five. Prints the wire's answer, the
 /// tier the terminal frame echoed, the time to first content and the total.
 ///
-/// Served → `responses_ladder.rs`'s `/fast on` arm resolves `fast_tier(model)`
-/// on `openai` as it does on `chatgpt`, and N2's second sentence goes away.
-/// Rejected → nothing moves.
+/// Recorded 2026-09-17: `ultrafast` was refused in both rounds (500,
+/// `Invalid service_tier argument`), so `/fast on` over `openai` stays `priority`.
 #[tokio::test]
 #[ignore = "talks to OpenAI's platform; needs GANJA_LIVE_TEST=1 and OPENAI_API_KEY"]
-async fn openai_serves_ultrafast_on_sol() {
+async fn probe_what_the_platform_answers_to_each_tier_on_sol() {
     if key("OPENAI_API_KEY").is_none() {
         return;
     }
@@ -1431,13 +1431,13 @@ fn print_steps(exchanges: &[Exchange], extra: impl Fn(&Exchange) -> String) {
     }
 }
 
-/// Probe 3 (§8a): `text.format` beside the default tool roster, on the seat,
+/// Probe 3: `text.format` beside the default tool roster, on the seat,
 /// wrapped exactly as `ganja run --json-schema` wraps it (`strict: true`).
 ///
 /// **Needs** `GANJA_LIVE_TEST=1` and `ganja auth login chatgpt`.
 /// `GANJA_MODEL` moves the model from `SUBSCRIPTION_DEFAULT`.
 ///
-/// Two requests, so the two questions probe row 12 left open come back apart:
+/// Two requests, so two questions come back apart:
 /// the AC-31 schema as shipped — no `additionalProperties: false` — answers
 /// "is a strict schema without it refused?", and the same schema with it set
 /// answers "is `text.format` refused beside a roster at all?". Each is the
@@ -1448,12 +1448,12 @@ fn print_steps(exchanges: &[Exchange], extra: impl Fn(&Exchange) -> String) {
 /// on this machine — the engine's side of the scope (the format rides the
 /// steps and nothing else) is pinned offline in `responses_options.rs`.
 ///
-/// A refusal of the first and not the second moves `run.rs`'s wrap (relax to
-/// `strict: false`, or refuse at the flag with a fifth sentence) and the
-/// `--json-schema` help line; a refusal of both is a design question.
+/// Recorded 2026-09-17 on `gpt-5.5`: the schema as shipped was refused (400,
+/// `'additionalProperties' is required to be supplied and to be false.`) and
+/// the closed one accepted, so `text.format` beside a roster is fine.
 #[tokio::test]
 #[ignore = "talks to the ChatGPT codex backend; needs GANJA_LIVE_TEST=1 and `ganja auth login chatgpt`"]
-async fn chatgpt_runs_a_json_schema_turn() {
+async fn probe_text_format_beside_the_default_roster_on_the_seat() {
     if !seated() {
         return;
     }
@@ -1515,7 +1515,7 @@ async fn chatgpt_runs_a_json_schema_turn() {
     }
 }
 
-/// Probe 4 (§8a): `custom_tools = ["bash"]` on the seat — a custom
+/// Probe 4: `custom_tools = ["bash"]` on the seat — a custom
 /// advertisement and its function twin under one name.
 ///
 /// **Needs** `GANJA_LIVE_TEST=1` and `ganja auth login chatgpt`.
@@ -1532,8 +1532,8 @@ async fn chatgpt_runs_a_json_schema_turn() {
 /// output item the backend produced (`custom_tool_call` or `function_call`),
 /// and every tool part the turn stored with its `custom` flag — the flag is
 /// the transcript's own record of which advertisement the call came back
-/// under. Refused → ruling 9's `<name>__args` contingency; accepted → the risk
-/// row closes by measurement.
+/// under. Recorded 2026-09-17 on `gpt-5.5`: accepted, and the model called the
+/// custom advertisement (the stored part carries `custom: true`).
 #[tokio::test]
 #[ignore = "talks to the ChatGPT codex backend; needs GANJA_LIVE_TEST=1 and `ganja auth login chatgpt`"]
 async fn chatgpt_calls_bash_as_a_custom_tool() {
@@ -1599,7 +1599,7 @@ async fn chatgpt_calls_bash_as_a_custom_tool() {
     }
 }
 
-/// Probe 5 (§8a): whether `context_management` does anything on a transcript
+/// Probe 5: whether `context_management` does anything on a transcript
 /// long enough for a compaction threshold to be crossed.
 ///
 /// **Needs** `GANJA_LIVE_TEST=1` and `ganja auth login chatgpt`.
@@ -1612,10 +1612,11 @@ async fn chatgpt_calls_bash_as_a_custom_tool() {
 ///
 /// The same request twice, without and then with the key. Prints, per
 /// request, the vendor's answer, the billed input tokens, the
-/// `context_management` echo (probe row 28 saw `null`) and the output item
+/// `context_management` echo and the output item
 /// types, where a server-side compaction would show up as an item of its own.
-/// Input tokens that fall, or a compaction item, argue about L5; no difference
-/// at all argues for refusing the key rather than passing it through.
+/// Recorded 2026-09-17 on `gpt-5.5` at the default sizes: 56,437 input tokens
+/// without the key and 56,629 with it, no compaction item and no echo, so the
+/// key left the seat's accepted list.
 #[tokio::test]
 #[ignore = "talks to the ChatGPT codex backend; needs GANJA_LIVE_TEST=1 and `ganja auth login chatgpt`"]
 async fn context_management_is_measured_on_a_long_transcript() {
@@ -1665,13 +1666,8 @@ async fn context_management_is_measured_on_a_long_transcript() {
         ),
     ] {
         relay.forget();
-        let request = ChatRequest {
-            model: model.clone(),
-            system: Some("Answer with a single word.".to_owned()),
-            messages: messages.clone(),
-            responses: options,
-            ..ChatRequest::default()
-        };
+        let request =
+            ChatRequest { messages: messages.clone(), ..one_word(&model, options, Vec::new()) };
         let wire = through_wire(&provider, request).await;
         let exchange = relay.exchanges().pop();
         let response = exchange.as_ref().and_then(Exchange::response);
@@ -1687,7 +1683,7 @@ async fn context_management_is_measured_on_a_long_transcript() {
     }
 }
 
-/// Probe 6 (§8a): what the seat says to a tool-less request carrying a
+/// Probe 6: what the seat says to a tool-less request carrying a
 /// `tool_choice` — the refusal `gated()` is built to prevent, measured rather
 /// than assumed.
 ///
@@ -1699,11 +1695,12 @@ async fn context_management_is_measured_on_a_long_transcript() {
 /// wire drops that key (the first column proves it did), so the relay puts it
 /// back **ungated** before forwarding. `"auto"` rides the same path as a
 /// control, so a refusal of `required` alone is told apart from a refusal of
-/// any `tool_choice` beside no tools. Nothing moves on either answer: quote the
-/// sentence into the probe report and into `gated`'s doc.
+/// any `tool_choice` beside no tools. Recorded 2026-09-17 on `gpt-5.5`:
+/// `required` was refused (400, `Tool choice 'required' must be specified with
+/// 'tools' parameter.`) and `auto` accepted.
 #[tokio::test]
 #[ignore = "talks to the ChatGPT codex backend; needs GANJA_LIVE_TEST=1 and `ganja auth login chatgpt`"]
-async fn compaction_request_with_configured_tool_choice_is_accepted() {
+async fn probe_tool_choice_on_a_tool_less_request_on_the_seat() {
     if !seated() {
         return;
     }
@@ -1743,19 +1740,20 @@ async fn compaction_request_with_configured_tool_choice_is_accepted() {
     }
 }
 
-/// Not a network test: the platform probe's rows cover every name this build
-/// would send the platform, so a key, tier, `include` value or hosted type
+/// Not a network test: the platform probe's rows cover exactly the names this
+/// build would send the platform, so a key, tier, `include` value or hosted type
 /// added to a list without a probe reddens here rather than going unmeasured.
 #[test]
 fn the_platform_probe_covers_every_key_tier_and_hosted_tool_this_build_accepts() {
     let probes = platform_probes();
+    // Both ways, so a key that leaves the list stops being paid for here too.
     let keys: BTreeSet<&str> = probes.iter().map(|probe| probe.key).collect();
-    for key in PLATFORM_ACCEPTED {
-        assert!(keys.contains(key), "no platform probe sends `{key}`");
-    }
-    for key in ["default:stream_options.include_obfuscation", "default:tool_choice"] {
-        assert!(keys.contains(key), "the injected default `{key}` is not probed");
-    }
+    let sent: BTreeSet<&str> = PLATFORM_ACCEPTED
+        .iter()
+        .copied()
+        .chain(["default:stream_options.include_obfuscation", "default:tool_choice"])
+        .collect();
+    assert_eq!(keys, sent, "the probes send exactly the keys and defaults this build sends");
 
     let tiers: BTreeSet<&str> =
         probes.iter().filter_map(|probe| probe.options.service_tier.as_deref()).collect();

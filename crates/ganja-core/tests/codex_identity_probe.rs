@@ -167,9 +167,8 @@ const CREDENTIAL: [&str; 2] = ["authorization", "chatgpt-account-id"];
 /// The ladder below reaches every offered model, so this is not about
 /// reachability: it is about the seat-parameter probe of 2026-09-16
 /// (`.omc/research/2026-09-16-chatgpt-seat-param-probe.md`), which measured
-/// `gpt-5.5`, `gpt-5.6-sol` and `gpt-6-astra` and nothing else. What a
-/// recording does not say is the part a reader most needs it to say, so these
-/// two are named in the header rather than left to be assumed covered.
+/// `gpt-5.5`, `gpt-5.6-sol` and `gpt-6-astra` and nothing else. The recording
+/// holds no call to these ids, so nothing here is asserted about them.
 const UNMEASURED: [&str; 2] = ["gpt-5.6-terra", "gpt-5.6-luna"];
 
 /// How much of a token's head the leak check searches for on its own.

@@ -50,6 +50,7 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// first read of that variable, with any other builder parked on the lock.
 fn pin_config_home() {
     static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+        // Never removed: a static never runs `Drop`, so a `TempDir` here would leave it too.
         let home = std::env::temp_dir().join(format!("ganja-command-model-{}", std::process::id()));
         let commands = home.join("commands");
         std::fs::create_dir_all(&commands).expect("a commands directory");

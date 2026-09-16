@@ -74,7 +74,7 @@ use ganja_core::provider::{
 use ganja_core::tool::Registry;
 use ganja_core::{Engine, catalog};
 use ganja_testkit::responses_server::{Endpoint, responses_transcript, serve};
-use ganja_testkit::{RecorderTool, drain};
+use ganja_testkit::{RecorderTool, drain, is_title_body};
 use secrecy::SecretString;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -107,10 +107,8 @@ const KEY: &str = "sk-key-canary-DDDD";
 /// The model the subscription phases ask for.
 ///
 /// A real catalog row, so a turn that reaches the session layer has a context
-/// window and a price to report — and one the ChatGPT backend actually serves,
-/// which is a second requirement the live pass discovered the hard way and the
-/// 2026-09-16 probe made it pay again: this said `gpt-5.4` until the seat
-/// started refusing that id.
+/// window and a price to report — and one the ChatGPT backend serves (measured
+/// 2026-09-16).
 const SUBSCRIPTION_MODEL: &str = "gpt-5.5";
 
 /// The model the key phases ask for.
@@ -848,18 +846,12 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.send(prompt("what is the weather")).await.expect("an idle engine accepts");
     drain(&mut events).await;
-    let is_title = |body: &serde_json::Value| {
-        body["instructions"].as_str().is_some_and(|text| text.contains("title generator"))
-    };
-    let mut titled = false;
-    for _ in 0..500 {
-        if endpoint.seen().iter().any(|request| is_title(&request.json())) {
-            titled = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(titled, "the first turn earns a title request");
+    ganja_testkit::eventually(
+        std::time::Duration::from_secs(5),
+        "the first turn's title request",
+        async || endpoint.seen().iter().any(|request| is_title_body(&request.json())).then_some(()),
+    )
+    .await;
     assert!(engine.settle(std::time::Duration::from_secs(10)).await);
     engine.send(Command::Compact).await.expect("an idle engine compacts");
     drain(&mut events).await;
@@ -869,7 +861,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     let [step, title, summary] = bodies.as_slice() else {
         panic!("a step, a title and a summary: {bodies:?}");
     };
-    assert!(is_title(title), "the second request is the title: {title}");
+    assert!(is_title_body(title), "the second request is the title: {title}");
     assert_eq!(step["service_tier"], json!("default"), "{step}");
     assert_eq!(step["text"], json!({"verbosity": "low"}), "{step}");
     assert_eq!(step["tool_choice"], json!("required"), "the step offers a tool: {step}");

@@ -42,6 +42,7 @@ mod session;
 mod subagent;
 mod tasklist;
 mod teammate;
+mod title;
 pub mod tmux;
 mod tool;
 
@@ -62,4 +63,5 @@ pub use teammate::{
     caller_with, eventually, externals, flooded_inbox, seed_team_file, spawn, spawn_with_prompt,
     team, team_file, team_with, teammates_recorded,
 };
+pub use title::{is_title_body, is_title_request};
 pub use tool::{BlockingTool, RecorderTool, placeholder_schema, tool_ctx};

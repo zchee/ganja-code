@@ -13,6 +13,7 @@
 //! test's own thread.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,8 +31,8 @@ use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
 use ganja_core::{Config, Engine, EngineError, Storage};
 use ganja_team::{TeamName, TeamsRoot};
 use ganja_testkit::{
-    LogCapture, RecordedSpawns, ScriptedProvider, caller, drain, drain_allowing, prompt, says,
-    served, spawn_with_prompt, tool_call,
+    LogCapture, RecordedSpawns, ScriptedProvider, caller, drain, drain_allowing, is_title_request,
+    prompt, says, served, spawn_with_prompt, tool_call,
 };
 use serde_json::json;
 
@@ -41,6 +42,10 @@ const OPENAI: &str = "openai";
 
 /// How long a turn's tail is given to settle before a test moves on.
 const SETTLE: Duration = Duration::from_secs(10);
+
+/// The line the engine logs when server-side compaction is configured beside
+/// its own.
+const NOTICE: &str = "server-side compaction is configured; ganja's own compaction still runs off the reported input tokens";
 
 /// A table keyed the way a config's `provider` entries are.
 fn tables(id: &str, text: &str) -> BTreeMap<String, ResponsesOptions> {
@@ -53,6 +58,18 @@ fn tables(id: &str, text: &str) -> BTreeMap<String, ResponsesOptions> {
 /// An in-memory engine over `provider` asking `model`, offering `tools`.
 fn in_memory(provider: Arc<ScriptedProvider>, model: &str, tools: Vec<Arc<dyn Tool>>) -> Engine {
     Engine::new(provider, model, Arc::new(Registry::new(tools)), Permissions::default())
+}
+
+/// An engine over `provider` asking `model`, offering no tools, storing under
+/// `directory`.
+fn persistent(provider: Arc<ScriptedProvider>, model: &str, directory: &Path) -> Engine {
+    Engine::persistent(
+        provider,
+        model,
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(directory.join("storage")),
+    )
 }
 
 /// Takes one whole turn and waits for its tail, so the next command is never
@@ -71,17 +88,6 @@ fn last(requests: &Mutex<Vec<ChatRequest>>) -> ChatRequest {
     requests.lock().expect("the request log is never poisoned").last().cloned().expect("a request")
 }
 
-/// Polls `check` until it yields, for work a turn leaves to a detached task.
-async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    for _ in 0..500 {
-        if let Some(found) = check() {
-            return found;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{what} never happened");
-}
-
 /// Takes a turn and answers with the tier its (last) request carried.
 async fn asked(
     engine: &Engine,
@@ -92,14 +98,9 @@ async fn asked(
     last(requests).responses.service_tier
 }
 
-/// Whether `request` is the one a session's title is asked with.
-fn is_title(request: &ChatRequest) -> bool {
-    request.system.as_deref().is_some_and(|system| system.contains("title generator"))
-}
-
 /// Whether `request` is a compaction's summarize request.
 fn is_summary(request: &ChatRequest) -> bool {
-    !is_title(request) && request.tools.is_empty() && request.messages.len() == 1
+    !is_title_request(request) && request.tools.is_empty() && request.messages.len() == 1
 }
 
 /// A tool that holds its call open until the test releases it, saying the
@@ -138,13 +139,7 @@ impl Tool for Gate {
 async fn a_fast_choice_is_announced_stored_and_restored() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let (provider, requests) = ScriptedProvider::named(CHATGPT_ID, vec![says("ok")]);
-    let engine = Engine::persistent(
-        provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(directory.path().join("storage")),
-    );
+    let engine = persistent(provider, FIVE, directory.path());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(Command::SetFast { fast: Some(FastChoice::Off) }).await.expect("idle takes it");
@@ -167,13 +162,7 @@ async fn a_fast_choice_is_announced_stored_and_restored() {
     assert_eq!(stored.fast, Some(FastChoice::Off), "the choice is on the row");
 
     let (reopened_provider, _) = ScriptedProvider::named(CHATGPT_ID, Vec::new());
-    let reopened = Engine::persistent(
-        reopened_provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(directory.path().join("storage")),
-    );
+    let reopened = persistent(reopened_provider, FIVE, directory.path());
     let mut reopened_events = reopened.subscribe().await.expect("the first subscriber wins");
     reopened.resume(&session.id).await.expect("the session loads");
     assert_eq!(reopened.fast(), Some(FastChoice::Off), "a resume restores the choice");
@@ -194,7 +183,11 @@ async fn a_fast_choice_is_announced_stored_and_restored() {
     let release = Arc::new(tokio::sync::Notify::new());
     let (busy_provider, _) =
         ScriptedProvider::named(CHATGPT_ID, vec![tool_call("gate", json!({})), says("done")]);
-    let busy = engine_with_gate(busy_provider, FIVE, entered, Arc::clone(&release));
+    let busy = in_memory(
+        busy_provider,
+        FIVE,
+        vec![Arc::new(Gate { entered, release: Arc::clone(&release) })],
+    );
     let mut busy_events = busy.subscribe().await.expect("the first subscriber wins");
     busy.send(prompt("hold")).await.expect("an idle engine accepts a prompt");
     let refused = async {
@@ -207,7 +200,8 @@ async fn a_fast_choice_is_announced_stored_and_restored() {
     assert!(matches!(refused, Err(EngineError::Busy)), "got {refused:?}");
     assert_eq!(busy.fast(), None, "a refused switch adopts nothing");
 
-    // E4 = E1, byte for byte, on a provider that does not speak Responses.
+    // A provider that does not speak Responses refuses every choice and reports
+    // no tier.
     let (anthropic, _) = ScriptedProvider::named("anthropic", Vec::new());
     let elsewhere = in_memory(anthropic, "claude-sonnet-4-5", Vec::new());
     for fast in [Some(FastChoice::On), Some(FastChoice::Off), None] {
@@ -224,20 +218,11 @@ async fn a_fast_choice_is_announced_stored_and_restored() {
     assert_eq!(elsewhere.service_tier(), None);
 }
 
-fn engine_with_gate(
-    provider: Arc<ScriptedProvider>,
-    model: &str,
-    entered: tokio::sync::mpsc::Sender<()>,
-    release: Arc<tokio::sync::Notify>,
-) -> Engine {
-    in_memory(provider, model, vec![Arc::new(Gate { entered, release })])
-}
-
-/// **AC-23.** The charter's example end to end, on the bytes' source: the tier
-/// each request carries follows the model, the choice and the configuration,
-/// in that order of precedence, on both Responses ids.
+/// **AC-23.** The precedence end to end, on the bytes' source: the tier each
+/// request carries follows the `/fast` choice, then the model's own entry, then
+/// the provider-wide configuration, on both Responses ids.
 #[tokio::test]
-async fn the_charters_example_resolves_per_model_and_per_switch() {
+async fn the_tier_follows_the_choice_then_the_model_then_the_config_on_both_ids() {
     let configured =
         "service_tier = \"priority\"\n[model.\"gpt-5.6-sol\"]\nservice_tier = \"ultrafast\"\n";
 
@@ -316,8 +301,8 @@ async fn the_charters_example_resolves_per_model_and_per_switch() {
 
 /// **AC-24.** What the engine reports: the requested tier and its rung before
 /// anything was asked, what the backend echoed after a turn — never what it
-/// echoed to a title — and nothing at all off a Responses id. L1 names both
-/// halves of the request.
+/// echoed to a title — and nothing at all off a Responses id. The debug log
+/// names the requested tier and its rung.
 #[tokio::test]
 async fn the_service_tier_view_reports_the_request_its_rung_and_what_was_served() {
     let (capture, _guard) = LogCapture::install(tracing::Level::DEBUG);
@@ -339,13 +324,7 @@ async fn the_service_tier_view_reports_the_request_its_rung_and_what_was_served(
             ],
         ],
     );
-    let engine = Engine::persistent(
-        provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(directory.path().join("storage")),
-    );
+    let engine = persistent(provider, FIVE, directory.path());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     assert_eq!(
@@ -359,11 +338,14 @@ async fn the_service_tier_view_reports_the_request_its_rung_and_what_was_served(
     assert_eq!(engine.fast_tier(SOL), Some("ultrafast"));
 
     turn(&engine, &mut events, "hello").await;
-    eventually("the title request", || {
-        requests.lock().expect("the log").iter().find(|it| is_title(it)).cloned()
+    ganja_testkit::eventually(Duration::from_secs(5), "the title request", async || {
+        requests.lock().expect("the log").iter().find(|it| is_title_request(it)).cloned()
     })
     .await;
-    eventually("the stored title", || engine.current_session().and_then(|info| info.title)).await;
+    ganja_testkit::eventually(Duration::from_secs(5), "the stored title", async || {
+        engine.current_session().and_then(|info| info.title)
+    })
+    .await;
 
     assert_eq!(
         engine.service_tier(),
@@ -411,8 +393,8 @@ async fn a_text_format_rides_the_steps_and_never_the_one_shot_requests() {
 
     engine.set_text_format(Some(format.clone()));
     turn(&engine, &mut events, "answer in JSON").await;
-    eventually("the title request", || {
-        requests.lock().expect("the log").iter().find(|it| is_title(it)).cloned()
+    ganja_testkit::eventually(Duration::from_secs(5), "the title request", async || {
+        requests.lock().expect("the log").iter().find(|it| is_title_request(it)).cloned()
     })
     .await;
     engine.send(Command::Compact).await.expect("an idle engine compacts");
@@ -421,12 +403,12 @@ async fn a_text_format_rides_the_steps_and_never_the_one_shot_requests() {
 
     let seen = requests.lock().expect("the log").clone();
     let steps: Vec<&ChatRequest> =
-        seen.iter().filter(|it| !is_title(it) && !is_summary(it)).collect();
+        seen.iter().filter(|it| !is_title_request(it) && !is_summary(it)).collect();
     assert_eq!(steps.len(), 2, "a tool call makes the turn two steps: {seen:?}");
     for step in &steps {
         assert_eq!(step.responses.text_format.as_ref(), Some(&format), "every step carries it");
     }
-    let title = seen.iter().find(|it| is_title(it)).expect("titled");
+    let title = seen.iter().find(|it| is_title_request(it)).expect("titled");
     assert_eq!(
         title.responses,
         Default::default(),
@@ -493,10 +475,12 @@ async fn a_child_resolves_its_own_models_tier_from_the_turns_snapshot() {
     );
     let (entered, mut entering) = tokio::sync::mpsc::channel(1);
     let release = Arc::new(tokio::sync::Notify::new());
-    let engine = engine_with_gate(provider, SOL, entered, Arc::clone(&release))
-        .with_agents(ganja_testkit::agent_registry(&helper_agents()))
-        .with_provider_options(tables(CHATGPT_ID, per_model));
-    engine.set_text_format(Some(json!({"type": "json_schema"})));
+    let engine =
+        in_memory(provider, SOL, vec![Arc::new(Gate { entered, release: Arc::clone(&release) })])
+            .with_agents(ganja_testkit::agent_registry(&helper_agents()))
+            .with_provider_options(tables(CHATGPT_ID, per_model));
+    let schema = json!({"type": "json_schema"});
+    engine.set_text_format(Some(schema.clone()));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt("delegate")).await.expect("an idle engine accepts a prompt");
@@ -520,11 +504,20 @@ async fn a_child_resolves_its_own_models_tier_from_the_turns_snapshot() {
             "the child's own model's entry, turn-start table"
         );
         assert_eq!(child.responses.text_format, None, "a child carries no schema");
-        assert!(child.responses.custom_tools.is_empty() && child.responses.include.is_empty());
+        assert_eq!(
+            child.responses.custom_tools,
+            Vec::<String>::new(),
+            "a child names no custom tool"
+        );
+        assert_eq!(child.responses.include, Vec::<String>::new(), "a child asks for no include");
     }
     for parent in &parents {
         assert_eq!(tier(parent).as_deref(), Some("ultrafast"), "the running turn keeps its table");
-        assert!(parent.responses.text_format.is_some(), "the parent's steps carry the schema");
+        assert_eq!(
+            parent.responses.text_format.as_ref(),
+            Some(&schema),
+            "the parent's steps carry the schema"
+        );
     }
 
     engine.send(Command::SetFast { fast: Some(FastChoice::On) }).await.expect("idle");
@@ -561,13 +554,7 @@ async fn a_custom_call_is_stored_as_one_even_when_the_stream_is_cut() {
             ProviderEvent::Failed(ProviderError::Transport("cut".to_owned())),
         ]],
     );
-    let engine = Engine::persistent(
-        provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(directory.path().join("storage")),
-    );
+    let engine = persistent(provider, FIVE, directory.path());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     let seen = turn(&engine, &mut events, "list").await;
@@ -607,20 +594,12 @@ async fn configured_server_compaction_is_mentioned_once_per_session() {
     turn(&engine, &mut events, "one").await;
     turn(&engine, &mut events, "two").await;
 
-    let said = capture
-        .logged()
-        .lines()
-        .filter(|line| {
-            line.contains(
-                "server-side compaction is configured; ganja's own compaction still runs off the reported input tokens",
-            )
-        })
-        .count();
+    let said = capture.logged().lines().filter(|line| line.contains(NOTICE)).count();
     assert_eq!(said, 1, "{}", capture.logged());
 }
 
 /// An in-process teammate asks the lead's provider, so it is billed at the tier
-/// the lead's config names (**D563**, review note on W3b): a `chatgpt` table
+/// the lead's config names (**D563**): a `chatgpt` table
 /// saying `service_tier = "default"` reaches the teammate's own request, where
 /// a teammate engine given no table would have resolved the fast default
 /// nobody configured.
@@ -636,17 +615,11 @@ async fn an_in_process_teammate_resolves_its_tier_from_the_leads_table() {
         ganja_testkit::LEAD_SESSION_ID,
         home.path(),
     ));
-    let lead = Engine::persistent(
-        provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(home.path().join("storage")),
-    )
-    .with_teammates(Arc::clone(&registry), ganja_testkit::externals())
-    // Installed after the team, as `ganja-tui` and `assemble.rs` are free to:
-    // the backend reads the table at the spawn, not when it was built.
-    .with_provider_options(tables(CHATGPT_ID, "service_tier = \"default\""));
+    let lead = persistent(provider, FIVE, home.path())
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals())
+        // Installed after the team, as `ganja-tui` and `assemble.rs` are free to:
+        // the backend reads the table at the spawn, not when it was built.
+        .with_provider_options(tables(CHATGPT_ID, "service_tier = \"default\""));
     let mut events = lead.subscribe().await.expect("the first subscriber wins");
     tokio::spawn(async move { while events.next().await.is_some() {} });
 
@@ -671,7 +644,7 @@ async fn an_in_process_teammate_resolves_its_tier_from_the_leads_table() {
                         part.as_text().is_some_and(|text| text.contains(TEAMMATE_PROMPT))
                     });
 
-                (about && !is_title(request)).then(|| request.clone())
+                (about && !is_title_request(request)).then(|| request.clone())
             })
         },
     )
@@ -729,8 +702,6 @@ async fn a_new_session_clears_the_fast_choice_and_announces_it() {
 /// once of its own.
 #[tokio::test]
 async fn a_new_session_and_a_resume_forget_the_served_echo_and_the_compaction_notice() {
-    const NOTICE: &str = "server-side compaction is configured; ganja's own compaction still runs off the reported input tokens";
-
     let (capture, _guard) = LogCapture::install(tracing::Level::INFO);
     let directory = tempfile::tempdir().expect("a temporary directory");
     // Every request is answered with an echo, so whichever order the detached
@@ -742,14 +713,7 @@ async fn a_new_session_and_a_resume_forget_the_served_echo_and_the_compaction_no
         ProviderEvent::Finish(FinishReason::Completed),
     ];
     let (provider, _) = ScriptedProvider::named(CHATGPT_ID, vec![echoing; 8]);
-    let engine = Engine::persistent(
-        provider,
-        FIVE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-        Storage::open(directory.path().join("storage")),
-    )
-    .with_provider_options(tables(
+    let engine = persistent(provider, FIVE, directory.path()).with_provider_options(tables(
         CHATGPT_ID,
         "context_management = [{ type = \"compaction\", compact_threshold = 1000 }]",
     ));

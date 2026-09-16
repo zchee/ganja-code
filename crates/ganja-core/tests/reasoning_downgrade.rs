@@ -49,11 +49,11 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-/// The model the drill runs as: one the seat serves, and one that reasons.
+/// The model the drill runs as: one the ChatGPT backend serves (measured
+/// 2026-09-16), and one that reasons.
 ///
-/// It said `gpt-5.4` until 2026-09-16, when the seat stopped serving that id
-/// and the wire started refusing the request before the drill could observe
-/// anything about a stored part.
+/// A model the seat does not serve is refused by the wire before the drill can
+/// observe anything about a stored part.
 const MODEL: &str = "gpt-5.5";
 
 /// The state the record held before a future build rewrote it. Nothing may put
