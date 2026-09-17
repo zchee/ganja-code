@@ -49,6 +49,14 @@ ganja-provider.workspace = true
 # The `serve` subcommand: the engine this binary assembles, behind the HTTP
 # routes and the SSE stream that crate owns.
 ganja-serve.workspace = true
+# `ganja evaluate` is the TypeSafe client with no engine around it: the
+# settings, the one `Request::checked` both surfaces validate through, and the
+# one line rendering both print. Named directly rather than reached through
+# `ganja_core`'s `tool` re-export for the same reason `ganja-provider` is —
+# that re-export is a convenience for code holding an engine, and this
+# subcommand deliberately holds none so that a hook in a project with a broken
+# config still answers.
+ganja-tool.workspace = true
 ganja-tui.workspace = true
 # The daily log rolls on the machine's own civil date. Jiff supplies the
 # system-timezone lookup without the unsafe unix-only `localtime_r` path.

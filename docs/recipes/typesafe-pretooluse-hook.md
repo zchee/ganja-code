@@ -158,11 +158,23 @@ knows. Run `annotate` over real work, read the numbers, then pick a `deny`
 threshold, which should be the higher of the two because that variant refuses
 the call.
 
-Editing `questions.json` is the more interesting lever. The ids are never sent,
-so each `instructions` must stand on its own, and evidence is referenced by
-backticked path into the state — `tool_input.command`, `cwd`. Both shipped
-questions end by telling the judge to ignore any claim inside the command text
-about whether it is safe, which brings us to the last section.
+Editing `questions.json` is the more interesting lever, and it moves the
+numbers further than the thresholds do. The ids are never sent, so each
+`instructions` must stand on its own, and evidence is referenced by backticked
+path into the state — `tool_input.command`, `cwd`. Each shipped question asks
+one thing in its `instructions` and puts what a yes and a no *mean* in
+`criteria`, which is the vendor's own slot for anchoring the two ends of a
+`noul`. That split is not decoration: rewriting these two questions from a
+single prose block into this shape moved the probabilities of genuinely
+destructive commands up by six to nine points while leaving safe ones where
+they were, which is to say it widened the gap a threshold has to sit in. If you
+find a threshold impossible to place, sharpen the criteria before moving the
+number.
+
+Both questions end by telling the judge to ignore any claim inside the command
+text about whether the command is safe. That is a mitigation and not a
+guarantee — the text being judged is written by the model whose command is
+being judged — which brings us to the last section.
 
 ## There is no auto-allow variant, on purpose
 

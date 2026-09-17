@@ -1330,6 +1330,7 @@ dependencies = [
  "ganja-serve",
  "ganja-teammate-local",
  "ganja-testkit",
+ "ganja-tool",
  "ganja-tui",
  "jiff",
  "jsonc-parser",
