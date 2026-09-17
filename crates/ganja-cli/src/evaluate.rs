@@ -23,10 +23,10 @@
 //! |---|---|
 //! | 0 | answered |
 //! | 2 | clap's own parse failure, and **only** that |
-//! | 3 | not configured: no key, or a refused base URL |
+//! | 3 | not configured: no key, a refused base URL, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule |
 //! | 4 | the vendor refused: 401, 403, 422, any other 4xx |
 //! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport, too large, malformed |
-//! | 64 | this command's own argument error (`EX_USAGE`) |
+//! | 64 | this command's own argument error (`EX_USAGE`), `--model` included |
 //!
 //! Three more things answer **5**, written down here rather than left to be
 //! inferred from the `match` that decides them:
@@ -42,6 +42,12 @@
 //! - a write to standard output that failed, which is what a hook that
 //!   stopped reading looks like from this side. It is an answer nobody
 //!   received, so it is reported as one rather than as a success.
+//!
+//! The two ways a model id can be refused land on **different** rows, which
+//! is the point of naming them: a `TYPESAFE_DEFAULT_MODEL` nobody can use is
+//! configuration that was already wrong before this ran (3), while a
+//! `--model` nobody can use is this invocation's own mistake (64). A caller
+//! that conflated them would tell somebody to fix the wrong thing.
 //!
 //! **2 is the one that matters**, and nothing here ever returns it: under a
 //! `PreToolUse` hook an exit 2 *blocks the tool call*
@@ -136,8 +142,12 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
                 ),
             );
         }
-        // The one error `from_env` has, and its message deliberately does not
-        // echo the URL: a base URL can carry a credential in its userinfo.
+        // Both of `from_env`'s refusals — a base URL that would carry the key
+        // in the clear, and a `TYPESAFE_DEFAULT_MODEL` outside the id rule —
+        // are **configuration** rather than this invocation's doing, so both
+        // answer 3 and neither echoes the offending value: a base URL can
+        // carry a credential in its userinfo, and the model id is named by
+        // its variable.
         Err(error) => return failed(NOT_CONFIGURED, &error.to_string()),
     };
 
@@ -324,7 +334,7 @@ fn state_from(text: String) -> Result<State, String> {
 /// about its own request.
 fn code_for(error: &typesafe::Error) -> u8 {
     match error {
-        typesafe::Error::RefusedBase => NOT_CONFIGURED,
+        typesafe::Error::RefusedBase | typesafe::Error::RefusedModel => NOT_CONFIGURED,
         typesafe::Error::InvalidRequest(_) => USAGE,
         typesafe::Error::Rejected { .. } | typesafe::Error::Invalid { .. } => REFUSED,
         typesafe::Error::Unavailable { .. }
@@ -347,7 +357,14 @@ fn failed(code: u8, why: &str) -> ExitCode {
     // Filtered like standard output, and for the same reason: the vendor's
     // own 422 `detail` reaches this sentence, so a refusal can carry text a
     // third party wrote straight onto a terminal.
-    eprintln!("ganja evaluate: {}", legible(why));
+    //
+    // `writeln!` rather than `eprintln!` for the same reason as the answers:
+    // `eprintln!` panics when the write fails, and a hook that closed both
+    // pipes would turn a refusal this function exists to report calmly into
+    // a stack trace. The result is deliberately dropped — there is nowhere
+    // left to report a failure to report something, and `code` is still the
+    // honest answer.
+    let _ = writeln!(std::io::stderr().lock(), "ganja evaluate: {}", legible(why));
 
     ExitCode::from(code)
 }

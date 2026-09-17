@@ -883,3 +883,104 @@ fn control_characters_never_reach_the_terminal_on_stderr() {
     assert!(!run.stderr.contains('\u{7}'), "a BEL survived: {:?}", run.stderr);
     assert!(run.stderr.contains("field"), "the reason still reads: {}", run.stderr);
 }
+
+// ------------------------------------------------------------ model ids
+
+/// **W2 review, F1.** A `--model` outside the id rule is *this invocation's*
+/// mistake, so it is 64 — and it is refused here, with the endpoint never
+/// hearing the request.
+#[test]
+fn a_model_id_that_is_not_one_is_a_usage_error() {
+    for bad in ["jev-latest \u{b7} forged", &"j".repeat(65), "jev latest", "jev\nlatest"] {
+        let endpoint = serve(200, ANSWERED);
+        let homes = Homes::new();
+
+        let run = ran(ganja(&homes, Some(endpoint.base()))
+            .args(["evaluate", "--model", bad, "--questions", &questions()])
+            .write_stdin("a sentence"));
+
+        assert_eq!(run.code, 64, "`{bad}` should be a usage error\nstderr:\n{}", run.stderr);
+        assert!(run.stdout.is_empty());
+        assert_eq!(endpoint.count(), 0, "`{bad}` never reached the vendor");
+    }
+}
+
+/// **W2 review, F1.** A `TYPESAFE_DEFAULT_MODEL` outside the same rule is
+/// *configuration* that was already wrong before this ran, so it is 3 — the
+/// row no caller should confuse with the one above, because the two send
+/// somebody to fix different things.
+#[test]
+fn a_configured_model_id_that_is_not_one_is_not_configured() {
+    let endpoint = serve(200, ANSWERED);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .env("TYPESAFE_DEFAULT_MODEL", "bad model")
+        .args(["evaluate", "--questions", &questions()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 3, "stderr:\n{}", run.stderr);
+    assert!(run.stdout.is_empty());
+    assert!(
+        run.stderr.contains("TYPESAFE_DEFAULT_MODEL"),
+        "the variable is named rather than the value echoed: {}",
+        run.stderr
+    );
+    assert_eq!(endpoint.count(), 0);
+}
+
+/// **W2 review.** An explicit `--model` still wins over a configured default,
+/// and a good one is not refused by the rule that refuses a bad one.
+#[test]
+fn a_good_model_id_passes_the_rule() {
+    let endpoint = serve(200, ANSWERED);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--model", "jev-1.13.0", "--questions", &questions()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    assert_eq!(endpoint.body()["model"], json!("jev-1.13.0"));
+}
+
+// ------------------------------------------------ a terminal on stdin
+
+/// **W2 review.** `--state` defaults to `-`, and `-` with a **terminal** on
+/// standard input is a usage error rather than a hang.
+///
+/// Run under a real pty, because that is the only way the child's
+/// `IsTerminal` answers true: `assert_cmd` hands a child a pipe or a null
+/// device, and against either of those this path is the ordinary read. The
+/// deadline is the assertion that matters — a build that hung here would
+/// hang a person's terminal with no prompt and no hint it was waiting.
+#[test]
+#[cfg(unix)]
+fn a_terminal_on_standard_input_is_a_usage_error_not_a_hang() {
+    use std::time::Instant;
+
+    use expectrl::Session;
+    use expectrl::process::unix::WaitStatus;
+
+    let homes = Homes::new();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ganja"));
+    homes.pin(&mut command, Path::new("unused.json"));
+    command
+        .env("TYPESAFE_API_KEY", KEY)
+        .env_remove("TYPESAFE_BASE_URL")
+        .env_remove("TYPESAFE_DEFAULT_MODEL")
+        .args(["evaluate", "--questions", &questions()]);
+
+    let started = Instant::now();
+    let session = Session::spawn(command).expect("`ganja` spawns in a pty");
+    let status = session.get_process().wait().expect("the child is reaped");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "it answered rather than waiting for a keystroke nobody was going to type"
+    );
+    assert!(
+        matches!(status, WaitStatus::Exited(_, 64)),
+        "a terminal on standard input is a usage error; got {status:?}"
+    );
+}
