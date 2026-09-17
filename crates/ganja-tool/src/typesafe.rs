@@ -24,10 +24,10 @@
 //!   on a *parsed* host — the same predicate `ganja_provider::provider::
 //!   reachable_in_the_clear` applies to a provider base URL, mirrored rather
 //!   than imported because this crate's internal dependency set is exactly
-//!   `ganja-permission`. W2's `crates/ganja-core/tests/typesafe_base_url.rs`
-//!   will hold the two equal, from the one crate that can see both; until it
-//!   lands, the copy is held by review alone. The refused URL is never
-//!   echoed: configuration is allowed to carry credentials in its userinfo.
+//!   `ganja-permission`. `crates/ganja-core/tests/typesafe_base_url.rs`
+//!   holds the two equal, from the one crate that can see both. The refused
+//!   URL is never echoed: configuration is allowed to carry credentials in
+//!   its userinfo.
 //! - **Redirects.** The client is built with [`reqwest::redirect::Policy::
 //!   none`], so a 3xx is a failure naming its status rather than a body to
 //!   parse. A request here carries an API key in a header; `webfetch`, which
@@ -284,11 +284,12 @@ impl std::fmt::Debug for Settings {
 /// Whether `url` may be spoken to at all, given that the request carries a
 /// secret.
 ///
-/// The mirror of `ganja_provider::provider::reachable_in_the_clear`. W2's
-/// `crates/ganja-core/tests/typesafe_base_url.rs` will hold the two equal
-/// over one shared table, from the one crate that can see both; that test is
-/// the gate on this copy and does not exist yet. Copied rather than shared
-/// because this crate may not name that crate.
+/// The mirror of `ganja_provider::provider::reachable_in_the_clear`, held to
+/// it by `crates/ganja-core/tests/typesafe_base_url.rs` over one shared
+/// table, in both directions, from the one crate that can see both. Copied
+/// rather than shared because this crate may not name that crate. The query
+/// and fragment clause below is the one place the copy is deliberately
+/// stricter, and that test says so rather than sharing the table with it.
 fn reachable_in_the_clear(url: &Url) -> bool {
     // `Url` has already done the parsing that makes this safe: whatever sits
     // before an `@` is userinfo and never reaches `host()`, and a host that
@@ -786,7 +787,12 @@ impl Client {
             // is somebody else's host asking for it.
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|error| Error::Transport(format!("no HTTP client: {error}")))?;
+            // `without_url` here too, though a builder error carries none
+            // today: one rule for every reqwest error in this module beats
+            // one rule and an exception nobody re-checks.
+            .map_err(|error| {
+                Error::Transport(format!("no HTTP client: {}", error.without_url()))
+            })?;
 
         Ok(Self { settings, http })
     }

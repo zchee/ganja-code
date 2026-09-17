@@ -732,7 +732,7 @@ fn a_tools_list_allows_what_it_names_and_denies_the_rest() {
     for allowed in ["read", "grep"] {
         assert_eq!(decides(rules, allowed, ANY_CALL), Some(Action::Allow));
     }
-    for denied in ["edit", "write", "bash", "task", "todowrite", "skill"] {
+    for denied in ["edit", "write", "bash", "task", "todowrite", "skill", "evaluate"] {
         assert_eq!(decides(rules, denied, ANY_CALL), Some(Action::Deny), "{denied}");
     }
     assert_eq!(
@@ -918,4 +918,41 @@ fn a_tools_value_is_read_in_every_spelling_it_is_written_in() {
         assert_eq!(super::tool_names(value), vec!["read".to_owned(), "grep".to_owned()], "{value}");
     }
     assert!(super::tool_names("  ").is_empty());
+}
+
+/// **D564.** `evaluate` sends whatever a model put in `state` to a third
+/// party, so an agent restricted to reading must not keep it — and the only
+/// thing that makes that true is its name being in `TOOL_NAMES`. Without the
+/// entry the wall leaves `evaluate` at Ask, and under `--yolo` an agent
+/// declared `tools: [read, grep]` could send what it read.
+///
+/// The second half is the reason the first half is not free: no builder in
+/// this crate registers `evaluate` — a frontend overlays it when a key is
+/// configured — so a roster that names it must not read as a typo.
+#[test]
+fn an_agent_restricted_to_reading_cannot_send_what_it_read_to_a_third_party() {
+    let (_directory, registry) = with_files(
+        &Config::default(),
+        &[("searcher.md", "---\ntools: read, grep\n---\nYou search and report.\n")],
+    );
+    let rules = &registry.get("searcher").expect("the file defines it").rules;
+
+    assert_eq!(decides(rules, "evaluate", ANY_CALL), Some(Action::Deny));
+}
+
+#[test]
+fn a_roster_that_names_evaluate_is_not_read_as_a_typo() {
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    let (_directory, registry) = with_files(
+        &Config::default(),
+        &[("judge.md", "---\ntools: read, evaluate\n---\nYou judge.\n")],
+    );
+    let rules = &registry.get("judge").expect("the file defines it").rules;
+
+    assert_eq!(decides(rules, "evaluate", ANY_CALL), Some(Action::Allow));
+    assert!(
+        !capture.logged().contains("names no tool this build registers"),
+        "a tool a frontend overlays is still a tool this build has: {}",
+        capture.logged()
+    );
 }

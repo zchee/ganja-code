@@ -22,6 +22,7 @@ pub mod bash_output;
 /// engine filters (a direct call to a deferred tool executes).
 pub mod deferral;
 pub mod edit;
+pub mod evaluate;
 /// The minimal-YAML frontmatter reader, public because `ganja-core`'s agent
 /// definition files open with the same fence a `SKILL.md` does and were being
 /// read by a second copy of this parser.

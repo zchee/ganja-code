@@ -1,27 +1,34 @@
-//! What the TypeSafe client puts in the log, and what it must never put
+//! What one `evaluate` call puts in the log, and what it must never put
 //! there.
 //!
-//! **One test, one binary**, and the reason is not the environment this time
-//! — though this binary mutates that too. It is `tracing`'s per-callsite
-//! interest cache. A `set_default` subscriber is thread-local and does not
-//! re-register a callsite another thread already reached; under a plain
-//! `cargo test` a sibling in the unit-test binary reaches
-//! `Client::evaluate`'s event first, on a thread with no subscriber at all,
-//! which caches that callsite as never and leaves the capture empty. So the
-//! subscriber here is the **process's global default**, which re-registers
-//! every callsite — and a process-global subscriber is process-wide state,
-//! which is what this directory is for.
+//! **One test, one binary**, for two reasons at once. It sets
+//! `TYPESAFE_API_KEY` and `TYPESAFE_BASE_URL`, which is process-wide state
+//! and is this directory's usual reason. The other is `tracing`'s
+//! per-callsite interest cache: a `set_default` subscriber is thread-local
+//! and does not re-register a callsite another thread already reached, so in
+//! the unit-test binary a sibling reaches the client's own event first, on a
+//! thread with no subscriber at all, which caches that callsite as never and
+//! leaves the capture empty. The subscriber here is the **process's global
+//! default**, which re-registers every callsite — and a process-global
+//! subscriber is process-wide state too.
 //!
 //! It is filtered to this crate's own targets on purpose. What is claimed is
-//! that *this client* logs no secret; an unfiltered global subscriber at
-//! TRACE would also be recording `reqwest`'s and `hyper`'s view of the wire,
-//! and a green assertion there would be about somebody else's code.
+//! that *this tool* logs no secret; an unfiltered global subscriber at TRACE
+//! would also be recording `reqwest`'s and `hyper`'s view of the wire, and a
+//! green assertion there would be about somebody else's code.
+//!
+//! The call goes through [`EvaluateTool::configured`] and [`Tool::run`] —
+//! the whole shipped road, environment included — rather than through the
+//! client underneath it, because the environment is what this binary exists
+//! to be allowed to touch.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ganja_tool::typesafe::{Question, Request, Settings, State};
+use ganja_tool::evaluate::EvaluateTool;
+use ganja_tool::{Credentials, FileTimes, ToolCtx};
 use tokio_util::sync::CancellationToken;
 
 /// The key this binary configures, kept distinctive so the leak check can
@@ -35,7 +42,7 @@ const STATE: &str = "payouts have been failing for three days";
 const ANSWERED: &str = r#"{"model":"jev-1.13.0","answers":{"urgent":{"type":"noul","noul":0.92}},"usage":{"input_tokens":312,"output_tokens":48}}"#;
 
 #[tokio::test]
-async fn nothing_the_typesafe_client_logs_carries_the_key_or_the_state() {
+async fn nothing_an_evaluate_call_logs_carries_the_key_or_the_state() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
@@ -56,24 +63,19 @@ async fn nothing_the_typesafe_client_logs_carries_the_key_or_the_state() {
         std::env::remove_var("TYPESAFE_DEFAULT_MODEL");
     }
 
-    // Through `from_env`, because that is the road both shipped surfaces take
-    // and the one an integration test can see.
-    let settings =
-        Settings::from_env().expect("a loopback base is accepted").expect("a key is configured");
-    let client = ganja_tool::typesafe::Client::new(settings).expect("an HTTP client builds");
-    let asked = Request::checked(
-        State::Text(STATE.to_owned()),
-        [(
-            "urgent".to_owned(),
-            Question::Noul { instructions: serde_json::json!("Urgent?"), criteria: None },
-        )]
-        .into_iter()
-        .collect(),
-        "jev-latest".to_owned(),
-    )
-    .expect("the fixture request is within every limit");
+    let tool = EvaluateTool::configured().expect("a configured environment offers the tool");
+    let answered = tool
+        .run(
+            serde_json::json!({
+                "state": STATE,
+                "questions": {"urgent": {"type": "noul", "instructions": "Urgent?"}}
+            }),
+            &ctx(),
+        )
+        .await
+        .expect("the canned answer parses");
 
-    client.evaluate(&asked, &CancellationToken::new()).await.expect("the canned answer parses");
+    assert_eq!(answered.title, "1 answer(s) · jev-1.13.0 · 312 input tokens");
 
     let logged = capture.logged();
 
@@ -85,6 +87,29 @@ async fn nothing_the_typesafe_client_logs_carries_the_key_or_the_state() {
     assert!(logged.contains("input_tokens=312"), "and what it claims to");
     assert!(!logged.contains(KEY), "the key reaches no event");
     assert!(!logged.contains(STATE), "the state reaches no event");
+}
+
+/// A call with every seam empty.
+///
+/// Spelled out rather than built by a helper: `ToolCtx::fixture` is
+/// `#[cfg(test)]` inside the library and deliberately invisible from out
+/// here, so that the literal stays the only shape a caller outside the crate
+/// can write — which is what makes a new field a decision somebody has to
+/// make rather than one a default makes for them.
+fn ctx() -> ToolCtx {
+    ToolCtx {
+        cwd: PathBuf::from("."),
+        cancel: CancellationToken::new(),
+        call_id: "call".to_owned(),
+        files: Arc::new(FileTimes::default()),
+        credentials: Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    }
 }
 
 /// A loopback endpoint answering one request with [`ANSWERED`], on a plain

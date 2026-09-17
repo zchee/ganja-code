@@ -22,13 +22,19 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
     let project = tempfile::TempDir::new().expect("a temporary directory is creatable");
     // SAFETY: process-wide, so this belongs to a test that runs alone in
     // its process — which `nextest` gives every test, and which the rest
-    // of this binary's unit tests do not contend for: none of them reads
-    // the environment.
+    // of this binary's unit tests do not contend for.
+    //
+    // The redirects are what make an assembly hermetic, and `assemble` reads
+    // one more variable than it used to: **D564** overlays `evaluate` when
+    // `TYPESAFE_API_KEY` is set, so a developer with a key exported would
+    // otherwise assemble a different roster here than CI does. It is removed
+    // for the same reason `GANJA_PROVIDER` is.
     unsafe {
         std::env::set_var("XDG_DATA_HOME", data.path());
         std::env::set_var("GANJA_CONFIG_HOME", home.path());
         std::env::remove_var("GANJA_PROVIDER");
         std::env::remove_var("GANJA_MODEL");
+        std::env::remove_var("TYPESAFE_API_KEY");
     }
     std::fs::write(
         project.path().join("ganja.toml"),

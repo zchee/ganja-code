@@ -6770,6 +6770,15 @@ impl App {
         if config.webfetch_allows_private() {
             tools = tools.with(Arc::new(ganja_tool::webfetch::WebfetchTool::allowing_private()));
         }
+        // **D564**, and the only overlay here keyed off the *process environment*
+        // rather than the config: `evaluate` is present exactly when
+        // `TYPESAFE_API_KEY` is set, because a tool whose dialog must name the
+        // host the content goes to has to be built from its settings — and
+        // because nobody who did not configure it should pay its description on
+        // every request. A frontend that drops this line fails silently.
+        if let Some(evaluate) = ganja_tool::evaluate::EvaluateTool::configured() {
+            tools = tools.with(evaluate);
+        }
         let skill_roots = ganja_core::instruction::skill_roots(&config, &self.cwd);
         tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(skill_roots.clone())));
         self.engine.replace_base_tools(Arc::new(tools));
