@@ -63,8 +63,17 @@
 //! place, inside `from_env`, while a forged `--model` is refused by `checked`
 //! as `InvalidRequest` — so neither the split nor its correctness depends on
 //! call order. A later reader may fold the two call sites into `code_for`
-//! without changing any answer; they should know that is a coincidence of
-//! those variants differing, and not a property of the enum.
+//! without changing any answer today; they should know that is a coincidence
+//! of those variants differing, and not a property of the enum.
+//!
+//! **So do not route the `Request::checked` call site through `code_for` for
+//! consistency.** Its hard-coded 64 is what makes a rejected request this
+//! command's own usage error. The day `checked` grows a *configuration*
+//! variant — it already borrows `RefusedModel`'s id rule, so that is not
+//! far-fetched — routing it would turn that 64 into a 3 silently, and a hook
+//! branching on the code would start reporting a misconfigured machine where
+//! a caller had simply asked for something impossible. The duplication here
+//! is the guard, not an oversight.
 //!
 //! Neither refusal echoes the value it refused, and that is load bearing
 //! rather than tidy: the id rule exists because the model id is interpolated
@@ -201,6 +210,18 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
     };
 
     let model = args.model.unwrap_or_else(|| settings.model().to_owned());
+    // Named here rather than by prefixing the refusal below, because
+    // `Request::checked` refuses the *whole* request and most of its reasons
+    // have nothing to do with this flag — telling somebody to fix `--model`
+    // when their questions were the problem is the same defect as telling a
+    // `--model` user to fix the environment.
+    //
+    // A bad configured default never reaches this line: `from_env` refused it
+    // above, as exit 3. So a model this build will not accept, here, came
+    // from the flag.
+    if let Some(refusal) = model_refusal(&model) {
+        return failed(USAGE, &format!("--model {refusal}"));
+    }
     // The same validator the tool uses. Every limit is decided here, so a
     // request that is going to be refused is refused without the vendor
     // hearing any of it.
@@ -351,6 +372,20 @@ fn state_from(text: String) -> Result<State, String> {
         value => serde_json::from_value(value)
             .map_err(|error| format!("is not a state this build can send: {error}")),
     }
+}
+
+/// Why `model` is not a usable id, when it is not.
+///
+/// Asked of [`typesafe::Request::checked`] itself rather than restated here:
+/// the id rule has one home and this is that home answering. The probe is a
+/// fixed minimum whose only variable is the model — a one-question request
+/// over an empty text state — so a refusal of it is about the model and can
+/// be about nothing else.
+fn model_refusal(model: &str) -> Option<typesafe::Error> {
+    let questions = serde_json::from_str(r#"{"probe":{"type":"noul","instructions":"probe"}}"#)
+        .expect("a one-question literal this build wrote parses as one question");
+
+    Request::checked(State::Text(String::new()), questions, model.to_owned()).err()
 }
 
 /// Which row of the table an error is.

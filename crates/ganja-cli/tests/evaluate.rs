@@ -908,13 +908,14 @@ fn a_model_id_that_is_not_one_is_a_usage_error() {
     // the wrong reason).
     const FORGED: &str = "Zzq7Forged";
 
-    for bad in [
-        &format!("jev-latest \u{b7} 999 B \u{b7} 0 question(s) {FORGED}"),
-        &"j".repeat(65),
-        &format!("jev {FORGED}"),
-        &format!("jev\n{FORGED}"),
-    ] {
-        let bad: &str = bad;
+    let cases: [String; 4] = [
+        format!("jev-latest \u{b7} 999 B \u{b7} 0 question(s) {FORGED}"),
+        "j".repeat(65),
+        format!("jev {FORGED}"),
+        format!("jev\n{FORGED}"),
+    ];
+
+    for bad in &cases {
         let endpoint = serve(200, ANSWERED);
         let homes = Homes::new();
 
@@ -931,6 +932,19 @@ fn a_model_id_that_is_not_one_is_a_usage_error() {
         assert!(
             !run.stderr.contains(FORGED),
             "the refused value must not be echoed: {}",
+            run.stderr
+        );
+        // **W3 addendum, L13.** The refusal names the flag, as `--questions`
+        // and `--state` do. Without it the sentence describes the id rule and
+        // leaves the reader to guess which of the two model sources broke it.
+        assert!(run.stderr.contains("--model"), "the flag is named: {}", run.stderr);
+        // **W3 addendum, L12.** And it does *not* name the environment. The
+        // exit code already tells these two apart, so a regression that
+        // reworded the sentence would keep every other assertion green while
+        // sending a `--model` user to go and edit their shell profile.
+        assert!(
+            !run.stderr.contains("TYPESAFE_DEFAULT_MODEL"),
+            "a flag's mistake must not be reported as the environment's: {}",
             run.stderr
         );
     }
@@ -956,6 +970,14 @@ fn a_configured_model_id_that_is_not_one_is_not_configured() {
     assert!(
         !run.stderr.contains("Zzq7Forged"),
         "and the value it held is not echoed: {}",
+        run.stderr
+    );
+    // The mirror of L12: a configuration mistake must not be reported as a
+    // flag's. The two sentences send a reader to two different files, and
+    // only the exit code is checked elsewhere.
+    assert!(
+        !run.stderr.contains("--model"),
+        "the environment's mistake must not be reported as a flag's: {}",
         run.stderr
     );
     assert_eq!(endpoint.count(), 0);
@@ -1203,5 +1225,36 @@ fn a_dash_is_not_standard_input_for_questions() {
 
     assert_eq!(run.code, 64, "stderr:\n{}", run.stderr);
     assert!(run.stderr.contains("--questions"), "the flag is named: {}", run.stderr);
+    assert_eq!(endpoint.count(), 0);
+}
+
+/// **W3 addendum, L13's other half.** A request refused for a reason that is
+/// *not* the model must not be reported as a `--model` problem.
+///
+/// `Request::checked` refuses the whole request, so the obvious way to name
+/// the flag — prefixing that refusal — would tell somebody with fifty-one
+/// questions to go and fix their model id. The flag is named by a separate
+/// probe of the model alone, and this is the case that proves the difference.
+#[test]
+fn a_refusal_that_is_not_about_the_model_does_not_name_the_flag() {
+    let endpoint = serve(200, ANSWERED);
+    let homes = Homes::new();
+    // One more than the limit, which `Request::checked` refuses by count.
+    let many: BTreeMap<String, Value> = (0..51)
+        .map(|n| (format!("q{n}"), json!({"type": "noul", "instructions": "Urgent?"})))
+        .collect();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        // A perfectly good model, so the only thing wrong is the questions.
+        .args(["evaluate", "--model", "jev-latest", "--questions", &json!(many).to_string()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 64, "stderr:\n{}", run.stderr);
+    assert!(
+        !run.stderr.contains("--model"),
+        "the questions were the problem; the model must not be blamed: {}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("51"), "the real reason is reported: {}", run.stderr);
     assert_eq!(endpoint.count(), 0);
 }
