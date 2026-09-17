@@ -951,23 +951,30 @@ fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
     }
 }
 
-/// The four rows whose vendor caps them below what models.dev publishes, read
-/// through the lookup a session uses, under **both** ids that reach them.
+/// Both ids that reach these rows answer with the ceiling's own number,
+/// through the lookup a session uses.
 ///
-/// `chatgpt` has no entry in `WINDOW_CEILINGS` and must not need one: it reads
-/// `openai`'s rows through `ROW_ALIASES` (**D555**), so a correction made once
-/// is a correction for the seat as well as for the platform key. Asserting both
-/// is what keeps that true — a ceiling keyed by the id a session was started
-/// under rather than by the id whose rows answer would size the seat and the
-/// key differently for one vendor's one model.
+/// **This pins the `ROW_ALIASES` path and the snapshot literals, not the
+/// clamp.** The shipped table is the snapshot, whose four literals already
+/// carry 872,000 deliberately, so deleting `WINDOW_CEILINGS`'s rows would leave
+/// this test green — the clamp itself is held by the two fetched-payload tests
+/// below. What it does hold is the half of **D565** those cannot reach:
+/// `chatgpt` has no ceiling entry and must never need one, because it reads
+/// `openai`'s rows through `ROW_ALIASES` (**D555**). A ceiling keyed by the id
+/// a session was started under rather than by the id whose rows answer would
+/// size the seat and the platform key differently for one vendor's one model,
+/// and that is what this notices.
+///
+/// The expected value is read out of the table rather than written again, so a
+/// ceiling that moves moves this assertion with it instead of reddening it.
 #[test]
-fn the_vendors_own_ceiling_sizes_these_rows_for_openai_and_for_chatgpt() {
-    for (provider, id, _) in super::WINDOW_CEILINGS {
+fn both_ids_that_reach_a_capped_row_answer_with_the_ceilings_number() {
+    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
         for asked in [*provider, "chatgpt"] {
             let row = model_for(asked, id)
                 .unwrap_or_else(|| panic!("{asked} serves {id} and the table must size it"));
 
-            assert_eq!(row.context_window, 872_000, "{asked}/{id}");
+            assert_eq!(row.context_window, *ceiling, "{asked}/{id}");
         }
     }
 }
@@ -976,37 +983,45 @@ fn the_vendors_own_ceiling_sizes_these_rows_for_openai_and_for_chatgpt() {
 /// edited literals.
 ///
 /// A fetched catalog is the tier that answers once anything has been fetched,
-/// and models.dev publishes 1,050,000 for every one of these rows — above the
-/// 920,012 tokens the backend was last measured accepting. A snapshot-only
-/// correction would therefore last exactly until the first
-/// `ganja models --refresh`.
+/// and the payload these rows arrive in is the one models.dev really publishes
+/// for them — `{context: 1050000, input: 922000, output: 128000}`, as cached at
+/// `~/.cache/ganja/models.json` on 2026-09-18. A snapshot-only correction would
+/// last exactly until the first `ganja models --refresh`.
+///
+/// Asserted for `openai` alone. A second pass under `chatgpt` would run the
+/// identical lookup — `row_id` resolves the seat to `openai` before `scoped`
+/// ever sees it — so it would prove nothing this does not; the alias is pinned
+/// where it is real, in
+/// `both_ids_that_reach_a_capped_row_answer_with_the_ceilings_number`. The
+/// resolution itself is asserted here so that the omission stays deliberate.
 #[test]
 fn a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling() {
+    assert_eq!(super::row_id("chatgpt"), "openai", "the seat's rows are the platform's");
+
     let catalog = parse(
         r#"{"openai":{"models":{
-                "gpt-6-astra":{"name":"GPT-6 Astra","limit":{"context":1050000,"input":1050000,
+                "gpt-6-astra":{"name":"GPT-6 Astra","limit":{"context":1050000,"input":922000,
                     "output":128000},"cost":{"input":10,"output":50}},
-                "gpt-5.6-sol":{"limit":{"context":1050000,"output":128000}},
-                "gpt-5.6-terra":{"limit":{"context":1050000,"output":128000}},
-                "gpt-5.6-luna":{"limit":{"context":1050000,"output":128000}}}}}"#,
+                "gpt-5.6-sol":{"limit":{"context":1050000,"input":922000,"output":128000}},
+                "gpt-5.6-terra":{"limit":{"context":1050000,"input":922000,"output":128000}},
+                "gpt-5.6-luna":{"limit":{"context":1050000,"input":922000,"output":128000}}}}}"#,
     )
     .expect("the payload decodes");
 
-    for (_, id, _) in super::WINDOW_CEILINGS {
-        for asked in ["openai", "chatgpt"] {
-            let row = super::scoped(&catalog, super::row_id(asked), id)
-                .unwrap_or_else(|| panic!("the payload carries {id}"));
+    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
+        let row = super::scoped(&catalog, provider, id)
+            .unwrap_or_else(|| panic!("the payload carries {id}"));
 
-            assert_eq!(row.context_window, 872_000, "{asked}/{id} as fetched");
-        }
+        assert_eq!(row.context_window, *ceiling, "{provider}/{id} as fetched");
     }
 
     let astra = super::scoped(&catalog, "openai", "gpt-6-astra").expect("the payload carries it");
     assert_eq!(
         astra.input_limit,
         Some(872_000),
-        "a published prompt-alone cap above the window it sits in says nothing \
-         a session could act on, so it is held to the same ceiling"
+        "a prompt-alone cap above the window it sits in is incoherent, so it is \
+         held to the same ceiling — a value derived from that ceiling and not a \
+         second vendor figure, the published cap being 922,000"
     );
     assert_eq!(astra.max_output, 128_000, "the ceiling is sizing, and only the window's");
     assert!(close(astra.pricing.input, 10.0), "the ceiling is not a price");
@@ -1038,9 +1053,14 @@ fn a_row_published_below_the_ceiling_keeps_what_it_publishes() {
 /// `openrouter` resells these models under the vendor's own spelling, and what
 /// a gateway accepts is the gateway's to publish: a ceiling matched on the
 /// model id alone would silently resize rows belonging to a backend nobody
-/// measured. The three OpenAI rows here are the ones the vendor's catalog sizes
-/// differently (`gpt-5.5` 272000/272000, `gpt-5.4` 272000/1000000) or does not
-/// carry at all (`gpt-5.6`).
+/// measured.
+///
+/// The three OpenAI rows here are untouched for two different reasons, and the
+/// difference is worth keeping straight. `gpt-5.5` (`max_context_window:
+/// 272000`) and `gpt-5.4` (`1000000`) are **exceptions** — the vendor's catalog
+/// caps each of them below the 1,050,000 they publish, so the rule as written
+/// would cap them too, and they are held back for a separate decision. `gpt-5.6`
+/// is not an exception: that catalog carries no row for it at all.
 #[test]
 fn the_ceiling_leaves_every_row_it_does_not_name_alone() {
     let snapshot = snapshot();

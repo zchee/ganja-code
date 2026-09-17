@@ -24,10 +24,13 @@
 //! is worth immeasurably more than no price at all.
 //!
 //! Neither tier is taken entirely at its word on sizing. A published window
-//! larger than the vendor itself will accept is held down to the vendor's own
-//! number by `WINDOW_CEILINGS`, applied where either tier's rows become a
-//! table (`Catalog::assembled`) so that a fetch cannot restore what the
-//! snapshot corrected (**D565**).
+//! larger than the ceiling the vendor's own client documents for that model is
+//! held down to the vendor's number by `WINDOW_CEILINGS`, applied where either
+//! tier's rows become a table (`Catalog::assembled`) so that a fetch cannot
+//! restore what the snapshot corrected (**D565**). What that buys is the
+//! compaction trigger: it fires at nine tenths of this figure, so an
+//! over-stated window is a session that accumulates past the prompt cap the
+//! vendor publishes before it ever tries to compact.
 //!
 //! Display names are the upstream `name` field with a trailing "(latest)"
 //! dropped, because a table column is not the place to explain aliasing.
@@ -379,32 +382,58 @@ const SERVED_ROWS: &[(&str, &str)] = &[("claude-code", "anthropic")];
 /// no entry and must not have one — it reads `openai`'s rows through
 /// [`ROW_ALIASES`], so one row corrected here is corrected for both ids.
 ///
-/// The four ids below are the vendor's own numbers, read on **2026-09-18** from
-/// the catalog its Codex CLI ships (`codex-rs/models-manager/models.json`,
-/// openai/codex at `66eab8ece4`, 2026-09-14): each of them publishes
-/// `context_window: 272000` beside `max_context_window: 872000`, the second
-/// documented in that repository's own protocol crate
+/// **Where 872,000 comes from, and what it is not.** It is the vendor's own
+/// number, read on **2026-09-18** from the catalog its Codex CLI ships
+/// (`codex-rs/models-manager/models.json`, openai/codex at `66eab8ece4`,
+/// 2026-09-14): each of the four publishes `context_window: 272000` beside
+/// `max_context_window: 872000`, and that second field is documented in the
+/// same repository's protocol crate
 /// (`codex-rs/protocol/src/openai_models.rs:453-456`) as the "Maximum context
-/// window allowed for config overrides". **872,000 is the override ceiling and
-/// 272,000 is what Codex actually runs at**, and this build deliberately takes
-/// the ceiling: ganja is the override, sizing a session by the most the backend
-/// will take rather than by the default somebody else's client chose.
+/// window allowed for config overrides" — the largest window that vendor's own
+/// client will let a configuration ask for, not a measured refusal boundary.
+/// 272,000 is what Codex itself runs at by default. Ganja takes the override
+/// ceiling rather than that default, and takes it **as a deliberately
+/// conservative figure by the owner's decision** rather than because anything
+/// has been observed to fail above it.
 ///
-/// The number models.dev publishes for these rows — 1,050,000, which is what
-/// the snapshot said until this table existed — is above anything the backend
-/// has been seen to accept: a third-party gateway measuring the ChatGPT Codex
-/// backend on **2026-09-05** had `gpt-6-astra` take 920,012 input tokens and
-/// refuse 935,012. The vendor's own ceiling sits under that measurement, so it
-/// is the safe of the two. Believing the published figure is not a cosmetic
-/// error — `ganja_core::session::context_window` reads this field as the
-/// denominator of the context meter *and* as the auto-compaction trigger, so an
-/// over-stated window means a session fills past what the backend accepts
-/// before it ever tries to compact.
+/// It is therefore not "the most the backend will take", and this table must
+/// not be described that way. What models.dev publishes for these rows is
+/// `{context: 1050000, input: 922000, output: 128000}` — the payload cached at
+/// `~/.cache/ganja/models.json`, read 2026-09-18 — where 922,000 + 128,000 is
+/// exactly 1,050,000: the published `context` is a prompt cap plus a maximum
+/// reply, and 922,000 is the prompt alone. The one live measurement anybody has
+/// (a third-party gateway against the ChatGPT Codex backend, **2026-09-05**:
+/// `gpt-6-astra` accepted 920,012 input tokens and refused 935,012)
+/// **corroborates that published 922,000 cap**. It is not evidence about
+/// 872,000, which sits *below* what that probe saw accepted.
 ///
-/// Rows this table deliberately leaves alone, because the same catalog gives
-/// them different numbers: `gpt-5.5` (272000/272000), `gpt-5.4`
-/// (272000/1000000), and ganja's plain `gpt-5.6` row, which that catalog does
-/// not carry at all.
+/// **The defect this fixes is the compaction trigger, and it is real at
+/// 1,050,000 whatever the ceiling's provenance.** Auto-compaction fires when
+/// the stored context reaches nine tenths of this field
+/// (`ganja_core::session::compact_if_needed`, `filled * 10 < window * 9`,
+/// `session.rs:3141`), so a believed 1,050,000 let a session run to 945,000
+/// stored tokens before it ever tried to compact — past the 922,000 prompt the
+/// vendor publishes as the cap. The fit guard behind it is no help either: it
+/// refuses to summarize only above `context_window - SUMMARY_OUTPUT_TOKENS`
+/// (`session.rs:3185`, `:177`, 4,096), which is 1,045,904. At 872,000 the
+/// trigger fires at 784,800, under the published cap with margin.
+///
+/// **The alternative not taken.** Keep 1,050,000 and drive the trigger from
+/// [`ModelInfo::input_limit`] where the catalog publishes one — the honest
+/// shape, since the prompt cap is the number a session actually has to fit
+/// under. It is a change to the engine's trigger rather than to this table,
+/// nothing outside tests reads `input_limit` today, and it would leave every
+/// uncataloged and every input-limit-less row on the old arithmetic; a window
+/// ceiling fixes those rows too and is one table. Worth revisiting as its own
+/// decision.
+///
+/// **Two rows the rule would also touch, deliberately left out.** By the rule
+/// as written, `gpt-5.5` (`max_context_window: 272000`) and `gpt-5.4`
+/// (`1000000`) both publish more than their own Codex catalog allows and would
+/// be capped here too — they are exceptions held back for a separate decision,
+/// not instances of the rule being applied. `gpt-5.6` is a third case and not
+/// an exception at all: that catalog carries no row for it, so the rule has
+/// nothing to say about it.
 const WINDOW_CEILINGS: &[(&str, &str, u64)] = &[
     ("openai", "gpt-6-astra", 872_000),
     ("openai", "gpt-5.6-sol", 872_000),
@@ -621,9 +650,10 @@ const SNAPSHOT: &[Row] = &[
     },
     // The three `gpt-5.6-*` rows below carry the same **D565** ceiling as
     // `gpt-6-astra`, and for the same reason: the vendor's own catalog gives
-    // each of them `max_context_window: 872000`. `gpt-5.5`, directly above,
-    // does not — that file sizes it 272000/272000 — so its published window is
-    // left exactly as the fetched tier states it.
+    // each of them `max_context_window: 872000`. `gpt-5.5`, directly above, is
+    // capped at 272000 in that same file and so would fall under the rule as
+    // well — it keeps its published window here because it is an exception
+    // held back for a separate decision, not because the rule spares it.
     Row {
         id: "gpt-5.6-sol",
         provider_id: "openai",
@@ -762,8 +792,8 @@ impl Catalog {
     /// **The one place either tier becomes a table**, which is the whole point
     /// of it being a function: the compiled-in snapshot and a fetched catalog
     /// both arrive here, so a vendor limit corrected in one is corrected in the
-    /// other and the next `ganja models --refresh` cannot quietly restore a
-    /// number the backend refuses.
+    /// other and the next `ganja models --refresh` cannot quietly restore the
+    /// larger published figure.
     fn assembled(models: Vec<ModelInfo>) -> Self {
         Self {
             models: models
@@ -774,13 +804,22 @@ impl Catalog {
                         .find(|(provider, id, _)| *provider == info.provider_id && *id == info.id)
                     {
                         info.context_window = info.context_window.min(*ceiling);
-                        // A prompt-alone cap above the whole window says
-                        // nothing a session could act on, so it is held under
-                        // the same ceiling — and only where the catalog
-                        // published one. An absent `limit.input` stays absent:
-                        // the ceiling is a correction to a number somebody
-                        // else stated, never a licence to state one nobody
-                        // did.
+                        // A prompt-alone cap above the whole window it sits in
+                        // is incoherent, so it is held under the same number —
+                        // and only where the catalog published one. An absent
+                        // `limit.input` stays absent: the ceiling corrects a
+                        // number somebody else stated, never a licence to
+                        // state one nobody did.
+                        //
+                        // **The clamped value is derived, not measured.** The
+                        // catalog publishes 922,000 for these rows and this
+                        // hands back 872,000 — an arithmetic consequence of
+                        // the window ceiling, not a second vendor figure and
+                        // not the cap the 2026-09-05 probe corroborated.
+                        // Nothing outside this module's tests reads
+                        // `input_limit` today, so it costs a session nothing
+                        // either way; were a consumer to appear, this is the
+                        // line it would have to be reconciled with.
                         info.input_limit = info.input_limit.map(|limit| limit.min(*ceiling));
                     }
 
