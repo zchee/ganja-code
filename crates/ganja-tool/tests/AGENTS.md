@@ -11,6 +11,7 @@ The tools' integration suites: the handful of behaviours that cannot be tested b
 
 | File | Description |
 |------|-------------|
+| `evaluate_log.rs` | What the TypeSafe client puts in the log, and what it must never put there: the `status`/`latency_ms`/`input_tokens` debug event is asserted **first**, as the control, and only then that no captured event carries the API key or the state. **One test, one binary** for two reasons at once — it sets `TYPESAFE_API_KEY`/`TYPESAFE_BASE_URL` and drives the client through `Settings::from_env`, and its subscriber is the process's **global** default. The global is not a convenience: a thread-local `set_default` does not re-register a callsite another thread already reached, so in the unit-test binary a sibling reaches `Client::evaluate`'s event first with no subscriber installed, caches that callsite as never, and the capture comes back empty. Filtered to `ganja_tool` targets, because the claim is about what *this client* logs and an unfiltered TRACE would be recording `hyper`'s view of every other test's wire. |
 | `websearch_keys.rs` | What `websearch` does about the credentials it reads from the environment: no key at all names both variables, a service named without its key names that one, and a variable exported blank is no key rather than a key that fails at the service. Mutates `EXA_API_KEY`, `PARALLEL_API_KEY` and `GANJA_WEBSEARCH_PROVIDER` — **one test, one binary**. No socket is opened on any of these paths, which is half the claim: a search that cannot be paid for should be refused before a third party hears about it. |
 
 ## For AI Agents
@@ -26,6 +27,7 @@ The tools' integration suites: the handful of behaviours that cannot be tested b
 ```sh
 cargo test -p ganja-tool                       # the in-module suites and these
 cargo nextest run -E 'binary(websearch_keys)'  # one of these binaries
+cargo nextest run -E 'binary(evaluate_log)'    # the TypeSafe client's log
 ```
 
 ### Common Patterns

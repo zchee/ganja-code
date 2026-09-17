@@ -51,6 +51,7 @@ pub mod tasklist;
 pub mod team;
 pub mod todo;
 pub mod truncate;
+pub mod typesafe;
 /// The stale-read watcher, here because [`FileTimes`] is here: it is built on
 /// the announce channel a read registers itself through, and what it reports is
 /// a state on that same log. The engine still owns *when* a watcher exists — it
