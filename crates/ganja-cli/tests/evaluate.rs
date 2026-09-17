@@ -765,3 +765,121 @@ fn the_shipped_questions_are_the_ones_the_script_thresholds() {
         assert!(asked.contains_key(*id), "`{id}` is thresholded but never asked");
     }
 }
+
+// ------------------------------------------------- vendor-controlled text
+
+/// A `choice` whose value and option names carry terminal control sequences.
+///
+/// The escapes are **JSON's**, not Rust's: a raw control byte inside a JSON
+/// string is not JSON at all and the client rejects the whole response as
+/// malformed long before any of this. What a hostile response really looks
+/// like is well-formed JSON whose *decoded* string holds the escape — which
+/// is what reaches a terminal, and so what these cases are about.
+///
+/// `destructive` rides along so the recipe case below has a `noul` line to
+/// act on: the point there is that filtering the neighbouring line does not
+/// disturb the one `awk` reads.
+const HOSTILE: &str = r#"{"model":"jev-1.13.0","answers":{"destructive":{"type":"noul","noul":0.92},"desk":{"type":"choice","choice":"\u001b[31mbilling\u0007","probabilities":{"\u001b[31mbilling\u0007":0.9,"tech\u001b[0m":0.1},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}"#;
+
+/// **W2 review.** `--format text` is a third party's text on a hook author's
+/// terminal, so it goes through the reporter's own `printable` filter: no
+/// escape reaches the screen, and the words around it survive.
+#[test]
+fn control_characters_never_reach_the_terminal_in_text() {
+    let endpoint = serve(200, HOSTILE);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--format", "text", "--questions", &questions()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    assert!(!run.stdout.contains('\u{1b}'), "an escape survived: {:?}", run.stdout);
+    assert!(!run.stdout.contains('\u{7}'), "a BEL survived: {:?}", run.stdout);
+    // Not merely stripped to nothing: the line is still the line, with the
+    // control characters standing in as replacement characters.
+    assert!(run.stdout.contains("billing"), "the text around them is intact: {:?}", run.stdout);
+    assert!(run.stdout.contains("desk: choice="), "the shape is unchanged: {:?}", run.stdout);
+    // The join is what makes this a per-line filter rather than a whole-string
+    // one; a whole-string filter would have eaten it.
+    assert_eq!(run.stdout.lines().count(), 2, "both answers, on their own lines");
+}
+
+/// **W2 review.** `--format json` needs no filter and gets none: `serde_json`
+/// escapes a control character rather than emitting it, so a caller piping
+/// this into a parser gets the vendor's bytes back exactly.
+#[test]
+fn control_characters_survive_json_because_json_escapes_them() {
+    let endpoint = serve(200, HOSTILE);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--questions", &questions()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    assert!(!run.stdout.contains('\u{1b}'), "the raw byte is escaped, not emitted");
+    let printed: Value = serde_json::from_str(&run.stdout).expect("--format json prints JSON");
+    assert_eq!(
+        printed["answers"]["desk"]["choice"],
+        json!("\u{1b}[31mbilling\u{7}"),
+        "the parser gets the vendor's own string back"
+    );
+}
+
+/// **W2 review.** And the recipe still works over a filtered rendering: the
+/// `noul` line `awk` reads is untouched by what happened to its neighbour.
+#[test]
+#[cfg(unix)]
+fn the_recipe_still_parses_a_filtered_rendering() {
+    let endpoint = serve(200, HOSTILE);
+    let homes = Homes::new();
+
+    let run = ran(recipe(&homes, endpoint.base(), "deny").write_stdin(envelope()));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    let printed: Value = serde_json::from_str(run.stdout.trim())
+        .unwrap_or_else(|error| panic!("the hook prints JSON ({error}): {:?}", run.stdout));
+    assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], json!("deny"));
+}
+
+/// **`lines` contract.** A response carrying no answers prints **nothing** in
+/// `text` — not a blank line, which the recipe's `awk` would read as one more
+/// record that happens not to match.
+#[test]
+fn an_empty_answer_set_prints_nothing_at_all() {
+    let endpoint = serve(200, r#"{"model":"jev-1.13.0","answers":{},"usage":{"input_tokens":3}}"#);
+    let homes = Homes::new();
+
+    let text = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--format", "text", "--questions", &questions()])
+        .write_stdin("a sentence"));
+    assert_eq!(text.code, 0, "stderr:\n{}", text.stderr);
+    assert!(text.stdout.is_empty(), "not even a newline: {:?}", text.stdout);
+
+    // `json` still prints its document: an empty `answers` map is an answer
+    // about the request, and a script reading JSON is not reading lines.
+    let json = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--questions", &questions()])
+        .write_stdin("a sentence"));
+    assert_eq!(json.code, 0);
+    let printed: Value = serde_json::from_str(&json.stdout).expect("a document is printed");
+    assert_eq!(printed["answers"], json!({}));
+}
+
+/// **W2 review.** The vendor's own 422 `detail` reaches this command's stderr,
+/// so it is filtered on the way out too.
+#[test]
+fn control_characters_never_reach_the_terminal_on_stderr() {
+    let endpoint = serve(422, r#"{"detail":"bad \u001b[31mfield\u0007"}"#);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--questions", &questions()])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 4, "stderr:\n{}", run.stderr);
+    assert!(!run.stderr.contains('\u{1b}'), "an escape survived: {:?}", run.stderr);
+    assert!(!run.stderr.contains('\u{7}'), "a BEL survived: {:?}", run.stderr);
+    assert!(run.stderr.contains("field"), "the reason still reads: {}", run.stderr);
+}

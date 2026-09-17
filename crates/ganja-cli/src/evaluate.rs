@@ -28,6 +28,21 @@
 //! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport, too large, malformed |
 //! | 64 | this command's own argument error (`EX_USAGE`) |
 //!
+//! Three more things answer **5**, written down here rather than left to be
+//! inferred from the `match` that decides them:
+//!
+//! - an arm of `#[non_exhaustive]` [`typesafe::Error`] this build does not
+//!   know. A later build may add one, and "nothing was answered, a later
+//!   attempt might be" is the reading that costs a caller a judgement rather
+//!   than telling it something false about its own request.
+//! - [`typesafe::Error::Cancelled`], which nothing here can currently
+//!   produce — a command has no turn to be abandoned from — but which is an
+//!   arm all the same, and an arm with no row is how a taxonomy stops being
+//!   total.
+//! - a write to standard output that failed, which is what a hook that
+//!   stopped reading looks like from this side. It is an answer nobody
+//!   received, so it is reported as one rather than as a success.
+//!
 //! **2 is the one that matters**, and nothing here ever returns it: under a
 //! `PreToolUse` hook an exit 2 *blocks the tool call*
 //! (`ganja_core::hook`), so a code of ganja's own choosing in that
@@ -37,7 +52,7 @@
 //! to the normal permission rules by printing nothing.
 
 use std::collections::BTreeMap;
-use std::io::{IsTerminal as _, Read as _};
+use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
@@ -169,16 +184,63 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
     };
 
     let printed = match args.format {
+        // Nothing to filter: `serde_json` escapes a control character rather
+        // than emitting it, so the document is safe to print as it stands and
+        // a caller piping it into a parser gets the vendor's bytes back.
         Format::Json => serde_json::to_string_pretty(&answered)
             .expect("a response this build parsed serializes back"),
         // Not clamped, unlike the tool's: a session's output budget is a
         // context-window decision, and truncating a script's input would be
-        // a bug wearing its clothes.
-        Format::Text => ganja_tool::evaluate::lines(&answered.answers),
+        // a bug wearing its clothes. Filtered, though — see [`legible`].
+        Format::Text => legible(&ganja_tool::evaluate::lines(&answered.answers)),
     };
-    println!("{printed}");
 
-    ExitCode::from(ANSWERED)
+    write(&printed)
+}
+
+/// Prints `printed` and answers 0, or answers [`UNAVAILABLE`] if it could not
+/// be printed.
+///
+/// An **empty** rendering is printed as nothing at all rather than as a blank
+/// line. `evaluate::lines` answers `""` for a response carrying no answers,
+/// and the recipe's `awk` reads standard output a line at a time: a blank
+/// line there is one more record to not match, and this way there is no
+/// record at all.
+///
+/// `writeln!` rather than `println!` because `println!` **panics** when the
+/// write fails, and the ordinary way for it to fail here is a hook that
+/// stopped reading — a closed pipe, which is not a bug and must not be a
+/// stack trace on somebody's terminal.
+fn write(printed: &str) -> ExitCode {
+    if printed.is_empty() {
+        return ExitCode::from(ANSWERED);
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    // Flushed here rather than left to the handle's drop, where a failure
+    // would be discarded and this command would answer 0 for an answer that
+    // never arrived.
+    match writeln!(out, "{printed}").and_then(|()| out.flush()) {
+        Ok(()) => ExitCode::from(ANSWERED),
+        Err(error) => failed(UNAVAILABLE, &format!("the answers could not be written: {error}")),
+    }
+}
+
+/// `text` with every control character replaced, one line at a time.
+///
+/// Part of what `--format text` prints is chosen by the vendor — a `choice`
+/// value, the option names beside it, the `type` of an answer this build does
+/// not recognise — and it lands unread on the terminal of whoever wrote the
+/// hook. The tool path is protected twice over (ratatui drops control
+/// characters, and the headless reporter filters); this path had neither, so
+/// it borrows the reporter's own filter rather than growing a second one.
+///
+/// Line by line because the rendering is newline-joined and a newline is a
+/// control character: filtering the whole string at once would replace every
+/// join with a replacement character and put all the answers on one line.
+fn legible(text: &str) -> String {
+    text.lines().map(crate::report::printable).collect::<Vec<_>>().join("\n")
 }
 
 /// Where a `-` argument reads from, if anywhere.
@@ -282,7 +344,10 @@ fn code_for(error: &typesafe::Error) -> u8 {
 /// only on exit 2, which this command never returns, so these sentences are
 /// for whoever runs it by hand.
 fn failed(code: u8, why: &str) -> ExitCode {
-    eprintln!("ganja evaluate: {why}");
+    // Filtered like standard output, and for the same reason: the vendor's
+    // own 422 `detail` reaches this sentence, so a refusal can carry text a
+    // third party wrote straight onto a terminal.
+    eprintln!("ganja evaluate: {}", legible(why));
 
     ExitCode::from(code)
 }
