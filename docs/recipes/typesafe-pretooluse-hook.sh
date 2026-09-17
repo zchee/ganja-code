@@ -9,6 +9,15 @@
 # input and always exits 0: whatever goes wrong here, the session must end up
 # exactly where it would have been with no hook at all.
 
+# Every number below is parsed and printed by `awk`, whose string-to-number
+# conversion honours LC_NUMERIC in mawk and in `gawk --posix`. Under a
+# comma-decimal locale `"0.92" + 0` stops at the `.` and yields 0, so nothing
+# ever clears a threshold and this hook goes permanently, silently inert --
+# exit 0 and empty stdout, indistinguishable from "no question crossed". That
+# is a failure OPEN, which is the direction that matters here, so the locale
+# is pinned rather than trusted.
+export LC_ALL=C
+
 # Thresholds, as `<question id>=<probability>` pairs separated by spaces. A
 # question whose id is not listed here is read out of the answer and ignored.
 #

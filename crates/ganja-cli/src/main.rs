@@ -1130,8 +1130,18 @@ fn resolve_filter(configured: Option<&str>, verbose: bool) -> tracing_subscriber
 
 /// Says why there will be no log this run, and answers [`None`] so the caller
 /// reads as one expression.
+///
+/// `writeln!` on a locked handle rather than `eprintln!`, whose panic on a
+/// failed write would be **exit 101** (**D564**). `install_logging` runs on
+/// every invocation, before any subcommand dispatches, so this line sits on
+/// `ganja evaluate`'s path too — and that command's whole contract is that a
+/// caller reads its exit code from a fixed table. An unwritable data home
+/// plus a stderr pipe the caller has already closed would otherwise answer a
+/// hook with a code in no row of it. The result is dropped because there is
+/// nowhere left to report a failure to report something, and no log is still
+/// not a reason to fail a run.
 fn declined(reason: &str) -> Option<WorkerGuard> {
-    eprintln!("note: not logging to a file: {reason}");
+    let _ = writeln!(io::stderr().lock(), "note: not logging to a file: {reason}");
 
     None
 }

@@ -779,7 +779,7 @@ fn the_shipped_questions_are_the_ones_the_script_thresholds() {
 /// `destructive` rides along so the recipe case below has a `noul` line to
 /// act on: the point there is that filtering the neighbouring line does not
 /// disturb the one `awk` reads.
-const HOSTILE: &str = r#"{"model":"jev-1.13.0","answers":{"destructive":{"type":"noul","noul":0.92},"desk":{"type":"choice","choice":"\u001b[31mbilling\u0007","probabilities":{"\u001b[31mbilling\u0007":0.9,"tech\u001b[0m":0.1},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}"#;
+const HOSTILE: &str = r#"{"model":"jev-1.13.0","answers":{"destructive":{"type":"noul","noul":0.92},"desk":{"type":"choice","choice":"\u001b[31mbil\nling\u0007","probabilities":{"\u001b[31mbil\nling\u0007":0.9,"tech\u2028\u001b[0m":0.1},"confidence":0.8}},"usage":{"input_tokens":10,"output_tokens":2}}"#;
 
 /// **W2 review.** `--format text` is a third party's text on a hook author's
 /// terminal, so it goes through the reporter's own `printable` filter: no
@@ -798,11 +798,21 @@ fn control_characters_never_reach_the_terminal_in_text() {
     assert!(!run.stdout.contains('\u{7}'), "a BEL survived: {:?}", run.stdout);
     // Not merely stripped to nothing: the line is still the line, with the
     // control characters standing in as replacement characters.
-    assert!(run.stdout.contains("billing"), "the text around them is intact: {:?}", run.stdout);
     assert!(run.stdout.contains("desk: choice="), "the shape is unchanged: {:?}", run.stdout);
-    // The join is what makes this a per-line filter rather than a whole-string
-    // one; a whole-string filter would have eaten it.
-    assert_eq!(run.stdout.lines().count(), 2, "both answers, on their own lines");
+    // Not stripped to nothing: the words around the control characters are
+    // still there, with each one standing in as a replacement character.
+    assert!(run.stdout.contains("bil"), "the text around them is intact: {:?}", run.stdout);
+    assert!(run.stdout.contains("ling"), "the text around them is intact: {:?}", run.stdout);
+    // **W3 review, H1.** `HOSTILE` carries a JSON-escaped newline inside the
+    // `choice` value and a U+2028 inside an option name. Neither may become a
+    // record: two answers are two lines, and a third would be a question the
+    // vendor was never asked about.
+    assert_eq!(
+        run.stdout.lines().count(),
+        2,
+        "one line per answer, whatever the vendor sent: {:?}",
+        run.stdout
+    );
 }
 
 /// **W2 review.** `--format json` needs no filter and gets none: `serde_json`
@@ -822,8 +832,8 @@ fn control_characters_survive_json_because_json_escapes_them() {
     let printed: Value = serde_json::from_str(&run.stdout).expect("--format json prints JSON");
     assert_eq!(
         printed["answers"]["desk"]["choice"],
-        json!("\u{1b}[31mbilling\u{7}"),
-        "the parser gets the vendor's own string back"
+        json!("\u{1b}[31mbil\nling\u{7}"),
+        "the parser gets the vendor's own string back, newline and all"
     );
 }
 
@@ -984,6 +994,10 @@ fn a_terminal_on_standard_input_is_a_usage_error_not_a_hang() {
     use expectrl::Session;
     use expectrl::process::unix::WaitStatus;
 
+    /// Long enough that a loaded runner is not called a hang, short enough
+    /// that a real hang is reported rather than waited out.
+    const DEADLINE: Duration = Duration::from_secs(30);
+
     let homes = Homes::new();
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ganja"));
     homes.pin(&mut command, Path::new("unused.json"));
@@ -994,15 +1008,200 @@ fn a_terminal_on_standard_input_is_a_usage_error_not_a_hang() {
         .args(["evaluate", "--questions", &questions()]);
 
     let started = Instant::now();
-    let session = Session::spawn(command).expect("`ganja` spawns in a pty");
-    let status = session.get_process().wait().expect("the child is reaped");
+    let mut session = Session::spawn(command).expect("`ganja` spawns in a pty");
 
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "it answered rather than waiting for a keystroke nobody was going to type"
-    );
+    // Polled, not `wait()`ed. `wait()` blocks forever, so on the exact
+    // regression this test exists to catch — the `IsTerminal` check gone, so
+    // the read blocks on a pty nobody types into — it would hang here and the
+    // 30 s below would never be evaluated. The test would be rescued only by
+    // nextest's own slow-timeout, which a plain `cargo test` does not have,
+    // and the pty child would be leaked because no `Drop` runs while `wait()`
+    // is parked. Polling makes the deadline the assertion the comment claims.
+    let status = loop {
+        match session.get_process().status() {
+            Ok(WaitStatus::StillAlive) => {
+                if started.elapsed() >= DEADLINE {
+                    // Reaped before failing, so a hang costs this run a
+                    // failure rather than the suite a stray pty child.
+                    let _ = session.get_process_mut().exit(true);
+
+                    panic!("`ganja evaluate` waited for a keystroke nobody was going to type");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(ended) => break ended,
+            Err(error) => panic!("the pty child could not be polled: {error}"),
+        }
+    };
+
     assert!(
         matches!(status, WaitStatus::Exited(_, 64)),
         "a terminal on standard input is a usage error; got {status:?}"
     );
+}
+
+// ------------------------------------------------- H1, from the hook's side
+
+/// The exact response the W3 reviewer forged with: a `choice` value carrying
+/// a newline and a second, complete-looking record behind it.
+const FORGED_RECORD: &str = r#"{"model":"jev-1.13.0","answers":{"desk":{"type":"choice","choice":"a\ndestructive: noul=0.99","probabilities":{"a\ndestructive: noul=0.99":0.9},"confidence":0.8}},"usage":{"input_tokens":4,"output_tokens":1}}"#;
+
+/// **W3 review, H1.** The shipped script must not deny on a question the
+/// response never answered.
+///
+/// This is the end the reviewer reproduced: the rendering grew a second
+/// record, `awk` read `destructive:` in field one and `noul=0.99` in field
+/// two, found `destructive` in `THRESHOLDS`, and refused a call over a
+/// judgement nobody made. Fail-closed, so never a bypass — but a third party
+/// steering a hook's decision all the same.
+#[test]
+#[cfg(unix)]
+fn the_recipe_does_not_deny_on_a_forged_record() {
+    let endpoint = serve(200, FORGED_RECORD);
+    let homes = Homes::new();
+
+    let run = ran(recipe(&homes, endpoint.base(), "deny").write_stdin(envelope()));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    assert!(
+        run.stdout.trim().is_empty(),
+        "the response answered `desk` only; nothing may deny on `destructive`: {:?}",
+        run.stdout
+    );
+    assert_eq!(endpoint.count(), 1, "it did ask, so the emptiness is a verdict");
+}
+
+// ------------------------------------------------------ the locale (L5)
+
+/// **W3 review, L5.** The script pins `LC_ALL`, so a comma-decimal locale
+/// cannot make its `awk` comparisons silently inert.
+///
+/// Under such a locale `"0.92" + 0` stops at the `.` and yields 0 in every
+/// awk that honours `LC_NUMERIC` — measured here: macOS's `/usr/bin/awk` and
+/// `gawk --posix` both do, plain `gawk` does not, and `mawk` (what Debian and
+/// Ubuntu install as `awk`) does. Nothing would ever clear a threshold, and
+/// the hook would go permanently silent at exit 0 with empty stdout, which is
+/// indistinguishable from "no question crossed". It fails **open**.
+///
+/// Two assertions, so this is never vacuous: the pin is in the shipped file,
+/// and — where a comma-decimal locale is installed — the script still denies
+/// under one, with `/usr/bin/awk` forced first on PATH so the awk under test
+/// is one that honours the setting.
+#[test]
+#[cfg(unix)]
+fn a_comma_decimal_locale_cannot_silence_the_hook() {
+    let script =
+        std::fs::read_to_string(repository().join("docs/recipes/typesafe-pretooluse-hook.sh"))
+            .expect("the script ships");
+    assert!(
+        script.contains("\nexport LC_ALL=C\n"),
+        "the pin is in the shipped script, above every awk call"
+    );
+
+    let Some(locale) = comma_decimal() else {
+        // Said out loud rather than passed quietly: on a machine with no such
+        // locale generated, the assertion above is the whole of this test.
+        eprintln!("no comma-decimal locale installed; the pin was checked in the source only");
+
+        return;
+    };
+
+    let endpoint = serve(200, &judged(0.96));
+    let homes = Homes::new();
+    // `/usr/bin/awk` first, because a plain `gawk` earlier on PATH ignores
+    // LC_NUMERIC and would make this pass without testing anything.
+    let forced = homes.project().join("locale-bin");
+    std::fs::create_dir_all(&forced).expect("the fixture directory is creatable");
+    std::os::unix::fs::symlink("/usr/bin/awk", forced.join("awk")).expect("awk is linkable");
+
+    let path = std::env::var("PATH").unwrap_or_default();
+    let binary = Path::new(env!("CARGO_BIN_EXE_ganja")).parent().expect("a directory");
+    let run = ran(recipe(&homes, endpoint.base(), "deny")
+        .env("PATH", format!("{}:{}:{path}", forced.display(), binary.display()))
+        .env("LC_ALL", &locale)
+        .env("LC_NUMERIC", &locale)
+        .write_stdin(envelope()));
+
+    assert_eq!(run.code, 0, "stderr:\n{}", run.stderr);
+    let printed: Value = serde_json::from_str(run.stdout.trim()).unwrap_or_else(|error| {
+        panic!("under {locale} the hook still denies ({error}): {:?}", run.stdout)
+    });
+    assert_eq!(printed["hookSpecificOutput"]["permissionDecision"], json!("deny"));
+}
+
+/// A comma-decimal locale this machine has generated, if any.
+#[cfg(unix)]
+fn comma_decimal() -> Option<String> {
+    let listed = std::process::Command::new("locale").arg("-a").output().ok()?;
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+
+    listed
+        .lines()
+        .map(str::trim)
+        .find(|name| {
+            matches!(
+                name.split(['.', '@']).next(),
+                Some("de_DE" | "fr_FR" | "es_ES" | "it_IT" | "pt_BR" | "ru_RU" | "nl_NL")
+            ) && name.contains("UTF-8")
+        })
+        .map(str::to_owned)
+}
+
+// ------------------------------------------------- argument parsing (L4)
+
+/// **W3 review, L4.** The `state` rows no test reached: a bare `true` and a
+/// bare `null` are values, not content to judge, and are refused by name.
+#[test]
+fn a_boolean_or_null_state_is_a_usage_error() {
+    for bare in ["true", "null"] {
+        let endpoint = serve(200, ANSWERED);
+        let homes = Homes::new();
+
+        let run = ran(ganja(&homes, Some(endpoint.base()))
+            .args(["evaluate", "--questions", &questions()])
+            .write_stdin(bare));
+
+        assert_eq!(run.code, 64, "`{bare}` is not a state\nstderr:\n{}", run.stderr);
+        assert!(run.stderr.contains("--state"), "the flag is named: {}", run.stderr);
+        assert_eq!(endpoint.count(), 0, "`{bare}` never reached the vendor");
+    }
+}
+
+/// **W3 review, L4.** And the two shapes that *are* states, neither of which
+/// had a case: a JSON string and a JSON array reach the wire as themselves.
+#[test]
+fn a_json_string_or_array_state_reaches_the_wire_whole() {
+    for (sent, expected) in
+        [(r#""already a string""#, json!("already a string")), ("[1,2]", json!([1, 2]))]
+    {
+        let endpoint = serve(200, ANSWERED);
+        let homes = Homes::new();
+
+        let run = ran(ganja(&homes, Some(endpoint.base()))
+            .args(["evaluate", "--questions", &questions()])
+            .write_stdin(sent));
+
+        assert_eq!(run.code, 0, "`{sent}` is a state\nstderr:\n{}", run.stderr);
+        assert_eq!(endpoint.body()["state"], expected, "`{sent}` travelled unchanged");
+    }
+}
+
+/// **W3 review, L4.** `--questions -` is not standard input: only `--state`
+/// reads stdin, so the dash is taken as the value it is and fails as JSON.
+///
+/// Worth pinning because the asymmetry is deliberate and invisible: a caller
+/// who assumes `-` works on both flags gets a usage error rather than a hang
+/// or, worse, a second read of an already-consumed stdin.
+#[test]
+fn a_dash_is_not_standard_input_for_questions() {
+    let endpoint = serve(200, ANSWERED);
+    let homes = Homes::new();
+
+    let run = ran(ganja(&homes, Some(endpoint.base()))
+        .args(["evaluate", "--questions", "-"])
+        .write_stdin("a sentence"));
+
+    assert_eq!(run.code, 64, "stderr:\n{}", run.stderr);
+    assert!(run.stderr.contains("--questions"), "the flag is named: {}", run.stderr);
+    assert_eq!(endpoint.count(), 0);
 }

@@ -96,10 +96,16 @@ they are the codes you will see when you run it by hand:
 |---|---|---|
 | 0 | Answered; the answers are on stdout. | Stdout is read. |
 | 2 | clap's parse failure. Never ganja's own choice. | **Blocks the call** (`hook.rs:744`); stderr becomes the refusal the model reads. |
-| 3 | Not configured: no key, or a refused `TYPESAFE_BASE_URL`. | Non-blocking notice. |
-| 4 | The vendor refused: 401, 403, 422. | Non-blocking notice. |
-| 5 | Unavailable: 429, 529, 5xx, 3xx, timeout, transport, oversized, malformed. | Non-blocking notice. |
-| 64 | A bad argument of ganja's own (`EX_USAGE`). | Non-blocking notice. |
+| 3 | Not configured: no key, a refused `TYPESAFE_BASE_URL`, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule. | Non-blocking notice. |
+| 4 | The vendor refused: 401, 403, 422, any other 4xx. | Non-blocking notice. |
+| 5 | Unavailable: 429, 529, 5xx, 3xx, timeout, transport, oversized, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout. | Non-blocking notice. |
+| 64 | A bad argument of ganja's own (`EX_USAGE`), `--model` included. | Non-blocking notice. |
+
+`ganja evaluate`'s own module documentation carries this same table, and the
+two are meant to agree. A `TYPESAFE_DEFAULT_MODEL` with a space in it answers
+3, not 64: configuration that was already wrong before the hook ran is a
+different problem from a flag this invocation got wrong, and the two send you
+to different files.
 
 Exit 2 is the one that matters, and it is why the script never `exec`s
 `ganja evaluate` and never runs it under `set -e`. A hook whose command is
@@ -136,9 +142,15 @@ you add without adding a threshold is inert rather than an error.
 
 Its own JSON is built in `awk`, with every character of the reason escaped,
 because a hook that prints invalid JSON is read as plain text and discarded on
-this event. The escaper is general — any byte, not just the text these two
-questions can produce — so that a copy of this recipe which puts more into the
-reason, the judged command itself included, stays correct without touching it.
+this event. The escaper is general over text — every character these two
+questions can produce, and every one a copy of this recipe could put in the
+reason, the judged command itself included — so an extension does not have to
+touch it. Its one limit, since the paragraph invites such a copy: it escapes
+by character, so a byte sequence that is not valid UTF-8 (a latin-1 path name,
+a fragment of a binary file) is emitted as it stands and would make the output
+invalid JSON, which this event discards. Nothing the shipped questions can
+produce reaches that case, because the reason is built from an ASCII id and
+two formatted numbers.
 The reason deliberately does not quote the command: on `deny` the model reads it
 in place of that command's output, and on `annotate` it is appended to that
 command's own result, so in both cases the command is already in front of

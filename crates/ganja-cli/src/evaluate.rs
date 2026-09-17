@@ -49,14 +49,22 @@
 //! `--model` nobody can use is this invocation's own mistake (64). A caller
 //! that conflated them would tell somebody to fix the wrong thing.
 //!
-//! One arm decides each because **the two origins raise different
-//! variants**, not the same variant from two places:
-//! [`typesafe::Error::RefusedModel`] is raised only by
-//! [`typesafe::Settings::from_env`], so it always means the environment and
-//! always answers 3; a forged `--model` is refused by
-//! [`typesafe::Request::checked`] as [`typesafe::Error::InvalidRequest`],
-//! which is this command's usage row. So `code_for` can decide both without
-//! knowing its caller, and no mapping is needed at the call sites.
+//! **The two rows are decided at two call sites**, not by [`code_for`]: the
+//! `Err` arm of [`typesafe::Settings::from_env`] hard-codes 3, and the `Err`
+//! arm of [`typesafe::Request::checked`] hard-codes 64. `code_for` is
+//! consulted only for the client and the exchange, neither of which can
+//! raise either error.
+//!
+//! Its `RefusedBase | RefusedModel` and `InvalidRequest` arms are therefore
+//! **unreachable**, and kept deliberately: they are totality for a
+//! `#[non_exhaustive]` enum, and they agree with the two call sites, so this
+//! table can be read in one place. They agree only because the two origins
+//! raise *different variants* — `RefusedModel` is raised at exactly one
+//! place, inside `from_env`, while a forged `--model` is refused by `checked`
+//! as `InvalidRequest` — so neither the split nor its correctness depends on
+//! call order. A later reader may fold the two call sites into `code_for`
+//! without changing any answer; they should know that is a coincidence of
+//! those variants differing, and not a property of the enum.
 //!
 //! Neither refusal echoes the value it refused, and that is load bearing
 //! rather than tidy: the id rule exists because the model id is interpolated
@@ -119,6 +127,11 @@ pub struct EvaluateArgs {
     /// `jev-latest` is the flagship alias and `jev-preview` the other one; a
     /// versioned id such as `jev-1.13.0` is equally valid. Nothing here
     /// decides which ids the vendor serves.
+    ///
+    /// Passing this does **not** rescue a malformed TYPESAFE_DEFAULT_MODEL:
+    /// the environment is read first, and a default outside the id rule is a
+    /// configuration refusal (exit 3) before this flag is looked at, even
+    /// though the run was never going to use that default.
     #[arg(long, value_name = "ID")]
     model: Option<String>,
     /// How to print the answers.
