@@ -214,11 +214,23 @@ impl Tool for EvaluateTool {
     }
 }
 
+/// Every answer as one line each, in id order.
+///
+/// The rendering `ganja evaluate --format text` prints, shared so the two
+/// surfaces cannot drift into two spellings of the same line.
+///
+/// The **join** is what is shared and the clamp deliberately is not. A tool
+/// call's output is spent out of a context window, so [`output`] clamps it;
+/// a subcommand's stdout is a script's input, and truncating that is a bug
+/// rather than a budget.
+#[must_use]
+pub fn lines(answers: &BTreeMap<String, Answer>) -> String {
+    answers.iter().map(|(id, answer)| line(id, answer)).collect::<Vec<_>>().join("\n")
+}
+
 /// What the model and the transcript are handed.
 fn output(answered: &Response, latency_ms: u64) -> ToolOutput {
-    let lines =
-        answered.answers.iter().map(|(id, answer)| line(id, answer)).collect::<Vec<_>>().join("\n");
-    let clamped = truncate::clamp(&lines);
+    let clamped = truncate::clamp(&lines(&answered.answers));
 
     ToolOutput {
         title: format!(

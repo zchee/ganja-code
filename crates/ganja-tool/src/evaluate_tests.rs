@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::{DESCRIPTION, EvaluateTool, ID, line};
+use super::{DESCRIPTION, EvaluateTool, ID, line, lines};
 use crate::typesafe::tests::fixture::{self, Endpoint, answer};
 use crate::typesafe::{Answer, DEFAULT_MODEL, PREVIEW_MODEL, Settings};
 use crate::{Tool, ToolCtx, ToolError};
@@ -16,6 +16,14 @@ const KEY: &str = "sk-typesafe-tool-fixture-0123456789";
 /// A canned answer carrying one of each type, plus one this build cannot
 /// read, so criterion 1b's four renderings come out of one exchange.
 const ANSWERED: &str = r#"{"model":"jev-1.13.0","answers":{"dept":{"type":"choice","choice":"technical","probabilities":{"billing":0.08,"sales":0.07,"technical":0.85},"confidence":0.82},"frustration":{"type":"score","score":1.6,"legend":{"0":"calm","1":"cross","2":"furious"},"probabilities":{"0":0.05,"1":0.3,"2":0.65},"confidence":0.78},"urgent":{"type":"noul","noul":0.92},"x":{"type":"quanta","quanta":[0.1,0.9]}},"usage":{"input_tokens":312,"output_tokens":48}}"#;
+
+/// What [`ANSWERED`]'s four answers render to, which both the tool's own
+/// output and the `ganja evaluate --format text` rendering must equal —
+/// named once so the two cannot be changed apart.
+const RENDERED: &str = "dept: choice=technical p=0.85 confidence=0.82 (billing 0.08, sales 0.07)\n\
+                        frustration: score=1.60 of 0..2 confidence=0.78\n\
+                        urgent: noul=0.92\n\
+                        x: quanta (unrecognised answer type)";
 
 /// A tool pointed at `endpoint`.
 fn tool(endpoint: &Endpoint) -> EvaluateTool {
@@ -62,13 +70,7 @@ async fn every_answer_type_renders_to_its_own_line_and_an_unknown_one_says_so() 
     let answered =
         tool(&endpoint).run(one_question(), &ctx()).await.expect("the canned answer parses");
 
-    assert_eq!(
-        answered.output,
-        "dept: choice=technical p=0.85 confidence=0.82 (billing 0.08, sales 0.07)\n\
-         frustration: score=1.60 of 0..2 confidence=0.78\n\
-         urgent: noul=0.92\n\
-         x: quanta (unrecognised answer type)"
-    );
+    assert_eq!(answered.output, RENDERED);
     // The **served** model, not the alias that was asked for.
     assert_eq!(answered.title, "4 answer(s) · jev-1.13.0 · 312 input tokens");
     assert_eq!(answered.metadata["model"], "jev-1.13.0");
@@ -341,4 +343,24 @@ async fn the_tool_is_named_what_the_permission_rules_gate() {
         ganja_permission::permission::ASK_BY_DEFAULT.contains(&ID),
         "a tool that sends project content to a third party asks first"
     );
+}
+
+/// The contract `ganja evaluate --format text` prints and the recipe's `awk`
+/// reads. It is the tool's own rendering, shared rather than spelled twice,
+/// so a change to either surface has to be a change to both.
+#[test]
+fn the_shared_rendering_is_the_one_line_per_answer_both_surfaces_print() {
+    let answered: crate::typesafe::Response =
+        serde_json::from_str(ANSWERED).expect("the canned answer parses");
+
+    assert_eq!(lines(&answered.answers), RENDERED);
+
+    // The clamp is deliberately not shared: a tool call's output is spent out
+    // of a context window, while a subcommand's stdout is a script's input.
+    // So what comes back here is the unclamped join, one line per answer.
+    assert_eq!(lines(&answered.answers).lines().count(), answered.answers.len());
+
+    // And an empty map is an empty string rather than a stray newline, since
+    // `awk` reading one line per answer must not see a blank one.
+    assert_eq!(lines(&std::collections::BTreeMap::new()), "");
 }
