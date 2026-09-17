@@ -283,6 +283,26 @@ async fn the_schema_states_the_shape_rather_than_leaving_it_to_the_model() {
         "the state names its own shape: {state}"
     );
 
+    // And `instructions` likewise, in every question variant. Left a bare
+    // `Value` it rendered as the always-true schema, which told the model
+    // nothing and let a null through to a request the vendor 422s.
+    let variants =
+        schema["$defs"]["Question"]["oneOf"].as_array().expect("three question variants");
+    assert_eq!(variants.len(), 3);
+    for variant in variants {
+        let instructions = &variant["properties"]["instructions"];
+
+        assert!(
+            instructions.get("$ref").is_some() || instructions.get("anyOf").is_some(),
+            "instructions state their shape rather than accepting anything: {instructions}"
+        );
+        assert_ne!(
+            instructions,
+            &serde_json::json!(true),
+            "and are not schemars' always-true schema"
+        );
+    }
+
     // A1: the model argument is a free string whose description names both
     // aliases, since a model never told an alias exists cannot ask for it.
     let model = &schema["properties"]["model"];
@@ -363,4 +383,117 @@ fn the_shared_rendering_is_the_one_line_per_answer_both_surfaces_print() {
     // And an empty map is an empty string rather than a stray newline, since
     // `awk` reading one line per answer must not see a blank one.
     assert_eq!(lines(&std::collections::BTreeMap::new()), "");
+}
+
+#[tokio::test]
+async fn a_model_or_an_instruction_the_dialog_could_not_survive_is_an_argument_error() {
+    let endpoint = fixture::serve(answer(ANSWERED)).await;
+    let tool = tool(&endpoint);
+    let noul = serde_json::json!({"type": "noul", "instructions": "Urgent?"});
+    let refused = format!("{ID} → 127.0.0.1 · the arguments are not a valid request");
+
+    let bad = [
+        // The title is a `·`-separated sentence and the model owns this
+        // field: unbounded and unflattened, it forges a second, smaller
+        // disclosure after the real one.
+        (
+            "a model that forges a second disclosure",
+            serde_json::json!({
+                "state": "x",
+                "questions": {"a": noul},
+                "model": "jev-latest · 12 B · 1 question(s) · jev-latest · state text"
+            }),
+        ),
+        (
+            "a model carrying a newline",
+            serde_json::json!({
+                "state": "x", "questions": {"a": noul}, "model": "jev-latest\nforged"
+            }),
+        ),
+        (
+            "a model of 65 characters",
+            serde_json::json!({"state": "x", "questions": {"a": noul}, "model": "j".repeat(65)}),
+        ),
+        // Untyped, this passed every local check and spent the whole state
+        // on a request the vendor answers with a 422.
+        (
+            "a null instruction",
+            serde_json::json!({
+                "state": "x", "questions": {"a": {"type": "noul", "instructions": null}}
+            }),
+        ),
+        (
+            "a numeric instruction",
+            serde_json::json!({
+                "state": "x", "questions": {"a": {"type": "noul", "instructions": 42}}
+            }),
+        ),
+        (
+            "a boolean instruction",
+            serde_json::json!({
+                "state": "x", "questions": {"a": {"type": "noul", "instructions": true}}
+            }),
+        ),
+    ];
+
+    for (what, args) in bad {
+        assert_eq!(tool.describe(&args), refused, "the dialog for {what} shows nothing");
+
+        let answered = tool.run(args, &ctx()).await;
+
+        assert!(
+            matches!(answered, Err(ToolError::InvalidArgs(_))),
+            "{what} is refused as bad arguments: {answered:?}"
+        );
+    }
+    assert_eq!(endpoint.count(), 0, "not one of them reached the vendor");
+
+    // And the shapes that are legitimate still are, in the dialog and on the
+    // wire: nothing about A1 or the documented instruction forms changed.
+    for good in [
+        serde_json::json!({"state": "x", "questions": {"a": noul}, "model": PREVIEW_MODEL}),
+        serde_json::json!({"state": "x", "questions": {"a": noul}, "model": "jev-1.13.0"}),
+        serde_json::json!({
+            "state": "x",
+            "questions": {"a": {"type": "noul", "instructions": {"ask": "Urgent?"}}}
+        }),
+        serde_json::json!({
+            "state": "x",
+            "questions": {"a": {"type": "noul", "instructions": ["Urgent?", "Be strict."]}}
+        }),
+    ] {
+        assert_ne!(tool.describe(&good), refused, "{good} is a valid request");
+        assert!(tool.run(good, &ctx()).await.is_ok());
+    }
+}
+
+#[test]
+fn a_choice_absent_from_its_own_distribution_says_so_rather_than_claiming_zero() {
+    // "The vendor did not say" and "the vendor said zero" are different
+    // facts, and a model reading the second acts on a certainty nobody
+    // expressed.
+    let absent = Answer::Choice {
+        choice: "technical".to_owned(),
+        probabilities: BTreeMap::from([("billing".to_owned(), 0.08)]),
+        confidence: 0.82,
+    };
+
+    assert_eq!(line("dept", &absent), "dept: choice=technical p=? confidence=0.82 (billing 0.08)");
+
+    let empty = Answer::Choice {
+        choice: "technical".to_owned(),
+        probabilities: BTreeMap::new(),
+        confidence: 0.5,
+    };
+
+    assert_eq!(line("dept", &empty), "dept: choice=technical p=? confidence=0.50");
+
+    // A choice that *is* in its distribution still reports the number.
+    let present = Answer::Choice {
+        choice: "technical".to_owned(),
+        probabilities: BTreeMap::from([("technical".to_owned(), 0.85)]),
+        confidence: 0.82,
+    };
+
+    assert_eq!(line("dept", &present), "dept: choice=technical p=0.85 confidence=0.82");
 }

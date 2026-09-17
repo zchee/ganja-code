@@ -174,6 +174,9 @@ impl Settings {
         };
         let model = read(MODEL_ENV)
             .map_or_else(|| DEFAULT_MODEL.to_owned(), |named| named.trim().to_owned());
+        if !is_model(&model) {
+            return Err(Error::RefusedModel);
+        }
 
         Ok(Some(Self::new(key, base, model)?))
     }
@@ -323,6 +326,14 @@ pub enum Error {
          wire in the clear"
     )]
     RefusedBase,
+    /// The configured default model is not a usable id. The value is
+    /// deliberately absent from this message: it reaches a dialog title, and
+    /// a refusal that quoted it would put it on the screen regardless.
+    #[error(
+        "{MODEL_ENV} is not a usable model id; ids are 1 to {MAX_ID} characters of letters, \
+         digits, `_`, `.` or `-`"
+    )]
+    RefusedModel,
     /// The request did not pass [`Request::checked`], so nothing was sent.
     #[error("{0}")]
     InvalidRequest(String),
@@ -385,6 +396,7 @@ impl From<Error> for ToolError {
             // Two sentences, because the two cases have different remedies
             // and a model that reads "check your API key" for a 404 will go
             // and tell the user something false.
+            Error::RefusedBase | Error::RefusedModel => Self::Failed(format!("{error}")),
             Error::Rejected { status } if matches!(status, 401 | 403) => Self::Failed(format!(
                 "TypeSafe refused the credential (HTTP {status}); check that {KEY_ENV} holds a \
                  valid key. This was rejected, so do not retry — continue without this \
@@ -440,6 +452,30 @@ pub struct NoulCriteria {
     pub no: Option<String>,
 }
 
+/// What a question asks, in the shapes the vendor accepts.
+///
+/// A sibling of [`State`] rather than [`State`] itself, though the two carry
+/// the same three shapes. They mean different things — one is the content
+/// being judged, the other the judgement to make about it — and a schema is
+/// read by a model: `instructions` pointing at a definition that describes
+/// itself as "the content a judgement is made about" would be actively
+/// misleading. The cost is one more `$defs` entry.
+///
+/// Typed rather than left a bare `serde_json::Value`, which schemars renders
+/// as the always-true schema. Untyped, `{"type":"noul","instructions":null}`
+/// passed every local check and spent the whole state on a request the
+/// vendor answers with a 422.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Instructions {
+    /// The usual case: the question in words.
+    Text(String),
+    /// Named parts, where one sentence will not do.
+    Object(BTreeMap<String, serde_json::Value>),
+    /// An ordered sequence of them.
+    Array(Vec<serde_json::Value>),
+}
+
 /// One narrow judgement to make about the state.
 ///
 /// The tagged form is the vendor's: `{"type": "noul", ...}`. Unknown keys are
@@ -453,7 +489,7 @@ pub enum Question {
     /// A yes/no question, answered with the probability of yes.
     Noul {
         /// The question to evaluate.
-        instructions: serde_json::Value,
+        instructions: Instructions,
         /// Optional descriptions of what a yes and a no mean.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         criteria: Option<NoulCriteria>,
@@ -461,14 +497,14 @@ pub enum Question {
     /// One option out of a named set, answered with the full distribution.
     Choice {
         /// What to decide.
-        instructions: serde_json::Value,
+        instructions: Instructions,
         /// Option to rubric; `null` where an option needs no extra detail.
         criteria: BTreeMap<String, Option<String>>,
     },
     /// A position on ordered levels, answered with a weighted value.
     Score {
         /// What to rate.
-        instructions: serde_json::Value,
+        instructions: Instructions,
         /// The levels, in order, lowest first.
         criteria: Vec<String>,
     },
@@ -618,8 +654,18 @@ impl Request {
                 return refuse(message);
             }
         }
-        if model.trim().is_empty() {
-            return refuse("the model id is empty.".to_owned());
+        if !is_model(&model) {
+            // Not only a wire concern. This string is interpolated into the
+            // permission dialog's title, which is a `·`-separated sentence,
+            // and the model owns this field — so an unbounded, unflattened
+            // value could forge a second, smaller-looking disclosure after
+            // the real one. The id rule refuses that by refusing the
+            // characters it would need.
+            return refuse(format!(
+                "the model id is not usable; ids are 1 to {MAX_ID} characters of letters, \
+                 digits, `_`, `.` or `-` — `{DEFAULT_MODEL}`, `{PREVIEW_MODEL}` and a versioned \
+                 id such as `jev-1.13.0` all qualify."
+            ));
         }
 
         let kind = StateKind::of(&state);
@@ -676,6 +722,16 @@ struct Wire<'request> {
     questions: &'request BTreeMap<String, Question>,
     /// Which model judges.
     model: &'request str,
+}
+
+/// Whether `model` is a usable model id.
+///
+/// The same grammar question ids answer to, for a second reason on top of
+/// the wire's: this value reaches the consent dialog's title, which is one
+/// `·`-separated sentence. The value is never echoed by the refusal, because
+/// echoing it would put the forged text on the screen anyway.
+fn is_model(model: &str) -> bool {
+    is_id(model)
 }
 
 /// Whether `id` is a usable question id.

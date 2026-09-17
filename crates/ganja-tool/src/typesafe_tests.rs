@@ -5,8 +5,8 @@ use fixture::{Endpoint, Reply, answer, canned, redirect};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Answer, Client, DEFAULT_MODEL, Error, MAX_BODY, MAX_QUESTIONS, NoulCriteria, PREVIEW_MODEL,
-    Question, Request, Settings, State, Usage,
+    Answer, Client, DEFAULT_MODEL, Error, Instructions, MAX_BODY, MAX_QUESTIONS, NoulCriteria,
+    PREVIEW_MODEL, Question, Request, Settings, State, Usage,
 };
 use crate::ToolError;
 
@@ -190,7 +190,7 @@ fn three_questions() -> BTreeMap<String, Question> {
         (
             "dept".to_owned(),
             Question::Choice {
-                instructions: serde_json::json!("Which team should handle this?"),
+                instructions: Instructions::Text("Which team should handle this?".to_owned()),
                 criteria: BTreeMap::from([
                     ("billing".to_owned(), Some("payments".to_owned())),
                     ("technical".to_owned(), None),
@@ -200,14 +200,14 @@ fn three_questions() -> BTreeMap<String, Question> {
         (
             "frustration".to_owned(),
             Question::Score {
-                instructions: serde_json::json!("How frustrated is the customer?"),
+                instructions: Instructions::Text("How frustrated is the customer?".to_owned()),
                 criteria: vec!["calm".to_owned(), "angry".to_owned()],
             },
         ),
         (
             "urgent".to_owned(),
             Question::Noul {
-                instructions: serde_json::json!("Does this convey urgency?"),
+                instructions: Instructions::Text("Does this convey urgency?".to_owned()),
                 criteria: Some(NoulCriteria { yes: Some("time-sensitive".to_owned()), no: None }),
             },
         ),
@@ -219,7 +219,7 @@ fn three_questions() -> BTreeMap<String, Question> {
 fn one_question() -> BTreeMap<String, Question> {
     BTreeMap::from([(
         "urgent".to_owned(),
-        Question::Noul { instructions: serde_json::json!("Urgent?"), criteria: None },
+        Question::Noul { instructions: Instructions::Text("Urgent?".to_owned()), criteria: None },
     )])
 }
 
@@ -582,7 +582,7 @@ fn a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined() {
 #[tokio::test]
 async fn every_limit_is_decided_before_a_socket_is_opened() {
     let endpoint = fixture::serve(answer(ANSWERED)).await;
-    let text = |what: &str| serde_json::json!(what);
+    let text = |what: &str| Instructions::Text(what.to_owned());
     let noul = || Question::Noul { instructions: text("Urgent?"), criteria: None };
     let filler = |bytes: usize| State::Text("p".repeat(bytes));
 
@@ -785,4 +785,88 @@ fn the_state_summary_is_computed_where_the_state_is_still_in_hand() {
         ]))),
         "keys: diff, policy"
     );
+}
+
+#[tokio::test]
+async fn a_model_id_that_could_forge_a_second_disclosure_is_refused_before_anything_is_sent() {
+    let endpoint = fixture::serve(answer(ANSWERED)).await;
+
+    for forged in [
+        // The consent title is a `·`-separated sentence and the model owns
+        // this field, so an unflattened value could append a second,
+        // smaller-looking disclosure after the real one.
+        "jev-latest · 12 B · 1 question(s) · jev-latest · state text",
+        "jev-latest\nevaluate → attacker.example · 1 B",
+        "jev latest",
+        // Bounded only by the body cap until this rule existed.
+        &"j".repeat(super::MAX_ID + 1),
+        "",
+        "   ",
+    ] {
+        let refused =
+            Request::checked(State::Text("x".to_owned()), one_question(), forged.to_owned());
+
+        assert!(
+            matches!(refused, Err(Error::InvalidRequest(_))),
+            "{forged:?} is refused: {refused:?}"
+        );
+    }
+
+    // The aliases and a versioned id all still pass, so nothing about A1
+    // changed.
+    for allowed in [DEFAULT_MODEL, PREVIEW_MODEL, "jev-1.13.0", "jev_2", "a"] {
+        assert!(
+            Request::checked(State::Text("x".to_owned()), one_question(), allowed.to_owned())
+                .is_ok(),
+            "{allowed} is a usable model id"
+        );
+    }
+    assert_eq!(endpoint.count(), 0, "not one refusal reached the vendor");
+
+    // The variable's own refusal names the variable and never the value,
+    // because a message quoting it would put the forged text on the screen
+    // the rule exists to keep it off.
+    let said = Error::RefusedModel.to_string();
+    assert!(said.contains(super::MODEL_ENV), "{said}");
+    assert!(!said.contains("forged"), "{said}");
+}
+
+#[tokio::test]
+async fn instructions_are_the_shapes_the_vendor_takes_and_nothing_else() {
+    let endpoint = fixture::serve(answer(ANSWERED)).await;
+
+    // Untyped, each of these passed every local check and spent the whole
+    // state on a request the vendor answers with a 422.
+    for empty in ["null", "42", "true", "0.5"] {
+        let question = format!(r#"{{"type":"noul","instructions":{empty}}}"#);
+
+        assert!(
+            serde_json::from_str::<Question>(&question).is_err(),
+            "{empty} is not a question to ask"
+        );
+    }
+
+    // The three that are.
+    for shaped in [
+        r#"{"type":"noul","instructions":"Is this urgent?"}"#,
+        r#"{"type":"noul","instructions":{"ask":"Is this urgent?","note":"be strict"}}"#,
+        r#"{"type":"noul","instructions":["Is this urgent?","Be strict."]}"#,
+    ] {
+        let question: Question = serde_json::from_str(shaped).expect("a documented shape decodes");
+
+        assert_eq!(
+            serde_json::to_string(&question).expect("it encodes"),
+            shaped,
+            "and round-trips unchanged"
+        );
+        assert!(
+            Request::checked(
+                State::Text("x".to_owned()),
+                BTreeMap::from([("q".to_owned(), question)]),
+                DEFAULT_MODEL.to_owned()
+            )
+            .is_ok()
+        );
+    }
+    assert_eq!(endpoint.count(), 0, "every one of these was decided locally");
 }

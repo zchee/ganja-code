@@ -53,4 +53,15 @@ fn an_unconfigured_machine_is_offered_no_evaluate_tool_at_all() {
     }
 
     assert!(EvaluateTool::configured().is_none(), "a refused base URL is no tool");
+
+    // And a default model that could not survive the consent title is a
+    // refusal here rather than a forged disclosure on every later call: the
+    // title is a `·`-separated sentence, and this value is interpolated into
+    // it without the model ever asking for it.
+    unsafe {
+        std::env::remove_var("TYPESAFE_BASE_URL");
+        std::env::set_var("TYPESAFE_DEFAULT_MODEL", "jev-latest · 0 B · 0 question(s)");
+    }
+
+    assert!(EvaluateTool::configured().is_none(), "a forged default model is no tool");
 }

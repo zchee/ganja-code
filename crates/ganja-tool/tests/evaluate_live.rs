@@ -20,7 +20,7 @@
 //! It needs `TYPESAFE_API_KEY` in the environment and reaches the real
 //! `https://api.typesafe.ai`.
 
-use ganja_tool::typesafe::{Answer, Client, Question, Request, Settings, State};
+use ganja_tool::typesafe::{Answer, Client, Instructions, Question, Request, Settings, State};
 use tokio_util::sync::CancellationToken;
 
 /// The second lock.
@@ -46,7 +46,7 @@ async fn one_real_noul_comes_back_as_a_probability_this_build_can_read() {
         [(
             "urgent".to_owned(),
             Question::Noul {
-                instructions: serde_json::json!("Does this convey urgency?"),
+                instructions: Instructions::Text("Does this convey urgency?".to_owned()),
                 criteria: None,
             },
         )]

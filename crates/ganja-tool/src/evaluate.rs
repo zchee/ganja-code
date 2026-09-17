@@ -267,8 +267,14 @@ fn line(id: &str, answer: &Answer) -> String {
                 .map(|(option, probability)| format!("{option} {probability:.2}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let chosen = probabilities.get(choice).copied().unwrap_or_default();
-            let line = format!("{id}: choice={choice} p={chosen:.2} confidence={confidence:.2}");
+            // `?`, not `0.00`, when the chosen option is absent from its own
+            // distribution: "the vendor did not say" and "the vendor said
+            // zero" are different facts, and a model reading the second acts
+            // on a certainty nobody expressed.
+            let chosen = probabilities
+                .get(choice)
+                .map_or_else(|| "?".to_owned(), |probability| format!("{probability:.2}"));
+            let line = format!("{id}: choice={choice} p={chosen} confidence={confidence:.2}");
 
             if others.is_empty() { line } else { format!("{line} ({others})") }
         }
