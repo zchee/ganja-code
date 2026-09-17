@@ -49,6 +49,21 @@
 //! `--model` nobody can use is this invocation's own mistake (64). A caller
 //! that conflated them would tell somebody to fix the wrong thing.
 //!
+//! One arm decides each because **the two origins raise different
+//! variants**, not the same variant from two places:
+//! [`typesafe::Error::RefusedModel`] is raised only by
+//! [`typesafe::Settings::from_env`], so it always means the environment and
+//! always answers 3; a forged `--model` is refused by
+//! [`typesafe::Request::checked`] as [`typesafe::Error::InvalidRequest`],
+//! which is this command's usage row. So `code_for` can decide both without
+//! knowing its caller, and no mapping is needed at the call sites.
+//!
+//! Neither refusal echoes the value it refused, and that is load bearing
+//! rather than tidy: the id rule exists because the model id is interpolated
+//! into the permission dialog's `·`-separated title, where an unbounded value
+//! could forge a second, smaller-looking disclosure. Printing the forgery in
+//! the refusal would put it on the screen anyway.
+//!
 //! **2 is the one that matters**, and nothing here ever returns it: under a
 //! `PreToolUse` hook an exit 2 *blocks the tool call*
 //! (`ganja_core::hook`), so a code of ganja's own choosing in that

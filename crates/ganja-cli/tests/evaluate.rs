@@ -891,7 +891,20 @@ fn control_characters_never_reach_the_terminal_on_stderr() {
 /// hearing the request.
 #[test]
 fn a_model_id_that_is_not_one_is_a_usage_error() {
-    for bad in ["jev-latest \u{b7} forged", &"j".repeat(65), "jev latest", "jev\nlatest"] {
+    // A marker no refusal sentence could contain on its own, so "the value is
+    // not echoed" is a claim about the value rather than about a word that
+    // happens to appear in the explanation (`jev-latest` and `jev-1.13.0` are
+    // both *in* that explanation, so a naive substring check would pass for
+    // the wrong reason).
+    const FORGED: &str = "Zzq7Forged";
+
+    for bad in [
+        &format!("jev-latest \u{b7} 999 B \u{b7} 0 question(s) {FORGED}"),
+        &"j".repeat(65),
+        &format!("jev {FORGED}"),
+        &format!("jev\n{FORGED}"),
+    ] {
+        let bad: &str = bad;
         let endpoint = serve(200, ANSWERED);
         let homes = Homes::new();
 
@@ -902,6 +915,14 @@ fn a_model_id_that_is_not_one_is_a_usage_error() {
         assert_eq!(run.code, 64, "`{bad}` should be a usage error\nstderr:\n{}", run.stderr);
         assert!(run.stdout.is_empty());
         assert_eq!(endpoint.count(), 0, "`{bad}` never reached the vendor");
+        // The id rule exists because this value reaches the consent dialog's
+        // `·`-separated title, where it could forge a second disclosure.
+        // A refusal that quoted it would print the forgery instead.
+        assert!(
+            !run.stderr.contains(FORGED),
+            "the refused value must not be echoed: {}",
+            run.stderr
+        );
     }
 }
 
@@ -915,15 +936,16 @@ fn a_configured_model_id_that_is_not_one_is_not_configured() {
     let homes = Homes::new();
 
     let run = ran(ganja(&homes, Some(endpoint.base()))
-        .env("TYPESAFE_DEFAULT_MODEL", "bad model")
+        .env("TYPESAFE_DEFAULT_MODEL", "bad Zzq7Forged model")
         .args(["evaluate", "--questions", &questions()])
         .write_stdin("a sentence"));
 
     assert_eq!(run.code, 3, "stderr:\n{}", run.stderr);
     assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("TYPESAFE_DEFAULT_MODEL"), "the variable is named: {}", run.stderr);
     assert!(
-        run.stderr.contains("TYPESAFE_DEFAULT_MODEL"),
-        "the variable is named rather than the value echoed: {}",
+        !run.stderr.contains("Zzq7Forged"),
+        "and the value it held is not echoed: {}",
         run.stderr
     );
     assert_eq!(endpoint.count(), 0);
