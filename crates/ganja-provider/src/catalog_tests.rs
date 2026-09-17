@@ -907,26 +907,221 @@ fn the_snapshot_stands_alone() {
     );
 }
 
-/// A seat started offline is offered a roster it can take a turn on.
+/// A seat started offline is offered a roster it can take a turn on, at the
+/// window its backend will actually accept.
 ///
 /// The roster and this table drifted apart once already: four of the five ids
 /// `responses::SEAT_ROSTER` offers had no row here, so a first run with no cache
 /// had no window for the model it was about to ask. Asserted against the
 /// compiled-in tier alone — no environment, no cache, nothing fetched — because
 /// that is the tier the failure happened on.
+///
+/// The windows are spelled out one id at a time rather than asserted to be one
+/// number, which is what this test said until **D565**: four of these five are
+/// held to the vendor's own `max_context_window` and `gpt-5.5` is not, so "the
+/// seat's million-token models" had stopped being true of the roster. Pinning
+/// the roster's membership here as well is what makes a sixth id somebody's
+/// deliberate decision about its window rather than a row that silently
+/// inherits whatever a catalog publishes.
 #[test]
 fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
     let snapshot = snapshot();
+    let expected = [
+        ("gpt-6-astra", 872_000),
+        ("gpt-5.5", 1_050_000),
+        ("gpt-5.6-sol", 872_000),
+        ("gpt-5.6-terra", 872_000),
+        ("gpt-5.6-luna", 872_000),
+    ];
 
-    for id in crate::provider::responses::SEAT_ROSTER {
+    assert_eq!(
+        crate::provider::responses::SEAT_ROSTER.to_vec(),
+        expected.map(|(id, _)| id).to_vec(),
+        "the roster moved; every id on it owes this table a window"
+    );
+
+    for (id, window) in expected {
         let row = snapshot
             .models
             .iter()
             .find(|model| model.id == id && model.provider_id == "openai")
             .unwrap_or_else(|| panic!("the seat offers {id} and nothing offline can size it"));
 
-        assert_eq!(row.context_window, 1_050_000, "{id} is one of the seat's million-token models");
+        assert_eq!(row.context_window, window, "{id}");
     }
+}
+
+/// The four rows whose vendor caps them below what models.dev publishes, read
+/// through the lookup a session uses, under **both** ids that reach them.
+///
+/// `chatgpt` has no entry in `WINDOW_CEILINGS` and must not need one: it reads
+/// `openai`'s rows through `ROW_ALIASES` (**D555**), so a correction made once
+/// is a correction for the seat as well as for the platform key. Asserting both
+/// is what keeps that true — a ceiling keyed by the id a session was started
+/// under rather than by the id whose rows answer would size the seat and the
+/// key differently for one vendor's one model.
+#[test]
+fn the_vendors_own_ceiling_sizes_these_rows_for_openai_and_for_chatgpt() {
+    for (provider, id, _) in super::WINDOW_CEILINGS {
+        for asked in [*provider, "chatgpt"] {
+            let row = model_for(asked, id)
+                .unwrap_or_else(|| panic!("{asked} serves {id} and the table must size it"));
+
+            assert_eq!(row.context_window, 872_000, "{asked}/{id}");
+        }
+    }
+}
+
+/// The ceiling survives a refresh, which is the whole reason it is not four
+/// edited literals.
+///
+/// A fetched catalog is the tier that answers once anything has been fetched,
+/// and models.dev publishes 1,050,000 for every one of these rows — above the
+/// 920,012 tokens the backend was last measured accepting. A snapshot-only
+/// correction would therefore last exactly until the first
+/// `ganja models --refresh`.
+#[test]
+fn a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling() {
+    let catalog = parse(
+        r#"{"openai":{"models":{
+                "gpt-6-astra":{"name":"GPT-6 Astra","limit":{"context":1050000,"input":1050000,
+                    "output":128000},"cost":{"input":10,"output":50}},
+                "gpt-5.6-sol":{"limit":{"context":1050000,"output":128000}},
+                "gpt-5.6-terra":{"limit":{"context":1050000,"output":128000}},
+                "gpt-5.6-luna":{"limit":{"context":1050000,"output":128000}}}}}"#,
+    )
+    .expect("the payload decodes");
+
+    for (_, id, _) in super::WINDOW_CEILINGS {
+        for asked in ["openai", "chatgpt"] {
+            let row = super::scoped(&catalog, super::row_id(asked), id)
+                .unwrap_or_else(|| panic!("the payload carries {id}"));
+
+            assert_eq!(row.context_window, 872_000, "{asked}/{id} as fetched");
+        }
+    }
+
+    let astra = super::scoped(&catalog, "openai", "gpt-6-astra").expect("the payload carries it");
+    assert_eq!(
+        astra.input_limit,
+        Some(872_000),
+        "a published prompt-alone cap above the window it sits in says nothing \
+         a session could act on, so it is held to the same ceiling"
+    );
+    assert_eq!(astra.max_output, 128_000, "the ceiling is sizing, and only the window's");
+    assert!(close(astra.pricing.input, 10.0), "the ceiling is not a price");
+    assert!(close(astra.pricing.output, 50.0));
+}
+
+/// A ceiling, never a floor: a row published *below* it is left where it is.
+///
+/// The vendor is free to shrink a window — a seat's limits have moved twice
+/// already — and a `max` in place of this `min` would answer such a change by
+/// sizing sessions to a window that had just been taken away.
+#[test]
+fn a_row_published_below_the_ceiling_keeps_what_it_publishes() {
+    let catalog = parse(
+        r#"{"openai":{"models":{"gpt-5.6-sol":{"limit":{"context":400000,"input":300000,
+                "output":128000}}}}}"#,
+    )
+    .expect("the payload decodes");
+
+    let row = super::scoped(&catalog, "openai", "gpt-5.6-sol").expect("the payload carries it");
+
+    assert_eq!(row.context_window, 400_000);
+    assert_eq!(row.input_limit, Some(300_000), "a cap under the ceiling is the vendor's to state");
+}
+
+/// Everything the ceiling does not name, in both tiers and under a provider
+/// that merely shares the model id.
+///
+/// `openrouter` resells these models under the vendor's own spelling, and what
+/// a gateway accepts is the gateway's to publish: a ceiling matched on the
+/// model id alone would silently resize rows belonging to a backend nobody
+/// measured. The three OpenAI rows here are the ones the vendor's catalog sizes
+/// differently (`gpt-5.5` 272000/272000, `gpt-5.4` 272000/1000000) or does not
+/// carry at all (`gpt-5.6`).
+#[test]
+fn the_ceiling_leaves_every_row_it_does_not_name_alone() {
+    let snapshot = snapshot();
+    for id in ["gpt-5.5", "gpt-5.4", "gpt-5.6"] {
+        let row = snapshot
+            .models
+            .iter()
+            .find(|model| model.id == id && model.provider_id == "openai")
+            .unwrap_or_else(|| panic!("the snapshot carries {id}"));
+
+        assert_eq!(row.context_window, 1_050_000, "{id} is not a row this ceiling names");
+    }
+
+    let catalog = parse(
+        r#"{"openrouter":{"models":{
+                "openai/gpt-6-astra":{"limit":{"context":1050000,"output":128000}},
+                "gpt-6-astra":{"limit":{"context":1050000,"output":128000}}}},
+            "openai":{"models":{"gpt-5.5":{"limit":{"context":1050000,"output":128000}}}}}"#,
+    )
+    .expect("the payload decodes");
+
+    for id in ["openai/gpt-6-astra", "gpt-6-astra"] {
+        let row = super::scoped(&catalog, "openrouter", id).expect("the payload carries it");
+
+        assert_eq!(
+            row.context_window, 1_050_000,
+            "{id} is a row of openrouter's, whatever the id spells"
+        );
+    }
+
+    let five_five = super::scoped(&catalog, "openai", "gpt-5.5").expect("the payload carries it");
+    assert_eq!(five_five.context_window, 1_050_000, "the seat's other roster model is not capped");
+}
+
+/// The compiled-in rows tell the truth read on their own, and the ceiling took
+/// nothing from them but the window.
+///
+/// The snapshot answers before anything has been fetched, so a literal left at
+/// the published figure would be the window a first offline session ran on
+/// however correct `WINDOW_CEILINGS` was.
+#[test]
+fn the_snapshot_literals_carry_the_ceiling_and_nothing_else_moved() {
+    let rows: Vec<_> = super::SNAPSHOT
+        .iter()
+        .filter(|row| {
+            row.provider_id == "openai"
+                && super::WINDOW_CEILINGS.iter().any(|(_, id, _)| *id == row.id)
+        })
+        .collect();
+
+    assert_eq!(rows.len(), super::WINDOW_CEILINGS.len(), "every capped row is a snapshot row");
+
+    for row in rows {
+        assert_eq!(row.context_window, 872_000, "{} as written in the snapshot", row.id);
+        assert_eq!(row.max_output, 128_000, "{}", row.id);
+    }
+
+    let priced = |id: &str| {
+        super::SNAPSHOT
+            .iter()
+            .find(|row| row.id == id && row.provider_id == "openai")
+            .map(|row| row.pricing.clone())
+            .expect("the snapshot carries it")
+    };
+
+    assert_eq!(
+        priced("gpt-6-astra"),
+        Pricing { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: Some(12.5) }
+    );
+    assert_eq!(
+        priced("gpt-5.6-sol"),
+        Pricing { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: Some(5.0) }
+    );
+    assert_eq!(
+        priced("gpt-5.6-terra"),
+        Pricing { input: 2.0, output: 12.0, cache_read: 0.2, cache_write: Some(2.5) }
+    );
+    assert_eq!(
+        priced("gpt-5.6-luna"),
+        Pricing { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: Some(0.25) }
+    );
 }
 
 /// Pins the row order the comment above the `gpt-5.5` row in `catalog.rs`

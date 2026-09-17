@@ -23,6 +23,12 @@
 //! behind it. Nothing here expires a catalog, because a price from last week
 //! is worth immeasurably more than no price at all.
 //!
+//! Neither tier is taken entirely at its word on sizing. A published window
+//! larger than the vendor itself will accept is held down to the vendor's own
+//! number by `WINDOW_CEILINGS`, applied where either tier's rows become a
+//! table (`Catalog::assembled`) so that a fetch cannot restore what the
+//! snapshot corrected (**D565**).
+//!
 //! Display names are the upstream `name` field with a trailing "(latest)"
 //! dropped, because a table column is not the place to explain aliasing.
 //!
@@ -360,6 +366,52 @@ const ROW_ALIASES: &[(&str, &str)] = &[("chatgpt", "openai")];
 /// price to hand over.
 const SERVED_ROWS: &[(&str, &str)] = &[("claude-code", "anthropic")];
 
+/// The largest window a vendor will actually accept for a row, where that is
+/// smaller than what the catalog publishes for it — `(the provider whose rows
+/// these are, the model id, the ceiling in tokens)` (**D565**).
+///
+/// **A ceiling, never a floor.** [`Catalog::assembled`] takes the smaller of
+/// the published number and the one here, so a row that already publishes less
+/// keeps what it publishes and a row nobody listed is untouched. It is matched
+/// on the row's own `provider_id`, which is what keeps it OpenAI's: the same
+/// model id reaches this table again under `openrouter` and under `opencode`,
+/// served by a gateway whose limits are the gateway's to state. `chatgpt` needs
+/// no entry and must not have one — it reads `openai`'s rows through
+/// [`ROW_ALIASES`], so one row corrected here is corrected for both ids.
+///
+/// The four ids below are the vendor's own numbers, read on **2026-09-18** from
+/// the catalog its Codex CLI ships (`codex-rs/models-manager/models.json`,
+/// openai/codex at `66eab8ece4`, 2026-09-14): each of them publishes
+/// `context_window: 272000` beside `max_context_window: 872000`, the second
+/// documented in that repository's own protocol crate
+/// (`codex-rs/protocol/src/openai_models.rs:453-456`) as the "Maximum context
+/// window allowed for config overrides". **872,000 is the override ceiling and
+/// 272,000 is what Codex actually runs at**, and this build deliberately takes
+/// the ceiling: ganja is the override, sizing a session by the most the backend
+/// will take rather than by the default somebody else's client chose.
+///
+/// The number models.dev publishes for these rows — 1,050,000, which is what
+/// the snapshot said until this table existed — is above anything the backend
+/// has been seen to accept: a third-party gateway measuring the ChatGPT Codex
+/// backend on **2026-09-05** had `gpt-6-astra` take 920,012 input tokens and
+/// refuse 935,012. The vendor's own ceiling sits under that measurement, so it
+/// is the safe of the two. Believing the published figure is not a cosmetic
+/// error — `ganja_core::session::context_window` reads this field as the
+/// denominator of the context meter *and* as the auto-compaction trigger, so an
+/// over-stated window means a session fills past what the backend accepts
+/// before it ever tries to compact.
+///
+/// Rows this table deliberately leaves alone, because the same catalog gives
+/// them different numbers: `gpt-5.5` (272000/272000), `gpt-5.4`
+/// (272000/1000000), and ganja's plain `gpt-5.6` row, which that catalog does
+/// not carry at all.
+const WINDOW_CEILINGS: &[(&str, &str, u64)] = &[
+    ("openai", "gpt-6-astra", 872_000),
+    ("openai", "gpt-5.6-sol", 872_000),
+    ("openai", "gpt-5.6-terra", 872_000),
+    ("openai", "gpt-5.6-luna", 872_000),
+];
+
 /// The suffix the `claude` CLI puts on a model it serves with the
 /// million-token window, and that window.
 ///
@@ -491,13 +543,19 @@ const SNAPSHOT: &[Row] = &[
     // Taken from models.dev on 2026-09-07 (`openai.models["gpt-6-astra"]`,
     // published 2026-09-04): the base tier's prices — the row also publishes a
     // context-over-272k tier at double, which this table's flat `Pricing`
-    // cannot carry — and its 1,050,000 window. The seat offers it
-    // (`responses::SEAT_ROSTER`); this row is what sizes and prices it.
+    // cannot carry. The seat offers it (`responses::SEAT_ROSTER`); this row is
+    // what sizes and prices it.
+    //
+    // **The window is not that file's 1,050,000** (**D565**): it is the
+    // vendor's own `max_context_window`, and `WINDOW_CEILINGS` holds the same
+    // number so that a fetched catalog publishing the larger figure cannot put
+    // it back. The literal is written out here as well so this tier tells the
+    // truth read on its own.
     Row {
         id: "gpt-6-astra",
         provider_id: "openai",
         name: "GPT-6 Astra",
-        context_window: 1_050_000,
+        context_window: 872_000,
         max_output: 128_000,
         pricing: Pricing { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: Some(12.5) },
     },
@@ -561,11 +619,16 @@ const SNAPSHOT: &[Row] = &[
         max_output: 128_000,
         pricing: Pricing { input: 5.0, output: 30.0, cache_read: 0.5, cache_write: None },
     },
+    // The three `gpt-5.6-*` rows below carry the same **D565** ceiling as
+    // `gpt-6-astra`, and for the same reason: the vendor's own catalog gives
+    // each of them `max_context_window: 872000`. `gpt-5.5`, directly above,
+    // does not — that file sizes it 272000/272000 — so its published window is
+    // left exactly as the fetched tier states it.
     Row {
         id: "gpt-5.6-sol",
         provider_id: "openai",
         name: "GPT-5.6 Sol",
-        context_window: 1_050_000,
+        context_window: 872_000,
         max_output: 128_000,
         pricing: Pricing { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: Some(5.0) },
     },
@@ -573,7 +636,7 @@ const SNAPSHOT: &[Row] = &[
         id: "gpt-5.6-luna",
         provider_id: "openai",
         name: "GPT-5.6 Luna",
-        context_window: 1_050_000,
+        context_window: 872_000,
         max_output: 128_000,
         pricing: Pricing { input: 0.2, output: 1.2, cache_read: 0.02, cache_write: Some(0.25) },
     },
@@ -581,7 +644,7 @@ const SNAPSHOT: &[Row] = &[
         id: "gpt-5.6-terra",
         provider_id: "openai",
         name: "GPT-5.6 Terra",
-        context_window: 1_050_000,
+        context_window: 872_000,
         max_output: 128_000,
         pricing: Pricing { input: 2.0, output: 12.0, cache_read: 0.2, cache_write: Some(2.5) },
     },
@@ -692,6 +755,42 @@ struct Catalog {
     models: Vec<Arc<ModelInfo>>,
 }
 
+impl Catalog {
+    /// Builds a tier's table out of the rows it decoded, applying
+    /// [`WINDOW_CEILINGS`] on the way in.
+    ///
+    /// **The one place either tier becomes a table**, which is the whole point
+    /// of it being a function: the compiled-in snapshot and a fetched catalog
+    /// both arrive here, so a vendor limit corrected in one is corrected in the
+    /// other and the next `ganja models --refresh` cannot quietly restore a
+    /// number the backend refuses.
+    fn assembled(models: Vec<ModelInfo>) -> Self {
+        Self {
+            models: models
+                .into_iter()
+                .map(|mut info| {
+                    if let Some((_, _, ceiling)) = WINDOW_CEILINGS
+                        .iter()
+                        .find(|(provider, id, _)| *provider == info.provider_id && *id == info.id)
+                    {
+                        info.context_window = info.context_window.min(*ceiling);
+                        // A prompt-alone cap above the whole window says
+                        // nothing a session could act on, so it is held under
+                        // the same ceiling — and only where the catalog
+                        // published one. An absent `limit.input` stays absent:
+                        // the ceiling is a correction to a number somebody
+                        // else stated, never a licence to state one nobody
+                        // did.
+                        info.input_limit = info.input_limit.map(|limit| limit.min(*ceiling));
+                    }
+
+                    Arc::new(info)
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The table every lookup reads, swapped wholesale by [`refresh`].
 ///
 /// A [`OnceLock`] rather than a `LazyLock` only because the initializer is a
@@ -722,11 +821,11 @@ fn install(catalog: Catalog) {
 
 /// The compiled-in tier, expanded into owned rows.
 fn snapshot() -> Catalog {
-    Catalog {
-        models: SNAPSHOT
+    Catalog::assembled(
+        SNAPSHOT
             .iter()
             .map(|row| {
-                Arc::new(ModelInfo {
+                ModelInfo {
                     id: row.id.to_owned(),
                     provider_id: row.provider_id.to_owned(),
                     name: row.name.to_owned(),
@@ -749,10 +848,10 @@ fn snapshot() -> Catalog {
                     // per-row hint to say.
                     npm: None,
                     variants: BTreeMap::new(),
-                })
+                }
             })
             .collect(),
-    }
+    )
 }
 
 /// Looks up a model by the identifier providers use for it.
@@ -1135,7 +1234,7 @@ fn parse(body: &str) -> Result<Catalog, CatalogError> {
                 continue;
             };
             if let Some(info) = wire.into_info(provider_id, model_id, provider_npm) {
-                models.push(Arc::new(info));
+                models.push(info);
             }
         }
     }
@@ -1146,7 +1245,7 @@ fn parse(body: &str) -> Result<Catalog, CatalogError> {
         ));
     }
 
-    Ok(Catalog { models })
+    Ok(Catalog::assembled(models))
 }
 
 /// One model as the catalog publishes it.
