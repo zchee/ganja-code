@@ -192,7 +192,13 @@ impl Tool for EvaluateTool {
             request.body_len(),
             request.questions(),
             request.model(),
-            shell::shorten(&request.state().to_string(), shell::DESCRIBE_LIMIT)
+            // The state's own top-level keys, which the **model** chose. The
+            // model id beside them is held to an id rule for this reason
+            // already; these cannot be, since they name whatever the evidence
+            // is really called — so they are made unforgeable instead. A key
+            // carrying a newline or a `·` would otherwise write a second,
+            // smaller-looking disclosure after the real one.
+            shell::shorten(&unforgeable(&request.state().to_string()), shell::DESCRIBE_LIMIT)
         )
     }
 
@@ -223,6 +229,12 @@ impl Tool for EvaluateTool {
 /// call's output is spent out of a context window, so [`output`] clamps it;
 /// a subcommand's stdout is a script's input, and truncating that is a bug
 /// rather than a budget.
+///
+/// **The contract both surfaces rest on: one line per answer, and no line
+/// break inside one, whatever the vendor sent.** A line-wise consumer — the
+/// `awk` in `docs/recipes/` is the one this build ships — must be able to
+/// read a record per question without a third party being able to add one.
+/// [`unforgeable`] is what holds it.
 #[must_use]
 pub fn lines(answers: &BTreeMap<String, Answer>) -> String {
     answers.iter().map(|(id, answer)| line(id, answer)).collect::<Vec<_>>().join("\n")
@@ -252,19 +264,54 @@ fn output(answered: &Response, latency_ms: u64) -> ToolOutput {
     }
 }
 
+/// One string somebody outside this build chose, with everything that could
+/// forge a record replaced by [`char::REPLACEMENT_CHARACTER`].
+///
+/// [`char::is_control`] is `Cc` alone, so the two Unicode line separators are
+/// named beside it: U+2028 and U+2029 end a line for a good many readers and
+/// neither is `Cc`.
+///
+/// **This is the line contract, not the terminal one.** `ganja evaluate` runs
+/// the CLI's own `printable` over the rendering as well, because a terminal
+/// cares about escapes this function does not judge. That filter cannot run
+/// here — `ganja-tool` must not depend on `ganja-cli` — and it could not close
+/// this anyway: once a rendering is one string, ganja's own joins and a
+/// newline the vendor put inside an answer are the same character, so a
+/// caller filtering afterwards either eats its own joins or preserves the
+/// forgery. The only place the two can still be told apart is here, before
+/// the join exists.
+fn unforgeable(text: &str) -> String {
+    text.chars()
+        .map(|point| {
+            if point.is_control() || point == '\u{2028}' || point == '\u{2029}' {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                point
+            }
+        })
+        .collect()
+}
+
 /// One answer as one line.
 ///
 /// One line per question, in id order, because a model reading twelve
 /// judgements needs them to line up — and because the output budget is the
 /// whole call's, not each answer's.
+///
+/// Every interpolation below that somebody else chose — the answer's id, a
+/// `choice` value, each option name, the score's levels, the `type` of an
+/// answer this build does not know — goes through [`unforgeable`] first. A
+/// newline in any of them would otherwise end this line early and start a
+/// record that looks exactly like an answer to a question nobody asked.
 fn line(id: &str, answer: &Answer) -> String {
+    let id = unforgeable(id);
     match answer {
         Answer::Noul { noul } => format!("{id}: noul={noul:.2}"),
         Answer::Choice { choice, probabilities, confidence } => {
             let others = probabilities
                 .iter()
                 .filter(|(option, _)| *option != choice)
-                .map(|(option, probability)| format!("{option} {probability:.2}"))
+                .map(|(option, probability)| format!("{} {probability:.2}", unforgeable(option)))
                 .collect::<Vec<_>>()
                 .join(", ");
             // `?`, not `0.00`, when the chosen option is absent from its own
@@ -274,17 +321,25 @@ fn line(id: &str, answer: &Answer) -> String {
             let chosen = probabilities
                 .get(choice)
                 .map_or_else(|| "?".to_owned(), |probability| format!("{probability:.2}"));
-            let line = format!("{id}: choice={choice} p={chosen} confidence={confidence:.2}");
+            let line = format!(
+                "{id}: choice={} p={chosen} confidence={confidence:.2}",
+                unforgeable(choice)
+            );
 
             if others.is_empty() { line } else { format!("{line} ({others})") }
         }
         Answer::Score { score, legend, confidence, .. } => {
-            format!("{id}: score={score:.2} of {} confidence={confidence:.2}", levels(legend))
+            format!(
+                "{id}: score={score:.2} of {} confidence={confidence:.2}",
+                unforgeable(&levels(legend))
+            )
         }
         // A `type` this build does not know. Named rather than hidden, so the
         // model can see that it asked something this build cannot read back
         // instead of finding the id simply missing.
-        Answer::Other(_) => format!("{id}: {} (unrecognised answer type)", answer.kind()),
+        Answer::Other(_) => {
+            format!("{id}: {} (unrecognised answer type)", unforgeable(answer.kind()))
+        }
     }
 }
 
