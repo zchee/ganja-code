@@ -1613,6 +1613,14 @@ pub struct Config {
     /// of only part of what it names. A tmux-pane teammate is a separate
     /// process that reads this file itself, so it needs nothing handed to it.
     ///
+    /// **`ganja models` is the one surface that does not divide by this.** Its
+    /// `CONTEXT` column lists the window the vendor publishes, because that
+    /// listing is the catalog's inventory rather than a statement about a
+    /// session; `/context`, the status bar's meter, this trigger and the
+    /// summarize fit guard all divide by the prompt budget. So a row can be
+    /// listed at 1.1M and metered against 922,000, and the two are answering
+    /// different questions.
+    ///
     /// A `/compact` a person typed ignores this entirely; the key governs the
     /// automatic trigger alone.
     pub auto_compact_threshold: Option<u64>,

@@ -1243,8 +1243,8 @@ fn a_borrowing_provider_is_still_not_cataloged() {
     assert!(model_for("claude-code", "claude-opus-5").is_none());
 }
 
-/// The compiled-in tier states the prompt cap its vendor publishes, for the
-/// seven `openai` rows that publish one (**D566**).
+/// The compiled-in tier states the prompt cap its vendor publishes, for all ten
+/// `openai` rows — seven at 922,000 and three at 272,000 (**D566**).
 ///
 /// The snapshot answered `input_limit: None` for every row until D566, which
 /// meant an offline session sized a `gpt-5.5` turn by the whole 1,050,000 —

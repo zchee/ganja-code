@@ -3168,12 +3168,19 @@ async fn compact_if_needed(
                 }
             }
             // tokens × 100 ≥ budget × percent is "at least percent% full"
-            // without leaving the integers; a saturated multiply only ever
-            // fails toward compacting sooner. The percentage is the config's
-            // `auto_compact_threshold`, ninety when no tier wrote it
-            // (**D566**) — the constant this compared against before the key
-            // existed. A manual compaction skips the question: the user asked,
-            // and how full the budget is was their business to judge.
+            // without leaving the integers. A saturated multiply on the
+            // **left** only ever fails toward compacting sooner, which is the
+            // safe direction; the right cannot saturate at all, because
+            // `percent` is at most 100 and no catalog states a budget within a
+            // hundredth of `u64::MAX`. Saying which side it holds for matters:
+            // a saturating `budget × percent` would compact *later*, and the
+            // sentence would then be reassuring about the wrong operand.
+            //
+            // The percentage is the config's `auto_compact_threshold`, ninety
+            // when no tier wrote it (**D566**) — the constant this compared
+            // against before the key existed. A manual compaction skips the
+            // question: the user asked, and how full the budget is was their
+            // business to judge.
             Some(window) => {
                 if !forced
                     && filled.saturating_mul(100)

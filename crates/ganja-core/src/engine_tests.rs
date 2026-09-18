@@ -631,6 +631,51 @@ async fn the_context_estimate_reports_the_stored_measure_against_the_catalog_win
     assert_eq!(after.window, Some(window));
 }
 
+/// `/context`'s autocompact-reserve row follows the **configured** percentage,
+/// not the ninety it defaults to (**D566**).
+///
+/// Found by mutation: making this row read `CompactThreshold::DEFAULT` instead
+/// of the engine's own value left the whole gate green, because every other
+/// test that reaches the reserve runs at the default. That mutation is
+/// `/context` lying to the one person who set the key — the meter would promise
+/// room a compaction is going to take, or hide room they still have.
+///
+/// The reserve is the complement of the trigger, so at fifty percent it is half
+/// the budget and at ninety it is a tenth. Asserted against
+/// `claude-haiku-4-5`'s 200,000 rather than a derived figure, so a wrong
+/// denominator cannot cancel out.
+#[tokio::test]
+async fn the_context_reserve_follows_the_configured_percentage() {
+    let at = |percent: u64| {
+        crate::config::CompactThreshold::new(percent).expect("the fixture is a percentage")
+    };
+    let breakdown = |threshold| async move {
+        Engine::persistent(
+            Arc::new(FakeProvider::new("ok", std::time::Duration::from_millis(1))),
+            "claude-haiku-4-5",
+            Arc::new(Registry::new(Vec::new())),
+            Permissions::default(),
+            Storage::open(
+                tempfile::tempdir().expect("a temporary directory").keep().join("storage"),
+            ),
+        )
+        .with_compact_threshold(threshold)
+        .context_breakdown()
+        .await
+    };
+
+    let ninety = breakdown(at(90)).await;
+    assert_eq!(ninety.window, Some(200_000), "the budget is the row's, cap-less here");
+    assert_eq!(ninety.reserve, Some(20_000), "a tenth held back, as before the key existed");
+
+    let half = breakdown(at(50)).await;
+    assert_eq!(half.window, Some(200_000), "the denominator did not move");
+    assert_eq!(half.reserve, Some(100_000), "half a budget is held back at fifty percent");
+
+    let full = breakdown(at(100)).await;
+    assert_eq!(full.reserve, Some(0), "compacting only when full holds nothing back");
+}
+
 /// A model the catalog does not know has no window to report — the same
 /// honest absence that keeps such a session from ever auto-compacting.
 #[tokio::test]

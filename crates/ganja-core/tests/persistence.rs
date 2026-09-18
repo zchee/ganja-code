@@ -1279,3 +1279,83 @@ async fn a_finish_is_never_overtaken_by_the_next_turns_events() {
 
     pusher.await.expect("the prompt pusher finishes cleanly");
 }
+
+/// Whether a session seeded at `filled` tokens compacts before its next turn,
+/// on an engine configured at `percent` (**D566**).
+///
+/// `claude-haiku-4-5`'s window is 200,000 and it publishes no prompt cap, so
+/// the budget is 200,000 and the arithmetic is readable at a glance. The
+/// witness is the request log rather than an event: a compaction is exactly a
+/// summarize request in front of the turn's own, which is the thing the
+/// percentage decides.
+async fn compacts_at(percent: u64, filled: u64) -> bool {
+    let (_dir, storage) = store();
+    let sid = SessionId::ascending();
+    storage
+        .save_info(&ganja_testkit::seeded_session_info(sid.clone(), filled))
+        .expect("the seeded info writes");
+    ganja_testkit::seed_message(&storage, &sid, &Message::user("the old objective"));
+    let mut old_reply = Message::assistant("claude-haiku-4-5");
+    old_reply.parts.push(Part::text("we removed three rows"));
+    old_reply.complete();
+    ganja_testkit::seed_message(&storage, &sid, &old_reply);
+
+    let provider = LaneProvider::new(
+        "anthropic",
+        vec![Ok(reply("Summary of the early work.", 111)), Ok(reply("Continuing now.", 222))],
+    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-haiku-4-5", storage.clone())
+            .with_compact_threshold(
+                ganja_core::config::CompactThreshold::new(percent)
+                    .expect("the fixture is a percentage"),
+            );
+    engine.resume(&sid).await.expect("the session resumes");
+
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine
+        .send(Command::SendPrompt {
+            text: "next step please".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = provider.requests();
+    match requests.len() {
+        1 => false,
+        2 => {
+            assert!(requests[0].tools.is_empty(), "a summarize request offers no tools");
+            true
+        }
+        other => panic!("one turn asks once, or twice when it compacts first; got {other}"),
+    }
+}
+
+/// The **configured** percentage is what auto-compaction fires on, not the
+/// ninety it defaults to (**D566**).
+///
+/// The gap this closes was found by mutation: replacing the trigger's
+/// `turn.compact_threshold.percent()` with the literal `90` left the whole
+/// five-package gate green, because every other test that puts a threshold on
+/// a turn uses the default — the value's journey from the config and the
+/// trigger's arithmetic were each pinned, and nothing joined them. So the key
+/// could have become decoration for every session without a gate noticing.
+///
+/// 100,000 of a 200,000 budget is exactly the 50% line and nowhere near the
+/// 90% one, which is what makes the three cases below a three-way witness: the
+/// same fill compacts at 50 and does not at 90, and one token below the line
+/// does not compact at 50 either.
+#[tokio::test]
+async fn auto_compaction_fires_on_the_configured_percentage_and_not_on_the_default() {
+    assert!(compacts_at(50, 100_000).await, "100,000 is exactly half of a 200,000 budget");
+    assert!(
+        !compacts_at(90, 100_000).await,
+        "the same fill is far short of ninety percent, so the default must not compact it"
+    );
+    assert!(!compacts_at(50, 99_999).await, "one token below the configured line is below it");
+}
