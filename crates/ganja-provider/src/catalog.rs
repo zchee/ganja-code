@@ -511,6 +511,30 @@ pub struct BorrowedRow {
     pub context_window: u64,
     /// See [`ModelInfo::max_output`].
     pub max_output: u64,
+    /// See [`ModelInfo::input_limit`] — the **lender's** published prompt cap,
+    /// carried rather than dropped so a borrowed turn is sized the same way a
+    /// cataloged one is (**D566**).
+    ///
+    /// Inert while no lender publishes one — anthropic, the only lender today,
+    /// publishes `limit.input` on none of its rows — and carried anyway,
+    /// because the day one appears a borrowed session would otherwise revert
+    /// to pre-D566 sizing with nothing to say so.
+    pub input_limit: Option<u64>,
+}
+
+impl BorrowedRow {
+    /// Tokens a borrowed turn actually has to fit inside;
+    /// [`ModelInfo::prompt_budget`]'s rule over the row that was lent.
+    ///
+    /// **The cap is applied after the `MILLION_SUFFIX` raise**, because
+    /// [`context_window`](Self::context_window) already carries it: a suffix
+    /// saying the window is a million does not enlarge a prompt cap the vendor
+    /// published, so a cap below the raised window wins. A row whose lender
+    /// published no cap hands back the window unchanged, raise and all.
+    #[must_use]
+    pub fn prompt_budget(&self) -> u64 {
+        self.input_limit.map_or(self.context_window, |limit| self.context_window.min(limit))
+    }
 }
 
 /// The sizing `provider_id` borrows for a model its vendor said it `served`,
@@ -533,7 +557,12 @@ fn borrowed_in(catalog: &Catalog, provider_id: &str, served: &str) -> Option<Bor
     let context_window =
         if million { info.context_window.max(MILLION_WINDOW) } else { info.context_window };
 
-    Some(BorrowedRow { row: format!("{lender}/{id}"), context_window, max_output: info.max_output })
+    Some(BorrowedRow {
+        row: format!("{lender}/{id}"),
+        context_window,
+        max_output: info.max_output,
+        input_limit: info.input_limit,
+    })
 }
 
 /// The id whose rows answer for `provider_id` — itself, for everyone outside

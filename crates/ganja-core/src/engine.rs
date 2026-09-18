@@ -110,7 +110,7 @@ const STORELESS: &str = "this session has no store to keep a teammate's \
     resume";
 
 /// How full the current session's context is, as [`Engine::context_estimate`]
-/// answers it: the estimate the last request stamped, and the window the
+/// answers it: the estimate the last request stamped, and the budget the
 /// catalog sizes the active model at — absent for a model it does not know,
 /// which is also the session that never auto-compacts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,8 +120,15 @@ pub struct ContextEstimate {
     /// against the window. Zero before a first turn, and always zero on an
     /// engine built without storage, which stores no measure to read.
     pub tokens: u64,
-    /// The catalog's context window for the active model, or [`None`] for an
-    /// uncataloged one.
+    /// The active model's **prompt budget**, or [`None`] for an uncataloged one.
+    ///
+    /// `min(context_window, input_limit)` where the catalog publishes both
+    /// (**D566**), which for several OpenAI rows is meaningfully smaller than
+    /// the window they publish: the window is a prompt cap plus a maximum
+    /// reply, and only the prompt half is a session's to fill. The field is
+    /// still called `window` because that is what a frontend's meter labels
+    /// it and renaming it reaches the protocol; this sentence is the only
+    /// thing that can say which number it is.
     pub window: Option<u64>,
 }
 
@@ -175,14 +182,18 @@ pub struct ContextBreakdown {
     pub conversation_user: u64,
     /// The conversation's assistant half, tool traffic included.
     pub conversation_assistant: u64,
-    /// The catalog's context window for the active model, or [`None`] for an
-    /// uncataloged one — the same honest absence [`ContextEstimate::window`]
-    /// reports.
+    /// The active model's **prompt budget**, or [`None`] for an uncataloged one
+    /// — the same number and the same honest absence
+    /// [`ContextEstimate::window`] reports, and its doc carries why it is not
+    /// the whole published window (**D566**).
     pub window: Option<u64>,
-    /// Tokens auto-compaction holds back — the top tenth of the window, the
-    /// complement of [`crate::session`]'s 90% trigger. Carried on the result
-    /// so a free-space consumer never re-derives the trigger; absent exactly
-    /// when the window is.
+    /// Tokens auto-compaction holds back: the complement of the configured
+    /// `auto_compact_threshold` against [`window`](Self::window) — a tenth of
+    /// the budget at the default ninety percent, half of it at fifty
+    /// (**D566**). Carried on the result so a free-space consumer never
+    /// re-derives the trigger, which is the whole point: the percentage is a
+    /// config key now, and a consumer deriving its own would be reading a
+    /// number this session is not using. Absent exactly when the window is.
     pub reserve: Option<u64>,
 }
 

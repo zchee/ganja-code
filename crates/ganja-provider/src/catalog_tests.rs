@@ -1291,7 +1291,11 @@ fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
         "no openai row is left sized by its window alone"
     );
 
-    // Nothing outside `openai` gained one, so no other vendor's rows moved.
+    // Nothing outside `openai` gained one **in this tier**. It is not a claim
+    // about other vendors' sizing in general: a fetched catalog populates
+    // `input_limit` from `limit.input` for every provider, so a refreshed
+    // `github-copilot` row is sized by its published cap like any other. What
+    // this pins is that D566's hand-written data entry stayed in its lane.
     assert!(
         super::SNAPSHOT
             .iter()
@@ -1365,4 +1369,68 @@ fn a_rows_prompt_budget_is_the_smaller_of_its_window_and_its_cap() {
     assert_eq!(sized(872_000, Some(872_000)), 872_000, "a capped row agrees with itself");
     assert_eq!(sized(200_000, Some(400_000)), 200_000, "min, never max");
     assert_eq!(sized(0, Some(400_000)), 0, "nothing is invented for a row stating nothing");
+}
+
+/// A borrowed turn is sized by the lender's prompt cap, and the cap wins over
+/// the `[1m]` raise (**D566**).
+///
+/// Latent rather than live: anthropic — the only lender in `SERVED_ROWS` —
+/// publishes `limit.input` on none of its rows, so nothing ships that exercises
+/// this. It is wired and pinned anyway, because the day a lender publishes one,
+/// a `claude-code` session would otherwise revert to pre-D566 sizing and no
+/// gate would say so. Probed through `borrowed_in` against a fixture for the
+/// reason its sibling above is: the shipped rows cannot show the behaviour.
+///
+/// The ordering is the whole of it. A served spelling carrying `[1m]` raises
+/// the window to a million, and a prompt cap the vendor published is not
+/// enlarged by that claim — so the `min` must come after the raise, and 400,000
+/// must beat 1,000,000 rather than the other way round.
+#[test]
+fn a_borrowed_rows_prompt_cap_beats_the_million_suffix_raise() {
+    let body = r#"{
+          "anthropic": {
+            "models": {
+              "claude-opus-5": { "limit": { "context": 200000, "input": 150000,
+                                            "output": 64000 },
+                                 "cost": { "input": 5, "output": 25 } },
+              "claude-capped": { "limit": { "context": 200000, "input": 400000,
+                                            "output": 64000 },
+                                 "cost": { "input": 5, "output": 25 } },
+              "claude-haiku-4-5": { "limit": { "context": 200000, "output": 32000 },
+                                    "cost": { "input": 1, "output": 5 } }
+            }
+          }
+        }"#;
+    let catalog = parse(body).expect("the fixture is a catalog");
+    let borrowed = |served: &str| {
+        let row = super::borrowed_in(&catalog, "claude-code", served)
+            .unwrap_or_else(|| panic!("{served} should borrow an anthropic row"));
+
+        (row.context_window, row.input_limit, row.prompt_budget())
+    };
+
+    assert_eq!(
+        borrowed("claude-opus-5"),
+        (200_000, Some(150_000), 150_000),
+        "the lender's cap is carried and it binds"
+    );
+    assert_eq!(
+        borrowed("claude-opus-5[1m]"),
+        (1_000_000, Some(150_000), 150_000),
+        "the suffix raises the window and the published cap still wins"
+    );
+
+    // A cap above the window it sits in is incoherent; the honest reading is
+    // the window — and after a raise, the raised one.
+    assert_eq!(borrowed("claude-capped"), (200_000, Some(400_000), 200_000), "min, never max");
+    assert_eq!(
+        borrowed("claude-capped[1m]"),
+        (1_000_000, Some(400_000), 400_000),
+        "a cap below the raised window wins over the raise"
+    );
+
+    // A lender publishing no cap is exactly what shipped before this: the
+    // window, raise and all.
+    assert_eq!(borrowed("claude-haiku-4-5"), (200_000, None, 200_000), "no cap, no change");
+    assert_eq!(borrowed("claude-haiku-4-5[1m]"), (1_000_000, None, 1_000_000), "no cap, no change");
 }

@@ -3071,8 +3071,10 @@ pub(crate) fn compaction_reserve(budget: u64, threshold: CompactThreshold) -> u6
 /// served, and that spelling can be another provider's row. Never the row's
 /// price — the borrowed type has none — because the one provider that
 /// borrows today bills a subscription seat rather than tokens (**D556**).
-/// `BorrowedRow` carries no prompt cap either, so the borrowed path hands back
-/// the window unchanged; when it gains one, it joins the `min` here.
+/// The borrowed row carries the lender's prompt cap too, so both paths end in
+/// the same `min` and read identically here. Inert today — anthropic, the only
+/// lender, publishes none — and wired anyway, because the day one appears a
+/// borrowed session would otherwise revert to pre-D566 sizing silently.
 ///
 /// The served name is read only when it answers **this** model's request.
 /// `Provider::served_model` is provider-wide and newest-wins, so a delegated
@@ -3093,7 +3095,7 @@ pub(crate) fn context_window(provider: &dyn Provider, model: &str) -> Option<u64
 
     let served = provider.served_model().filter(|served| served.requested == model)?;
 
-    catalog::borrowed_row(provider.id(), &served.served).map(|row| row.context_window)
+    catalog::borrowed_row(provider.id(), &served.served).map(|row| row.prompt_budget())
 }
 
 /// Summarizes the live window into a fresh assistant message when the last
