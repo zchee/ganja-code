@@ -140,6 +140,24 @@ The script reads only the `noul` lines, and only those whose id appears in
 `THRESHOLDS`. Anything else falls through and contributes nothing, so a question
 you add without adding a threshold is inert rather than an error.
 
+**One line per question is a guarantee, not a habit.** The rendering is built
+so that no answer can contain a line break, whatever the vendor sent — every
+part of it a third party chose is filtered before the lines are joined. That
+matters here because reading this output a record at a time is exactly what the
+`awk` below does: without the guarantee, a `choice` value carrying a newline
+would print a second record, and a hook could be made to act on a question it
+never asked.
+
+The script also pins `LC_ALL=C` before it runs `awk`, and that line is
+load-bearing rather than tidy. `awk` converts `"0.92"` to a number through the
+locale, and under a comma-decimal one — German, French, Russian, Brazilian
+Portuguese — the conversion stops at the `.` and yields `0`. Every comparison
+below a threshold, forever, at exit 0 with empty stdout: indistinguishable from
+"no question crossed", and a failure **open**. Measured: macOS's `/usr/bin/awk`
+and `gawk --posix` both behave that way, as does `mawk`, which is what Debian
+and Ubuntu install as `awk`. If you rewrite the script, keep the pin above the
+pipeline.
+
 Its own JSON is built in `awk`, with every character of the reason escaped,
 because a hook that prints invalid JSON is read as plain text and discarded on
 this event. The escaper is general over text — every character these two
