@@ -1242,3 +1242,116 @@ fn a_borrowing_provider_is_still_not_cataloged() {
     assert!(!carries("claude-code"), "claude-code borrows sizing, never a price");
     assert!(model_for("claude-code", "claude-opus-5").is_none());
 }
+
+/// The compiled-in tier states the prompt cap its vendor publishes, for the
+/// seven `openai` rows that publish one (**D566**).
+///
+/// The snapshot answered `input_limit: None` for every row until D566, which
+/// meant an offline session sized a `gpt-5.5` turn by the whole 1,050,000 —
+/// the very defect the fetched tier had been corrected for. Pinned per id
+/// rather than as "the rows that publish one", because what a vendor publishes
+/// is read from its catalog by a person and written here by hand.
+#[test]
+fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
+    let stated = |id: &str| {
+        super::SNAPSHOT
+            .iter()
+            .find(|row| row.id == id && row.provider_id == "openai")
+            .unwrap_or_else(|| panic!("the snapshot carries {id}"))
+            .input_limit
+    };
+
+    for id in [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.6",
+    ] {
+        assert_eq!(stated(id), Some(922_000), "{id} as models.dev publishes it");
+    }
+
+    // The three the D566 brief deliberately left out: their vendor publishes
+    // 272,000, and stating it here would move their trigger, which is its own
+    // decision rather than this one.
+    for id in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex"] {
+        assert_eq!(stated(id), None, "{id} is deliberately unstated");
+    }
+
+    // Nothing outside `openai` gained one, so no other vendor's rows moved.
+    assert!(
+        super::SNAPSHOT
+            .iter()
+            .filter(|row| row.provider_id != "openai")
+            .all(|row| row.input_limit.is_none()),
+        "D566 stated openai's rows and only openai's"
+    );
+}
+
+/// A capped row's prompt cap comes out at the ceiling, not at what its vendor
+/// published — so the four D565 rows are sized by 872,000 from either tier.
+///
+/// `Catalog::assembled` holds a published `input_limit` under the same ceiling
+/// it holds the window under, and the snapshot now states one, so this is the
+/// first tier where the two could have disagreed.
+#[test]
+fn a_capped_rows_prompt_cap_is_held_to_the_same_ceiling_the_window_is() {
+    let snapshot = snapshot();
+
+    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
+        let row = super::scoped(&snapshot, provider, id)
+            .unwrap_or_else(|| panic!("the snapshot carries {id}"));
+
+        assert_eq!(row.context_window, *ceiling, "{provider}/{id}");
+        assert_eq!(row.input_limit, Some(*ceiling), "{provider}/{id} as assembled");
+    }
+
+    // The three rows D565 left uncapped keep the published cap whole.
+    for id in ["gpt-5.5", "gpt-5.4", "gpt-5.6"] {
+        let row = super::scoped(&snapshot, "openai", id).expect("the snapshot carries it");
+
+        assert_eq!(row.context_window, 1_050_000, "{id} is not a capped row");
+        assert_eq!(row.input_limit, Some(922_000), "{id} keeps its published cap");
+    }
+}
+
+/// A turn is sized by the prompt cap when the row states one below its window,
+/// and by the window otherwise — `min`, never `max` (**D566**).
+///
+/// The incoherent row is the case nothing else can reach: `Catalog::assembled`
+/// holds a capped row's `input_limit` under the same ceiling as its window, so
+/// no assembled row carries a cap above its own window. What that clamp
+/// guarantees is pinned here as the behaviour it guarantees rather than as the
+/// absence of a row, since a tier that grew a third source would have to keep
+/// it.
+#[test]
+fn a_rows_prompt_budget_is_the_smaller_of_its_window_and_its_cap() {
+    let sized = |context_window: u64, input_limit: Option<u64>| {
+        super::ModelInfo {
+            id: "sizing-fixture".to_owned(),
+            provider_id: "fixture".to_owned(),
+            name: "Sizing Fixture".to_owned(),
+            context_window,
+            max_output: 128_000,
+            input_limit,
+            pricing: Pricing { input: 1.0, output: 1.0, cache_read: 0.0, cache_write: None },
+            family: None,
+            release_date: None,
+            tool_call: true,
+            status: ModelStatus::Active,
+            reasoning: false,
+            reasoning_options: None,
+            npm: None,
+            variants: std::collections::BTreeMap::new(),
+        }
+        .prompt_budget()
+    };
+
+    assert_eq!(sized(1_050_000, Some(922_000)), 922_000, "the prompt cap binds");
+    assert_eq!(sized(1_050_000, None), 1_050_000, "an unstated cap leaves the window alone");
+    assert_eq!(sized(872_000, Some(872_000)), 872_000, "a capped row agrees with itself");
+    assert_eq!(sized(200_000, Some(400_000)), 200_000, "min, never max");
+    assert_eq!(sized(0, Some(400_000)), 0, "nothing is invented for a row stating nothing");
+}
