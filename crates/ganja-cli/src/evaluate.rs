@@ -25,7 +25,7 @@
 //! | 2 | clap's own parse failure, and **only** that |
 //! | 3 | not configured: no key, a refused base URL, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule |
 //! | 4 | the vendor refused: 401, 403, 422, any other 4xx |
-//! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport, too large, malformed |
+//! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport, too large, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout |
 //! | 64 | this command's own argument error (`EX_USAGE`), `--model` included |
 //!
 //! Three more things answer **5**, written down here rather than left to be
