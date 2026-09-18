@@ -1555,8 +1555,8 @@ pub struct Config {
     ///
     /// Top-level rather than a key under a model or a provider, because what it
     /// scales is the one measure every session has: the denominator
-    /// [`crate::session::context_window`] hands back, which is the smaller of
-    /// the catalog row's window and its published prompt cap. `100` is a
+    /// `session::context_window` hands back, which is the smaller of the
+    /// catalog row's window and its published prompt cap. `100` is a
     /// meaningful answer — compact only when the budget is full — and is
     /// deliberately not refused.
     ///
