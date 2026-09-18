@@ -160,6 +160,7 @@ fn turn_with(
     let turn = Turn {
         provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+        compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
         session_id: SessionId::from("ses_fixture".to_owned()),
         model: fake::MODEL.to_owned(),
         small_model: None,
@@ -918,6 +919,7 @@ fn parent_spawn(
     let host = Host {
         provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+        compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
         model: fake::MODEL.to_owned(),
         small_model: None,
         agents: Arc::new(
@@ -1732,4 +1734,76 @@ async fn a_server_tool_blob_that_cannot_be_kept_records_why() {
     let recorded = super::server_tool_blob(&crate::protocol::PartId::ascending(), blob).await;
 
     assert_eq!(recorded, format!("server-tool-output: {decoded}"));
+}
+
+/// The numbers auto-compaction actually runs on, per model id (**D566**).
+///
+/// Three quantities, one denominator: what [`super::context_window`] hands
+/// back, the fill level the trigger fires at, and the ceiling above which the
+/// summarize fit guard gives up. They are spelled out rather than derived from
+/// the catalog, because deriving them from the same table the code reads would
+/// pin the arithmetic and nothing about the figures — and the figures are what
+/// a vendor published and a person decided.
+#[test]
+fn the_prompt_budget_is_what_the_trigger_and_the_fit_guard_divide() {
+    let provider = FakeProvider::new("", Duration::ZERO);
+    // `filled * 100 >= budget * percent`, the trigger's own arithmetic, solved
+    // for the smallest `filled` that fires it.
+    let fires_at = |budget: u64, percent: u64| budget * percent / 100;
+
+    for id in ["gpt-5.5", "gpt-5.4", "gpt-5.6"] {
+        let budget = super::context_window(&provider, id).expect("the snapshot sizes it");
+
+        assert_eq!(budget, 922_000, "{id} is sized by its published prompt cap, not its window");
+        assert_eq!(fires_at(budget, 90), 829_800, "{id} at the default ninety percent");
+        assert_eq!(budget - super::SUMMARY_OUTPUT_TOKENS, 917_904, "{id}'s fit guard");
+    }
+
+    // The four rows D565 capped are untouched: their published cap is held to
+    // the same ceiling as their window, so `min` hands back what they already
+    // ran on.
+    for id in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        let budget = super::context_window(&provider, id).expect("the snapshot sizes it");
+
+        assert_eq!(budget, 872_000, "{id} keeps the D565 ceiling");
+        assert_eq!(fires_at(budget, 90), 784_800, "{id} at the default ninety percent");
+    }
+
+    // A row whose vendor publishes no prompt cap is sized by its window,
+    // exactly as every row was before D566.
+    let sonnet =
+        super::context_window(&provider, "claude-sonnet-5").expect("the snapshot sizes it");
+    assert_eq!(sonnet, 1_000_000);
+    assert_eq!(fires_at(sonnet, 90), 900_000);
+
+    // The percentage is a knob, and it moves both ends of the range.
+    assert_eq!(fires_at(922_000, 50), 461_000, "half a budget");
+    assert_eq!(fires_at(922_000, 100), 922_000, "only when the budget is full");
+}
+
+/// `/context`'s autocompact-reserve row is the complement of the trigger, at
+/// whatever percentage the trigger is running (**D566**).
+///
+/// The reserve is what the meter tells a person they will never get to fill.
+/// Derived from the same percentage rather than from a constant tenth, or the
+/// two would disagree the moment somebody set the key.
+#[test]
+fn the_reserve_is_the_complement_of_the_trigger_at_any_percentage() {
+    use super::compaction_reserve;
+
+    assert_eq!(compaction_reserve(1_000_000, 90), 100_000, "the pre-D566 tenth, unchanged");
+    assert_eq!(compaction_reserve(922_000, 90), 92_200);
+    assert_eq!(compaction_reserve(872_000, 90), 87_200);
+    assert_eq!(compaction_reserve(922_000, 50), 461_000);
+    assert_eq!(compaction_reserve(922_000, 100), 0, "a full budget reserves nothing");
+    assert_eq!(compaction_reserve(922_000, 1), 912_780);
+
+    // Saturating, and saturating in the direction the trigger does: a budget
+    // large enough to overflow the multiply *overstates* the reserve rather
+    // than understating it, so a meter is never told it has more room than it
+    // has. Unreachable from a config — the loader refuses anything outside
+    // `1..=100` — and pinned because the arithmetic, not the loader, is what
+    // guarantees the direction.
+    assert!(compaction_reserve(u64::MAX, 100) > 0, "saturation shows more reserve, never less");
+    assert_eq!(compaction_reserve(0, 90), 0, "a budget of nothing reserves nothing");
 }

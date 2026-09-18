@@ -1342,6 +1342,22 @@ pub struct Engine {
     /// ([`crate::config::AgentsConfig::concurrency`]) and an engine nobody
     /// configured still has to have an answer.
     concurrency: usize,
+    /// How full a turn's prompt budget gets before auto-compaction fires, as a
+    /// percentage — the config's `auto_compact_threshold` (**D566**); see
+    /// [`Engine::with_compact_threshold`].
+    ///
+    /// A plain number rather than an [`Option`] for `concurrency`'s reason: the
+    /// config's own default is resolved before it gets here
+    /// ([`crate::config::Config::compact_threshold`]) and an engine nobody
+    /// configured still has to have an answer. That answer is ninety, which is
+    /// what the trigger compared against as a constant before the key existed,
+    /// so a scripted or golden run is byte-identical to one built before it.
+    ///
+    /// **Not reloadable**, the way `defer_threshold` beside it is not: the
+    /// `/plugin` dialog's Reload seam rebuilds hooks, skills and the Responses
+    /// tables (**D474**), and a knob resolved once at assembly is restart-
+    /// required like the rest of the engine's shape.
+    compact_threshold: u64,
     /// The config's `small_model`, handed to every turn this engine starts so
     /// that the title request can prefer it over the catalog's cheapest row.
     ///
@@ -1670,6 +1686,7 @@ impl Engine {
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+            compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
             small_model: None,
             inbound: Arc::new(inbound),
             inbound_drain: std::sync::Mutex::new(Some(inbound_drain)),
@@ -1972,6 +1989,30 @@ impl Engine {
     #[must_use]
     pub fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// Sets how full a turn's prompt budget gets before auto-compaction fires,
+    /// as a percentage — the config's `auto_compact_threshold` (**D566**).
+    ///
+    /// Taken as given. The loader already refused anything outside `1..=100` by
+    /// name, and an engine assembled by a test rather than by a config is the
+    /// one place a number outside it could arrive; the trigger's arithmetic
+    /// saturates, so even that only ever compacts sooner.
+    #[must_use]
+    pub fn with_compact_threshold(mut self, percent: u64) -> Self {
+        self.compact_threshold = percent;
+
+        self
+    }
+
+    /// The read side of
+    /// [`with_compact_threshold`](Self::with_compact_threshold), and
+    /// [`concurrency`](Self::concurrency)'s reason for existing: an assembly
+    /// seam's own test can see whether the config's percentage reached the
+    /// engine a real session runs on.
+    #[must_use]
+    pub fn compact_threshold(&self) -> u64 {
+        self.compact_threshold
     }
 
     /// Sets the MCP servers this session may use.
@@ -3733,7 +3774,7 @@ impl Engine {
             conversation_user: user,
             conversation_assistant: assistant,
             window,
-            reserve: window.map(compaction_reserve),
+            reserve: window.map(|window| compaction_reserve(window, self.compact_threshold)),
         }
     }
 
@@ -5337,6 +5378,7 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
             concurrency: self.concurrency,
+            compact_threshold: self.compact_threshold,
             // The root turn's Host, so the team crosses whole: `task {name}`
             // is the model-side spawn door (D504), and a `None` here is what
             // once left it answering NO_TEAM while the schema advertised the
@@ -6116,6 +6158,7 @@ impl Engine {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone(), seed, served.clone()),
             concurrency: self.concurrency,
+            compact_threshold: self.compact_threshold,
             session_id: self.session_id(),
             model,
             small_model: self.small_model.clone(),

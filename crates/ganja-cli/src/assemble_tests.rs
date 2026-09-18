@@ -2,7 +2,7 @@ use ganja_core::config::Overrides;
 
 use super::assemble;
 
-/// The cap a config names reaches the engine this seam builds.
+/// The two scalars a config names reach the engine this seam builds.
 ///
 /// `ganja-core`'s own suite pins what the cap *does* — two children at a
 /// time and never more — over an engine it builds by hand
@@ -30,16 +30,27 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
         std::env::remove_var("GANJA_PROVIDER");
         std::env::remove_var("GANJA_MODEL");
     }
-    std::fs::write(project.path().join("ganja.toml"), "[agents]\nconcurrency = 3\n")
-        .expect("the fixture config is writable");
+    std::fs::write(
+        project.path().join("ganja.toml"),
+        "auto_compact_threshold = 60\n[agents]\nconcurrency = 3\n",
+    )
+    .expect("the fixture config is writable");
 
     let assembled = assemble(project.path(), &Overrides::default())
         .await
-        .expect("a project holding one config key assembles");
+        .expect("a project holding two config keys assembles");
 
     assert_eq!(
         assembled.engine.concurrency(),
         3,
         "the assembled engine runs at the cap the config named"
+    );
+    // The same half, for the same reason, for the auto-compaction percentage
+    // (**D566**): `ganja-core` pins what the percentage does, and nothing there
+    // can see whether a real headless session is handed it.
+    assert_eq!(
+        assembled.engine.compact_threshold(),
+        60,
+        "the assembled engine compacts at the percentage the config named"
     );
 }
