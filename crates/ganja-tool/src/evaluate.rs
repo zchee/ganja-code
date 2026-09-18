@@ -193,12 +193,17 @@ impl Tool for EvaluateTool {
             request.questions(),
             request.model(),
             // The state's own top-level keys, which the **model** chose. The
-            // model id beside them is held to an id rule for this reason
-            // already; these cannot be, since they name whatever the evidence
-            // is really called — so they are made unforgeable instead. A key
-            // carrying a newline or a `·` would otherwise write a second,
-            // smaller-looking disclosure after the real one.
-            shell::shorten(&unforgeable(&request.state().to_string()), shell::DESCRIBE_LIMIT)
+            // model id one field to the left is held to an id rule for exactly
+            // this reason; these cannot be, since they name whatever the
+            // evidence is really called, so they are made unwritable instead.
+            //
+            // A newline is **not** among the cases: `shell::shorten` flattens
+            // one before this is ever drawn, and it did so before any of this
+            // existed. What [`title_safe`] adds is a carriage return (which
+            // can overwrite the head of the row a dialog draws), ESC and the
+            // rest of `Cc`, the two Unicode line separators, and the
+            // separator this sentence is built from.
+            shell::shorten(&title_safe(&request.state().to_string()), shell::DESCRIBE_LIMIT)
         )
     }
 
@@ -290,6 +295,29 @@ fn unforgeable(text: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The separator the consent title is built from.
+///
+/// Named rather than spelled inline twice, so that the filter below and the
+/// `format!` above cannot disagree about which character this is.
+const SEPARATOR: char = '\u{b7}';
+
+/// [`unforgeable`], plus the separator, for text going into the consent title.
+///
+/// The title is one `·`-separated sentence that ganja writes, so a `·` inside
+/// a value **it interpolates** is never legitimate: it can only make one field
+/// read as several. A model-chosen state key of `x · 1 B · 0 question(s)`
+/// would otherwise append a run shaped exactly like a second, smaller
+/// disclosure after the real one — which is the forgery `is_model` already
+/// refuses for the model id in the field beside it.
+///
+/// This is deliberately **not** what [`line`] uses. There the separator is a
+/// perfectly ordinary character in a vendor's option name, and replacing it
+/// would corrupt honest text to no purpose: an answer line is parsed by
+/// position and by `noul=`, not by `·`.
+fn title_safe(text: &str) -> String {
+    unforgeable(text).replace(SEPARATOR, &char::REPLACEMENT_CHARACTER.to_string())
 }
 
 /// One answer as one line.

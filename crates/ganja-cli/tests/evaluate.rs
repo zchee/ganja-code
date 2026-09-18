@@ -1115,9 +1115,29 @@ fn a_comma_decimal_locale_cannot_silence_the_hook() {
     let script =
         std::fs::read_to_string(repository().join("docs/recipes/typesafe-pretooluse-hook.sh"))
             .expect("the script ships");
+    // **W3-b, N5.** Position, not mere presence: the message here used to
+    // claim "above every awk call" while asserting only that the line existed
+    // somewhere, so moving the `export` below the pipeline would have kept it
+    // green and restored the bug it exists to prevent.
+    //
+    // Compared by line, and only against lines that are not comments — the
+    // script's own header says "POSIX sh and awk only", and the paragraph
+    // explaining this very pin names awk twice, so the first *occurrence* of
+    // the word is 700 bytes above the pin and means nothing.
+    let line_of = |wanted: &dyn Fn(&str) -> bool| {
+        script
+            .lines()
+            .position(|line| !line.trim_start().starts_with('#') && wanted(line))
+            .unwrap_or_else(|| panic!("the shipped script has no such line:\n{script}"))
+    };
+    let pin = line_of(&|line: &str| line.trim() == "export LC_ALL=C");
+    let call = line_of(&|line: &str| line.contains("awk"));
     assert!(
-        script.contains("\nexport LC_ALL=C\n"),
-        "the pin is in the shipped script, above every awk call"
+        pin < call,
+        "the pin is on line {} and the first awk call on line {}; a pin below \
+         the pipeline sets nothing for it",
+        pin + 1,
+        call + 1
     );
 
     let Some(locale) = comma_decimal() else {
@@ -1127,6 +1147,16 @@ fn a_comma_decimal_locale_cannot_silence_the_hook() {
 
         return;
     };
+
+    // **W3-b, N6.** `symlink` succeeds against a target that does not exist,
+    // so a machine without `/usr/bin/awk` would get a dangling link, an awk
+    // that cannot be executed, and a failure that says nothing about locales.
+    // Checked before it is linked, and skipped out loud like the branch above.
+    if !Path::new("/usr/bin/awk").is_file() {
+        eprintln!("no /usr/bin/awk; the pin was checked in the source only");
+
+        return;
+    }
 
     let endpoint = serve(200, &judged(0.96));
     let homes = Homes::new();
