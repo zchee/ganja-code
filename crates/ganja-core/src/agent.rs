@@ -131,8 +131,13 @@ const AGENTS_SUBDIR: &str = "agents";
 /// [`MCP_PREFIX`]'s glob instead. `task` is here although the engine — not
 /// [`crate::tool::Registry::with_builtins`] — registers it, because an agent
 /// restricted to reading must not be able to delegate its way out of the
-/// restriction. Upstream's permission aliases (`apply_patch`, `shell`) are
-/// not: no tool answers to either name here.
+/// restriction. `evaluate` is here for the same reason and by the same
+/// argument, although no builder in this crate registers it either: a
+/// frontend overlays it when `TYPESAFE_API_KEY` is set (**D564**), and
+/// without its name in this list an agent declared `tools: [read, grep]`
+/// would keep `evaluate` at Ask — so under `--yolo` it could send what it
+/// read to a third party. Upstream's permission aliases (`apply_patch`,
+/// `shell`) are not: no tool answers to either name here.
 const TOOL_NAMES: &[&str] = &[
     "read",
     "edit",
@@ -145,6 +150,7 @@ const TOOL_NAMES: &[&str] = &[
     "todowrite",
     "webfetch",
     "websearch",
+    "evaluate",
     "skill",
     "task",
     "question",

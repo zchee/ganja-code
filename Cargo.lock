@@ -1330,6 +1330,7 @@ dependencies = [
  "ganja-serve",
  "ganja-teammate-local",
  "ganja-testkit",
+ "ganja-tool",
  "ganja-tui",
  "jiff",
  "jsonc-parser",
@@ -1577,6 +1578,7 @@ dependencies = [
  "reqwest",
  "rustix",
  "schemars",
+ "secrecy",
  "serde",
  "serde_json",
  "similar 3.2.0",
@@ -1585,6 +1587,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
+ "url",
  "windows-sys 0.61.2",
 ]
 

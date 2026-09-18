@@ -64,6 +64,10 @@ reqwest.workspace = true
 # Tool argument schemas, generated from the argument structs themselves so the
 # schema a model sees cannot drift from what the tool parses.
 schemars.workspace = true
+# The TypeSafe API key is held in a `SecretString` so it is wiped on drop and
+# cannot reach a `Debug` rendering; the `evaluate` client exposes it at
+# exactly one line, where the `Authorization` header is built.
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # `edit` reports what it changed as a unified patch, which a frontend renders
@@ -75,6 +79,10 @@ tracing.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
+# The TypeSafe base URL is refused on a *parsed* host rather than on text —
+# `http://127.0.0.1.evil.com` is a domain somebody else registered — which
+# needs `Host`, the one type reqwest's `Url` re-export leaves out.
+url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # The shell tool runs commands in their own process group and `killpg` is the
@@ -96,7 +104,11 @@ windows-sys.workspace = true
 # Every tool that touches the disk is tested against a real directory tree that
 # goes away afterwards, rather than against a mocked filesystem.
 tempfile.workspace = true
-# `net` is for `webfetch` only: its tests serve canned HTTP over a loopback
-# socket rather than mocking the client, so the request really is built, sent
-# and streamed. The library itself needs no listener.
+# `net` is for the two tools that reach the network, `webfetch` and
+# `evaluate`: their tests serve canned HTTP over a loopback socket rather than
+# mocking the client, so the request really is built, sent and streamed. The
+# library itself needs no listener.
 tokio = { workspace = true, features = ["net"] }
+# `tests/evaluate_log.rs` reads the `evaluate` client's own log back: a
+# captured subscriber is what proves the key and the state reach no event.
+tracing-subscriber.workspace = true

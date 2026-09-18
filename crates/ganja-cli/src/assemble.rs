@@ -74,6 +74,15 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     if config.webfetch_allows_private() {
         tools = tools.with(Arc::new(ganja_core::tool::webfetch::WebfetchTool::allowing_private()));
     }
+    // **D564**, and the only overlay here keyed off the *process environment*
+    // rather than the config: `evaluate` is present exactly when
+    // `TYPESAFE_API_KEY` is set, because a tool whose dialog must name the
+    // host the content goes to has to be built from its settings — and
+    // because nobody who did not configure it should pay its description on
+    // every request. A frontend that drops this line fails silently.
+    if let Some(evaluate) = ganja_core::tool::evaluate::EvaluateTool::configured() {
+        tools = tools.with(evaluate);
+    }
     // Over the top of the roster's rootless one, out of the **same** value the
     // prompt's `<available_skills>` block is built from below: a session that
     // is offered a skill has to be able to load it, and only a caller holding

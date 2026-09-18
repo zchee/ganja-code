@@ -325,3 +325,50 @@ fn an_escape_sequence_in_a_title_never_reaches_the_buffer() {
     // Without this the assertion above would also pass on a blank screen.
     assert!(screen.contains("rm -rf /"), "the printable remainder still has to render:\n{screen}");
 }
+
+/// **D564.** The `evaluate` dialog's title is the consent disclosure — which
+/// host the project content would travel to, and how many bytes of it — and
+/// that is only true if the terminal actually draws those two unbroken.
+///
+/// The modal wraps its body by verbatim chunking at the inner width, so a
+/// host that straddled a row would be drawn as two fragments and would not
+/// read as a host. Rendered at 80x24, which is the smallest terminal anybody
+/// runs.
+#[test]
+fn the_evaluate_dialog_draws_its_host_and_byte_count_unbroken() {
+    let title = "evaluate → 127.0.0.1 · 1483 B · 2 question(s) · jev-latest · \
+                 state keys: diff, policy";
+    let permission = Permission::new(
+        PermissionId::from("perm_2".to_owned()),
+        "evaluate".to_owned(),
+        title.to_owned(),
+        serde_json::json!({"state": {"diff": "-a\n+b"}}),
+        Vec::new(),
+    );
+    let screen = rendered(&permission, Rect::new(0, 0, 80, 24));
+
+    assert!(screen.contains("127.0.0.1"), "the host is drawn whole:\n{screen}");
+    assert!(screen.contains("1483 B"), "and so is the byte count:\n{screen}");
+}
+
+/// The forwarded case: a teammate's dialog carries `"<teammate> · "` ahead of
+/// the title, which shifts the disclosure right by the name's length. It
+/// stays at the head of the sentence, but it can now land across a row
+/// boundary — so this case asserts the two after the row breaks are removed.
+#[test]
+fn a_forwarded_evaluate_dialog_still_carries_the_whole_disclosure() {
+    let title = "reviewer · evaluate → 127.0.0.1 · 1483 B · 2 question(s) · jev-latest · \
+                 state keys: diff, policy";
+    let permission = Permission::new(
+        PermissionId::from("perm_3".to_owned()),
+        "evaluate".to_owned(),
+        title.to_owned(),
+        serde_json::json!({"state": {"diff": "-a\n+b"}}),
+        Vec::new(),
+    );
+    let joined = rendered(&permission, Rect::new(0, 0, 80, 24)).replace('\n', "");
+
+    assert!(joined.contains("127.0.0.1"), "the host survives the wrap");
+    assert!(joined.contains("1483 B"), "and so does the byte count");
+    assert!(joined.contains("reviewer"), "and the dialog still says whose call it is");
+}

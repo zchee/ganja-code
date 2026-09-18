@@ -152,6 +152,10 @@ pub const ASK_BY_DEFAULT: &[&str] = &[
     "apply_patch",
     "bash",
     "edit",
+    // Project content chosen by a model, sent to a third party. The dialog's
+    // title says which host, how many bytes and which top-level state keys,
+    // because the argument preview cannot carry the payload.
+    "evaluate",
     EXTERNAL_DIRECTORY,
     "shell",
     TASK,

@@ -22,6 +22,7 @@ pub mod bash_output;
 /// engine filters (a direct call to a deferred tool executes).
 pub mod deferral;
 pub mod edit;
+pub mod evaluate;
 /// The minimal-YAML frontmatter reader, public because `ganja-core`'s agent
 /// definition files open with the same fence a `SKILL.md` does and were being
 /// read by a second copy of this parser.
@@ -51,6 +52,7 @@ pub mod tasklist;
 pub mod team;
 pub mod todo;
 pub mod truncate;
+pub mod typesafe;
 /// The stale-read watcher, here because [`FileTimes`] is here: it is built on
 /// the announce channel a read registers itself through, and what it reports is
 /// a state on that same log. The engine still owns *when* a watcher exists — it

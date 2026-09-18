@@ -478,7 +478,7 @@
     },
     "PermissionConfig": {
       "title": "Permission block",
-      "description": "Either a bare action covering everything, or an object mapping tool names to rules. A bare action replaces everything below it instead of merging into it. Keys are tool ids — read, edit, write, glob, grep, bash, todowrite, webfetch, websearch, skill, question, task, plan_exit, bash_output, kill_shell, an mcp__<server>__<tool> name, or the pseudo-permission external_directory, which a call raises beside the tool's own when it would work outside the project.",
+      "description": "Either a bare action covering everything, or an object mapping tool names to rules. A bare action replaces everything below it instead of merging into it. Keys are tool ids — read, edit, write, glob, grep, bash, todowrite, webfetch, websearch, skill, question, task, plan_exit, bash_output, kill_shell, evaluate (offered only when TYPESAFE_API_KEY is set), an mcp__<server>__<tool> name, or the pseudo-permission external_directory, which a call raises beside the tool's own when it would work outside the project.",
       "$comment": "crates/ganja-permission/src/permission.rs:525-538 and 597-633 (PermissionConfig); external_directory at permission.rs:133.",
       "anyOf": [
         {

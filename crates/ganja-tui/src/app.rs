@@ -6738,6 +6738,15 @@ impl App {
     ///   `[provider.<id>.options]` tables replace the engine's whole, read by
     ///   the next turn's requests, its children, and every in-process teammate
     ///   spawned after the swap — each resolves per turn and holds no copy.
+    /// - **The `evaluate` overlay is re-applied** (**D564**): the tool is not
+    ///   in `Registry::with_builtins()`, so the line that adds it when
+    ///   `TYPESAFE_API_KEY` is set has to run here as well as at startup, or
+    ///   a reload would quietly take it away from a session that had it. It
+    ///   is the one entry in this inventory keyed off the **process
+    ///   environment** rather than off the config, which is why it cannot
+    ///   change across a reload the way the rows above it can: a process's
+    ///   environment is not editable from outside it, so re-reading finds
+    ///   what it found before and the line exists to preserve, not to update.
     /// - **Agents, MCP dials and LSP servers do not**: the roster, the
     ///   dials and the spawns are assembled at startup, and half-reloading
     ///   any of them — an agent list that changed under a running roster, a
@@ -6769,6 +6778,15 @@ impl App {
         let mut tools = ganja_tool::Registry::with_builtins();
         if config.webfetch_allows_private() {
             tools = tools.with(Arc::new(ganja_tool::webfetch::WebfetchTool::allowing_private()));
+        }
+        // **D564**, and the only overlay here keyed off the *process environment*
+        // rather than the config: `evaluate` is present exactly when
+        // `TYPESAFE_API_KEY` is set, because a tool whose dialog must name the
+        // host the content goes to has to be built from its settings — and
+        // because nobody who did not configure it should pay its description on
+        // every request. A frontend that drops this line fails silently.
+        if let Some(evaluate) = ganja_tool::evaluate::EvaluateTool::configured() {
+            tools = tools.with(evaluate);
         }
         let skill_roots = ganja_core::instruction::skill_roots(&config, &self.cwd);
         tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(skill_roots.clone())));

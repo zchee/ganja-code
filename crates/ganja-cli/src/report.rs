@@ -113,11 +113,18 @@ fn section(name: &str, header: &str, right: &str, rows: &[(String, String)], wid
 /// paragraph exists. Callers therefore pass their text as they read it, and a
 /// third door added later belongs through this function too.
 ///
+/// **`ganja evaluate --format text` is the third door** (**D564**), and it
+/// filters through this function for the same reason: part of what it prints
+/// — a `choice` value, the option names beside it, an unrecognised answer
+/// `type` — is text a third party chose, and it lands on the terminal of
+/// whoever wrote the hook. It filters line by line, because the rendering it
+/// prints is newline-joined and a newline is a control character here.
+///
 /// A tab goes the same way as an escape. The columns are space-aligned, so a
 /// tab was already going to break the alignment this function is protecting;
 /// there is no reason to keep the one control character that is merely
 /// annoying and drop the ones that are not.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     text.chars()
         .map(
             |character| {

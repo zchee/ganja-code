@@ -34,6 +34,31 @@ What is **not** in either file: any reply text beyond the probe's own one-word a
 
 ---
 
+## TypeSafe
+
+The `evaluate` tool and the `ganja evaluate` subcommand (**D564**) talk to
+TypeSafe's System One API. **No TypeSafe prose ships in this repository.**
+Every sentence the model reads in `crates/ganja-tool/src/evaluate.rs`, every
+refusal in `crates/ganja-tool/src/typesafe.rs`, and both question texts in
+`docs/recipes/questions.json` are ganja's own, written from the vendor's
+documentation read as a specification — the same rule D497 sets for Claude
+Code's teams reference.
+
+What is taken is **interop facts**, which cannot be spelled any other way and
+are not expression: the endpoint path `/v1/systemone`; the request and response
+field names (`state`, `questions`, `model`, `answers`, `usage`, and the
+primitives `noul`, `choice` and `score` with their `instructions`, `criteria`,
+`probabilities`, `legend` and `confidence`); the status semantics of 401, 403,
+422, 429 and 529; the environment variable names `TYPESAFE_API_KEY`,
+`TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`, and the default base URL,
+default model and 10-second timeout those SDK constants document; and the two
+model aliases `jev-latest` and `jev-preview`.
+
+Documentation read 2026-09-17 and 2026-09-18 against `jev-1.13.0`. TypeSafe is
+not a dependency of this repository and no TypeSafe code is vendored; the
+client is original Rust over `reqwest`.
+
+
 ## Foreign CLI probe recordings
 
 P27 made `codex`, `agy` and `grok` teammate backends, and what each one's sandbox actually bounds was **measured** rather than read off a `--help` page. The three recordings those measurements produced — `crates/ganja-teammate-local/tests/fixtures/{codex,agy,grok}-posture-probe.txt` — are ganja's own prose: the instrument, the ladder with its control row, the verdict, and on the last line the single sentence a test compares the shipped posture against. **No vendor source file, prompt text or documentation is reproduced at length**, and **no ganja-authored constant carries a vendor's words** — a vendor's own diagnostic is forwarded verbatim only where the thing being reported *is* that vendor's output.

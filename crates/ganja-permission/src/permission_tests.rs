@@ -154,9 +154,31 @@ fn state_changing_tools_ask_and_read_only_tools_do_not() {
     for tool in ["read", "glob", "grep", "todo", "todoread", "todowrite", "lsp"] {
         assert_eq!(permissions.gate(tool, &none).action, Decision::Allow, "{tool}");
     }
-    for tool in ["write", "edit", "shell", "bash", "webfetch", "websearch", "apply_patch"] {
+    for tool in
+        ["write", "edit", "shell", "bash", "webfetch", "websearch", "apply_patch", "evaluate"]
+    {
         assert_eq!(permissions.gate(tool, &none).action, Decision::Ask, "{tool}");
     }
+}
+
+/// **D564.** `evaluate` sends project content a model chose to a third
+/// party, so it asks — and a stored `deny` still holds, which is what makes
+/// the ask something a person can settle once rather than a dialog they
+/// cannot get rid of.
+#[test]
+fn sending_project_content_to_a_third_party_asks_and_a_deny_rule_still_refuses_it() {
+    let mut permissions = memory();
+    let none = json!({});
+
+    assert_eq!(permissions.gate("evaluate", &none).action, Decision::Ask);
+
+    permissions.set_baseline(vec![Rule {
+        permission: "evaluate".to_owned(),
+        pattern: "*".to_owned(),
+        action: Action::Deny,
+    }]);
+
+    assert_eq!(permissions.gate("evaluate", &none).action, Decision::Deny);
 }
 
 #[test]

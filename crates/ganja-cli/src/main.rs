@@ -15,6 +15,7 @@
 
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,7 @@ mod assemble;
 #[cfg(unix)]
 mod binder;
 mod claude_hooks;
+mod evaluate;
 mod import;
 #[cfg(unix)]
 mod lister;
@@ -321,6 +323,22 @@ enum Command {
         #[command(subcommand)]
         action: Config,
     },
+    /// Ask TypeSafe's Jev for calibrated probabilities, with no session.
+    ///
+    /// The same client the `evaluate` tool calls, for a script or a
+    /// `PreToolUse` hook: the state arrives on standard input by default and
+    /// the questions as JSON or `@PATH`. Configured by TYPESAFE_API_KEY,
+    /// TYPESAFE_BASE_URL and TYPESAFE_DEFAULT_MODEL, and gated by no
+    /// permission dialog — whoever typed this, or wrote it into a config
+    /// file, is the consenting party.
+    ///
+    /// Exits 0 answered, 3 not configured, 4 refused by the vendor, 5
+    /// unavailable, 64 for a bad argument. Only clap's own parse failure
+    /// exits 2, which is the code a `PreToolUse` hook reads as a refusal of
+    /// the call it was asked about.
+    ///
+    /// See docs/recipes/typesafe-pretooluse-hook.md for the hook this is for.
+    Evaluate(evaluate::EvaluateArgs),
     /// Show the configured MCP servers and the tools they lend, or manage one.
     ///
     /// `add`, `get` and `remove` edit the `mcp` table of a config file;
@@ -804,8 +822,17 @@ const UNTITLED: &str = "(untitled)";
 /// What a line hanging under a row of the MCP listing starts with.
 const INDENT: &str = "    ";
 
+/// The binary's exit code.
+///
+/// **D564.** Every arm but one answers [`ExitCode::SUCCESS`] or, through
+/// `anyhow`, 1 with the error printed — which is what this binary has always
+/// done. `evaluate` is the exception: it is called by hooks and scripts that
+/// branch on the code, so it carries a taxonomy of its own (see
+/// [`crate::evaluate`]) and returns it here. `ExitCode` rather than
+/// `process::exit`, which would skip the logging guard's drop below and lose
+/// whatever the appender had not written.
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     // Parsed before the log is installed so that `--version`, `--help` and a
     // usage error do not create a log directory for a run that never started.
     let cli = Cli::parse();
@@ -866,20 +893,35 @@ async fn main() -> Result<()> {
                 cli.socket_dir,
             )
             .await
+            .map(succeeded)
         }
-        Some(Command::Auth { action }) => auth_command(action).await,
-        Some(Command::Config { action }) => config_command(action),
-        Some(Command::Mcp { action }) => mcp_command(action).await,
-        Some(Command::Models { provider, refresh }) => models_command(provider, refresh).await,
-        Some(Command::Plugin { action }) => plugin::plugin_command(action),
-        Some(Command::Run(args)) => run::run(args).await,
-        Some(Command::Serve(args)) => serve::serve(args).await,
-        Some(Command::Sessions(args)) => sessions_command(args).await,
+        Some(Command::Auth { action }) => auth_command(action).await.map(succeeded),
+        Some(Command::Config { action }) => config_command(action).map(succeeded),
+        // The one arm with a code of its own, and the reason `main` returns
+        // one at all.
+        Some(Command::Evaluate(args)) => Ok(evaluate::evaluate(args).await),
+        Some(Command::Mcp { action }) => mcp_command(action).await.map(succeeded),
+        Some(Command::Models { provider, refresh }) => {
+            models_command(provider, refresh).await.map(succeeded)
+        }
+        Some(Command::Plugin { action }) => plugin::plugin_command(action).map(succeeded),
+        Some(Command::Run(args)) => run::run(args).await.map(succeeded),
+        Some(Command::Serve(args)) => serve::serve(args).await.map(succeeded),
+        Some(Command::Sessions(args)) => sessions_command(args).await.map(succeeded),
         Some(Command::Skills) => {
             let cwd = std::env::current_dir().context("failed to read the working directory")?;
-            skills::skills_command(&cwd)
+            skills::skills_command(&cwd).map(succeeded)
         }
     }
+}
+
+/// What every subcommand but `evaluate` answers when it did not fail.
+///
+/// A named function rather than a closure repeated at each arm, so that the
+/// one arm which does *not* map through it reads as the deliberate exception
+/// it is.
+const fn succeeded((): ()) -> ExitCode {
+    ExitCode::SUCCESS
 }
 
 fn config_command(action: Config) -> Result<()> {
@@ -1088,8 +1130,18 @@ fn resolve_filter(configured: Option<&str>, verbose: bool) -> tracing_subscriber
 
 /// Says why there will be no log this run, and answers [`None`] so the caller
 /// reads as one expression.
+///
+/// `writeln!` on a locked handle rather than `eprintln!`, whose panic on a
+/// failed write would be **exit 101** (**D564**). `install_logging` runs on
+/// every invocation, before any subcommand dispatches, so this line sits on
+/// `ganja evaluate`'s path too — and that command's whole contract is that a
+/// caller reads its exit code from a fixed table. An unwritable data home
+/// plus a stderr pipe the caller has already closed would otherwise answer a
+/// hook with a code in no row of it. The result is dropped because there is
+/// nowhere left to report a failure to report something, and no log is still
+/// not a reason to fail a run.
 fn declined(reason: &str) -> Option<WorkerGuard> {
-    eprintln!("note: not logging to a file: {reason}");
+    let _ = writeln!(io::stderr().lock(), "note: not logging to a file: {reason}");
 
     None
 }
