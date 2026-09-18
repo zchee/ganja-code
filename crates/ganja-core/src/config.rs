@@ -1245,6 +1245,59 @@ pub struct Overrides {
 /// typical handful of servers never notices the machinery exists.
 pub const DEFAULT_TOOL_DEFER_THRESHOLD: usize = 32;
 
+/// How full a turn's prompt budget gets before auto-compaction fires, as a
+/// percentage, in the one shape everything past the loader passes around
+/// (**D566**).
+///
+/// **A type rather than a bare integer, for a reason a reviewer can check.**
+/// It travels beside `tool_defer_threshold`'s budget for most of its journey —
+/// the two ride the same `Engine`, the same `InProcess` backend and the same
+/// `Teammate` constructor into a teammate's engine — and two adjacent unsigned
+/// integers are swappable without a compiler or a test noticing. Different
+/// types make that swap a build error, which is the only form of the guarantee
+/// that does not depend on somebody rereading the argument list.
+///
+/// Range is a property of the value, so it is enforced where the value is made:
+/// [`new`](Self::new) is the only way in and answers [`None`] outside
+/// `1..=100`. The loader's refusal is worded from the same check, so the
+/// sentence a person reads and the range the type admits cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactThreshold(u64);
+
+impl CompactThreshold {
+    /// What a config that wrote no `auto_compact_threshold` means: the ninety
+    /// percent auto-compaction has fired at since P4, kept as the default so a
+    /// session saying nothing behaves exactly as it did before the key existed.
+    pub const DEFAULT: Self = Self(90);
+
+    /// The percentage `percent` names, or [`None`] when it is not one.
+    ///
+    /// Both ends are refused for a reason rather than for tidiness. `0` would
+    /// compact at the top of every turn, summarizing a conversation that has
+    /// not happened; anything above `100` is a trigger no fill level can reach,
+    /// which is auto-compaction switched off wearing a number — and "off" is
+    /// already spelled elsewhere in this file as a huge `tool_defer_threshold`,
+    /// so it must not acquire a second spelling here. `100` is kept: "compact
+    /// only when the budget is full" is somebody's real answer, the way
+    /// `agents.concurrency = 1` is.
+    #[must_use]
+    pub fn new(percent: u64) -> Option<Self> {
+        (1..=100).contains(&percent).then_some(Self(percent))
+    }
+
+    /// The percentage itself, for the one arithmetic that needs it.
+    #[must_use]
+    pub const fn percent(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for CompactThreshold {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Everything the config files asked for, merged.
 ///
 /// The curated posture — an unknown key is refused **by name** — was
@@ -1536,6 +1589,41 @@ pub struct Config {
     /// moment they are touched, and raising this key is the one-line off
     /// switch.
     pub tool_defer_threshold: Option<usize>,
+    /// How full a session's prompt budget gets before auto-compaction summarizes
+    /// it, as a percentage (**D566**).
+    ///
+    /// **Absent is 90** ([`Config::compact_threshold`] is what reads it), which
+    /// is the figure the trigger carried as a constant before this key existed.
+    /// Refused outside `1..=100` by name: `0` would compact at the top of every
+    /// turn, which is a session that never holds a conversation, and above 100
+    /// is a trigger that can never fire, which is auto-compaction off wearing a
+    /// number — and off is what a huge budget already means everywhere else in
+    /// this file, so it must not be spelled two ways here.
+    ///
+    /// Top-level rather than a key under a model or a provider, because what it
+    /// scales is the one measure every session has: the denominator
+    /// `session::context_window` hands back, which is the smaller of the
+    /// catalog row's window and its published prompt cap. `100` is a
+    /// meaningful answer — compact only when the budget is full — and is
+    /// deliberately not refused.
+    ///
+    /// **Reaches every engine this session owns**, its subagents' turns and the
+    /// in-process teammates it spawns, because a lead compacting at eighty
+    /// whose teammates quietly compacted at ninety would be a key that is true
+    /// of only part of what it names. A tmux-pane teammate is a separate
+    /// process that reads this file itself, so it needs nothing handed to it.
+    ///
+    /// **`ganja models` is the one surface that does not divide by this.** Its
+    /// `CONTEXT` column lists the window the vendor publishes, because that
+    /// listing is the catalog's inventory rather than a statement about a
+    /// session; `/context`, the status bar's meter, this trigger and the
+    /// summarize fit guard all divide by the prompt budget. So a row can be
+    /// listed at 1.1M and metered against 922,000, and the two are answering
+    /// different questions.
+    ///
+    /// A `/compact` a person typed ignores this entirely; the key governs the
+    /// automatic trigger alone.
+    pub auto_compact_threshold: Option<u64>,
     /// Commands this session runs at the nine moments [`crate::hook`] names,
     /// keyed by the event's own spelling (`"PreToolUse"`, `"SessionStart"`, …).
     ///
@@ -2511,6 +2599,18 @@ impl Config {
         self.tool_defer_threshold.unwrap_or(DEFAULT_TOOL_DEFER_THRESHOLD)
     }
 
+    /// How full the prompt budget gets before auto-compaction fires; see
+    /// [`Config::auto_compact_threshold`] for the key. Absent is
+    /// [`CompactThreshold::DEFAULT`].
+    ///
+    /// A value outside the range cannot reach here — the loader's own `checked`
+    /// refused the file — so falling back to the default on one is a belt to
+    /// that suspenders rather than a second policy.
+    #[must_use]
+    pub fn compact_threshold(&self) -> CompactThreshold {
+        self.auto_compact_threshold.and_then(CompactThreshold::new).unwrap_or_default()
+    }
+
     /// Whether `webfetch` may reach a private address; see
     /// [`WebfetchConfig::allow_private`].
     #[must_use]
@@ -2654,6 +2754,7 @@ impl Config {
         overlay(&mut self.memory, other.memory);
         overlay(&mut self.snapshot, other.snapshot);
         overlay(&mut self.tool_defer_threshold, other.tool_defer_threshold);
+        overlay(&mut self.auto_compact_threshold, other.auto_compact_threshold);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
         overlay(&mut self.teammates.shim_turn_timeout, other.teammates.shim_turn_timeout);
         overlay(&mut self.teammates.shell, other.teammates.shell);
@@ -3207,7 +3308,7 @@ fn located(message: &str, span: Option<Range<usize>>, text: &str) -> String {
     format!("{message} at line {line}, column {column}")
 }
 
-/// The seven refusals a decoded config still has to pass, and the one place
+/// The nine refusals a decoded config still has to pass, and the one place
 /// they are spelled.
 ///
 /// Checked per file rather than after the merge, so the complaint names the
@@ -3230,8 +3331,25 @@ fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
     check_teammates(&config.teammates).map_err(refused)?;
     check_openrouter(&config.openrouter).map_err(refused)?;
     check_claude_code(&config.claude_code).map_err(refused)?;
+    check_auto_compact_threshold(config.auto_compact_threshold).map_err(refused)?;
 
     Ok(config)
+}
+
+/// Refuses an `auto_compact_threshold` that is not a percentage (**D566**).
+///
+/// [`check_agents`]'s shape, over [`CompactThreshold::new`] rather than over a
+/// range spelled again here: the type is what decides what a percentage is, and
+/// this is the sentence a person reads when theirs is not one. Why both ends
+/// are refused, and why `100` is not, is on that constructor.
+fn check_auto_compact_threshold(percent: Option<u64>) -> Result<(), String> {
+    match percent {
+        Some(percent) if CompactThreshold::new(percent).is_none() => Err(format!(
+            "auto_compact_threshold must be between 1 and 100; {percent} is not a percentage of a \
+             context window"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Refuses an `lsp` entry that describes a server nothing could start.

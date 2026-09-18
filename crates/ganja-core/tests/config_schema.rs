@@ -103,6 +103,7 @@ theme_mode = "dark"
 shell = "/bin/zsh"
 memory = true
 snapshot = false
+auto_compact_threshold = 75
 
 [agent.plan]
 description = "plans"

@@ -254,6 +254,7 @@ pub async fn run(
     // would be a knob every interactive session still ignored.
     .with_concurrency(config.agents.concurrency())
     .with_defer_threshold(config.defer_threshold())
+    .with_compact_threshold(config.compact_threshold())
     // The admission gate's two config knobs (**D523**, **D524**): the
     // explicit `cross_session_inbound` with the tier that won it, and the
     // review window a parity hold's timer runs on. Wired here for the

@@ -110,7 +110,7 @@ const STORELESS: &str = "this session has no store to keep a teammate's \
     resume";
 
 /// How full the current session's context is, as [`Engine::context_estimate`]
-/// answers it: the estimate the last request stamped, and the window the
+/// answers it: the estimate the last request stamped, and the budget the
 /// catalog sizes the active model at — absent for a model it does not know,
 /// which is also the session that never auto-compacts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,8 +120,15 @@ pub struct ContextEstimate {
     /// against the window. Zero before a first turn, and always zero on an
     /// engine built without storage, which stores no measure to read.
     pub tokens: u64,
-    /// The catalog's context window for the active model, or [`None`] for an
-    /// uncataloged one.
+    /// The active model's **prompt budget**, or [`None`] for an uncataloged one.
+    ///
+    /// `min(context_window, input_limit)` where the catalog publishes both
+    /// (**D566**), which for several OpenAI rows is meaningfully smaller than
+    /// the window they publish: the window is a prompt cap plus a maximum
+    /// reply, and only the prompt half is a session's to fill. The field is
+    /// still called `window` because that is what a frontend's meter labels
+    /// it and renaming it reaches the protocol; this sentence is the only
+    /// thing that can say which number it is.
     pub window: Option<u64>,
 }
 
@@ -175,14 +182,18 @@ pub struct ContextBreakdown {
     pub conversation_user: u64,
     /// The conversation's assistant half, tool traffic included.
     pub conversation_assistant: u64,
-    /// The catalog's context window for the active model, or [`None`] for an
-    /// uncataloged one — the same honest absence [`ContextEstimate::window`]
-    /// reports.
+    /// The active model's **prompt budget**, or [`None`] for an uncataloged one
+    /// — the same number and the same honest absence
+    /// [`ContextEstimate::window`] reports, and its doc carries why it is not
+    /// the whole published window (**D566**).
     pub window: Option<u64>,
-    /// Tokens auto-compaction holds back — the top tenth of the window, the
-    /// complement of [`crate::session`]'s 90% trigger. Carried on the result
-    /// so a free-space consumer never re-derives the trigger; absent exactly
-    /// when the window is.
+    /// Tokens auto-compaction holds back: the complement of the configured
+    /// `auto_compact_threshold` against [`window`](Self::window) — a tenth of
+    /// the budget at the default ninety percent, half of it at fifty
+    /// (**D566**). Carried on the result so a free-space consumer never
+    /// re-derives the trigger, which is the whole point: the percentage is a
+    /// config key now, and a consumer deriving its own would be reading a
+    /// number this session is not using. Absent exactly when the window is.
     pub reserve: Option<u64>,
 }
 
@@ -1342,6 +1353,28 @@ pub struct Engine {
     /// ([`crate::config::AgentsConfig::concurrency`]) and an engine nobody
     /// configured still has to have an answer.
     concurrency: usize,
+    /// How full a turn's prompt budget gets before auto-compaction fires, as a
+    /// percentage — the config's `auto_compact_threshold` (**D566**); see
+    /// [`Engine::with_compact_threshold`].
+    ///
+    /// A resolved value rather than an [`Option`] for `concurrency`'s reason:
+    /// the config's own default is resolved before it gets here
+    /// ([`crate::config::Config::compact_threshold`]) and an engine nobody
+    /// configured still has to have an answer. That answer is ninety, which is
+    /// what the trigger compared against as a constant before the key existed,
+    /// so a scripted or golden run is byte-identical to one built before it.
+    ///
+    /// Handed to every turn this engine starts, to every subagent's `Host`, and
+    /// to the in-process teammate backend built in
+    /// [`Engine::with_teammates`] — where it sits beside `defer_threshold`, and
+    /// where the two being different types is what makes swapping them a build
+    /// error rather than a silent misconfiguration.
+    ///
+    /// **Not reloadable**, the way `defer_threshold` beside it is not: the
+    /// `/plugin` dialog's Reload seam rebuilds hooks, skills and the Responses
+    /// tables (**D474**), and a knob resolved once at assembly is restart-
+    /// required like the rest of the engine's shape.
+    compact_threshold: crate::config::CompactThreshold,
     /// The config's `small_model`, handed to every turn this engine starts so
     /// that the title request can prefer it over the catalog's cheapest row.
     ///
@@ -1670,6 +1703,7 @@ impl Engine {
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
+            compact_threshold: crate::config::CompactThreshold::DEFAULT,
             small_model: None,
             inbound: Arc::new(inbound),
             inbound_drain: std::sync::Mutex::new(Some(inbound_drain)),
@@ -1972,6 +2006,30 @@ impl Engine {
     #[must_use]
     pub fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// Sets how full a turn's prompt budget gets before auto-compaction fires —
+    /// the config's `auto_compact_threshold` (**D566**).
+    ///
+    /// Nothing is validated here because nothing can be: the range is a
+    /// property of [`crate::config::CompactThreshold`], which is the only
+    /// shape this takes.
+    #[must_use]
+    pub fn with_compact_threshold(mut self, threshold: crate::config::CompactThreshold) -> Self {
+        self.compact_threshold = threshold;
+
+        self
+    }
+
+    /// The read side of
+    /// [`with_compact_threshold`](Self::with_compact_threshold), and
+    /// [`concurrency`](Self::concurrency)'s reason for existing: an assembly
+    /// seam's own test can see whether the config's percentage reached the
+    /// engine a real session runs on, and a teammate's engine can be asked
+    /// whether it inherited its lead's.
+    #[must_use]
+    pub fn compact_threshold(&self) -> crate::config::CompactThreshold {
+        self.compact_threshold
     }
 
     /// Sets the MCP servers this session may use.
@@ -2293,6 +2351,11 @@ impl Engine {
                 // The lead's own budget, so a teammate offered the lead's MCP
                 // tools defers the same set of them (**D492**).
                 self.defer_threshold,
+                // The lead's own percentage, so a teammate compacts on the
+                // terms its lead's config named rather than on the default
+                // (**D566**). Beside the budget above and deliberately a
+                // different type: swapping the two arguments does not compile.
+                self.compact_threshold,
                 // The lead's own Responses tables, read per spawn (**D563**):
                 // installed after the team or swapped by a reload, a teammate
                 // started afterwards still resolves its tier from them.
@@ -3733,7 +3796,7 @@ impl Engine {
             conversation_user: user,
             conversation_assistant: assistant,
             window,
-            reserve: window.map(compaction_reserve),
+            reserve: window.map(|window| compaction_reserve(window, self.compact_threshold)),
         }
     }
 
@@ -5337,6 +5400,7 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
             concurrency: self.concurrency,
+            compact_threshold: self.compact_threshold,
             // The root turn's Host, so the team crosses whole: `task {name}`
             // is the model-side spawn door (D504), and a `None` here is what
             // once left it answering NO_TEAM while the schema advertised the
@@ -6116,6 +6180,7 @@ impl Engine {
             provider: Arc::clone(&self.provider),
             spawn: self.spawn_host(model.clone(), seed, served.clone()),
             concurrency: self.concurrency,
+            compact_threshold: self.compact_threshold,
             session_id: self.session_id(),
             model,
             small_model: self.small_model.clone(),

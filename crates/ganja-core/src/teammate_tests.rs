@@ -1306,3 +1306,64 @@ fn a_forwarded_dialog_is_counted_by_the_registry_until_it_is_answered() {
     drop(raised);
     assert_eq!(registry.dialogs_waiting(), 0, "the wait is over, whatever the answer was");
 }
+
+/// A lead's `auto_compact_threshold` reaches the engine its in-process
+/// teammate runs on (**D566**).
+///
+/// The hop this pins is the one that was missing: a teammate engine is built by
+/// `Teammate::deferring`, which took the lead's defer budget and nothing else,
+/// so a lead configured at eighty spawned teammates that compacted at ninety —
+/// a config key true of only part of what it names.
+///
+/// The seam above it, `Engine::with_teammates` handing `InProcess::lending` the
+/// engine's own value, is guarded by the type rather than by an assertion: the
+/// argument sits directly beside `defer_threshold`, a `usize`, and
+/// [`crate::config::CompactThreshold`] cannot be passed in its place or
+/// received from it. That is what the newtype is for, and it is checked at
+/// every build rather than by this test — which could not read it anyway, since
+/// the assembled backend is stored as `Arc<dyn TeammateBackend>`.
+#[test]
+fn an_in_process_teammate_inherits_its_leads_compact_threshold() {
+    let home = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    let eighty = crate::config::CompactThreshold::new(80).expect("eighty percent is a percentage");
+
+    let backend = InProcess::lending(
+        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+        || Arc::new(Tools::new(Vec::new())),
+        Storage::open(home.path().join("storage")),
+        |_| Permissions::default(),
+        crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+        eighty,
+        std::collections::BTreeMap::new,
+    );
+    assert_eq!(backend.compact_threshold, eighty, "the backend holds what it was lent");
+
+    // What `InProcess::spawn` builds out of that field, reached directly
+    // because a spawn hands back an `Arc<dyn Spawned>` that hides it.
+    let teammate = super::Teammate::deferring(
+        "w1",
+        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+        "recorder-model",
+        Arc::new(Tools::new(Vec::new())),
+        Permissions::default(),
+        Storage::open(home.path().join("storage")),
+        backend.defer_threshold,
+        backend.compact_threshold,
+    );
+
+    assert_eq!(
+        teammate.engine().compact_threshold(),
+        eighty,
+        "the teammate's engine compacts on its lead's terms"
+    );
+
+    // A backend nobody named one to runs where it always did, so every
+    // scripted and golden run is unchanged.
+    let plain = InProcess::new(
+        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+        Arc::new(Tools::new(Vec::new())),
+        Storage::open(home.path().join("storage")),
+        |_| Permissions::default(),
+    );
+    assert_eq!(plain.compact_threshold, crate::config::CompactThreshold::DEFAULT);
+}

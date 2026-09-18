@@ -47,6 +47,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog;
+use crate::config::CompactThreshold;
 use crate::engine::{Fanout, PendingSwitch, RecordSwitch};
 use crate::permission::{Decision, Permissions};
 use crate::protocol::{
@@ -972,6 +973,14 @@ pub(crate) struct Turn {
     /// read: a child's registry has no `task` tool, so it never assembles a
     /// batch to cap.
     pub(crate) concurrency: usize,
+    /// What percentage of this turn's prompt budget auto-compaction waits for,
+    /// the config's `auto_compact_threshold` resolved by the engine before the
+    /// turn started (**D566**). Ninety on an engine nobody configured, which is
+    /// what the trigger compared against as a constant before the key existed.
+    ///
+    /// Carried by a subagent's turn too, and read there: a child writes through
+    /// a `Persist` of its own, so its own window is the one it compacts.
+    pub(crate) compact_threshold: CompactThreshold,
     /// The engine's plan-switch cell, when this turn could write or announce
     /// it: a `plan_exit` or `plan_enter` Yes records `Requested` here through
     /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`
@@ -1209,6 +1218,10 @@ impl Turn {
             // states: a child assembles no batch, because it is offered no
             // tool that would make one.
             concurrency: host.concurrency,
+            // Read, unlike `concurrency` above: a child compacts its own
+            // window, and it does so on the same terms the parent's session was
+            // configured with.
+            compact_threshold: host.compact_threshold,
             // The switch cell is the parent engine's, and a child never
             // holds it — same discipline as `spawn: None`. A child that did
             // would run phase one at its own tail, announcing on a private
@@ -3019,20 +3032,38 @@ pub(crate) fn estimate_tokens(chars: usize) -> u64 {
     u64::try_from(chars).unwrap_or(u64::MAX) / 4
 }
 
-/// Tokens of a catalog window the auto-compaction trigger holds back: the
-/// trigger in [`compact_if_needed`] fires once the stored measure reaches 90%
-/// of the window (`tokens × 10 ≥ window × 9`), so the top tenth is space a
-/// session never gets to fill before a compaction claims it.
+/// Tokens of a turn's budget the auto-compaction trigger holds back: the
+/// trigger in [`compact_if_needed`] fires once the stored measure reaches
+/// `percent` of the budget (`tokens × 100 ≥ budget × percent`), so what is left
+/// above that is space a session never gets to fill before a compaction claims
+/// it.
+///
+/// `threshold` is the config's `auto_compact_threshold`, ninety when no tier
+/// wrote it (**D566**); it was the constant nine tenths this function divided
+/// by until then. It is taken as an argument rather than read here because this
+/// module has no config: the caller is the engine, which holds the resolved
+/// value.
 ///
 /// Exposed through `ContextBreakdown::reserve` so `/context`'s
 /// autocompact-reserve row and its tests read this one derivation rather than
 /// re-deriving the complement of the trigger themselves (P14 **D470**).
-pub(crate) fn compaction_reserve(window: u64) -> u64 {
-    window.saturating_sub(window.saturating_mul(9) / 10)
+pub(crate) fn compaction_reserve(budget: u64, threshold: CompactThreshold) -> u64 {
+    budget.saturating_sub(budget.saturating_mul(threshold.percent()) / 100)
 }
 
 /// The context window a turn on `model` is sized against, or [`None`] when
 /// nothing can say.
+///
+/// **The denominator is the prompt budget, not the whole window** (**D566**):
+/// `ModelInfo::prompt_budget`, the smaller of the row's `context_window` and
+/// its `input_limit` where the catalog publishes one. Those two are different
+/// numbers on purpose — several OpenAI rows publish
+/// `{context: 1050000, input: 922000, output: 128000}`, where the window is a
+/// prompt cap plus a maximum reply — and it is the prompt alone that a request
+/// has to fit inside. Sizing by the window let a session accumulate past the
+/// cap the vendor publishes before it first tried to compact, which is the
+/// defect this closes; a row that publishes no `input_limit` is sized by its
+/// window exactly as it always was.
 ///
 /// The catalog's own row first — sizing keeps the id-only lookup, as it
 /// always has. Past it, a provider the catalog cannot price may still
@@ -3040,6 +3071,10 @@ pub(crate) fn compaction_reserve(window: u64) -> u64 {
 /// served, and that spelling can be another provider's row. Never the row's
 /// price — the borrowed type has none — because the one provider that
 /// borrows today bills a subscription seat rather than tokens (**D556**).
+/// The borrowed row carries the lender's prompt cap too, so both paths end in
+/// the same `min` and read identically here. Inert today — anthropic, the only
+/// lender, publishes none — and wired anyway, because the day one appears a
+/// borrowed session would otherwise revert to pre-D566 sizing silently.
 ///
 /// The served name is read only when it answers **this** model's request.
 /// `Provider::served_model` is provider-wide and newest-wins, so a delegated
@@ -3050,15 +3085,17 @@ pub(crate) fn compaction_reserve(window: u64) -> u64 {
 /// One function for the three readers — the auto-trigger and the fit guard
 /// in [`compact_if_needed`], and the engine's `context_estimate` and
 /// `context_breakdown` — so the meter a person reads and the trigger that
-/// acts on it cannot disagree about the denominator.
+/// acts on it cannot disagree about the denominator. The name is kept although
+/// the derivation moved: what it answers is still the figure a turn on `model`
+/// is sized against, which is what every one of those readers asks it for.
 pub(crate) fn context_window(provider: &dyn Provider, model: &str) -> Option<u64> {
     if let Some(row) = catalog::model(model) {
-        return Some(row.context_window);
+        return Some(row.prompt_budget());
     }
 
     let served = provider.served_model().filter(|served| served.requested == model)?;
 
-    catalog::borrowed_row(provider.id(), &served.served).map(|row| row.context_window)
+    catalog::borrowed_row(provider.id(), &served.served).map(|row| row.prompt_budget())
 }
 
 /// Summarizes the live window into a fresh assistant message when the last
@@ -3132,13 +3169,25 @@ async fn compact_if_needed(
                     return ControlFlow::Continue(None);
                 }
             }
-            // tokens × 10 ≥ window × 9 is "at least 90% full" without leaving
-            // the integers; a saturated multiply only ever fails toward
-            // compacting sooner. A manual compaction skips the question: the
-            // user asked, and how full the window is was their business to
-            // judge.
+            // tokens × 100 ≥ budget × percent is "at least percent% full"
+            // without leaving the integers. A saturated multiply on the
+            // **left** only ever fails toward compacting sooner, which is the
+            // safe direction; the right cannot saturate at all, because
+            // `percent` is at most 100 and no catalog states a budget within a
+            // hundredth of `u64::MAX`. Saying which side it holds for matters:
+            // a saturating `budget × percent` would compact *later*, and the
+            // sentence would then be reassuring about the wrong operand.
+            //
+            // The percentage is the config's `auto_compact_threshold`, ninety
+            // when no tier wrote it (**D566**) — the constant this compared
+            // against before the key existed. A manual compaction skips the
+            // question: the user asked, and how full the budget is was their
+            // business to judge.
             Some(window) => {
-                if !forced && filled.saturating_mul(10) < window.saturating_mul(9) {
+                if !forced
+                    && filled.saturating_mul(100)
+                        < window.saturating_mul(turn.compact_threshold.percent())
+                {
                     return ControlFlow::Continue(None);
                 }
             }

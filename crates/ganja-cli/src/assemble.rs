@@ -94,6 +94,7 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     .with_snapshots(snapshots)
     .with_concurrency(config.agents.concurrency())
     .with_defer_threshold(config.defer_threshold())
+    .with_compact_threshold(config.compact_threshold())
     // The admission gate's two config knobs (**D523**, **D524**), the
     // screen's own line kept in the half that must never drift. Inert today:
     // a headless `run` or `serve` installs no teammates and leads no team,

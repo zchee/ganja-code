@@ -199,6 +199,64 @@ fn tool_defer_threshold_is_thirty_two_until_a_config_says_otherwise() {
     assert_eq!(merged.defer_threshold(), 8);
 }
 
+/// The auto-compaction percentage (**D566**): absent is 90 — the figure the
+/// trigger carried as a constant before the key existed — and both ends of the
+/// range mean something a person might want.
+#[test]
+fn auto_compact_threshold_is_ninety_until_a_config_says_otherwise() {
+    let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
+    assert_eq!(absent.auto_compact_threshold, None);
+    assert_eq!(absent.compact_threshold().percent(), 90);
+
+    let half = parse(r#"auto_compact_threshold = 50"#).expect("half a budget is an answer");
+    assert_eq!(half.compact_threshold().percent(), 50);
+
+    let full = parse(r#"auto_compact_threshold = 100"#).expect("only when the budget is full");
+    assert_eq!(full.compact_threshold().percent(), 100);
+
+    let one = parse(r#"auto_compact_threshold = 1"#).expect("the other end of the range");
+    assert_eq!(one.compact_threshold().percent(), 1);
+
+    // A tier that says nothing leaves the tier below it alone; a closer
+    // tier's number wins.
+    let mut merged = half;
+    merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
+    assert_eq!(merged.compact_threshold().percent(), 50, "silence is not an opinion");
+    merged.merge(parse(r#"auto_compact_threshold = 70"#).expect("it parses"));
+    assert_eq!(merged.compact_threshold().percent(), 70);
+}
+
+/// Outside `1..=100` the key is refused **by name**, both ends of it: zero
+/// compacts a conversation that has not happened, and past a hundred is
+/// auto-compaction off wearing a number.
+#[test]
+fn an_auto_compact_threshold_outside_the_range_is_refused_by_name() {
+    for wrong in [
+        r#"auto_compact_threshold = 0"#,
+        r#"auto_compact_threshold = 101"#,
+        r#"auto_compact_threshold = 1000"#,
+    ] {
+        let error = parse(wrong).expect_err("a percentage is 1 to 100");
+        let message = error.to_string();
+        assert!(message.contains("auto_compact_threshold"), "the refusal names the key: {message}");
+        assert!(message.contains("between 1 and 100"), "and the range it takes: {message}");
+    }
+
+    // A string, a float or a negative is serde's own positioned type refusal,
+    // exactly as it is for `tool_defer_threshold` beside it.
+    for wrong in [
+        r#"auto_compact_threshold = "most""#,
+        r#"auto_compact_threshold = 90.5"#,
+        r#"auto_compact_threshold = -1"#,
+    ] {
+        let error = parse(wrong).expect_err("a percentage is an unsigned integer");
+        assert!(
+            error.to_string().contains("expected u64"),
+            "the refusal says what the key takes: {error}"
+        );
+    }
+}
+
 /// The key takes a count and nothing else: a string, a float or a
 /// negative is serde's own type refusal — positioned, like every curated
 /// scalar's here; it is unknown *keys* that are refused by name.
