@@ -663,7 +663,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.4 mini",
         context_window: 400_000,
         max_output: 128_000,
-        input_limit: None,
+        input_limit: Some(272_000),
         pricing: Pricing { input: 0.75, output: 4.5, cache_read: 0.075, cache_write: None },
     },
     Row {
@@ -672,7 +672,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.4 nano",
         context_window: 400_000,
         max_output: 128_000,
-        input_limit: None,
+        input_limit: Some(272_000),
         pricing: Pricing { input: 0.2, output: 1.25, cache_read: 0.02, cache_write: None },
     },
     Row {
@@ -681,7 +681,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.3 Codex",
         context_window: 400_000,
         max_output: 128_000,
-        input_limit: None,
+        input_limit: Some(272_000),
         pricing: Pricing { input: 1.75, output: 14.0, cache_read: 0.175, cache_write: None },
     },
     // The four below are read from `models.opencode.ai/api.json` on 2026-09-16 —

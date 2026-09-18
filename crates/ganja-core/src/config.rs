@@ -1245,11 +1245,58 @@ pub struct Overrides {
 /// typical handful of servers never notices the machinery exists.
 pub const DEFAULT_TOOL_DEFER_THRESHOLD: usize = 32;
 
-/// What [`Config::compact_threshold`] answers when no tier wrote the key: the
-/// ninety percent auto-compaction has fired at since P4, kept as the default so
-/// that a config saying nothing behaves exactly as every session did before the
-/// key existed (**D566**).
-pub const DEFAULT_AUTO_COMPACT_THRESHOLD: u64 = 90;
+/// How full a turn's prompt budget gets before auto-compaction fires, as a
+/// percentage, in the one shape everything past the loader passes around
+/// (**D566**).
+///
+/// **A type rather than a bare integer, for a reason a reviewer can check.**
+/// It travels beside `tool_defer_threshold`'s budget for most of its journey —
+/// the two ride the same `Engine`, the same `InProcess` backend and the same
+/// `Teammate` constructor into a teammate's engine — and two adjacent unsigned
+/// integers are swappable without a compiler or a test noticing. Different
+/// types make that swap a build error, which is the only form of the guarantee
+/// that does not depend on somebody rereading the argument list.
+///
+/// Range is a property of the value, so it is enforced where the value is made:
+/// [`new`](Self::new) is the only way in and answers [`None`] outside
+/// `1..=100`. The loader's refusal is worded from the same check, so the
+/// sentence a person reads and the range the type admits cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactThreshold(u64);
+
+impl CompactThreshold {
+    /// What a config that wrote no `auto_compact_threshold` means: the ninety
+    /// percent auto-compaction has fired at since P4, kept as the default so a
+    /// session saying nothing behaves exactly as it did before the key existed.
+    pub const DEFAULT: Self = Self(90);
+
+    /// The percentage `percent` names, or [`None`] when it is not one.
+    ///
+    /// Both ends are refused for a reason rather than for tidiness. `0` would
+    /// compact at the top of every turn, summarizing a conversation that has
+    /// not happened; anything above `100` is a trigger no fill level can reach,
+    /// which is auto-compaction switched off wearing a number — and "off" is
+    /// already spelled elsewhere in this file as a huge `tool_defer_threshold`,
+    /// so it must not acquire a second spelling here. `100` is kept: "compact
+    /// only when the budget is full" is somebody's real answer, the way
+    /// `agents.concurrency = 1` is.
+    #[must_use]
+    pub fn new(percent: u64) -> Option<Self> {
+        (1..=100).contains(&percent).then_some(Self(percent))
+    }
+
+    /// The percentage itself, for the one arithmetic that needs it.
+    #[must_use]
+    pub const fn percent(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for CompactThreshold {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// Everything the config files asked for, merged.
 ///
@@ -1559,6 +1606,12 @@ pub struct Config {
     /// catalog row's window and its published prompt cap. `100` is a
     /// meaningful answer — compact only when the budget is full — and is
     /// deliberately not refused.
+    ///
+    /// **Reaches every engine this session owns**, its subagents' turns and the
+    /// in-process teammates it spawns, because a lead compacting at eighty
+    /// whose teammates quietly compacted at ninety would be a key that is true
+    /// of only part of what it names. A tmux-pane teammate is a separate
+    /// process that reads this file itself, so it needs nothing handed to it.
     ///
     /// A `/compact` a person typed ignores this entirely; the key governs the
     /// automatic trigger alone.
@@ -2538,12 +2591,16 @@ impl Config {
         self.tool_defer_threshold.unwrap_or(DEFAULT_TOOL_DEFER_THRESHOLD)
     }
 
-    /// How full the prompt budget gets before auto-compaction fires, as a
-    /// percentage; see [`Config::auto_compact_threshold`] for the key. Absent is
-    /// [`DEFAULT_AUTO_COMPACT_THRESHOLD`].
+    /// How full the prompt budget gets before auto-compaction fires; see
+    /// [`Config::auto_compact_threshold`] for the key. Absent is
+    /// [`CompactThreshold::DEFAULT`].
+    ///
+    /// A value outside the range cannot reach here — the loader's own `checked`
+    /// refused the file — so falling back to the default on one is a belt to
+    /// that suspenders rather than a second policy.
     #[must_use]
-    pub fn compact_threshold(&self) -> u64 {
-        self.auto_compact_threshold.unwrap_or(DEFAULT_AUTO_COMPACT_THRESHOLD)
+    pub fn compact_threshold(&self) -> CompactThreshold {
+        self.auto_compact_threshold.and_then(CompactThreshold::new).unwrap_or_default()
     }
 
     /// Whether `webfetch` may reach a private address; see
@@ -3273,19 +3330,13 @@ fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
 
 /// Refuses an `auto_compact_threshold` that is not a percentage (**D566**).
 ///
-/// [`check_agents`]'s shape, and a range rather than a floor because both ends
-/// mean something and neither is an answer. Zero compacts at the top of every
-/// turn, summarizing a conversation that has not happened yet; anything above
-/// one hundred is a trigger no fill level can reach, which is auto-compaction
-/// switched off — and this file already spells "off" as a huge budget on
-/// [`Config::tool_defer_threshold`], so a second spelling for it here would be
-/// a key whose out-of-range values quietly do something.
-///
-/// A hundred is kept: "compact only when the budget is full" is somebody's real
-/// answer, the way `agents.concurrency = 1` is.
+/// [`check_agents`]'s shape, over [`CompactThreshold::new`] rather than over a
+/// range spelled again here: the type is what decides what a percentage is, and
+/// this is the sentence a person reads when theirs is not one. Why both ends
+/// are refused, and why `100` is not, is on that constructor.
 fn check_auto_compact_threshold(percent: Option<u64>) -> Result<(), String> {
     match percent {
-        Some(percent) if !(1..=100).contains(&percent) => Err(format!(
+        Some(percent) if CompactThreshold::new(percent).is_none() => Err(format!(
             "auto_compact_threshold must be between 1 and 100; {percent} is not a percentage of a \
              context window"
         )),

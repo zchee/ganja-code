@@ -206,7 +206,7 @@
       "maximum": 100,
       "description": "How full a session's prompt budget gets before auto-compaction summarizes it, as a percentage (D566). The budget is the smaller of the model row's context_window and its published input_limit, so the trigger sits under the prompt cap a vendor states rather than under the whole window. Absent = 90, the figure the trigger carried as a constant before this key existed. Refused outside 1-100 by name: 0 would compact at the top of every turn and anything above 100 is auto-compaction off wearing a number. A /compact a person typed ignores this entirely.",
       "default": 90,
-      "$comment": "crates/ganja-core/src/config.rs (Config::auto_compact_threshold, compact_threshold, check_auto_compact_threshold); the denominator and the trigger at crates/ganja-core/src/session.rs (context_window, compact_if_needed); the reserve row at crates/ganja-core/src/engine.rs (context_breakdown)."
+      "$comment": "crates/ganja-core/src/config.rs (Config::auto_compact_threshold, compact_threshold, CompactThreshold::new, check_auto_compact_threshold); the denominator and the trigger at crates/ganja-core/src/session.rs (context_window, compact_if_needed); the reserve row at crates/ganja-core/src/engine.rs (context_breakdown)."
     },
     "hooks": {
       "type": "object",

@@ -160,7 +160,7 @@ fn turn_with(
     let turn = Turn {
         provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
-        compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
+        compact_threshold: crate::config::CompactThreshold::DEFAULT,
         session_id: SessionId::from("ses_fixture".to_owned()),
         model: fake::MODEL.to_owned(),
         small_model: None,
@@ -919,7 +919,7 @@ fn parent_spawn(
     let host = Host {
         provider: Arc::new(FakeProvider::new("", Duration::ZERO)),
         concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
-        compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
+        compact_threshold: crate::config::CompactThreshold::DEFAULT,
         model: fake::MODEL.to_owned(),
         small_model: None,
         agents: Arc::new(
@@ -1769,6 +1769,15 @@ fn the_prompt_budget_is_what_the_trigger_and_the_fit_guard_divide() {
         assert_eq!(fires_at(budget, 90), 784_800, "{id} at the default ninety percent");
     }
 
+    // The same defect at a different size: 272,000 published against a 400,000
+    // window, so sizing by the window triggered at 360,000, past the cap.
+    for id in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex"] {
+        let budget = super::context_window(&provider, id).expect("the snapshot sizes it");
+
+        assert_eq!(budget, 272_000, "{id} is sized by its published prompt cap");
+        assert_eq!(fires_at(budget, 90), 244_800, "{id} at the default ninety percent");
+    }
+
     // A row whose vendor publishes no prompt cap is sized by its window,
     // exactly as every row was before D566.
     let sonnet =
@@ -1791,12 +1800,17 @@ fn the_prompt_budget_is_what_the_trigger_and_the_fit_guard_divide() {
 fn the_reserve_is_the_complement_of_the_trigger_at_any_percentage() {
     use super::compaction_reserve;
 
-    assert_eq!(compaction_reserve(1_000_000, 90), 100_000, "the pre-D566 tenth, unchanged");
-    assert_eq!(compaction_reserve(922_000, 90), 92_200);
-    assert_eq!(compaction_reserve(872_000, 90), 87_200);
-    assert_eq!(compaction_reserve(922_000, 50), 461_000);
-    assert_eq!(compaction_reserve(922_000, 100), 0, "a full budget reserves nothing");
-    assert_eq!(compaction_reserve(922_000, 1), 912_780);
+    let at = |percent: u64| {
+        crate::config::CompactThreshold::new(percent).expect("the fixture is a percentage")
+    };
+
+    assert_eq!(compaction_reserve(1_000_000, at(90)), 100_000, "the pre-D566 tenth, unchanged");
+    assert_eq!(compaction_reserve(922_000, at(90)), 92_200);
+    assert_eq!(compaction_reserve(872_000, at(90)), 87_200);
+    assert_eq!(compaction_reserve(272_000, at(90)), 27_200);
+    assert_eq!(compaction_reserve(922_000, at(50)), 461_000);
+    assert_eq!(compaction_reserve(922_000, at(100)), 0, "a full budget reserves nothing");
+    assert_eq!(compaction_reserve(922_000, at(1)), 912_780);
 
     // Saturating, and saturating in the direction the trigger does: a budget
     // large enough to overflow the multiply *overstates* the reserve rather
@@ -1804,6 +1818,6 @@ fn the_reserve_is_the_complement_of_the_trigger_at_any_percentage() {
     // has. Unreachable from a config — the loader refuses anything outside
     // `1..=100` — and pinned because the arithmetic, not the loader, is what
     // guarantees the direction.
-    assert!(compaction_reserve(u64::MAX, 100) > 0, "saturation shows more reserve, never less");
-    assert_eq!(compaction_reserve(0, 90), 0, "a budget of nothing reserves nothing");
+    assert!(compaction_reserve(u64::MAX, at(100)) > 0, "saturation shows more reserve, never less");
+    assert_eq!(compaction_reserve(0, at(90)), 0, "a budget of nothing reserves nothing");
 }

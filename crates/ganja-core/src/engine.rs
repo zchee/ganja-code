@@ -1346,18 +1346,24 @@ pub struct Engine {
     /// percentage — the config's `auto_compact_threshold` (**D566**); see
     /// [`Engine::with_compact_threshold`].
     ///
-    /// A plain number rather than an [`Option`] for `concurrency`'s reason: the
-    /// config's own default is resolved before it gets here
+    /// A resolved value rather than an [`Option`] for `concurrency`'s reason:
+    /// the config's own default is resolved before it gets here
     /// ([`crate::config::Config::compact_threshold`]) and an engine nobody
     /// configured still has to have an answer. That answer is ninety, which is
     /// what the trigger compared against as a constant before the key existed,
     /// so a scripted or golden run is byte-identical to one built before it.
     ///
+    /// Handed to every turn this engine starts, to every subagent's `Host`, and
+    /// to the in-process teammate backend built in
+    /// [`Engine::with_teammates`] — where it sits beside `defer_threshold`, and
+    /// where the two being different types is what makes swapping them a build
+    /// error rather than a silent misconfiguration.
+    ///
     /// **Not reloadable**, the way `defer_threshold` beside it is not: the
     /// `/plugin` dialog's Reload seam rebuilds hooks, skills and the Responses
     /// tables (**D474**), and a knob resolved once at assembly is restart-
     /// required like the rest of the engine's shape.
-    compact_threshold: u64,
+    compact_threshold: crate::config::CompactThreshold,
     /// The config's `small_model`, handed to every turn this engine starts so
     /// that the title request can prefer it over the catalog's cheapest row.
     ///
@@ -1686,7 +1692,7 @@ impl Engine {
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
-            compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
+            compact_threshold: crate::config::CompactThreshold::DEFAULT,
             small_model: None,
             inbound: Arc::new(inbound),
             inbound_drain: std::sync::Mutex::new(Some(inbound_drain)),
@@ -1991,16 +1997,15 @@ impl Engine {
         self.concurrency
     }
 
-    /// Sets how full a turn's prompt budget gets before auto-compaction fires,
-    /// as a percentage — the config's `auto_compact_threshold` (**D566**).
+    /// Sets how full a turn's prompt budget gets before auto-compaction fires —
+    /// the config's `auto_compact_threshold` (**D566**).
     ///
-    /// Taken as given. The loader already refused anything outside `1..=100` by
-    /// name, and an engine assembled by a test rather than by a config is the
-    /// one place a number outside it could arrive; the trigger's arithmetic
-    /// saturates, so even that only ever compacts sooner.
+    /// Nothing is validated here because nothing can be: the range is a
+    /// property of [`crate::config::CompactThreshold`], which is the only
+    /// shape this takes.
     #[must_use]
-    pub fn with_compact_threshold(mut self, percent: u64) -> Self {
-        self.compact_threshold = percent;
+    pub fn with_compact_threshold(mut self, threshold: crate::config::CompactThreshold) -> Self {
+        self.compact_threshold = threshold;
 
         self
     }
@@ -2009,9 +2014,10 @@ impl Engine {
     /// [`with_compact_threshold`](Self::with_compact_threshold), and
     /// [`concurrency`](Self::concurrency)'s reason for existing: an assembly
     /// seam's own test can see whether the config's percentage reached the
-    /// engine a real session runs on.
+    /// engine a real session runs on, and a teammate's engine can be asked
+    /// whether it inherited its lead's.
     #[must_use]
-    pub fn compact_threshold(&self) -> u64 {
+    pub fn compact_threshold(&self) -> crate::config::CompactThreshold {
         self.compact_threshold
     }
 
@@ -2334,6 +2340,11 @@ impl Engine {
                 // The lead's own budget, so a teammate offered the lead's MCP
                 // tools defers the same set of them (**D492**).
                 self.defer_threshold,
+                // The lead's own percentage, so a teammate compacts on the
+                // terms its lead's config named rather than on the default
+                // (**D566**). Beside the budget above and deliberately a
+                // different type: swapping the two arguments does not compile.
+                self.compact_threshold,
                 // The lead's own Responses tables, read per spawn (**D563**):
                 // installed after the team or swapped by a reload, a teammate
                 // started afterwards still resolves its tier from them.

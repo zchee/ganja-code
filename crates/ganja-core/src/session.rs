@@ -47,6 +47,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog;
+use crate::config::CompactThreshold;
 use crate::engine::{Fanout, PendingSwitch, RecordSwitch};
 use crate::permission::{Decision, Permissions};
 use crate::protocol::{
@@ -979,7 +980,7 @@ pub(crate) struct Turn {
     ///
     /// Carried by a subagent's turn too, and read there: a child writes through
     /// a `Persist` of its own, so its own window is the one it compacts.
-    pub(crate) compact_threshold: u64,
+    pub(crate) compact_threshold: CompactThreshold,
     /// The engine's plan-switch cell, when this turn could write or announce
     /// it: a `plan_exit` or `plan_enter` Yes records `Requested` here through
     /// [`ToolCtx::switch`], and this turn's boundary moves it to `Announced`
@@ -3037,17 +3038,17 @@ pub(crate) fn estimate_tokens(chars: usize) -> u64 {
 /// above that is space a session never gets to fill before a compaction claims
 /// it.
 ///
-/// `percent` is the config's `auto_compact_threshold`, ninety when no tier
+/// `threshold` is the config's `auto_compact_threshold`, ninety when no tier
 /// wrote it (**D566**); it was the constant nine tenths this function divided
 /// by until then. It is taken as an argument rather than read here because this
 /// module has no config: the caller is the engine, which holds the resolved
-/// number.
+/// value.
 ///
 /// Exposed through `ContextBreakdown::reserve` so `/context`'s
 /// autocompact-reserve row and its tests read this one derivation rather than
 /// re-deriving the complement of the trigger themselves (P14 **D470**).
-pub(crate) fn compaction_reserve(budget: u64, percent: u64) -> u64 {
-    budget.saturating_sub(budget.saturating_mul(percent) / 100)
+pub(crate) fn compaction_reserve(budget: u64, threshold: CompactThreshold) -> u64 {
+    budget.saturating_sub(budget.saturating_mul(threshold.percent()) / 100)
 }
 
 /// The context window a turn on `model` is sized against, or [`None`] when
@@ -3175,7 +3176,8 @@ async fn compact_if_needed(
             // and how full the budget is was their business to judge.
             Some(window) => {
                 if !forced
-                    && filled.saturating_mul(100) < window.saturating_mul(turn.compact_threshold)
+                    && filled.saturating_mul(100)
+                        < window.saturating_mul(turn.compact_threshold.percent())
                 {
                     return ControlFlow::Continue(None);
                 }

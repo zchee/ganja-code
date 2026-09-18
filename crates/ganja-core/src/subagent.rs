@@ -221,7 +221,7 @@ pub(crate) struct Host {
     /// The session's `auto_compact_threshold`, carried for the same reason and
     /// **read** there, unlike the cap above: a child writes through a `Persist`
     /// of its own and compacts its own window (**D566**).
-    pub(crate) compact_threshold: u64,
+    pub(crate) compact_threshold: crate::config::CompactThreshold,
     /// The team this session leads, when it leads one (**D501**).
     ///
     /// Here rather than on [`Spawn`] because the two have different lifetimes:

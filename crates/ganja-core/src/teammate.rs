@@ -237,6 +237,7 @@ impl Teammate {
             permissions,
             storage,
             crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+            crate::config::CompactThreshold::DEFAULT,
         )
     }
 
@@ -255,6 +256,16 @@ impl Teammate {
     /// `tool_search` to fetch a deferred schema back with. Composing here is
     /// also why nothing recomposes later — a teammate engine dials no MCP
     /// servers of its own, so the set it starts with is the set it keeps.
+    ///
+    /// Eight arguments, and bundling the two thresholds into one carrier is
+    /// deliberately not the fix: they are already different types, which is what
+    /// makes a swap a build error, and a pair struct would exist only to satisfy
+    /// a count while hiding which knob a diff touched — `ganja-tui`'s `run` says
+    /// the same thing about the same lint.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every argument is a distinct thing the lead holds; see the note above"
+    )]
     #[must_use]
     pub(crate) fn deferring(
         name: impl Into<String>,
@@ -264,11 +275,13 @@ impl Teammate {
         permissions: Permissions,
         storage: Storage,
         defer_threshold: usize,
+        compact_threshold: crate::config::CompactThreshold,
     ) -> Self {
         Self {
             name: name.into(),
             engine: Engine::persistent(provider, model, Arc::clone(&tools), permissions, storage)
-                .with_defer_threshold(defer_threshold),
+                .with_defer_threshold(defer_threshold)
+                .with_compact_threshold(compact_threshold),
             tools,
         }
     }
@@ -1211,6 +1224,13 @@ pub struct InProcess {
     /// The lead's own `tool_defer_threshold`, so a teammate offered the lead's
     /// MCP tools defers the same set of them (**D492**).
     defer_threshold: usize,
+    /// The lead's own `auto_compact_threshold`, so a teammate compacts on the
+    /// terms its lead's config named rather than on the default (**D566**).
+    ///
+    /// Beside the budget above and deliberately a different type: the two are
+    /// adjacent parameters for the whole of their journey, and only the types
+    /// stop a swap from compiling.
+    compact_threshold: crate::config::CompactThreshold,
     /// The lead's own Responses options tables, read at each spawn for the
     /// reason `tools` is: a reload swaps them after the backend was built
     /// (**D563**).
@@ -1245,6 +1265,7 @@ impl InProcess {
             storage,
             permissions,
             crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
+            crate::config::CompactThreshold::DEFAULT,
             BTreeMap::new,
         )
     }
@@ -1259,8 +1280,11 @@ impl InProcess {
     /// an engine has, and what a test wants.
     ///
     /// `defer_threshold` is the lead's own; see [`Teammate`]'s `deferring` for
-    /// why a teammate must not be given a different one. `provider_options`
-    /// is the lead's too, for the tier its requests are billed at.
+    /// why a teammate must not be given a different one. `compact_threshold`
+    /// is the lead's for the same reason — a lead compacting at eighty whose
+    /// teammates compacted at ninety would be a config key true of only part of
+    /// what it names — and `provider_options` is the lead's too, for the tier
+    /// its requests are billed at.
     ///
     /// `pub(crate)` for the same reason `install_postbox` is: the live tool
     /// handle it closes over is the *engine's* own, so the only caller that
@@ -1272,6 +1296,7 @@ impl InProcess {
         storage: Storage,
         permissions: impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static,
         defer_threshold: usize,
+        compact_threshold: crate::config::CompactThreshold,
         provider_options: impl Fn() -> BTreeMap<String, crate::config::ResponsesOptions>
         + Send
         + Sync
@@ -1283,6 +1308,7 @@ impl InProcess {
             storage,
             permissions: Box::new(permissions),
             defer_threshold,
+            compact_threshold,
             provider_options: Box::new(provider_options),
         }
     }
@@ -1309,6 +1335,7 @@ impl TeammateBackend for InProcess {
             (self.permissions)(spec),
             self.storage.clone(),
             self.defer_threshold,
+            self.compact_threshold,
         );
         // The lead's own Responses tables (**D563**): a teammate asks the
         // lead's provider, so the tier the lead's config names is the tier its

@@ -206,24 +206,24 @@ fn tool_defer_threshold_is_thirty_two_until_a_config_says_otherwise() {
 fn auto_compact_threshold_is_ninety_until_a_config_says_otherwise() {
     let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(absent.auto_compact_threshold, None);
-    assert_eq!(absent.compact_threshold(), 90);
+    assert_eq!(absent.compact_threshold().percent(), 90);
 
     let half = parse(r#"auto_compact_threshold = 50"#).expect("half a budget is an answer");
-    assert_eq!(half.compact_threshold(), 50);
+    assert_eq!(half.compact_threshold().percent(), 50);
 
     let full = parse(r#"auto_compact_threshold = 100"#).expect("only when the budget is full");
-    assert_eq!(full.compact_threshold(), 100);
+    assert_eq!(full.compact_threshold().percent(), 100);
 
     let one = parse(r#"auto_compact_threshold = 1"#).expect("the other end of the range");
-    assert_eq!(one.compact_threshold(), 1);
+    assert_eq!(one.compact_threshold().percent(), 1);
 
     // A tier that says nothing leaves the tier below it alone; a closer
     // tier's number wins.
     let mut merged = half;
     merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
-    assert_eq!(merged.compact_threshold(), 50, "silence is not an opinion");
+    assert_eq!(merged.compact_threshold().percent(), 50, "silence is not an opinion");
     merged.merge(parse(r#"auto_compact_threshold = 70"#).expect("it parses"));
-    assert_eq!(merged.compact_threshold(), 70);
+    assert_eq!(merged.compact_threshold().percent(), 70);
 }
 
 /// Outside `1..=100` the key is refused **by name**, both ends of it: zero

@@ -49,7 +49,7 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
     // (**D566**): `ganja-core` pins what the percentage does, and nothing there
     // can see whether a real headless session is handed it.
     assert_eq!(
-        assembled.engine.compact_threshold(),
+        assembled.engine.compact_threshold().percent(),
         60,
         "the assembled engine compacts at the percentage the config named"
     );

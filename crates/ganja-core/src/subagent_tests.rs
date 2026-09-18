@@ -633,7 +633,7 @@ async fn a_spawn_refused_at_the_dialog_starts_nothing() {
 /// so the gate asks. Everything else is the least the type will hold.
 fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammates>) -> Arc<Host> {
     Arc::new(Host {
-        compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
+        compact_threshold: crate::config::CompactThreshold::DEFAULT,
         provider: Arc::new(crate::provider::FakeProvider::new("on it", std::time::Duration::ZERO)),
         model: "recorder-model".to_owned(),
         small_model: None,

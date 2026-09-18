@@ -1273,12 +1273,23 @@ fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
         assert_eq!(stated(id), Some(922_000), "{id} as models.dev publishes it");
     }
 
-    // The three the D566 brief deliberately left out: their vendor publishes
-    // 272,000, and stating it here would move their trigger, which is its own
-    // decision rather than this one.
+    // The smaller three, carrying the same defect at a different size: their
+    // vendor publishes 272,000 against a 400,000 window, so sizing them by the
+    // window triggered at 360,000 — past their own prompt cap, which is
+    // exactly what D566 exists to stop. Stated, so it triggers at 244,800.
     for id in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex"] {
-        assert_eq!(stated(id), None, "{id} is deliberately unstated");
+        assert_eq!(stated(id), Some(272_000), "{id} as models.dev publishes it");
     }
+
+    // Every `openai` row states one, so a new one cannot be added without
+    // answering the question.
+    assert!(
+        super::SNAPSHOT
+            .iter()
+            .filter(|row| row.provider_id == "openai")
+            .all(|row| row.input_limit.is_some()),
+        "no openai row is left sized by its window alone"
+    );
 
     // Nothing outside `openai` gained one, so no other vendor's rows moved.
     assert!(
