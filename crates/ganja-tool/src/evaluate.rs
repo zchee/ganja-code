@@ -231,7 +231,7 @@ impl Tool for EvaluateTool {
 /// surfaces cannot drift into two spellings of the same line.
 ///
 /// The **join** is what is shared and the clamp deliberately is not. A tool
-/// call's output is spent out of a context window, so [`output`] clamps it;
+/// call's output is spent out of a context window, so `output` clamps it;
 /// a subcommand's stdout is a script's input, and truncating that is a bug
 /// rather than a budget.
 ///
@@ -239,7 +239,7 @@ impl Tool for EvaluateTool {
 /// break inside one, whatever the vendor sent.** A line-wise consumer — the
 /// `awk` in `docs/recipes/` is the one this build ships — must be able to
 /// read a record per question without a third party being able to add one.
-/// [`unforgeable`] is what holds it.
+/// `unforgeable` is what holds it.
 #[must_use]
 pub fn lines(answers: &BTreeMap<String, Answer>) -> String {
     answers.iter().map(|(id, answer)| line(id, answer)).collect::<Vec<_>>().join("\n")

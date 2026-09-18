@@ -354,7 +354,7 @@ pub enum Error {
     /// is what it said about which field.
     #[error("TypeSafe rejected the questions (HTTP 422): {detail}")]
     Invalid {
-        /// The vendor's explanation, clamped to [`MAX_DETAIL`] bytes.
+        /// The vendor's explanation, clamped to `MAX_DETAIL` bytes.
         detail: String,
     },
     /// A failure a later attempt might not hit: 429, 529, any other 5xx, and
