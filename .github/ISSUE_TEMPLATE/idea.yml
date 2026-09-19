@@ -1,0 +1,60 @@
+name: Idea
+description: Propose a direction or a new feature for ganja.
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An idea is a proposal about ganja's direction or a new feature. Bugs are not ideas.
+        The owner gives every idea a verdict: *do* (it will be built, with a size), *park* (kept, with a
+        written condition that reopens it) or *drop* (settled, with a reason). Ideas are grouped under
+        `Theme:` issues and ranked in the ideas index.
+  - type: textarea
+    id: what
+    attributes:
+      label: What it does
+      description: What the idea does, in plain words. Say what changes for a person using ganja.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Source
+      description: Where the idea comes from — a README line, an issue, a file in this repository (`path:line` with the commit), or a public page.
+    validations:
+      required: true
+  - type: textarea
+    id: direction
+    attributes:
+      label: "Against the three criteria: Direction (README)"
+      description: How the idea sits against the direction the README states. Direction wins when it conflicts with today's value.
+    validations:
+      required: true
+  - type: textarea
+    id: users
+    attributes:
+      label: "Against the three criteria: Today's terminal users"
+      description: What it gives the people using ganja in a terminal today.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "Against the three criteria: Evidence"
+      description: What is measured or reported. An idea that needs a measurement or a probe first is not marked *do* until that evidence exists, unless the owner makes an explicit exception.
+    validations:
+      required: true
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      description: Other ideas or missing parts this one needs. Write "Nothing" if it needs none.
+    validations:
+      required: true
+  - type: textarea
+    id: verdict
+    attributes:
+      label: Verdict
+      description: Leave empty. The owner fills it in — the verdict, then the size or the reopening condition or the reason, whether it is an exception to the probe rule, and the date.
+    validations:
+      required: false

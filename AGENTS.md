@@ -312,4 +312,4 @@ git push                # Push to remote
 
 ### Labels beyond the managed block
 
-- `idea` — a feature that is named and argued for but not designed past its bead: a slash command somebody thought of, an algorithm worth adopting. `br list -l idea` is the proposal backlog. The label comes off when a plan under `.omc/plans/` takes the bead up, so the list stays the set of things nobody has sized yet.
+- `idea` — retired for beads. Ideas about ganja's direction and new features live on GitHub issues, not in beads. They are filed through the issue form `.github/ISSUE_TEMPLATE/idea.yml`, carry `idea` plus one of `verdict:do`, `verdict:park` or `verdict:drop` and, for *do*, one of `size:S`, `size:M`, `size:L` or `size:XL`, and sit as sub-issues under a `Theme:` parent issue. The index issue https://github.com/zchee/ganja-code/issues/100 ranks the themes and the ideas inside each. Beads carry work only: bugs, tasks and chores. A plan that takes up a *do* idea files fresh work beads; the idea beads that moved were closed with an `external_ref` to their issue.
