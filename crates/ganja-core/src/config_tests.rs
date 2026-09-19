@@ -908,6 +908,119 @@ fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
     assert!(message.contains("zzz_probe"), "{message}");
 }
 
+/// Between the person's own files the roster is later-wins, replaced whole
+/// like every list here but `instructions`: the explicit tier outranks the
+/// global one, and a tier that says nothing about the table keeps the one
+/// below it.
+#[test]
+fn a_closer_trusted_tier_replaces_the_openrouter_server_tools() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let explicit = directory.path().join("explicit.toml");
+    let silent = directory.path().join("silent.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+    plant(&explicit, r#"openrouter = { server_tools = ["web_fetch"] }"#);
+    plant(&silent, r#"model = "openrouter/anthropic/claude-3""#);
+
+    let config = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    assert_eq!(
+        config.openrouter.server_tools,
+        ["web_search", "datetime"],
+        "a single tier's roster reaches the merged config"
+    );
+
+    let config = merge_files(&[global.clone(), explicit]).expect("both tiers parse");
+    assert_eq!(config.openrouter.server_tools, ["web_fetch"], "the closer trusted tier replaces");
+
+    let config = merge_files(&[global, silent]).expect("both tiers parse");
+    assert_eq!(
+        config.openrouter.server_tools,
+        ["web_search", "datetime"],
+        "a tier silent on the table keeps the one below it"
+    );
+}
+
+/// A checkout's file is not the person's: the tools on this list run on
+/// the gateway and bill per call, so a project file may only narrow what
+/// the trusted tiers granted — never add to it, never fail the load.
+#[test]
+fn a_project_file_can_only_narrow_the_openrouter_server_tools() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+
+    for (listed, expected) in [
+        // A subset narrows.
+        (r#"["datetime"]"#, vec!["datetime"]),
+        // A name the trusted tiers did not grant is dropped, not added.
+        (r#"["datetime", "shell"]"#, vec!["datetime"]),
+        // Nothing in common leaves nothing.
+        (r#"["shell"]"#, vec![]),
+        // Naming everything granted, and more, changes nothing but the extra.
+        (r#"["web_search", "datetime", "image_generation"]"#, vec!["web_search", "datetime"]),
+    ] {
+        plant(&project, &format!("openrouter = {{ server_tools = {listed} }}"));
+        let mut merged =
+            merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+        merged
+            .merge_project(
+                read(&project).expect("the project file parses").expect("it exists"),
+                &project,
+            )
+            .expect("no valid project value is fatal");
+        assert_eq!(merged.openrouter.server_tools, expected, "project lists {listed}");
+    }
+
+    // A project file silent on the table leaves the grant alone.
+    plant(&project, r#"model = "openrouter/anthropic/claude-3""#);
+    let mut merged = merge_files(&[global]).expect("the global tier parses");
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("an ordinary key is no error");
+    assert_eq!(merged.openrouter.server_tools, ["web_search", "datetime"]);
+
+    // With nothing granted, a project cannot turn anything on.
+    plant(&project, r#"openrouter = { server_tools = ["shell", "web_fetch"] }"#);
+    let mut merged = Config::default();
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("an ungranted roster is dropped, never an error");
+    assert!(merged.openrouter.server_tools.is_empty(), "{:?}", merged.openrouter.server_tools);
+}
+
+/// Narrowing is never silent: every name dropped on either side — a granted
+/// tool the project file left out, and a listed tool nobody granted — gets
+/// exactly one warning that names the tool and the file that dropped it.
+#[test]
+fn each_openrouter_server_tool_a_project_file_drops_is_warned_once() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+    plant(&project, r#"openrouter = { server_tools = ["datetime", "web_fetch"] }"#);
+    let mut merged = merge_files(&[global]).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("narrowing is never fatal");
+
+    assert_eq!(merged.openrouter.server_tools, ["datetime"]);
+    let logged = capture.logged();
+    let lines: Vec<&str> =
+        logged.lines().filter(|line| line.contains("openrouter.server_tools")).collect();
+    assert_eq!(lines.len(), 2, "one warning per dropped name, no more: {logged}");
+    let path = project.display().to_string();
+    for tool in ["web_search", "web_fetch"] {
+        let naming: Vec<&&str> =
+            lines.iter().filter(|line| line.contains(&format!("tool={tool}"))).collect();
+        assert_eq!(naming.len(), 1, "exactly one warning names {tool}: {logged}");
+        assert!(naming[0].contains(&path), "the warning for {tool} names the file: {logged}");
+    }
+    assert!(!logged.contains("tool=datetime"), "a kept tool is not warned about: {logged}");
+}
+
 /// OSC 9 degrades to nothing on a terminal that ignores it, which is the
 /// right failure for a default.
 #[test]

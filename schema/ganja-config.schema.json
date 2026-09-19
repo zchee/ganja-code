@@ -931,7 +931,7 @@
       "properties": {
         "server_tools": {
           "type": "array",
-          "description": "Tools the model may call and OpenRouter executes, by the name after the `openrouter:` prefix. Each call bills, so an empty list (the default) sends none. A name outside the roster is refused at load.",
+          "description": "Tools the model may call and OpenRouter executes, by the name after the `openrouter:` prefix. Each call bills, so an empty list (the default) sends none. A name outside the roster is refused at load. The global config and the file GANJA_CONFIG or --config names replace the list; a project file may only narrow it: names the trusted tiers did not grant are dropped with a warning, an empty or absent list in a project file changes nothing, and a list that names no granted tool leaves none.",
           "items": {
             "type": "string",
             "enum": [

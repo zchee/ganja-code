@@ -2102,8 +2102,16 @@ pub struct OpenRouterConfig {
     /// [`openrouter::SERVER_TOOLS`](crate::provider::openrouter::SERVER_TOOLS)
     /// at load and **refused by name**: a misspelling forwarded verbatim is a
     /// 400 in the middle of a turn, where the same typo caught here is a line
-    /// somebody can read. Replaced rather than concatenated across tiers, like
-    /// every list here but `instructions`.
+    /// somebody can read.
+    ///
+    /// Across tiers: a trusted tier (the global config, or the file
+    /// `GANJA_CONFIG` or `--config` names) replaces the list, like every list
+    /// here but `instructions`. A **project** file may only narrow it — its
+    /// list is intersected with what the trusted tiers granted, and a name
+    /// they did not grant is dropped with a warning — because these tools run
+    /// on the gateway and bill per call, and a checkout is not the person
+    /// paying. An empty or absent list in a project file changes nothing; a
+    /// list that names no granted tool leaves none.
     #[serde(default)]
     pub server_tools: Vec<String>,
 }
@@ -2785,6 +2793,12 @@ impl Config {
             }
         }
         overlay(&mut self.webfetch.allow_private, other.webfetch.allow_private);
+        // Replaced whole between trusted tiers; a project file never reaches
+        // this line with a list, because `merge_project` takes it first and
+        // narrows instead.
+        if !other.openrouter.server_tools.is_empty() {
+            self.openrouter.server_tools = other.openrouter.server_tools;
+        }
         // Arrays replace, which is this file's rule everywhere but
         // `instructions`: a project that names its own skill directories means
         // those, and a global tier that keeps applying underneath would be a
@@ -2838,14 +2852,17 @@ impl Config {
     /// Overlays one **project-tier** file onto the running result (**D523**).
     ///
     /// The project tier is the one tier whose author is the checkout rather
-    /// than the person running it, so three keys diverge from
+    /// than the person running it, so four keys diverge from
     /// [`Config::merge`]'s later-wins: `dialog_expiry` is refused outright —
     /// the complaint names the key and `path` — while `cross_session_inbound`
     /// and `teamless_send` (**D531**) replace the running result only when
     /// strictly more severe on their own [`InboundPolicy::severity`] /
     /// [`TeamlessSend::severity`] orders, so a checkout can tighten the
-    /// person's policy and never loosen it. Every other key merges exactly
-    /// as [`Config::merge`] merges it.
+    /// person's policy and never loosen it; and `openrouter.server_tools`
+    /// only narrows — the running list keeps the names this file also lists,
+    /// and a name the trusted tiers did not grant is dropped with a warning,
+    /// never added and never fatal. Every other key merges exactly as
+    /// [`Config::merge`] merges it.
     ///
     /// # Errors
     ///
@@ -2868,6 +2885,11 @@ impl Config {
             InboundPolicy::severity,
         );
         tighten(&mut self.teamless_send, other.teamless_send.take(), TeamlessSend::severity);
+        narrow_server_tools(
+            &mut self.openrouter.server_tools,
+            &std::mem::take(&mut other.openrouter.server_tools),
+            path,
+        );
         self.merge(other);
 
         Ok(())
@@ -2906,6 +2928,38 @@ fn merge_lsp(slot: &mut Option<LspConfig>, incoming: Option<LspConfig>) {
             existing.extend(entries);
         }
         (_, incoming) => *slot = Some(incoming),
+    }
+}
+
+/// Narrows the granted gateway tools to the ones a project file also lists.
+///
+/// An empty `listed` says nothing and changes nothing. Otherwise `granted`
+/// keeps only the names `listed` holds, and each name on either side that does
+/// not survive gets one warning naming it and `path`: a granted tool the file
+/// left out is narrowed away, and a listed tool nobody granted is ignored
+/// rather than added.
+fn narrow_server_tools(granted: &mut Vec<String>, listed: &[String], path: &Path) {
+    if listed.is_empty() {
+        return;
+    }
+    granted.retain(|name| {
+        let kept = listed.contains(name);
+        if !kept {
+            tracing::warn!(
+                path = %path.display(),
+                tool = %name,
+                "openrouter.server_tools: this project file narrows the granted tool away"
+            );
+        }
+        kept
+    });
+    for name in listed.iter().filter(|name| !granted.contains(name)) {
+        tracing::warn!(
+            path = %path.display(),
+            tool = %name,
+            "openrouter.server_tools: a project file may only narrow what the trusted tiers \
+             granted; this tool was not granted and is ignored"
+        );
     }
 }
 
