@@ -25,6 +25,7 @@ jobs:
         os:
           - ubuntu-26.04
           - xcode-27
+          - namespace-profile-zchee
           # A windows-2025 entry stood here (and a windows-lint job above)
           # until 2026-08-12: windows support is parked for now, and the
           # lanes left with it. The cfg(windows) code still in the tree has
