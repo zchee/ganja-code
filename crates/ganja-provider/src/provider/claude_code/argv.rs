@@ -2,9 +2,10 @@
 //! the environment the CLI inherits.
 //!
 //! Spec: the recording, `tests/fixtures/claude-code-sdk-mcp-probe.txt` — its
-//! header's `argv:` block is [`BASE`] verbatim, its `env:` block is [`SET`]
-//! and [`STRIP`] by name, and both preflights (runs 0 and 0b) prove the whole
-//! line parses on the recorded build and on the floor.
+//! header's `argv:` block is [`BASE`] verbatim, its `env:` block is [`STRIP`]
+//! by name and the first nine of [`SET`] by name — [`BETAS`] was added after
+//! the recording and is not in it — and both preflights (runs 0 and 0b)
+//! prove the whole line parses on the recorded build and on the floor.
 //!
 //! # Two builders, and why the never-lists are two
 //!
@@ -271,10 +272,11 @@ pub const STRIP: &[&str] = &[
 
 /// Names set in the child's environment, in [`ChildEnv::apply`]'s own order.
 ///
-/// Nine: two that say what is driving the CLI, and seven that quiet a thing
-/// it would otherwise do on its own — update itself under a held process,
-/// phone home, ask for feedback, or rewrite the terminal's title, which is
-/// ganja's title and not this child's.
+/// Ten: two that say what is driving the CLI, seven that quiet a thing it
+/// would otherwise do on its own — update itself under a held process, phone
+/// home, ask for feedback, or rewrite the terminal's title, which is ganja's
+/// title and not this child's — and one, [`BETAS`], that names the API betas
+/// the CLI opts its requests into.
 ///
 /// [`SET`] is applied **after** [`STRIP`], which matters for exactly one
 /// name: `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is on both lists — the CLI
@@ -293,7 +295,57 @@ pub const SET: &[(&str, &str)] = &[
     ("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"),
     ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
     ("CLAUDE_CODE_QUESTION_PREVIEW_FORMAT", "markdown"),
+    ("ANTHROPIC_BETAS", BETAS),
 ];
+
+/// The value of `ANTHROPIC_BETAS` on the child: the comma-separated
+/// `anthropic-beta` header values the CLI sends on every request.
+///
+/// The CLI reads the name itself and appends these to the betas it would
+/// send anyway, so the list is additive and a name it already sends is not a
+/// conflict. Kept as one constant so a test can assert the child's value is
+/// this string and no other, and so a beta is added or retired in exactly
+/// one place. Each name appears once: the header is a set, and a repeat
+/// would only make a diff of this list harder to read.
+pub const BETAS: &str = "files-api-2025-04-14,\
+context-1m-2025-08-07,\
+web-fetch-2025-09-10,\
+model-context-window-exceeded-2025-08-26,\
+code-execution-2025-08-25,\
+advanced-tool-use-2025-11-20,\
+effort-2025-11-24,\
+structured-outputs-2025-12-15,\
+code-execution-web-tools-2026-02-09,\
+fast-mode-2026-02-01,\
+adaptive-thinking-2026-01-28,\
+prompt-caching-scope-2026-01-05,\
+token-efficient-tools-2026-03-28,\
+managed-agents-2026-04-01,\
+afk-mode-2026-01-31,\
+cli-internal-2026-02-09,\
+dreaming-2026-04-21,\
+mid-conversation-system-2026-04-07,\
+advisor-tool-2026-03-01,\
+computer-use-2025-11-24,\
+mcp-client-2025-11-20,\
+compact-2026-01-12,\
+context-management-2025-06-27,\
+task-budgets-2026-03-13,\
+thinking-token-count-2026-05-13,\
+mid-conversation-tool-changes-2026-07-01,\
+server-side-fallback-2026-06-01,\
+server-side-fallback-2026-07-01,\
+fallback-credit-2026-06-01,\
+thinking-display-updates-2026-08-18,\
+auto-mode-classifier-2026-07-16,\
+mcp-tunnels-2026-06-22,\
+per-turn-control-2026-07-01,\
+mid-conversation-system-clear-at-2026-08-21,\
+message-threads-2026-08-12,\
+thinking-resumption-2026-07-17,\
+timing-2026-09-09,\
+environments-2025-11-01,\
+oidc-federation-2026-04-01";
 
 /// What a process that takes a turn is spawned with: a held conversation's,
 /// or a title's or a compaction summary's one-shot, told apart by which

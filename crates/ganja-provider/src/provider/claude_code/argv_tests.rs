@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::{
-    BASE, ChildEnv, NEVER_ANYWHERE, NEVER_ON_CONVERSATION, PERMISSION_MODE, SET, Spawn,
+    BASE, BETAS, ChildEnv, NEVER_ANYWHERE, NEVER_ON_CONVERSATION, PERMISSION_MODE, SET, Spawn,
     conversation, forbidden, listing, one_shot,
 };
 
@@ -296,13 +296,32 @@ fn the_two_credentials_that_would_outrank_the_clis_login_are_removed_by_name() {
 fn every_set_name_reaches_the_command_with_its_value() {
     let envs = child_env();
 
-    assert_eq!(SET.len(), 9);
+    assert_eq!(SET.len(), 10);
     for (name, value) in SET {
         assert!(
             envs.contains(&((*name).to_owned(), Some((*value).to_owned()))),
             "{name} is not set on the child's environment"
         );
     }
+}
+
+/// The betas list is one header value: every name once, none empty, no
+/// whitespace for the CLI to pass through into the header, and the child
+/// receives exactly this string.
+#[test]
+fn the_betas_reach_the_child_as_one_deduplicated_header_value() {
+    let names: Vec<&str> = BETAS.split(',').collect();
+    let unique: BTreeSet<&str> = names.iter().copied().collect();
+
+    assert_eq!(names.len(), 39);
+    assert_eq!(unique.len(), names.len(), "a beta is named once");
+    for name in &names {
+        assert!(!name.is_empty(), "an empty item would be an empty header value");
+        assert_eq!(name.trim(), *name, "{name:?} carries whitespace into the header");
+    }
+
+    let envs = child_env();
+    assert!(envs.contains(&("ANTHROPIC_BETAS".to_owned(), Some(BETAS.to_owned()))));
 }
 
 #[test]

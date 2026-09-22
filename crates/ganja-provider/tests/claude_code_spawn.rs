@@ -101,7 +101,7 @@ async fn checks() {
     // SAFETY: this binary holds exactly one test and has spawned nothing yet,
     // so no other thread is reading the environment while it is written.
     // These have to be set on the **parent** because `ChildEnv` sets nothing
-    // but its own nine names and reads no value at all: a child inherits them
+    // but its own ten names and reads no value at all: a child inherits them
     // the way it inherits `PATH`.
     unsafe {
         std::env::set_var(fake_claude::SCRIPT_ENV, &script);
@@ -273,7 +273,11 @@ async fn check_env(home: &Path, side: &Path) -> Result<(), String> {
     )?;
     ensure(
         record.env_present.get("CLAUDE_CODE_ENTRYPOINT") == Some(&true),
-        "the wire's own nine names did not reach the child",
+        "the wire's own ten names did not reach the child",
+    )?;
+    ensure(
+        record.env_present.get("ANTHROPIC_BETAS") == Some(&true),
+        "the betas list did not reach the child",
     )
 }
 

@@ -245,6 +245,7 @@ const WATCHED: &[&str] = &[
     "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT",
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BETAS",
 ];
 
 /// Tokens the fake refuses outright, the way the real CLI refuses an option
