@@ -50,7 +50,7 @@
 //! is why nothing is executed inside this crate. Every kind the roster has no
 //! tool for keeps D550's typed refusal (`request::refusal_answer`), never run
 //! here and never left to hang the turn. The rulings behind both — D550's and
-//! D552's — are stated in full in `crates/ganja-provider/AGENTS.md`.
+//! D552's — are stated in full in `docs/decisions/ganja-provider.md`.
 //!
 //! **A call's row opens when the model begins it** (**D559**): `decode`
 //! announces it under [`COMPOSING`](crate::provider::COMPOSING) and the pause

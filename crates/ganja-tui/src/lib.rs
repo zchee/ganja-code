@@ -443,7 +443,7 @@ pub async fn run(
     // by the name it registers, while the `teamless_send` dialog is now
     // **reached** — teamless became a live read of the session's own
     // registry rather than a flag an installer set. This crate's own
-    // `AGENTS.md` states D542 in full and what D543 did next, carrying the
+    // `docs/decisions/ganja-tui.md` states D542 in full and what D543 did next, carrying the
     // literal spellings this comment deliberately leaves to it.
     let home = ganja_core::config::config_home()
         .context("failed to locate the config home this session's team is kept in")?;

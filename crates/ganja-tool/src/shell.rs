@@ -121,7 +121,7 @@ pub struct ShellTool {
     /// Only a test ever sets this, through `ShellTool::spilling_into` — gated
     /// `#[cfg(test)]`, so there is no item here to link: a
     /// test that spilled into the resolved data directory would fill a real
-    /// person's `~/.local/share` with fixtures, which `tests/AGENTS.md`
+    /// person's `~/.local/share` with fixtures, which `crates/ganja-tool/AGENTS.md`
     /// forbids in as many words. Every other build leaves it empty and the
     /// location is resolved per call.
     spill_dir: Option<PathBuf>,

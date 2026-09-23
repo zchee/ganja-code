@@ -2,7 +2,7 @@
 //!
 //! This has its own test binary because the suite spawns real shells. That
 //! keeps the shell-facing contract isolated under the integration-suite rule
-//! in `tests/AGENTS.md` while the assertions observe the public engine seam.
+//! in `crates/ganja-core/AGENTS.md` while the assertions observe the public engine seam.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

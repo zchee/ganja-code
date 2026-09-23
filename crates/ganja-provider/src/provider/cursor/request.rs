@@ -100,7 +100,7 @@
 //! a statement about what this turn is offering, not about what this client
 //! can do. Why a decline is the kind's own arm rather than the throw, and a
 //! refusal rather than a failed turn, are **D550**'s rulings, stated in full
-//! in `crates/ganja-provider/AGENTS.md`.
+//! in `docs/decisions/ganja-provider.md`.
 //!
 //! # The switchboard: asking the server for less
 //!

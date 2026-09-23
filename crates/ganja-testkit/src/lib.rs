@@ -2,7 +2,7 @@
 //!
 //! `crates/ganja-core/tests/*.rs` is a family of standalone binaries, several
 //! of them deliberately one-test-per-binary (see
-//! `ganja-core/tests/AGENTS.md`). Before this crate existed, each one
+//! `crates/ganja-core/AGENTS.md`). Before this crate existed, each one
 //! rebuilt the same handful of fixtures from scratch: a [`Provider`] double
 //! that plays back a script — or answers by what it was asked — and records
 //! it, a [`Tool`] double that records a call or blocks until cancelled, a
