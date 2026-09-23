@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
-use super::{MAX_RESPONSE_SIZE, WebfetchTool};
+use super::{Double, MAX_RESPONSE_SIZE, WebfetchTool};
 use crate::{Tool, ToolCtx, ToolError};
 
 /// A loopback endpoint answering one connection with canned bytes.
@@ -15,6 +17,9 @@ use crate::{Tool, ToolCtx, ToolError};
 struct Endpoint {
     /// Where the tool should be pointed.
     url: String,
+    /// The socket it listens on, which is what a resolver double answers
+    /// with.
+    address: SocketAddr,
     /// The request the endpoint was sent, once it has had one.
     seen: Arc<std::sync::Mutex<String>>,
     /// Kept so the server outlives the test talking to it.
@@ -31,7 +36,8 @@ impl Endpoint {
 /// a server that accepts and then goes quiet is spelled.
 async fn serve(response: Option<Vec<u8>>) -> Endpoint {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
-    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
+    let address = listener.local_addr().expect("a bound socket has an address");
+    let url = format!("http://{address}");
     let seen = Arc::new(std::sync::Mutex::new(String::new()));
     let log = Arc::clone(&seen);
 
@@ -64,7 +70,7 @@ async fn serve(response: Option<Vec<u8>>) -> Endpoint {
         let _ = socket.flush().await;
     });
 
-    Endpoint { url, seen, _server: server }
+    Endpoint { url, address, seen, _server: server }
 }
 
 /// A 200 carrying `body` as `content_type`.
@@ -81,10 +87,50 @@ fn response(content_type: &str, body: &str) -> Vec<u8> {
 
 /// A 302 pointing at `url`.
 fn redirect_to(url: &str) -> Vec<u8> {
+    redirect_saying(url, "")
+}
+
+/// A 302 pointing at `url`, carrying `body` as the page a client that does
+/// not follow it would be shown.
+fn redirect_saying(url: &str, body: &str) -> Vec<u8> {
     format!(
-        "HTTP/1.1 302 Found\r\nconnection: close\r\nlocation: {url}\r\ncontent-length: 0\r\n\r\n"
+        "HTTP/1.1 302 Found\r\nconnection: close\r\nlocation: {url}\r\n\
+         content-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
     )
     .into_bytes()
+}
+
+/// A resolver double: each name answers the lists given, one list per
+/// lookup, and `public` names the listeners that stand in for public hosts.
+///
+/// A name's answers carry the listener's port, and a URL that names no port
+/// connects to the port its answer carries — so one test can hold a public
+/// stand-in and a private listener on the same loopback address and still
+/// tell which of them a connection reached.
+fn resolving(names: &[(&str, Vec<Vec<SocketAddr>>)], public: &[SocketAddr]) -> Double {
+    Double {
+        answers: Mutex::new(
+            names
+                .iter()
+                .map(|(name, answers)| ((*name).to_owned(), answers.iter().cloned().collect()))
+                .collect::<HashMap<_, _>>(),
+        ),
+        public: public.to_vec(),
+        proxy: None,
+    }
+}
+
+/// Asserts `error` is the refusal the tool gives for `host`, word for word.
+fn assert_refused(error: &ToolError, host: &str) {
+    let ToolError::Failed(message) = error else {
+        panic!("{host} should be refused as a failure: {error:?}");
+    };
+    assert_eq!(
+        message,
+        &super::refusal(host).to_string(),
+        "a refusal is the same sentence wherever it is raised"
+    );
 }
 
 fn ctx() -> ToolCtx {
@@ -131,6 +177,10 @@ async fn a_local_private_or_reserved_address_is_refused_before_anything_is_opene
         ("http://[64:ff9b::6464:6401]/", "the shared address space, through NAT64"),
         ("http://[2002:a00:1::]/", "a ten, through 6to4"),
         ("http://[2002:6464:6401::]/", "the shared address space, through 6to4"),
+        ("http://[::a00:1]/", "a ten, written IPv4-compatible"),
+        ("http://[::ffff:0:a00:1]/", "a ten, in SIIT's translated form"),
+        ("http://[64:ff9b:1:a00:1::]/", "a ten, behind the local-use NAT64 prefix"),
+        ("http://[2001:2::1]/", "v6 benchmarking"),
     ];
 
     for (url, what) in refused {
@@ -204,11 +254,14 @@ fn a_public_address_is_not_what_the_guard_refuses() {
         ("http://[fe00::1]/", "just below the unique-local prefix"),
         ("http://[64:ff9b::0808:0808]/", "a public v4, through NAT64"),
         ("http://[2002:808:808::]/", "a public v4, through 6to4"),
+        ("http://[2001:2:1::1]/", "just past v6 benchmarking"),
     ];
 
     for (url, what) in allowed {
         let parsed = reqwest::Url::parse(url).expect("the fixture is a URL");
-        super::resolved_and_allowed(&parsed)
+        WebfetchTool::new()
+            .guard()
+            .admit(&parsed)
             .unwrap_or_else(|error| panic!("{what} should be allowed: {url}: {error:?}"));
     }
 }
@@ -216,16 +269,15 @@ fn a_public_address_is_not_what_the_guard_refuses() {
 /// A redirect is a URL somebody else chose, so the policy runs the same
 /// check on it that the first hop got.
 ///
-/// This pins the check the policy applies. What it does not reach is a live
-/// redirect *into* a private range while the guard is on: getting there
-/// needs a first hop on a public address, which means a listener on one,
-/// which a hermetic test cannot have. The follow path is covered by the
-/// test below.
+/// This pins the check the policy applies to an address written into the
+/// `Location` header, which no resolver is ever asked about. A redirect to a
+/// *name*, with the guard on, is driven end to end through a resolver double
+/// further down.
 #[test]
 fn a_redirect_target_on_a_private_network_is_refused_by_the_check_the_policy_applies() {
     let hop =
         reqwest::Url::parse("http://169.254.169.254/latest/meta-data/").expect("a URL parses");
-    let refused = super::resolved_and_allowed(&hop).expect_err("a hop into link-local");
+    let refused = WebfetchTool::new().guard().admit(&hop).expect_err("a hop into link-local");
 
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("private network")),
@@ -252,6 +304,392 @@ async fn a_redirect_is_followed_to_the_page_it_names() {
         "the second endpoint is the one that served the body: {}",
         target.seen()
     );
+}
+
+/// A name that answers a public address when its hop is checked and a
+/// private one when the connection is made is refused at the second answer:
+/// the connection's own lookup is checked, not trusted to agree with the
+/// first.
+#[tokio::test]
+async fn a_name_answering_privately_by_the_time_its_connection_is_made_is_refused() {
+    let public = serve(Some(response("text/plain", "the public page"))).await;
+    let private = serve(Some(response("text/plain", "the private page"))).await;
+    let tool = WebfetchTool::new().resolving_through(resolving(
+        &[("rebind.test", vec![vec![public.address], vec![private.address]])],
+        &[public.address],
+    ));
+
+    let refused = tool
+        .run(serde_json::json!({ "url": "http://rebind.test/" }), &ctx())
+        .await
+        .expect_err("the answer the connection would use is private");
+
+    assert_refused(&refused, "rebind.test");
+    assert!(private.seen().is_empty(), "the private address was never reached: {}", private.seen());
+    assert!(
+        public.seen().is_empty(),
+        "nor the public one, which only the check was answered with: {}",
+        public.seen()
+    );
+}
+
+/// A redirect to a name that resolves into a private range is refused before
+/// it is followed, and what the first hop said is not handed back.
+#[tokio::test]
+async fn a_redirect_to_a_name_resolving_privately_is_refused_and_the_first_hop_is_not_returned() {
+    let private = serve(Some(response("text/plain", "the private page"))).await;
+    let first = serve(Some(redirect_saying("http://inside.test/", "moved along"))).await;
+    let tool = WebfetchTool::new().resolving_through(resolving(
+        &[("first.test", vec![vec![first.address]]), ("inside.test", vec![vec![private.address]])],
+        &[first.address],
+    ));
+
+    let refused = tool
+        .run(serde_json::json!({ "url": "http://first.test/" }), &ctx())
+        .await
+        .expect_err("the redirect leads into a private range");
+
+    assert_refused(&refused, "inside.test");
+    assert!(
+        !refused.to_string().contains("moved along"),
+        "the first hop's page is not what comes back: {refused}"
+    );
+    assert!(first.seen().starts_with("GET / "), "the first hop was fetched: {}", first.seen());
+    assert!(private.seen().is_empty(), "the private address was never reached: {}", private.seen());
+}
+
+/// The same after a redirect: a hop's name that answers publicly when the
+/// hop is admitted and privately when its connection is made is refused at
+/// the connection, so no hop connects through a lookup the guard never saw.
+#[tokio::test]
+async fn a_redirect_to_a_name_answering_privately_by_the_time_its_connection_is_made_is_refused() {
+    let public = serve(Some(response("text/plain", "the public page"))).await;
+    let private = serve(Some(response("text/plain", "the private page"))).await;
+    let first = serve(Some(redirect_saying("http://rebind.test/", "moved along"))).await;
+    let tool = WebfetchTool::new().resolving_through(resolving(
+        &[
+            ("first.test", vec![vec![first.address]]),
+            ("rebind.test", vec![vec![public.address], vec![private.address]]),
+        ],
+        &[first.address, public.address],
+    ));
+
+    let refused = tool
+        .run(serde_json::json!({ "url": "http://first.test/" }), &ctx())
+        .await
+        .expect_err("the answer the redirect's connection would use is private");
+
+    assert_refused(&refused, "rebind.test");
+    assert!(first.seen().starts_with("GET / "), "the first hop was fetched: {}", first.seen());
+    assert!(private.seen().is_empty(), "the private address was never reached: {}", private.seen());
+    assert!(public.seen().is_empty(), "nor the check's public answer: {}", public.seen());
+}
+
+/// The connection's check applies only to a name the hop was admitted under,
+/// so however a `Location` spells its name, the connection must look it up
+/// under that same name. A spelling that reached the connection any other way
+/// would resolve unchecked, and the private listener would answer.
+#[tokio::test]
+async fn every_spelling_of_a_redirect_s_name_is_checked_at_its_connection() {
+    // The `Location` sent, and the name the URL parser makes of it.
+    let spellings = [
+        ("http://REBIND.Test/", "rebind.test"),
+        ("HTTP://REBIND.TEST/", "rebind.test"),
+        ("http://rebind.test./", "rebind.test."),
+        ("//rebind.test/", "rebind.test"),
+        ("http://user:pw@rebind.test/", "rebind.test"),
+        ("http://reb%69nd.test/", "rebind.test"),
+        ("http://B\u{dc}CHER.test/", "xn--bcher-kva.test"),
+        ("http://xn--BCHER-kva.test/", "xn--bcher-kva.test"),
+        // The private listener's own port, so a connection that skipped the
+        // check would reach it whichever answer it used.
+        ("http://rebind.test:PRIVATE_PORT/", "rebind.test"),
+    ];
+
+    for (location, name) in spellings {
+        let public = serve(Some(response("text/plain", "the public page"))).await;
+        let private = serve(Some(response("text/plain", "the private page"))).await;
+        let location = location.replace("PRIVATE_PORT", &private.address.port().to_string());
+        let first = serve(Some(redirect_saying(&location, "moved along"))).await;
+        let tool = WebfetchTool::new().resolving_through(resolving(
+            &[
+                ("first.test", vec![vec![first.address]]),
+                (name, vec![vec![public.address], vec![private.address]]),
+            ],
+            &[first.address, public.address],
+        ));
+
+        let refused = tool
+            .run(serde_json::json!({ "url": "http://first.test/" }), &ctx())
+            .await
+            .expect_err(&format!("{location}: the answer its connection would use is private"));
+
+        let ToolError::Failed(message) = &refused else {
+            panic!("{location}: refused as a failure: {refused:?}");
+        };
+        assert_eq!(
+            message,
+            &super::refusal(name).to_string(),
+            "{location}: refused at the connection's lookup, naming the host"
+        );
+        assert!(private.seen().is_empty(), "{location}: private reached: {}", private.seen());
+        assert!(public.seen().is_empty(), "{location}: public reached: {}", public.seen());
+    }
+}
+
+/// A connection whose own lookup fails, or finds no address, is reported by
+/// host, as a hop's check reports it, rather than in reqwest's sentence, which
+/// names the whole URL and whatever its query carries.
+#[tokio::test]
+async fn a_failed_or_empty_connection_lookup_is_reported_as_the_host_not_resolving() {
+    let public = serve(Some(response("text/plain", "the public page"))).await;
+    // The hop's check gets the public answer, and the connection then gets
+    // none.
+    let empty = WebfetchTool::new().resolving_through(resolving(
+        &[("gone.test", vec![vec![public.address], vec![]])],
+        &[public.address],
+    ));
+    // With the guard lifted, the connection's lookup is the only one, and the
+    // double knows no such name.
+    let failed = WebfetchTool::allowing_private().resolving_through(resolving(&[], &[]));
+
+    for (tool, what) in [(empty, "finds no address"), (failed, "fails")] {
+        let error = tool
+            .run(serde_json::json!({ "url": "http://gone.test/page?token=abc" }), &ctx())
+            .await
+            .expect_err(&format!("a connection whose lookup {what} fails the fetch"));
+
+        let ToolError::Failed(message) = &error else {
+            panic!("a lookup that {what} is a failure: {error:?}");
+        };
+        assert_eq!(message, "gone.test did not resolve", "a lookup that {what}");
+    }
+    assert!(public.seen().is_empty(), "nothing was connected to: {}", public.seen());
+}
+
+/// A redirect to a name that resolves publicly is followed as it always was,
+/// and the page is stamped as one the guard checked.
+#[tokio::test]
+async fn a_redirect_to_a_name_resolving_publicly_is_followed_and_stamped_as_checked() {
+    let target = serve(Some(response("text/plain", "arrived"))).await;
+    let first = serve(Some(redirect_to("http://second.test/"))).await;
+    let tool = WebfetchTool::new().resolving_through(resolving(
+        &[("first.test", vec![vec![first.address]]), ("second.test", vec![vec![target.address]])],
+        &[first.address, target.address],
+    ));
+
+    let out = tool
+        .run(serde_json::json!({ "url": "http://first.test/" }), &ctx())
+        .await
+        .expect("both hops resolve publicly");
+
+    assert_eq!(out.output, "arrived");
+    assert_eq!(out.metadata, serde_json::json!({ "private_allowed": false, "truncated": false }));
+    assert!(target.seen().starts_with("GET / "), "the second hop served it: {}", target.seen());
+}
+
+/// With the guard lifted every one of those names is fetched: a name that
+/// resolves privately, a redirect to one, and a name that changes its answer.
+/// Nothing is checked, so nothing is looked up twice — the one lookup is the
+/// connection's, and it gets the name's first answer.
+#[tokio::test]
+async fn once_the_session_allows_private_addresses_every_such_name_is_fetched() {
+    let private = serve(Some(response("text/plain", "a private page"))).await;
+    let redirected = serve(Some(response("text/plain", "a private page, redirected to"))).await;
+    let first = serve(Some(redirect_to("http://inside.test/"))).await;
+    let public = serve(Some(response("text/plain", "the first answer"))).await;
+    let rebound = serve(Some(response("text/plain", "the second answer"))).await;
+    let tool = WebfetchTool::allowing_private().resolving_through(resolving(
+        &[
+            ("private.test", vec![vec![private.address]]),
+            ("first.test", vec![vec![first.address]]),
+            ("inside.test", vec![vec![redirected.address]]),
+            ("rebind.test", vec![vec![public.address], vec![rebound.address]]),
+        ],
+        &[],
+    ));
+
+    for (url, page) in [
+        ("http://private.test/", "a private page"),
+        ("http://first.test/", "a private page, redirected to"),
+        ("http://rebind.test/", "the first answer"),
+    ] {
+        let out = tool
+            .run(serde_json::json!({ "url": url }), &ctx())
+            .await
+            .unwrap_or_else(|error| panic!("{url} is fetched once allowed: {error:?}"));
+
+        assert_eq!(out.output, page, "{url}");
+        assert_eq!(out.metadata["private_allowed"], true, "{url}: {}", out.metadata);
+    }
+    assert!(rebound.seen().is_empty(), "the second answer was never asked for: {}", rebound.seen());
+}
+
+/// A guarded page is stamped `false` only when it came from an address the
+/// guard checked. Sent through a proxy, the proxy resolved the target and the
+/// guard saw none of its answers, so the stamp is `null` — which a reader
+/// requiring an explicit `false` reads as "may have been a private page".
+#[tokio::test]
+async fn a_page_is_stamped_as_checked_only_when_it_came_from_an_address_the_guard_checked() {
+    let site = serve(Some(response("text/plain", "straight from the site"))).await;
+    let direct = WebfetchTool::new()
+        .resolving_through(resolving(&[("site.test", vec![vec![site.address]])], &[site.address]))
+        .run(serde_json::json!({ "url": "http://site.test/" }), &ctx())
+        .await
+        .expect("the site answers");
+    assert_eq!(direct.output, "straight from the site");
+    assert_eq!(
+        direct.metadata,
+        serde_json::json!({ "private_allowed": false, "truncated": false }),
+        "the connection went to the answer the guard checked"
+    );
+
+    let site = serve(Some(response("text/plain", "straight from the site"))).await;
+    let proxy = serve(Some(response("text/plain", "through the proxy"))).await;
+    let mut double = resolving(&[("site.test", vec![vec![site.address]])], &[site.address]);
+    double.proxy = Some(reqwest::Proxy::http(&proxy.url).expect("the proxy's URL is a URL"));
+    let proxied = WebfetchTool::new()
+        .resolving_through(double)
+        .run(serde_json::json!({ "url": "http://site.test/" }), &ctx())
+        .await
+        .expect("the proxy answers");
+
+    assert_eq!(proxied.output, "through the proxy");
+    assert_eq!(
+        proxied.metadata,
+        serde_json::json!({ "private_allowed": null, "truncated": false }),
+        "the proxy resolved the target, so the guard did not decide where the page came from"
+    );
+    assert!(
+        proxy.seen().starts_with("GET http://site.test/ "),
+        "the request went to the proxy, naming the target: {}",
+        proxy.seen()
+    );
+    assert!(site.seen().is_empty(), "and never to the site itself: {}", site.seen());
+}
+
+/// The guard polices where a fetch goes, not how it gets there. A proxy is
+/// the person's own configuration, and one on this machine is where a proxy
+/// usually is, so its name is resolved without the guard — while the target
+/// it is asked for is still admitted first.
+#[tokio::test]
+async fn a_proxy_whose_name_resolves_to_this_machine_is_still_used() {
+    let site = serve(Some(response("text/plain", "straight from the site"))).await;
+    let proxy = serve(Some(response("text/plain", "through the proxy"))).await;
+    let mut double = resolving(
+        &[("site.test", vec![vec![site.address]]), ("proxy.test", vec![vec![proxy.address]])],
+        &[site.address],
+    );
+    double.proxy = Some(
+        reqwest::Proxy::http(format!("http://proxy.test:{}", proxy.address.port()))
+            .expect("the proxy's URL is a URL"),
+    );
+
+    let out = WebfetchTool::new()
+        .resolving_through(double)
+        .run(serde_json::json!({ "url": "http://site.test/" }), &ctx())
+        .await
+        .expect("a proxy on loopback is still reached");
+
+    assert_eq!(out.output, "through the proxy");
+    assert_eq!(out.metadata["private_allowed"], serde_json::Value::Null, "{}", out.metadata);
+    assert!(site.seen().is_empty(), "the site itself was never reached: {}", site.seen());
+}
+
+/// A proxy that carries only some hops — `HTTP_PROXY` without `HTTPS_PROXY`,
+/// or an exception list — can share an address with an answer that a direct
+/// hop to the same name connected to. The page it served is still not stamped
+/// as checked: it came from another port than a direct connection to that
+/// answer uses.
+#[tokio::test]
+async fn a_page_a_proxy_served_after_a_direct_hop_to_the_same_name_is_not_stamped_as_checked() {
+    let proxy = serve(Some(response("text/plain", "through the proxy"))).await;
+    let site = serve(Some(redirect_saying("http://site.test:9/", "moved along"))).await;
+    let mut double = resolving(&[("site.test", vec![vec![site.address]])], &[site.address]);
+    let proxy_url = proxy.url.clone();
+    // Only the second hop, the one naming port 9, is sent through the proxy,
+    // which listens on the site's own loopback address.
+    double.proxy =
+        Some(reqwest::Proxy::custom(move |url| (url.port() == Some(9)).then(|| proxy_url.clone())));
+
+    let out = WebfetchTool::new()
+        .resolving_through(double)
+        .run(serde_json::json!({ "url": "http://site.test/" }), &ctx())
+        .await
+        .expect("the proxy answers the second hop");
+
+    assert_eq!(out.output, "through the proxy");
+    assert!(site.seen().starts_with("GET / "), "the first hop went direct: {}", site.seen());
+    assert!(
+        proxy.seen().starts_with("GET http://site.test:9/ "),
+        "the second went to the proxy, naming the target: {}",
+        proxy.seen()
+    );
+    assert_eq!(
+        out.metadata,
+        serde_json::json!({ "private_allowed": null, "truncated": false }),
+        "the proxy resolved the second hop's target, whatever address it shares with the site"
+    );
+}
+
+/// The same with a proxy that is named rather than written as an address, and
+/// that listens on the very port the proxied hop names, so its socket matches
+/// an answer a direct hop connected to. Its name was looked up on the way,
+/// and that lookup is what marks the fetch as proxied.
+#[tokio::test]
+async fn a_page_a_named_proxy_served_on_the_hop_s_own_port_is_not_stamped_as_checked() {
+    let proxy = serve(Some(response("text/plain", "through the proxy"))).await;
+    let port = proxy.address.port();
+    let site =
+        serve(Some(redirect_saying(&format!("http://site.test:{port}/"), "moved along"))).await;
+    let mut double = resolving(
+        &[("site.test", vec![vec![site.address]]), ("proxy.test", vec![vec![proxy.address]])],
+        &[site.address],
+    );
+    let proxy_url = format!("http://proxy.test:{port}");
+    double.proxy = Some(reqwest::Proxy::custom(move |url| {
+        (url.port() == Some(port)).then(|| proxy_url.clone())
+    }));
+
+    let out = WebfetchTool::new()
+        .resolving_through(double)
+        .run(serde_json::json!({ "url": "http://site.test/" }), &ctx())
+        .await
+        .expect("the proxy answers the second hop");
+
+    assert_eq!(out.output, "through the proxy");
+    assert!(site.seen().starts_with("GET / "), "the first hop went direct: {}", site.seen());
+    assert!(
+        proxy.seen().starts_with(&format!("GET http://site.test:{port}/ ")),
+        "the second went to the proxy, naming the target: {}",
+        proxy.seen()
+    );
+    assert_eq!(
+        out.metadata,
+        serde_json::json!({ "private_allowed": null, "truncated": false }),
+        "a fetch that looked up a proxy's name is not stamped as checked"
+    );
+}
+
+/// A hop sent through a proxy is still admitted first, and that is the only
+/// check it gets here: a name resolving into a private range on this machine
+/// is refused before the proxy is asked for it.
+#[tokio::test]
+async fn a_proxied_fetch_of_a_name_resolving_privately_here_is_refused_before_the_proxy_is_asked() {
+    let private = serve(Some(response("text/plain", "the private page"))).await;
+    let proxy = serve(Some(response("text/plain", "through the proxy"))).await;
+    let mut double = resolving(&[("inside.test", vec![vec![private.address]])], &[]);
+    double.proxy = Some(reqwest::Proxy::http(&proxy.url).expect("the proxy's URL is a URL"));
+
+    let refused = WebfetchTool::new()
+        .resolving_through(double)
+        .run(serde_json::json!({ "url": "http://inside.test/" }), &ctx())
+        .await
+        .expect_err("the name resolves into a private range here");
+
+    assert_refused(&refused, "inside.test");
+    assert!(proxy.seen().is_empty(), "the proxy was never asked: {}", proxy.seen());
+    assert!(private.seen().is_empty(), "nor the private address reached: {}", private.seen());
 }
 
 #[tokio::test]
@@ -464,8 +902,9 @@ async fn a_page_clamped_with_nowhere_to_spill_reports_that_nothing_was_appended(
 /// key as `true`, so a branch that lost its stamp fails toward caution.
 ///
 /// Loopback is the only address a hermetic test may fetch, and the guarded
-/// tool refuses it, so the `false` a guarded fetch writes is asserted on the
-/// one function both branches stamp through, fed the flag the tool holds.
+/// tool refuses it, so the `false` is asserted here on the one function both
+/// branches stamp through, fed the flag the tool holds. A guarded fetch
+/// writing it end to end goes through a resolver double further down.
 #[tokio::test]
 async fn every_fetched_result_says_whether_private_addresses_were_allowed_and_whether_it_was_cut() {
     let endpoint = serve(Some(response("text/plain", "an intranet page"))).await;
@@ -497,13 +936,13 @@ async fn every_fetched_result_says_whether_private_addresses_were_allowed_and_wh
 
     let guarded = WebfetchTool::new();
     assert_eq!(
-        super::stamped(guarded.allow_private, None),
+        super::stamped(Some(guarded.allow_private), None),
         serde_json::json!({ "private_allowed": false, "truncated": false }),
         "the tool as it ships stamps an explicit false"
     );
     assert_eq!(
         super::stamped(
-            guarded.allow_private,
+            Some(guarded.allow_private),
             Some(&crate::truncate::Truncated {
                 text: String::new(),
                 truncated: true,
