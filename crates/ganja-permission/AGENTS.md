@@ -1,59 +1,54 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-05 | Updated: 2026-08-05 -->
-
 # ganja-permission
 
-## Purpose
+Decides which tool calls ganja runs without asking, and which worktree a session belongs to. A call becomes one or more patterns, the last matching rule wins, and every pattern must come back allowed for the call to run unasked. It sits at the bottom of the workspace graph: it depends on no workspace crate, so a rule is decidable without a session.
 
-What ganja is allowed to do, and where. A call becomes one or more patterns, the last matching rule wins, and every pattern has to come back allowed for the call to run without asking. Its own crate because the answer must not depend on the loop that asks: a tool checks a write for containment, the engine raises a dialog, and a stored answer outlives both — three readers, one authority, and nothing in here reaching back for a session to consult.
+## Boundary
 
-**On the name.** `project.rs` is bundled here and that makes the crate name a small lie, which is accepted rather than fixed. Project resolution is what the rules are *keyed by* — which worktree this is decides where the stored answers live and what counts as outside the project — and a few hundred settled lines whose only readers are this crate and the engine do not earn a manifest of their own. The alternative buys a truer name with a micro-crate that has one consumer, which is a worse trade.
+- `depgate.toml`: `[rules."ganja-permission"] leaf = true`. No `ganja-*` dependency may be added.
+- `crates/ganja-core/src/lib.rs` re-exports it as `pub use ganja_permission::{permission, project};`, so `ganja_core::permission` must keep resolving. That is why the inner module is named `permission`; `src/lib.rs` re-exports the main types at the crate root for direct consumers.
 
-## Key Files
+## Layout
 
-| File | Description |
-|------|-------------|
-| `Cargo.toml` | Member manifest, `publish = false`. |
-| `src/lib.rs` | Crate doc, the two module declarations, and the headline re-exports (`Action`, `Permissions`, `Decision`, `CallDecision`, `PermissionConfig`, `Project`, `ProjectError`) — how a direct consumer avoids the `ganja_permission::permission` stutter, which exists because the inner module's name is load-bearing for `ganja-core`'s facade. No logic. |
-| `src/permission.rs` | The engine: `Rule`, `Action`, `RuleSet`, `PermissionConfig` (a config file's `permission` block with its key order intact), `Permissions` (the layered set and the `decide` that walks it backwards), the wildcard `matches`, the arity table behind what an "always" answer remembers about a shell command, and the `permissions.json` store. Spec: upstream `packages/opencode/src/permission/`. |
-| `src/project.rs` | `Project` — the worktree a session runs in, resolved by walking up to a `.git`, and the slug naming its data directory: Claude Code's scheme, the absolute path with every non-alphanumeric character dashed, cut at 200 characters and hashed past that. Also `data_home`, and `digest` — the FNV that no longer names anything here and survives for `ganja-core`'s snapshot store, which keys a worktree by it. |
+| Path | Holds |
+|---|---|
+| `src/lib.rs` | Module declarations and crate-root re-exports. No logic. |
+| `src/permission.rs` | `Rule`, `Action`, `Decision`, `RuleSet`, `PermissionConfig`, `Permissions`, `CallDecision`, the wildcard `matches`, the shell arity table, the `permissions.json` store, and the constants `ASK_BY_DEFAULT`, `EXTERNAL_DIRECTORY`, `MCP_PREFIX`, `TASK`. Spec: upstream `packages/opencode/src/permission/`. |
+| `src/project.rs` | `Project` (worktree root and slug), `data_home`, `write_new`, `digest`. |
+| `src/permission_tests.rs`, `src/project_tests.rs` | Unit tests. |
 
-## For AI Agents
-
-### Working In This Directory
-
-- **Last-match-wins is the whole evaluation model, so order is data.** `PermissionConfig` is a list rather than a map and nothing here ever sorts; a reader that sorted the keys would change which rule decides. The config layer parses documents in order for exactly this reason.
-- **Rules layer, they do not merge.** The *baseline* is what a build decided (the agent's ruleset, which already carries the config's own `permission` block) and it is replaced wholesale when the agent changes; the *stored* rules are the answers a person gave and sit on top, so an "always allow" survives an agent switch.
-- **A subagent inherits the refusals and never the allows.** Nobody is watching an unattended turn, so `derive_subagent` drops the stored tier entirely rather than carrying it at the top of the order, and `inherited_by_subagent` passes down only denials and the location gate.
-- **Two gates, not one.** Patterns say *what* a call does; `EXTERNAL_DIRECTORY` is raised alongside them for *where*. A rule naming a tool cannot answer the location gate — `write` is not `external_directory` — which is what keeps an "always" given before that gate existed meaning what its user meant.
-- **The per-call read is `gate`.** Earlier trees spelled it `check` and answered the refusal text, the dialog's directories and the stored rules from three separate derivations; `gate` answers all of them from one look, and `remember` consumes what it precomputed. A reader hunting for `check` is looking at history.
-- **`MCP_PREFIX` lives here and is the one owner.** A tool whose id starts with it asks by default, below the rules, so a config that answered for it still wins. The engine's MCP module imports the constant from this crate rather than spelling the prefix a second time.
-- **`evaluate` asks by default** (**D564**), beside `edit` in `ASK_BY_DEFAULT`, and that entry is load-bearing rather than cosmetic: the un-ruled fallthrough is *allow*, so without it the built-in agents that carry no `tools:` list would send project content to a third party unasked. A `deny` rule still denies, and `--yolo` answers it `Once` without writing anything down, exactly as it does for `webfetch`.
-- **Nothing here may fail a turn.** A store that cannot be read is quarantined or ignored with a warning and the session falls back to the defaults; a store that cannot be written costs the answer its persistence and nothing else.
-- **A widened item is a claim about a reader.** Several items are `pub` only because the config layer, the agent layer or the engine sit in another crate now (`PermissionConfig::merge` and `.entries`, `RuleSet`, `Permissions::{derive, derive_subagent, inherited_by_subagent, baseline_mentions}`, `matches`, `project::digest`). Do not widen anything else without a named caller.
-
-### Testing Requirements
+## Commands
 
 ```sh
-cargo test -p ganja-permission        # the in-module suites travelled with the files
-cargo nextest run --workspace         # and the engine's, which exercise them through a turn
+cargo nextest run -p ganja-permission
+cargo nextest run -p ganja-core --test permissions   # the data-home and store behaviour, through the engine
+cargo depgate check --config depgate.toml            # the leaf rule, from the repository root
 ```
 
-Tests that write a store redirect `XDG_DATA_HOME` so they cannot touch the real user's answers.
+## Conventions
 
-### Common Patterns
+- **The engine calls `Permissions::gate_with_default` once per tool call** (from `prepare` in `crates/ganja-core/src/session.rs`, with the value of `effective_default`). `gate` is the same function with no default; only tests call it. A change to how a call is judged goes into `gate_with_default`.
+- **Precedence, highest first:** the last matching rule over the baseline followed by the stored rules (`decide` walks `ordered()` in reverse), then the caller's `unmatched` default, then `ASK_BY_DEFAULT`, then the `MCP_PREFIX` ask, then allow. `Decision` is ordered `Allow < Ask < Deny`, and a call takes the maximum over its patterns and directories (pinned by `src/permission_tests.rs`).
+- **Order is data.** `PermissionConfig` is a list, not a map, and nothing here sorts it. Sorting would change which rule wins.
+- **Baseline and stored rules layer; they do not merge.** `set_baseline` replaces the agent's rules wholesale; stored answers sit above them and survive an agent switch.
+- **A subagent inherits denials and the location gate, never allows.** `derive_subagent` drops the parent's stored answers and keeps the store; `inherited_by_subagent` returns the rules passed down. `derive` is the attended variant and keeps the stored answers.
+- **Two gates per call.** Tool patterns decide what a call does; `EXTERNAL_DIRECTORY` decides where. The `unmatched` default applies to the tool only, never to the location gate.
+- **`MCP_PREFIX` is defined only here.** The engine's MCP module imports it; do not write the prefix a second time.
+- **Keep items private unless a named caller in another crate needs them.** Current cross-crate items include `PermissionConfig::merge`, `Permissions::{derive, derive_subagent, inherited_by_subagent, baseline_mentions}`, `matches`, `project::digest` and `write_new` (called by `crates/ganja-tui/src/theme/selection.rs`). `RuleSet` is public but has no caller outside this crate today.
 
-- A stored answer is a `Rule`, never a remembered command line: for a shell call, "always" keeps the tokens that *name* the command and wildcards the arguments, from upstream's arity table.
-- The wildcard matcher normalises separators and treats a trailing ` *` as optional, so `ls *` covers a bare `ls` without covering `lst`.
+## Gotchas
 
-## Dependencies
+- **The worktree is decided by `Project::resolve`** in `src/project.rs`: it canonicalises `cwd` and takes the nearest ancestor that contains `.git`, or `cwd` itself when none does. The slug is Claude Code's scheme (non-alphanumeric UTF-16 units become `-`, cut at 200 characters plus a hash).
+- `project::digest` names a worktree's snapshot repository in `crates/ganja-storage/src/snapshot.rs`. Changing it orphans existing snapshots.
+- An "always" answer stores a `Rule`, not a command line: for a shell call the arity table keeps the tokens that name the command and wildcards the arguments. A directory whose name contains a wildcard character is never remembered and keeps asking.
+- A trailing ` *` in a pattern is optional, so `ls *` matches bare `ls` but not `lst` (pinned by `src/permission_tests.rs`).
+- Nothing here may fail a turn. An unreadable store is quarantined or ignored with a warning and the session falls back to defaults; an unwritable store keeps the answer in memory only.
+- `evaluate` is in `ASK_BY_DEFAULT`; removing it lets built-in agents send project content to a third party unasked.
 
-### Internal
+## Tests
 
-None. Both directions matter: the engine depends on this, and this depends on nothing in the workspace, which is what makes a rule decidable without a session.
+Unit tests live in sibling files wired through `#[path]`; no inline test module exists. Unit tests use `tempfile` directories and never set `XDG_DATA_HOME`: that variable is process-wide, so the data-home test lives in `crates/ganja-core/tests/permissions.rs`, which calls `ganja_testkit::redirect_xdg_data_home` (see `src/project_tests.rs`).
 
-### External
+## History
 
-`etcetera` (the data directory the store lands in), `serde` (rules decode from a config file), `serde_json` (a gated call is described by the arguments the model sent, which arrive as a value), `thiserror`, `tracing` (a dropped store names itself). `tempfile` for the tests.
-
-<!-- MANUAL: -->
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-permission.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

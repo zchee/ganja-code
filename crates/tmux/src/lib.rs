@@ -7,7 +7,7 @@
 //!
 //! Spec: pandaemonium pkg/tmux/doc.go, pkg/tmux/README.md. This crate is a
 //! behavioral port — the Go package is the specification, not source to
-//! translate; see this workspace's root `CLAUDE.md` for that standing
+//! translate; see this workspace's root `AGENTS.md` for that standing
 //! rule. It is a sealed leaf by explicit user directive: no `ganja-*` crate
 //! in this workspace may depend on it, and it depends on no `ganja-*`
 //! crate, in either direction — CI-asserted, not merely documented.

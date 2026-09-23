@@ -1,7 +1,7 @@
 use super::{DENIED_PREFIX, HOOK_REFUSED_PREFIX, REJECTED, is_refusal};
 
 // Every sentence below is spelled as a **string literal**, never built from
-// the constant it is testing (D552's Dv-8, `crates/ganja-core/AGENTS.md:52`):
+// the constant it is testing (D552's Dv-8, `docs/decisions/ganja-core.md`):
 // a test that says `format!("{HOOK_REFUSED_PREFIX}…")` passes whatever the
 // constant is reworded to, which is exactly the change these pins exist to
 // catch — a reword is what silently changes what a wire is told a call did.

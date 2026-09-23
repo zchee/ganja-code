@@ -477,7 +477,7 @@ pub enum PartBody {
     ///
     /// The tag is `reasoning_text`, which keeps the [`REASONING_TAG`] prefix
     /// the variant below makes a contract of. A build too old to decode it
-    /// therefore takes that contract's reader arm — `ganja-core`'s storage puts
+    /// therefore takes that contract's reader arm — `ganja-storage` puts
     /// a stateless [`PartBody::Reasoning`] in its place and warns — which is
     /// that contract working as designed rather than a fault: the marker is
     /// never sent, so nothing downstream is harmed. The one imprecision is that
@@ -642,7 +642,7 @@ pub enum PartBody {
     /// reader that cannot decode a `reasoning*` part is required to keep the
     /// rest of the message and put a stateless one of these in its place
     /// (`encrypted: None`), so the loss is recorded where the next request is
-    /// built instead of vanishing. `ganja-core`'s storage is that reader.
+    /// built instead of vanishing. `ganja-storage` is that reader.
     Reasoning {
         /// Which provider minted it, spelled as that provider's own id.
         ///

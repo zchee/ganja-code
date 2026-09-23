@@ -1,8 +1,8 @@
 # ganja-code
 
 Glossary for ganja's domain vocabulary — the canonical term for each concept and
-the words to avoid. Definitions only; implementation detail lives in `AGENTS.md`
-and decisions live there as D-numbers. Seeded from the multi-agent surface
+the words to avoid. Definitions only; implementation detail lives in the `AGENTS.md` files
+and decisions live in `docs/decisions/` as D-numbers. Seeded from the multi-agent surface
 (teams, teammates, orchestration); grows lazily as terms are resolved.
 
 ## Language

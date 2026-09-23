@@ -19,7 +19,7 @@
 //! [`Engine`] captures its working directory and project root at construction
 //! from the **process's** own, so every fixture here has to `chdir` into a
 //! temporary checkout before building an engine. That is process-wide state,
-//! and this suite's own convention (`tests/AGENTS.md`) is that such a test
+//! and this suite's own convention (`crates/ganja-core/AGENTS.md`) is that such a test
 //! gets its own binary. Under `nextest` each test is already its own process;
 //! under a plain `cargo test` they share one, so [`FIXTURE`] serializes them
 //! rather than leaving the pass rate to the scheduler.

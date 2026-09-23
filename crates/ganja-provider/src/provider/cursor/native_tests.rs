@@ -1039,8 +1039,8 @@ fn a_permission_refusal_is_told_from_a_failure_by_the_sentence_the_engine_render
 /// A call a `PreToolUse` hook blocked is a **refusal** on this wire too
 /// (**D556**, amending D552's classifier).
 ///
-/// D552 shipped knowing two sentences, so a hook block — which root
-/// `AGENTS.md` says "routes the same `fail_call` a denied rule does" —
+/// D552 shipped knowing two sentences, so a hook block — which the frozen root ledger
+/// (`docs/decisions/root.md`) says "routes the same `fail_call` a denied rule does" —
 /// reached cursor's server as a call that ran and broke. It now reaches it as
 /// the kind's typed `rejected` arm.
 ///

@@ -1,56 +1,56 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-06 | Updated: 2026-08-18 -->
-
 # ganja-client
 
-## Purpose
+A typed client for `ganja-serve`'s REST routes and SSE event stream. `ganja run --attach <URL>` drives a served engine through it, and `ganja sessions --live` probes every session socket through it. It never contains engine logic and never links `ganja-core` or `ganja-serve`.
 
-The consumer side of `ganja-serve`: a typed client for the served engine's REST routes and its SSE event stream, which is what `ganja run --attach` drives instead of an engine in its own process. Its internal dependency list is **exactly `ganja-protocol`**, asserted in CI as an allowlist — a client that linked `ganja-core` would quietly become a second frontend instead of a consumer of the served one, and one that linked `ganja-serve` would drag `axum` into every build that only wanted to talk to a server.
+## Boundary
 
-## Key Files
+- `depgate.toml` `[rules."ganja-client"]`: `internal = ["ganja-protocol"]`, `deny = ["axum*"]`. Linking `ganja-core` would make this a second frontend; linking `ganja-serve` would pull `axum` into every build that only talks to a server. CI runs `cargo depgate check --config depgate.toml`.
+- Five external dependencies: `reqwest`, `serde`, `serde_json`, `futures`, `thiserror`; `tokio` is dev-only. Each carries its reason in `Cargo.toml`.
 
-| File | Description |
-|------|-------------|
-| `Cargo.toml` | Member manifest, and deliberately six externals: `reqwest` (the routes and the stream's body), `serde`/`serde_json` (every body is a JSON document), `futures` (the event stream has to be nameable to be returned), `thiserror` (the error taxonomy), plus `ganja-protocol`. Dev: `tokio`, for the loopback server the suites answer from. |
-| `src/lib.rs` | `Client`: `health`, `create_session`, `sessions`, `prompt`, `events`, `permissions`, `reply_permission`, with `Credentials` (Basic, `Debug` redacted by hand) and `ClientError`. Also the declared bodies — `Health` (since **D505** carrying the served `session_id`, required), `SessionRow` (partial on purpose), `PendingPermission` (whole and closed), `Prompt` — and `Events`, the typed stream. **P25 (D505)** added the second address form: `Client::on_socket(path)` binds one `reqwest` client to one session socket for its whole life — no credential, since the filesystem already said who may connect — shown under §5.6's `uds:` spelling in every error, and refused in words (`ClientError::SocketPath`) for a path that is empty or carries a NUL. Every answer is read under `BODY_CAP` (8 MiB) and a longer one is `ClientError::Oversized`, refused unread: the far end of a socket is another process's word, and `ganja sessions --live` walks every socket in the directory through this. Of the socket's three routes this crate declares `health` alone; the two team routes' one caller is the engine's deliver arm, whose crate may not link this one. |
-| `src/sse.rs` | The frame vocabulary serve writes, **declared here**: `connected`, `message`, `heartbeat`, `evicted`, the `EvictedNotice` payload shape, the `Frame` parse and the `Frames` splitter. Pinned against a real server in `ganja-cli/tests/frames.rs`, because a declaration nobody checks is a comment. |
+## Layout
 
-## Subdirectories
+| Path | Holds |
+|---|---|
+| `src/lib.rs` | `Client` (`health`, `create_session`, `sessions`, `prompt`, `events`, `permissions`, `reply_permission`), `Client::new`, `Client::on_socket`, `Credentials`, `ClientError`, `BODY_CAP`, the declared bodies `Health`, `SessionRow`, `PendingPermission`, `Prompt`, and the `Events` stream. |
+| `src/sse.rs` | Frame vocabulary: `CONNECTED`, `MESSAGE`, `HEARTBEAT`, `EVICTED`, `FRAMES`, `EvictedNotice`, `Frame`, the `Frames` splitter. |
+| `tests/wire.rs` | Every surface against a stub answering real bytes, including malformed ones. |
+| `tests/socket.rs` | The Unix-socket form: health with no credential, a dead socket, an oversized answer. |
+| `tests/support/` | Hand-rolled loopback HTTP stub on a port or a Unix socket (a directory module, not a binary). |
 
-| Directory | Purpose |
-|-----------|---------|
-| `tests/` | `wire.rs` — every surface against a socket that answers real bytes, including the ones no real server would send: an unknown event `type`, an undeclared body field, a frame named outside the vocabulary, a stream that opens mid-conversation. `socket.rs` (**D505**) — the socket form: health crossing a real Unix socket with no credential, a dead socket as a transport error naming the `uds:` path, and an oversized answer refused unread. `support/` is a hand-rolled loopback HTTP stub (a directory module, not a binary) that listens on a port or on a Unix socket, rather than `ganja-serve`, because linking the server into these tests would put `axum` in the graph this crate exists to keep clean. |
-
-## For AI Agents
-
-### Working In This Directory
-
-- **Version skew is unsupported and refused readably.** `Event` is internally tagged with no unknown-variant tolerance, so a server one version ahead sends frames this build cannot name. Every shape this crate cannot read — an unknown event `type`, a body field nobody declared, a frame outside the vocabulary — becomes one `ClientError::Skew` naming the mismatch, and a stream that hits one ends. A client that skipped what it did not recognize would render a transcript missing exactly the parts the two builds disagree about.
-- **Do not add a dependency without the reason being load-bearing.** The internal allowlist is a CI gate; the external list is short on purpose and every entry carries its why in the manifest.
-- **`events()` returns only after the `connected` frame.** That is the registration guarantee serve publishes: subscribe first, prompt second, and nothing the turn emits can be lost between.
-- **What is declared here, and why each shape is the shape it is.** `PendingPermission` is serve's own projection and is declared whole with `deny_unknown_fields`, so the skew posture catches a drift. `SessionRow` is deliberately partial: the listing is `ganja-core`'s `SessionInfo`, a type this crate has no business duplicating.
-- **One `Client` per socket path.** `reqwest`'s `unix_socket` routes every request of the client it is set on through that path, so a socket-bound `Client` is bound to that socket for life and is never shared across paths; `Client::on_socket` is where the rule is kept.
-
-### Testing Requirements
+## Commands
 
 ```sh
-cargo test -p ganja-client                 # the surfaces, against loopback
-cargo nextest run -p ganja-cli --test frames   # the frame pin, against a real ganja-serve
-cargo nextest run -p ganja-cli --test attach   # one turn, both ways, held against itself
+cargo nextest run -p ganja-client
+cargo nextest run -p ganja-cli --test frames   # the frame vocabulary against a real ganja-serve
+cargo nextest run -p ganja-cli --test attach   # one turn in-process and attached, compared
+cargo depgate check --config depgate.toml
 ```
 
-The pin and the acceptance both live in `ganja-cli/tests/` because that is the one crate that links this client *and* the server.
+The `frames` and `attach` tests live in `ganja-cli/tests/` because `ganja-cli` is the only crate that links both this client and the server.
 
-### Common Patterns
+## Conventions
 
-Errors are written for a person to act on: every one of them names the address, the route, or the variable that would fix it. Nothing renders a password — `Credentials` and `Client` write their own `Debug`, and a named test is the canary.
+- Two address forms. `Client::new(address, credentials)` takes an absolute `http` or `https` URL; a bare `host:port` is `ClientError::Address`. `Client::on_socket(path)` binds one client to one session socket, takes no credential, and names the address `uds:<path>` in every error; an empty path or one with a NUL is `ClientError::SocketPath` (`src/lib.rs`).
+- Never share a socket-bound `Client` across paths. `reqwest`'s `unix_socket` routes every request of that client through one path, so each socket path gets its own `Client::on_socket` (`src/lib.rs`).
+- The frame vocabulary serve writes is declared in `src/sse.rs` as `FRAMES` = `connected`, `message`, `heartbeat`, `evicted`. Changing it on either side needs the pin in `ganja-cli/tests/frames.rs` updated.
+- Every shape this crate cannot read (unknown event `type`, undeclared body field, frame outside `FRAMES`) becomes one `ClientError::Skew`, and a stream that hits one ends. Do not add unknown-variant tolerance (pinned by `tests/wire.rs`).
+- `PendingPermission` and `Health` are declared whole with `deny_unknown_fields`. `SessionRow` is deliberately partial and must not copy `ganja-core`'s `SessionInfo`.
+- Error messages name the address, route or variable that would fix the problem.
+- `Credentials` and `Client` implement `Debug` by hand and never render the password (pinned by `no_rendering_of_a_client_or_its_credential_shows_the_password` in `src/lib_tests.rs`).
 
-## Dependencies
+## Gotchas
 
-### Internal
+- Credentials: this crate reads no environment. `ganja run --attach` builds `Credentials` from `GANJA_SERVER_PASSWORD` and `GANJA_SERVER_USERNAME` (`ganja-cli/src/run.rs`); a `401` is `ClientError::Unauthorized`, whose message names both variables.
+- `events()` returns only after the `connected` frame, so a caller subscribes first and prompts second without losing events. A stream that opens with anything else is `Skew`; an `evicted` frame is `ClientError::Evicted`.
+- Every body is read under `BODY_CAP` (8 MiB); a longer one is `ClientError::Oversized`, refused unread.
+- A socket client times out a connect after 2 s and a stalled read after 30 s (`SOCKET_CONNECT_DEADLINE`, `SOCKET_READ_DEADLINE`).
+- Of the four socket routes, this crate declares only `health`. The team and receipt routes are called from the engine side, which may not link this crate.
 
-`ganja-protocol`, and nothing else. CI asserts it.
+## Tests
 
-### External
+Unit tests live in sibling `*_tests.rs` files through `#[path]`. The integration tests use `tests/support/`, not `ganja-serve`, so `axum` stays out of this crate's graph; no binary needs setup beyond a loopback port or a temp socket path.
 
-`reqwest` (rustls, no OpenSSL), `serde`/`serde_json`, `futures`, `thiserror`; `tokio` for tests.
+## History
+
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-client.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

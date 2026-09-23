@@ -562,7 +562,7 @@ pub struct TaskListTool {
     /// gated `#[cfg(test)]`, so there is no item here to link. The seam is
     /// `shell.rs`'s (`ShellTool::spill_dir`) and exists for its reason: a test
     /// spilling into the resolved data directory would fill a real person's
-    /// `~/.local/share` with fixtures, which `tests/AGENTS.md` forbids in as
+    /// `~/.local/share` with fixtures, which `crates/ganja-tool/AGENTS.md` forbids in as
     /// many words — and one that merely avoided naming a directory would pass
     /// on the pathless notice a machine with no writable candidate answers
     /// with, never proving a file was written at all. Every other build leaves

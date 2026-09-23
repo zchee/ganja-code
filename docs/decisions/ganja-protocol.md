@@ -1,0 +1,49 @@
+<!-- Parent: ../AGENTS.md -->
+<!-- Generated: 2026-08-05 | Updated: 2026-08-05 -->
+
+# ganja-protocol
+
+## Purpose
+
+The types every side of the app speaks: the `Command`s a frontend sends, the `Event`s the engine streams back, and the `Message`/`Part` model a session is stored as. Two files (`lib.rs`, `team.rs`), and a dependency list of exactly `serde`, `serde_json` and `uuid` (**D493**) — a list that short is the whole reason it is a crate. Rendering a transcript, asserting on an event, or later driving a session from the far end of a socket takes none of the engine, and with the protocol on its own nothing has to build one to find that out.
+
+## Key Files
+
+| File | Description |
+|------|-------------|
+| `Cargo.toml` | Member manifest, `publish = false`. Three dependencies — `serde`, `serde_json`, and `uuid` since P25 (**D493**, the id mint), which is why the CI gate asserting this crate's depth-1 externals reads `serde serde_json uuid `. Anything that would widen the list belongs on the other side of the boundary. |
+| `src/lib.rs` | The whole crate: `Command`, `Event`, `Message`, `Part`, `PartBody` (including `PartBody::Reasoning` and its `REASONING_TAG`), `ToolState`, `Usage`, the id types and their ascending minting, `FinishReason`, `Mention`, `RevertInfo`, `PermissionReply`. Spec: upstream `session/message-v2.ts`. `PartBody::Reasoning` is the first variant whose absence changes what the *next request* carries rather than what a transcript looks like, so its tag prefix is a contract: a later variant of it keeps the `reasoning` prefix, and a reader that cannot decode such a record must keep the rest of the message and leave a stateless one of these in its place. `PartBody::ReasoningText` (tag `reasoning_text`) is the first variant to honor that contract — thinking a person can read, split out of what upstream fuses into one part. It is **display-only**: no wire sends it, no summary carries it, the context meter counts it as nothing, and it is outside `Part::as_text` so it can never title a checkpoint or answer a copy command. A caller that wants thinking matches the variant itself, and `Part::streamed_mut` is the one accessor spanning both kinds of text, for a frontend applying a `PartDelta` that names an id and not a kind. **P25** put three teammate things here: `uuidv7` — an id is now a bare lowercase hyphenated UUID and nothing else, no prefix (**D493**), because the old `<prefix>_<millis hex><counter hex>` ran off a *process-local* counter whose first id always ended in six zeroes, so two `ganja` processes reaching engine construction in the same millisecond were **guaranteed** to collide, and a team is exactly several processes started together; `PartBody::Peer`, something another agent said, carried as its own variant so nothing can mistake it for user text (**D495**); and `PermissionMode` with `Command::SetPermissionMode`, two postures rather than Claude's four, applied at the *next* turn's start (**D496**). **D556** put one field on `Message` beside `role`, `parts` and the rest: `request_only`, true of a message the engine mints for **one request** rather than for the conversation — the `/team` guards block and, since **D557**, the deadline block, both built by `Message::request_only_user` — with `#[serde(default, skip_serializing_if)]`, so a stored session that carries none is byte-for-byte what it was before the field existed. It is a protocol field rather than an engine-local one because the thing that has to read it lives outside the engine: a wire that remembers which user messages it has already sent needs to know that this one is re-minted with a fresh id on every request, or it reads the new id in the same position as a rewind. `claude-code` did exactly that, respawning its CLI on every `/team` continuation past the first, which is the defect the field exists to make impossible. **`ruto`** (2026-09-14) put a second field beside it in the same idiom: `compaction_summary`, true of the one assistant message the engine minted as a compaction summary — set at the mint and persisted with the row, backfilled on the head of a resumed window whose id the session record names — so a wire that carries a summary forward in another voice promotes it by the mark and never by its position; default-false and skipped when false, so an older transcript is byte-identical. A mark read back from the store is trusted as written — only the engine's mint and its resume backfill set it in code, and the store is the user's own file under the data home, never the checkout — which is the same trust every other stored field already gets. **D561** (2026-09-15, bead `32hp`) put a third field beside them, the first that is not a flag: `command: Option<String>`, the slash line a command expansion was typed as — `/team 1 --backend codex …` — set by `Message::from_command` alone, which the engine calls at its one expansion mint (`session::user_message`, for a turn `Engine::run_command` started) and nowhere else. The expansion stays the message's text, so the request, storage, compaction, `Part::as_text` and every copy read exactly what they read before; the line exists so a frontend can draw what the person typed instead of a page of template they never wrote. `#[serde(default, skip_serializing_if = "Option::is_none")]`, so an older transcript is byte-identical and a row without the key reads as `None`. **D557** put one command beside `SetPermissionMode`: `Command::SetDeadline { until: Option<u64> }`, an absolute instant in milliseconds since the Unix epoch — `MessageTime`'s own spelling, so a frontend that can stamp a message can name a moment without a second time type on the wire — with `None` clearing and absent from the wire when it is, `SwitchEffort`'s rule, so the clearing command's bytes carry nothing but its type. Accepted while a turn streams, like the posture beside it and for a sharper version of its reason: the turn being watched is the one somebody setting a deadline wants hurried. **No event answers it** — the value is polled off `Engine::deadline`, the D484/D485 shape — and nothing in the protocol says what it *means*: the two sentences the model reads are the engine's (`session::deadline_block`), and the warning-only posture is the engine's too. |
+| `src/team.rs` | **P25**: the teammate control channel — the frames two agents exchange through a mailbox, plus `TeamView`/`MemberView`, ganja's own projection for anything that merely renders a team (which is what lets a frontend show a roster without depending on `ganja-team`). Two things here are load-bearing. **Casing is kept per family and never normalized** (**D494**), declining the reference's own advice, because these frames are read and written by a real `claude` sharing the mailbox and a normalized `request_id` on a frame Claude spells `requestId` is a frame Claude drops — the inconsistency is the wire's. And `LeadFrame` carries **no serde derives at all**, a deliberate exception to this crate's round-trip rule: it is a constructor with a condition attached, and a `Deserialize` impl is exactly a constructor that skips it, so "only the lead could have said this" becomes a thing the compiler checks rather than a thing a call site remembers to. |
+
+## For AI Agents
+
+### Working In This Directory
+
+- **Every type here is serde-serializable, and that constraint is load-bearing.** It is not a trait that preserves the path to serving the engine over a socket — it is this. A type that cannot round-trip through `serde` does not belong here, and one that can, but whose representation changes, is a wire break: the stored sessions on disk are these values written out verbatim.
+- **Ids sort in creation order.** `uuidv7` mints a bare lowercase hyphenated UUIDv7 (**D493**) — no prefix, RFC 9562's monotonic counter within a millisecond, so lexicographic order is creation order — and the id types' own `ascending()` constructors all call it. `now`, `uuidv7` and `is_uuidv7` are public because the engine and the store ask them, and two implementations of "sorts after everything before it" is one too many.
+- **This crate names no other crate in the workspace, and must not start.** If a doc comment here needs to talk about something on the engine's side of the line — the read log `edit` consults, say — it says so in prose rather than as an intra-doc link, because the link would require a dependency the boundary refuses.
+- Adding a `PartBody` variant changes nothing already on the wire; changing or removing one changes what a stored session decodes to. Treat the two cases differently.
+
+### Testing Requirements
+
+```sh
+cargo test -p ganja-protocol          # its unit tests
+cargo tree -p ganja-protocol -e normal   # the boundary, visible: serde, serde_json and uuid
+cargo depgate check --config depgate.toml   # the boundary, gated from the repository root: leaf, plus the exact depth-1 set
+```
+
+### Common Patterns
+
+Types are plain data with derived `serde` impls; behavior belongs to whoever holds them. The exceptions are small and are about identity rather than meaning: `MessageId`/`PartId`/`PermissionId`/`SessionId` mint and compare themselves, `Part` carries the `as_text`/`as_text_mut` accessors that spare every caller a `match` on the body, and `Event::session_id` reads the one field every variant carries so a session-filtering consumer does not write the eight-arm match itself.
+
+## Dependencies
+
+### Internal
+
+None, and that is the invariant.
+
+### External
+
+`serde` (every type derives it), `serde_json` (a tool call's arguments and metadata are values the protocol carries rather than shapes it re-declares), and `uuid` (v7 only — the id mint, **D493**).
+
+<!-- MANUAL: -->

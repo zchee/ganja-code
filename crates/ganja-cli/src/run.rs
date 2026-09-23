@@ -242,7 +242,7 @@ pub struct RunArgs {
     // precedent: a value that is neither a readable file nor JSON is refused
     // before any engine is assembled. The *provider* it needs cannot be
     // checked here — it is not known until `select` has run — so that refusal
-    // is `json_schema_provider`'s, below, and is still ahead of any session.
+    // is `json_schema_format`'s, below, and is still ahead of any session.
     // Refused together with `--attach` for `--effort`'s reason: the client's
     // surface carries no text-format route (**D563**).
     #[arg(

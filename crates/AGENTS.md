@@ -1,63 +1,59 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
 
 # crates
 
-## Purpose
+The fourteen workspace members. The split is architectural: what each crate may depend on is a fact the compiler and `cargo depgate check` verify, not a rule a reviewer remembers.
 
-Container for the workspace members. The split is architectural, not cosmetic. Two axes cross here. **Up:** `ganja-core` must stay usable without a terminal so the engine is testable headless and can later be served over a socket, `ganja-tui` owns every pixel and no engine logic, and `ganja-cli` is the thin binary that wires them together. **Down:** the protocol, the permission engine, the tools and the vendor wires are crates of their own beneath the engine, so that what each depends on is a fact the compiler checks rather than a rule a reviewer remembers.
+## Graph
 
-## Subdirectories
+Arrows point at what a crate depends on. Every edge out of a crate that carries an `internal` rule in `depgate.toml` is asserted by that rule; `ganja-cli` has no rule, and `ganja-tui` and `ganja-serve` carry deny rules only. Each rule's rationale is the comment above it there.
 
-| Directory | Purpose |
-|-----------|---------|
-| `ganja-protocol/` | The types every side of the app speaks. Depends on nothing of ours (see `ganja-protocol/AGENTS.md`) |
-| `ganja-permission/` | Which calls run unasked, and the worktree they run in (see `ganja-permission/AGENTS.md`) |
-| `ganja-team/` | Claude Code's teams directory: member records and the file-backed mailboxes teammates are addressed through. Names only `ganja-protocol` (see `ganja-team/AGENTS.md`) |
-| `ganja-tool/` | What the model can do besides talk, plus the read log and its watcher (see `ganja-tool/AGENTS.md`) |
-| `ganja-provider/` | Talking to a model vendor: the wires, the credentials they present, and the catalog that sizes and prices what they serve (see `ganja-provider/AGENTS.md`) |
-| `ganja-storage/` | Where sessions live between runs — one SQLite database per project — and the working-tree snapshots `/undo`/`/rewind` walk. Names only `ganja-permission` and `ganja-protocol` (**D540**; see `ganja-storage/AGENTS.md`) |
-| `ganja-core/` | Engine: sessions, the agent loop, config, storage. Re-exports the six above under their old module names (see `ganja-core/AGENTS.md`) |
-| `ganja-teammate-local/` | The teammate backends bound to the lead's own machine: tmux panes, the `ganja` and `claude` panes split into them, and the three foreign CLIs driven in their own native TUIs. Sits *above* `ganja-core`, the way a frontend does (**D538**, **D539**); internal set closed at exactly the seven crates beneath it (see `ganja-teammate-local/AGENTS.md`) |
-| `ganja-tui/` | ratatui frontend (see `ganja-tui/AGENTS.md`) |
-| `ganja-serve/` | The engine over a socket: REST routes and the SSE event stream, over TCP and over a per-session Unix socket (see `ganja-serve/AGENTS.md`) |
-| `ganja-client/` | The other end of that wire, and nothing else: the typed routes and the SSE reader `run --attach` and `sessions --live` drive. Names only `ganja-protocol` (see `ganja-client/AGENTS.md`) |
-| `ganja-cli/` | The `ganja` binary (see `ganja-cli/AGENTS.md`) |
-| `ganja-testkit/` | Dev-only scaffolding shared by `ganja-core`'s integration suites: scripted providers, recorder/blocking tools, drain and storage-seeding builders (see `ganja-testkit/AGENTS.md`) |
-| `tmux/` | A sealed-leaf tmux control-mode client over one persistent `tmux -C`; deliberately outside the ganja dependency graph (see `tmux/AGENTS.md`) |
+```
+ganja-cli ──► ganja-tui ──► ganja-teammate-local ──► ganja-core ──► ganja-provider ──► ganja-tool ──► ganja-permission
+    │             │                                      │              │                                  ▲
+    │             └──────────────────────────────────────┤              └──► ganja-protocol                │
+    ├──► ganja-serve ──► ganja-core                      ├──► ganja-storage ──► ganja-permission, ganja-protocol
+    └──► ganja-client ──► ganja-protocol                 └──► ganja-team ──► ganja-protocol
+tmux            (sealed leaf: no edge in either direction)
+ganja-testkit   (dev-dependency only; no shipped binary links it)
+```
 
-## For AI Agents
+| Rule kind | Crate | Rule |
+|---|---|---|
+| deny | `ganja-core` | no `ratatui*`, no `axum*` |
+| deny | `ganja-provider` | no `ratatui*`, `crossterm*`, `arboard*` |
+| deny | `ganja-tui` | no `axum*` |
+| deny | `ganja-serve` | no `ratatui*`, no `ganja-teammate-local` |
+| deny | `ganja-client` | no `axum*` |
+| internal | `ganja-core` | exactly permission, protocol, provider, storage, team, tool |
+| internal | `ganja-provider` | exactly permission, protocol, tool |
+| internal | `ganja-storage` | exactly permission, protocol |
+| internal | `ganja-tool` | exactly permission |
+| internal | `ganja-team`, `ganja-client` | exactly protocol |
+| internal | `ganja-teammate-local` | exactly core plus the six beneath it |
+| leaf | `ganja-permission`, `ganja-protocol`, `tmux` | no internal dependency |
+| direct | `ganja-protocol` | exactly serde, serde_json, uuid |
+| direct | `tmux` | exactly futures, thiserror, tokio |
+| sealed | `tmux` | no member consumes it; the member set is resolved when the gate runs |
+| manifest | all | every dependency version lives in the root `Cargo.toml` |
 
-### Working In This Directory
+## Conventions
 
-The dependency direction is one-way, and every load-bearing edge of it is asserted in CI: frontends — `ganja-tui` and `ganja-serve` alike — sit on `ganja-core`, core sits on `ganja-provider`, `ganja-storage`, `ganja-tool` and `ganja-team`, and the provider, storage and tool crates sit on `ganja-permission` — while `ganja-protocol` is a leaf that core, the provider crate, the storage crate, the teams crate, the frontends and `ganja-client` consume directly and that tool and permission never touch, and the two bottom crates name nothing else of ours at all. Five rules follow.
+- A member manifest declares `foo.workspace = true` and never a version or a path. A feature enabled at the member level (`tokio-util = { workspace = true, features = ["rt"] }`) carries a comment saying why.
+- `ganja-core` re-exports the crates beneath it under their old module names (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`, `::auth`, `::catalog`, `::storage`, `::snapshot`, `::team`). Code that wants one of them alone depends on it directly, as `ganja-cli` does for `auth login`.
+- `ganja_core::provider` is the one facade that is not a bare re-export: the wires live in `ganja-provider`, the half that reads a `Config` (`select`, `Selection`, `selectable`) stays in the engine.
+- What a tool needs from its caller arrives as a value in `ToolCtx`; what a wire needs arrives on its `ChatRequest`; where a teams directory is arrives as a `TeamsRoot`. That is how the bottom crates stay ignorant of the engine.
+- Teammate backends that need a tmux server, a shell or somebody else's binary live in `ganja-teammate-local`, above the engine; a frontend assembles them and hands them to `Engine::with_teammates`. The `tmux` module inside that crate is not the `tmux` workspace crate.
+- Adding an internal edge to a crate that carries an `internal` rule is a deliberate edit to `depgate.toml`; a new member gets a rule of its own. A new member that must not consume `tmux` needs no edit: the sealed rule resolves the member set at gate time.
 
-- **`ganja-core` may never depend on a terminal crate.** The root `depgate.toml` denies `ratatui*` (and `axum*`) from `ganja-core`'s normal tree, gated in CI by `cargo depgate check`. If core needs to describe something the UI will draw, it does so in serde-serializable protocol types, not in ratatui types. `ganja-provider` is held to the same rule, plus `arboard`: a login that wants to ask a person something hands the question back to whoever called it rather than drawing a prompt.
-- **Nothing below the engine may name the engine.** The assertion is a closed allowlist per crate — the `internal` rules in the root `depgate.toml` — rather than a blocklist, which names one crate and goes quiet the day a new one appears: `ganja-tool`'s internal set is exactly `ganja-permission`, `ganja-provider`'s is exactly `ganja-permission ganja-protocol ganja-tool`, `ganja-team`'s and `ganja-client`'s are each exactly `ganja-protocol`, `ganja-storage`'s is exactly `ganja-permission ganja-protocol` (**D540**), and `ganja-permission` and `ganja-protocol` name nothing of ours at all. What a tool needs from its caller arrives as a value in `ToolCtx`, which is why that type is a bag of values rather than a session handle; what a wire needs arrives on its `ChatRequest`; where a teams directory *is* arrives as a `TeamsRoot`, for the same reason; and a session store needs only a project's worktree and the wire types a stored record decodes to. `ganja-core`'s own list is the closed six — `ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool` — which is the one that has to be edited deliberately when a crate is split off, and the reason none of these is a blocklist.
-- **`ganja-tui` holds no engine logic.** It turns terminal events into `Command`s and engine `Event`s into frames. A transcript is built from engine events alone — the frontend never invents an entry — because that is what makes resumed sessions and remote clients replay identically. It links `ganja-protocol` for the types it renders, `ganja-permission` for the project's stored rules it loads and hands to the engine, `ganja-tool` for the one thing it genuinely runs in-process — the `@` file menu's glob walk — and `ganja-teammate-local` to assemble the pane and foreign-CLI teammate backends it hands the engine.
-- **`ganja-teammate-local` sits *above* `ganja-core`, and the engine never names it back.** The crate names the engine (**D538**, **D539**) — every backend it holds needs a tmux server, a shell to split into, or somebody else's binary on `PATH`, none of which an engine may hold — so it sits with the frontends rather than beneath the engine; `ganja-core`'s own internal allowlist is asserted unchanged by the crate's existence. The rule that is this split's whole reason to exist is `ganja-serve`'s deny in `depgate.toml`: **`ganja-serve` never links `ganja-teammate-local`.** The closure `ganja serve` ships is the closure a cloud worker will ship, and a worker must be provably unable to spawn a pane or drive a foreign CLI on somebody else's machine.
-- **`ganja-storage` sits *below* the engine, a leaf on the same two bottom crates `ganja-tool` and `ganja-team` stand on.** The session store and the working-tree snapshots (**D540**) never needed the loop that calls them, only a project's worktree and the wire types a stored record decodes to — so `rusqlite` moved with them, and `ganja-core`'s own manifest names neither the database nor the crate that holds it directly by version, only `ganja-storage.workspace = true`. `ganja_core::storage` and `ganja_core::snapshot` are bare re-exports; no caller outside this crate had to change a path.
+## Commands
 
-`tmux` at `crates/tmux` is the fourteenth workspace member but not part of this graph at all: the P26 user directive (2026-08-18) seals it in both directions, so it consumes nothing here and nothing here consumes it. CI checks its normal tree for no `ganja-*` crates and derives every other member from `cargo metadata` before checking that none names `tmux`.
+```sh
+cargo nextest run -p <crate>                 # any member
+cargo depgate check --config depgate.toml    # after touching any Cargo.toml
+cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'   # the member list the gate uses
+```
 
-`ganja-cli` depends on `ratatui` for exactly one reason: the raw-mode read that keeps a typed API key off the screen, through the same crossterm instance the UI drives so the two cannot disagree about terminal state.
+## History
 
-### Testing Requirements
-
-Run the workspace gates from the repository root; see `../AGENTS.md`. Per-crate: `cargo test -p ganja-core`, and the same for `-p ganja-protocol`, `-p ganja-permission`, `-p ganja-team`, `-p ganja-tool`, `-p ganja-storage`, `-p ganja-teammate-local`, `-p ganja-provider`, `-p ganja-tui`, `-p ganja-serve`, `-p ganja-client`, `-p ganja-cli`.
-
-### Common Patterns
-
-Member manifests declare dependencies as `foo.workspace = true` and never carry a version. Where a feature is enabled at the member level (`tokio-util = { workspace = true, features = ["rt"] }`), the manifest comment says why that crate opts into that module.
-
-## Dependencies
-
-### Internal
-
-Every `ganja-*` member is declared as a workspace dependency (a path dep) in the root manifest with the reason it exists, so members reference each other the same way they reference crates.io — `foo.workspace = true`, never a path or a version in a member manifest. Sealed-leaf `tmux` is the P26 exception described above: its missing handle is deliberate because no member may opt in to consuming it.
-
-`ganja-core` re-exports the crates beneath it under the module names they had before each split (`ganja_core::protocol`, `::permission`, `::project`, `::tool`, `::watch`, `::auth`, `::catalog`, `::storage`, `::snapshot`, and `::team` for the one crate that was born rather than split off), which is what let each split land without rewriting every caller. The facade is those module names and nothing more: the crate root names only the engine's own types, so a caller that wants one of the crates beneath it alone depends on it directly rather than reach through the facade — `ganja-cli` does exactly that for `auth login`, which drives `ganja-provider`'s OAuth flows and has no engine at all.
-
-`ganja_core::provider` is the one facade that is not a bare re-export, because the module did not move whole: the wires left, and the half that reads a `Config` — which provider a session runs as, which model it asks for — stayed, over a glob of `ganja_provider::provider`. Every path a caller already wrote still resolves, and `ganja-core/src/AGENTS.md` says which functions are on which side.
-
-<!-- MANUAL: -->
+Decisions before 2026-09-23: `docs/decisions/crates.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

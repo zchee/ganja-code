@@ -127,7 +127,7 @@ pub fn backends(storage: Storage) -> Backends {
 /// is *production on a machine where the foreign CLI is not installed*. Never a
 /// stub once that CLI's wave has landed — the not-built-yet sentence stops
 /// being true, and a fixture asserting a retired refusal is a fixture asserting
-/// a lie. W5 was the wave that retired the last of them, so no slot below is a
+/// a lie. The last of those refusals is retired, so no slot below is a
 /// stub any more. Never this process's own `PATH` either: a spawn there would
 /// find the developer's real binary, take a real turn and spend somebody's
 /// quota from inside the ordinary test suite. A suite that wants a child which
