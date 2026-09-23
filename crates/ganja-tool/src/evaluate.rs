@@ -106,9 +106,13 @@ impl EvaluateTool {
     /// The overlay line at each of the three assembly sites is exactly
     /// `if let Some(tool) = EvaluateTool::configured() { tools = tools.with(tool) }`.
     ///
-    /// A refused [`typesafe::BASE_ENV`] is nothing plus one warning naming
-    /// the variable — never its value, which is configuration and may carry a
-    /// credential in its userinfo. Each call builds a fresh client, so a
+    /// A refused [`typesafe::BASE_ENV`] or [`typesafe::MODEL_ENV`] is nothing
+    /// plus one warning naming the variable the refusal was about — never its
+    /// value, which is configuration: a base URL may carry a credential in
+    /// its userinfo, and a model id was refused for what it could forge. The
+    /// variable is read off the error variant, because a warning that blamed
+    /// the base URL for a refused model would send a person to fix the one
+    /// variable that was fine. Each call builds a fresh client, so a
     /// `/plugin` reload re-reads the (unchanged) environment and may warn
     /// again; that is accepted.
     #[must_use]
@@ -116,10 +120,29 @@ impl EvaluateTool {
         let settings = match Settings::from_env() {
             Ok(Some(settings)) => settings,
             Ok(None) => return None,
-            Err(_refused) => {
+            Err(typesafe::Error::RefusedBase) => {
                 tracing::warn!(
                     variable = typesafe::BASE_ENV,
                     "the TypeSafe base URL is not https or loopback; `evaluate` is not offered"
+                );
+
+                return None;
+            }
+            Err(typesafe::Error::RefusedModel) => {
+                tracing::warn!(
+                    variable = typesafe::MODEL_ENV,
+                    "the TypeSafe default model is not a usable model id; `evaluate` is not offered"
+                );
+
+                return None;
+            }
+            // Nothing else is returned by `from_env` today; a refusal added
+            // later is reported by its own message rather than blamed on
+            // either variable above.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the TypeSafe settings were refused; `evaluate` is not offered"
                 );
 
                 return None;

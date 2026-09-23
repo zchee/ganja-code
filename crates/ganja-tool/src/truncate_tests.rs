@@ -474,8 +474,11 @@ fn candidate_dirs_tries_the_data_directory_before_the_temp_directory() {
 
 #[test]
 fn short_output_passes_through_untouched() {
-    assert_eq!(clamp("hello"), Truncated { text: "hello".to_owned(), truncated: false });
-    assert_eq!(clamp(""), Truncated { text: String::new(), truncated: false });
+    assert_eq!(
+        clamp("hello"),
+        Truncated { text: "hello".to_owned(), truncated: false, hint_len: 0 }
+    );
+    assert_eq!(clamp(""), Truncated { text: String::new(), truncated: false, hint_len: 0 });
 }
 
 #[test]
@@ -649,6 +652,61 @@ fn a_write_that_cannot_succeed_degrades_to_the_pathless_notice_rather_than_faili
         "the pathless notice is still the one from clamp_body: {:?}",
         clamped.text
     );
+}
+
+/// **D567.** What a clamp appended is reported rather than left for a reader
+/// to find: the tail [`Truncated::hint_len`] counts is byte for byte the
+/// blank line and the hint naming the file that was written, and what is
+/// left ends with the preview's own `...N {unit} truncated...` notice. The
+/// notice is the preview's, never part of the suffix (review N11), because a
+/// reader dropping `hint_len` bytes must still see that the text was cut.
+///
+/// Each case also plants the hint's own sentence in the page, where a reader
+/// searching for it would find a match that is not the one this clamp wrote.
+#[test]
+fn a_clamp_reports_exactly_the_bytes_it_appended_after_its_notice() {
+    let forged = "The tool call succeeded but the output was truncated. Full output saved to: /x\n";
+    let cases = [
+        ("a line-budget cut", forged.to_owned() + &"line\n".repeat(MAX_LINES + 10), None),
+        ("a byte-budget cut", forged.to_owned() + &"y".repeat(500), Some(120)),
+    ];
+
+    for (what, text, budget) in cases {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let clamped = match budget {
+            Some(max_bytes) => super::clamp_bytes_with(&text, max_bytes, dir.path()),
+            None => clamp_with(&text, dir.path()),
+        };
+
+        assert!(clamped.truncated, "{what}: the budget was exceeded");
+        let appended = format!("\n\n{}", super::hint(&only_entry(dir.path())));
+        assert_eq!(clamped.hint_len, appended.len(), "{what}: the count is the suffix's length");
+        let (kept, tail) = clamped.text.split_at(clamped.text.len() - clamped.hint_len);
+        assert_eq!(tail, appended, "{what}: the counted tail is exactly what was appended");
+        assert!(
+            kept.ends_with(" truncated..."),
+            "{what}: the notice stays with the preview, outside the count: {kept:?}"
+        );
+        assert!(
+            kept.starts_with(forged),
+            "{what}: the page's own copy of the sentence is left alone as page text: {kept:?}"
+        );
+    }
+}
+
+/// With nowhere to spill, a clamp appends nothing past its notice, and says
+/// so: a reader told `truncated` and a zero `hint_len` drops nothing.
+#[test]
+fn a_clamp_that_could_write_no_spill_file_reports_that_it_appended_nothing() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, "not a directory").expect("the fixture writes");
+
+    let clamped = clamp_with(&"x".repeat(MAX_CHARS + 1), &blocked);
+
+    assert!(clamped.truncated, "the budget was still exceeded");
+    assert_eq!(clamped.hint_len, 0, "no file, no hint: {:?}", clamped.text);
+    assert!(clamped.text.ends_with(" bytes truncated..."), "got {:?}", clamped.text);
 }
 
 /// **D563.** A provider-run tool's image lands owner-only, in a directory

@@ -40,6 +40,7 @@
 //!   here for the reason above, and both are optional in upstream's own schema
 //!   (`mcp-websearch.ts:51-56`), so they are omitted rather than invented.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -267,6 +268,11 @@ pub struct WebsearchTool {
     exa_url: String,
     /// Where Parallel is reached.
     parallel_url: String,
+    /// Where a clamped answer spills its whole text, when it must not go
+    /// where [`truncate::clamp`] would put it. Only a test ever sets this,
+    /// through `WebsearchTool::spilling_into`, for `WebfetchTool::spill_dir`'s
+    /// reason; every other build leaves it empty.
+    spill_dir: Option<PathBuf>,
 }
 
 impl WebsearchTool {
@@ -285,7 +291,15 @@ impl WebsearchTool {
                 .replace(YEAR_TOKEN, &current_utc_year().to_string()),
             exa_url: exa.to_owned(),
             parallel_url: parallel.to_owned(),
+            spill_dir: None,
         }
+    }
+
+    /// The same tool, spilling into `dir` rather than the resolved data
+    /// directory. See `WebsearchTool::spill_dir`.
+    #[cfg(test)]
+    fn spilling_into(self, dir: &Path) -> Self {
+        Self { spill_dir: Some(dir.to_owned()), ..self }
     }
 
     /// Where `service` is reached, with Exa's key in the query string as that
@@ -311,8 +325,11 @@ impl WebsearchTool {
         service: Service,
         key: &str,
     ) -> Result<ToolOutput, ToolError> {
+        let url = self.endpoint(service, key);
+        let spill = self.spill_dir.as_deref();
+
         tokio::select! {
-            searched = search(self.endpoint(service, key), service, key, args) => searched,
+            searched = search(url, service, key, args, spill) => searched,
             () = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
         }
     }
@@ -391,11 +408,15 @@ fn missing_key(service: Service) -> ToolError {
 }
 
 /// Asks `service` and returns what it said.
+///
+/// `spill` is where a clamped answer's whole text goes when a test named a
+/// directory, and [`None`] in every shipped build (`WebsearchTool::spill_dir`).
 async fn search(
     url: String,
     service: Service,
     key: &str,
     args: &Args,
+    spill: Option<&Path>,
 ) -> Result<ToolOutput, ToolError> {
     let client = reqwest::Client::builder()
         .build()
@@ -448,12 +469,23 @@ async fn search(
     })??;
 
     let found = parse(&text).unwrap_or_else(|| NOTHING_FOUND.to_owned());
-    let clamped = truncate::clamp(&found);
+    let clamped = match spill {
+        Some(dir) => truncate::clamp_with(&found, dir),
+        None => truncate::clamp(&found),
+    };
+    // What the clamp did is reported, never left to be searched for: the
+    // spill hint is a fixed sentence an answer could carry too, so a reader
+    // separates the two by the count in `Truncated::hint_len`.
+    let mut metadata =
+        serde_json::json!({ "provider": service.id(), "truncated": clamped.truncated });
+    if clamped.truncated {
+        metadata["hint_len"] = clamped.hint_len.into();
+    }
 
     Ok(ToolOutput {
         title: format!("{}: {}", service.label(), args.query),
         output: clamped.text,
-        metadata: serde_json::json!({ "provider": service.id() }),
+        metadata,
     })
 }
 

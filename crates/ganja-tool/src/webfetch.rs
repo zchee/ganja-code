@@ -11,6 +11,7 @@
 //! `http` with a 301 to `https`.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -156,6 +157,17 @@ pub struct WebfetchTool {
     /// Whether a URL resolving onto this machine or a private network is
     /// fetched rather than refused. See [`WebfetchTool::allowing_private`].
     allow_private: bool,
+    /// Where a clamped page spills its whole text, when it must not go where
+    /// [`truncate::clamp`] would put it.
+    ///
+    /// Only a test ever sets this, through `WebfetchTool::spilling_into` —
+    /// gated `#[cfg(test)]`, so there is no item here to link. The seam is
+    /// `shell.rs`'s (`ShellTool::spill_dir`) and exists for its reason: a test
+    /// spilling into the resolved data directory would fill a real person's
+    /// `~/.local/share` with fixtures, and one that merely avoided naming a
+    /// directory would pass on the pathless notice without proving a file was
+    /// written. Every other build leaves it empty.
+    spill_dir: Option<PathBuf>,
 }
 
 impl WebfetchTool {
@@ -173,7 +185,7 @@ impl WebfetchTool {
     /// `webfetch-refuses-private-addresses`).
     #[must_use]
     pub fn new() -> Self {
-        Self { allow_private: false }
+        Self { allow_private: false, spill_dir: None }
     }
 
     /// The tool with that refusal lifted, for a session whose config asked for
@@ -185,7 +197,14 @@ impl WebfetchTool {
     /// session can answer.
     #[must_use]
     pub fn allowing_private() -> Self {
-        Self { allow_private: true }
+        Self { allow_private: true, spill_dir: None }
+    }
+
+    /// The same tool, spilling into `dir` rather than the resolved data
+    /// directory. See `WebfetchTool::spill_dir`.
+    #[cfg(test)]
+    fn spilling_into(self, dir: &Path) -> Self {
+        Self { spill_dir: Some(dir.to_owned()), ..self }
     }
 }
 
@@ -232,8 +251,10 @@ impl Tool for WebfetchTool {
             .timeout
             .map_or(DEFAULT_TIMEOUT, |seconds| Duration::from_secs(seconds).min(MAX_TIMEOUT));
 
+        let spill = self.spill_dir.as_deref();
+
         tokio::select! {
-            fetched = fetch(&args, timeout, self.allow_private) => fetched,
+            fetched = fetch(&args, timeout, self.allow_private, spill) => fetched,
             () = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
         }
     }
@@ -330,10 +351,14 @@ fn host_of(url: &reqwest::Url) -> Result<String, ToolError> {
 }
 
 /// Gets the URL and renders the body in the format the call asked for.
+///
+/// `spill` is where a clamped page's whole text goes when a test named a
+/// directory, and [`None`] in every shipped build (`WebfetchTool::spill_dir`).
 async fn fetch(
     args: &Args,
     timeout: Duration,
     allow_private: bool,
+    spill: Option<&Path>,
 ) -> Result<ToolOutput, ToolError> {
     let client = client(&args.url, allow_private).await?;
     let request = client
@@ -368,6 +393,10 @@ async fn fetch(
         // The protocol carries no attachments yet, so an image is reported
         // rather than returned; upstream hands the bytes back as a data URL.
         if mime.starts_with("image/") {
+            let mut metadata = stamped(allow_private, false, 0);
+            metadata["mime"] = mime.as_str().into();
+            metadata["bytes"] = body.len().into();
+
             return Ok(ToolOutput {
                 title,
                 output: format!(
@@ -375,7 +404,7 @@ async fn fetch(
                      bytes to the model yet.",
                     body.len()
                 ),
-                metadata: serde_json::json!({ "mime": mime, "bytes": body.len() }),
+                metadata,
             });
         }
 
@@ -398,16 +427,41 @@ async fn fetch(
         } else {
             content
         };
-        let clamped = truncate::clamp(&rendered);
+        let clamped = match spill {
+            Some(dir) => truncate::clamp_with(&rendered, dir),
+            None => truncate::clamp(&rendered),
+        };
 
         Ok::<_, ToolError>(ToolOutput {
             title,
+            metadata: stamped(allow_private, clamped.truncated, clamped.hint_len),
             output: clamped.text,
-            metadata: serde_json::json!({}),
         })
     })
     .await
     .map_err(|_elapsed| ToolError::Failed("Request timed out".to_owned()))?
+}
+
+/// What every fetched result's metadata says about how it was fetched and
+/// what the clamp did to it, whichever branch answered.
+///
+/// `private_allowed` is written on **every** result, `false` included, so a
+/// reader deciding by it can require an explicit `false` and treat a missing
+/// key as the other answer: a branch that forgot the stamp then fails toward
+/// "this may have been a private page" rather than away from it. `truncated`
+/// is written on every result too, so no reader has to decide what its
+/// absence means, and `hint_len` — the bytes [`truncate::clamp`] appended
+/// after its notice ([`truncate::Truncated::hint_len`]) — whenever it is
+/// true, so a reader separates the page from the spill hint by count rather
+/// than by searching for a sentence the page could have carried itself.
+fn stamped(allow_private: bool, truncated: bool, hint_len: usize) -> serde_json::Value {
+    let mut metadata =
+        serde_json::json!({ "private_allowed": allow_private, "truncated": truncated });
+    if truncated {
+        metadata["hint_len"] = hint_len.into();
+    }
+
+    metadata
 }
 
 /// The client one fetch runs through, guarded unless the session lifted it.

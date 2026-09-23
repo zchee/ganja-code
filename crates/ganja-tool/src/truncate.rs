@@ -122,6 +122,16 @@ pub struct Truncated {
     pub text: String,
     /// Whether anything was cut.
     pub truncated: bool,
+    /// How many bytes at the end of `text` the clamp appended after the
+    /// preview's `...N {unit} truncated...` notice: the blank line and the
+    /// spill hint, exactly `"\n\n"` plus `hint`'s sentence. Zero when nothing
+    /// was cut, and zero when something was but no spill file could be
+    /// written, since that path appends nothing past the notice.
+    ///
+    /// Reported rather than left for a reader to find, because the hint is a
+    /// fixed sentence any page can carry too: `text[..text.len() - hint_len]`
+    /// is the preview and its notice, whatever the page said.
+    pub hint_len: usize,
 }
 
 /// Clamps `text` to the line and byte budgets, spilling the full original to
@@ -174,16 +184,13 @@ fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
 /// to `max_bytes`, then writes it to the first of `dirs` that accepts it.
 fn clamp_in(text: &str, max_bytes: usize, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
     let Some(body) = clamp_body(text, max_bytes) else {
-        return Truncated { text: text.to_owned(), truncated: false };
+        return Truncated { text: text.to_owned(), truncated: false, hint_len: 0 };
     };
 
     let written = dirs.into_iter().find_map(|dir| write_overflow(&dir, text.as_bytes()));
-    let text = match written {
-        Some((file, _)) => format!("{body}\n\n{}", hint(&file)),
-        None => body,
-    };
+    let suffix = written.map(|(file, _)| format!("\n\n{}", hint(&file))).unwrap_or_default();
 
-    Truncated { text, truncated: true }
+    Truncated { hint_len: suffix.len(), text: body + &suffix, truncated: true }
 }
 
 /// The clamped preview and upstream's `...N {unit} truncated...` notice, or
@@ -233,7 +240,11 @@ fn clamp_body(text: &str, max_bytes: usize) -> Option<String> {
 /// agents may delegate is not a question a truncation notice may answer. So
 /// every call is upstream's other branch, the one that points at `grep` and
 /// `read` instead.
-fn hint(file: &Path) -> String {
+///
+/// `pub(crate)` for the tools' own tests: what a tool reports as the bytes a
+/// clamp appended ([`Truncated::hint_len`]) is held byte for byte against
+/// this one spelling rather than against a copy of the sentence.
+pub(crate) fn hint(file: &Path) -> String {
     format!(
         "The tool call succeeded but the output was truncated. Full output saved to: {}\n\
          Use Grep to search the full content or Read with offset/limit to view specific sections.",

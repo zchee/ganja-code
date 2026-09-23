@@ -360,6 +360,128 @@ async fn html_asked_for_as_html_keeps_its_markup() {
     assert_eq!(out.output, PAGE);
 }
 
+/// **D567.** A page cut to fit says so in its metadata, and says how many
+/// trailing bytes of the output are the spill hint rather than the page — so
+/// a reader drops exactly those and never searches for a sentence the page
+/// could have carried itself. The notice stays in what is left (review N11):
+/// it is the preview's, and a reader that dropped the hint must still see
+/// the page was cut.
+#[tokio::test]
+async fn a_clamped_page_reports_the_bytes_its_hint_appended_and_keeps_its_notice() {
+    let spill = tempfile::tempdir().expect("a scratch directory");
+    let page = "line\n".repeat(crate::truncate::MAX_LINES + 10);
+    let endpoint = serve(Some(response("text/plain", &page))).await;
+
+    let out = WebfetchTool::allowing_private()
+        .spilling_into(spill.path())
+        .run(serde_json::json!({ "url": endpoint.url }), &ctx())
+        .await
+        .expect("the endpoint answers");
+
+    let spilled = std::fs::read_dir(spill.path())
+        .expect("the spill directory was created")
+        .map(|entry| entry.expect("a readable directory entry").path())
+        .collect::<Vec<_>>();
+    let [file] = spilled.as_slice() else {
+        panic!("exactly one spill file: {spilled:?}");
+    };
+    let appended = format!("\n\n{}", crate::truncate::hint(file));
+
+    assert_eq!(out.metadata["truncated"], true, "{}", out.metadata);
+    assert_eq!(out.metadata["private_allowed"], true, "{}", out.metadata);
+    assert_eq!(out.metadata["hint_len"], appended.len(), "{}", out.metadata);
+    let hint_len = usize::try_from(out.metadata["hint_len"].as_u64().expect("a count"))
+        .expect("a count that fits");
+    let (kept, tail) = out.output.split_at(out.output.len() - hint_len);
+    assert_eq!(tail, appended, "the counted tail is byte for byte what the clamp appended");
+    assert!(
+        kept.ends_with("\n\n...11 lines truncated..."),
+        "the notice is left with the page, outside the count: {:?}",
+        &kept[kept.len().saturating_sub(64)..]
+    );
+    assert_eq!(std::fs::read_to_string(file).expect("the spill is readable"), page);
+}
+
+/// **D567.** A page cut with nowhere to spill is still reported as cut, and
+/// its `hint_len` is zero: nothing was appended past the notice, so a reader
+/// dropping `hint_len` bytes drops nothing and keeps the notice.
+#[tokio::test]
+async fn a_page_clamped_with_nowhere_to_spill_reports_that_nothing_was_appended() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    // A regular file where the spill directory would have to be created, so
+    // no spill file can be written: the degraded path, reached hermetically.
+    let blocked = scratch.path().join("blocked");
+    std::fs::write(&blocked, "not a directory").expect("the fixture writes");
+    let page = "line\n".repeat(crate::truncate::MAX_LINES + 10);
+    let endpoint = serve(Some(response("text/plain", &page))).await;
+
+    let out = WebfetchTool::allowing_private()
+        .spilling_into(&blocked)
+        .run(serde_json::json!({ "url": endpoint.url }), &ctx())
+        .await
+        .expect("the endpoint answers");
+
+    assert_eq!(
+        out.metadata,
+        serde_json::json!({ "private_allowed": true, "truncated": true, "hint_len": 0 })
+    );
+    assert!(
+        out.output.ends_with("\n\n...11 lines truncated..."),
+        "the notice is the last thing in the output: {:?}",
+        &out.output[out.output.len().saturating_sub(64)..]
+    );
+    assert!(!out.output.contains("Full output saved to:"), "no file is claimed");
+}
+
+/// **D567.** Every result says whether private addresses were allowed and
+/// whether it was cut, on both branches a fetch can answer through. A reader
+/// may then require an explicit `private_allowed: false` and treat a missing
+/// key as `true`, so a branch that lost its stamp fails toward caution.
+///
+/// Loopback is the only address a hermetic test may fetch, and the guarded
+/// tool refuses it, so the `false` a guarded fetch writes is asserted on the
+/// one function both branches stamp through, fed the flag the tool holds.
+#[tokio::test]
+async fn every_fetched_result_says_whether_private_addresses_were_allowed_and_whether_it_was_cut() {
+    let endpoint = serve(Some(response("text/plain", "an intranet page"))).await;
+    let page = WebfetchTool::allowing_private()
+        .run(serde_json::json!({ "url": endpoint.url }), &ctx())
+        .await
+        .expect("the endpoint answers");
+    assert_eq!(
+        page.metadata,
+        serde_json::json!({ "private_allowed": true, "truncated": false }),
+        "a page that fit carries no hint_len"
+    );
+
+    let endpoint = serve(Some(response("image/png", "png bytes"))).await;
+    let image = WebfetchTool::allowing_private()
+        .run(serde_json::json!({ "url": endpoint.url }), &ctx())
+        .await
+        .expect("the endpoint answers");
+    assert_eq!(
+        image.metadata,
+        serde_json::json!({
+            "mime": "image/png",
+            "bytes": "png bytes".len(),
+            "private_allowed": true,
+            "truncated": false,
+        }),
+        "the image branch is stamped too"
+    );
+
+    let guarded = WebfetchTool::new();
+    assert_eq!(
+        super::stamped(guarded.allow_private, false, 0),
+        serde_json::json!({ "private_allowed": false, "truncated": false }),
+        "the tool as it ships stamps an explicit false"
+    );
+    assert_eq!(
+        super::stamped(guarded.allow_private, true, 213),
+        serde_json::json!({ "private_allowed": false, "truncated": true, "hint_len": 213 }),
+    );
+}
+
 #[tokio::test]
 async fn a_response_over_the_size_cap_is_refused() {
     // Declares a length nobody would want to buffer, so the refusal lands
