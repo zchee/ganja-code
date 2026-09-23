@@ -207,6 +207,9 @@ context_management = [{ type = "compaction", compact_threshold = 400000 }]
 [webfetch]
 allow_private = true
 
+[evaluate]
+screen = ["webfetch", "websearch", "mcp:github", "mcp:plugin:foo:bar"]
+
 [skills]
 paths = ["~/.claude/skills"]
 urls = ["https://example/skills"]
@@ -266,6 +269,10 @@ fn the_schema_matches_what_the_real_loader_accepts() {
     );
     the_loader_names_exactly_the_keys_a_responses_options_table_accepts(
         &home.path().join("responses-options"),
+        &schema,
+    );
+    the_loader_names_exactly_the_keys_an_evaluate_table_accepts(
+        &home.path().join("evaluate"),
         &schema,
     );
     the_kitchen_sink_document_loads_through_the_real_loader(&home.path().join("kitchen-sink"));
@@ -354,6 +361,21 @@ fn the_loader_names_exactly_the_keys_a_responses_options_table_accepts(
         loader_fields, schema_fields,
         "ResponsesOptions' own fields (from serde's refusal: {message:?}) must be exactly \
          the schema's ResponsesOptions properties"
+    );
+}
+
+/// Code → schema, for `EvaluateConfig` — **D567**'s table, whose one key
+/// decides what leaves the machine, so a key the loader grew and the schema
+/// never described would be one an editor could not warn about.
+fn the_loader_names_exactly_the_keys_an_evaluate_table_accepts(project: &Path, schema: &Value) {
+    let message = bogus_key_error(project, "[evaluate]\nzzz_schema_probe = 1\n");
+    let loader_fields = expected_fields(&message);
+    let schema_fields = schema_keys(schema, Some("EvaluateConfig"));
+
+    assert_eq!(
+        loader_fields, schema_fields,
+        "EvaluateConfig's own fields (from serde's refusal: {message:?}) must be exactly \
+         the schema's EvaluateConfig properties"
     );
 }
 
@@ -719,6 +741,68 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
                  schema must not accept it either"
             );
         }
+    }
+}
+
+/// `evaluate.screen` in the schema refuses what `check_evaluate` refuses and
+/// accepts what it accepts, a colon inside a server's name included and a
+/// `*` or a control character in one excluded — and its
+/// description says what the key costs before anybody writes one: that the
+/// feature is experimental and off by default, that the text of every result
+/// it names goes to the TypeSafe host, and that only the person's own tiers
+/// can add a source (**D567**).
+#[test]
+fn the_screen_list_is_described_and_refused_the_way_the_loader_reads_it() {
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+
+    for accepted in
+        [json!(["mcp:plugin:foo:bar"]), json!(["webfetch", "websearch", "mcp:github"]), json!([])]
+    {
+        let mut sink: Value = kitchen_sink();
+        sink["evaluate"]["screen"] = accepted.clone();
+        assert!(validator.is_valid(&sink), "the loader accepts {accepted}, and so must the schema");
+    }
+    for refused in [
+        json!(["web"]),
+        json!(["mcp:"]),
+        json!(["mcp"]),
+        json!(["webfetch", "webfetch"]),
+        // No wildcard, bare, whole or partial.
+        json!(["*"]),
+        json!(["mcp:*"]),
+        json!(["mcp:github-*"]),
+        // A control character: a newline, which would forge a line in the
+        // person's log, and C1, the other half of `char::is_control`.
+        json!(["mcp:x\n2026-09-23T04:00:00.000000Z  WARN ganja_core::config: forged line"]),
+        json!(["mcp:a\u{85}b"]),
+    ] {
+        let mut sink: Value = kitchen_sink();
+        sink["evaluate"]["screen"] = refused.clone();
+        assert!(!validator.is_valid(&sink), "the loader refuses {refused}, and so must the schema");
+    }
+    let mut sink: Value = kitchen_sink();
+    sink["evaluate"]["zzz_schema_probe"] = json!(1);
+    assert!(
+        !validator.is_valid(&sink),
+        "the evaluate table is curated with deny_unknown_fields; additionalProperties: false \
+         on EvaluateConfig should refuse an unknown key too"
+    );
+
+    let schema = schema();
+    let description = schema["$defs"]["EvaluateConfig"]["properties"]["screen"]["description"]
+        .as_str()
+        .expect("evaluate.screen carries a description");
+    for sentence in [
+        "Experimental, and off by default",
+        "The text of every page `webfetch` reads, every `websearch` result and every result of \
+         the named servers is sent to the TypeSafe host.",
+        "Only the trusted tiers — the global config, and the file GANJA_CONFIG or --config \
+         names — can add a source",
+        "a project file can only narrow it",
+        "There is no wildcard: name each server, because a name holding \"*\" is refused, as \
+         is a name holding a control character.",
+    ] {
+        assert!(description.contains(sentence), "the description says {sentence:?}: {description}");
     }
 }
 

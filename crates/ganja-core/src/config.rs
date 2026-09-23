@@ -42,7 +42,7 @@
 //! block carries `options.apiKey`, and ganja's entry carries `key_env`, the
 //! *name* of the variable holding it, instead.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
+    judge::Screen,
     // The `permission` block parses straight into the types the permission
     // layer evaluates: a config file describes rules, and what a rule *is* is
     // not this module's to say.
@@ -1653,6 +1654,11 @@ pub struct Config {
     /// What the `webfetch` tool may reach; see [`WebfetchConfig`].
     #[serde(default)]
     pub webfetch: WebfetchConfig,
+    /// Which tool results are sent to TypeSafe's host to be screened; see
+    /// [`EvaluateConfig`] (**D567**). Experimental, and off until a trusted
+    /// tier names a source.
+    #[serde(default)]
+    pub evaluate: EvaluateConfig,
     /// Where this session looks for skills besides ganja's own two homes; see
     /// [`SkillsConfig`] and [`default_skill_dirs`].
     #[serde(default)]
@@ -2480,6 +2486,84 @@ pub struct WebfetchConfig {
     pub allow_private: Option<bool>,
 }
 
+/// Which tool results a session sends to TypeSafe's host, to be screened for
+/// text that addresses an AI agent (**D567**). **Experimental, and off by
+/// default.**
+///
+/// Its own table for [`WebfetchConfig`]'s reason: what it configures is one
+/// feature, and the next key that feature needs belongs beside this one. Not
+/// a key upstream has.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluateConfig {
+    /// The sources screened: `"webfetch"`, `"websearch"`, or `"mcp:<server>"`
+    /// for the tools of one MCP server, by the name the `mcp` table gives it.
+    /// The name may hold colons, so a plugin's `plugin:<plugin>:<server>` is
+    /// one entry. There is no wildcard: name each server, because a name
+    /// holding `*` is refused, as is a name holding a control character. Any
+    /// other entry, and an entry named twice, is refused at load by name.
+    ///
+    /// **The text of every page `webfetch` reads, every `websearch` result and
+    /// every result of the named servers is sent to the TypeSafe host.** That
+    /// is why nothing is screened until somebody names a source, and why only
+    /// the person running ganja can name one.
+    ///
+    /// **`None` inherits and `Some([])` is off.** An [`Option`] for
+    /// [`Config::snapshot`]'s reason, and for one a bare list cannot give:
+    /// `skills.paths` reads an empty list as "says nothing", which leaves no
+    /// way to write "nothing".
+    ///
+    /// Across tiers: a trusted tier (the global config, or the file
+    /// `GANJA_CONFIG` or `--config` names) replaces the list whole. A
+    /// **project** file may only narrow it, and no valid value in one is
+    /// fatal: its list is intersected with the screen the tiers above it
+    /// left, and every entry either side loses gets a warning — a screened
+    /// source the list leaves out is narrowed away, and a listed one the
+    /// screen did not hold is ignored rather than added. A server the
+    /// project file defines or redefines in its own `mcp` table leaves the
+    /// screen, also with a warning — the person agreed to send that server's
+    /// results, and a checkout that replaces the server has replaced what they
+    /// agreed to. Neither step can add a source, so an inner project file
+    /// never puts back what an outer one removed.
+    pub screen: Option<Vec<String>>,
+}
+
+/// What an `evaluate.screen` entry says, and the grammar's one spelling: the
+/// loader's refusal ([`check_evaluate`]) and [`Config::evaluate_screen`] both
+/// read entries through [`ScreenSource::read`], so what is refused and what is
+/// screened cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScreenSource<'a> {
+    /// `"webfetch"`.
+    Webfetch,
+    /// `"websearch"`.
+    Websearch,
+    /// `"mcp:<server>"`, holding the server's name.
+    Mcp(&'a str),
+}
+
+impl<'a> ScreenSource<'a> {
+    /// The accepted shapes, as the refusal lists them.
+    const SHAPES: &'static str = "\"webfetch\", \"websearch\", or \"mcp:<server>\" naming one MCP \
+                                  server by its name in the mcp table";
+
+    /// Reads one entry, or [`None`] for one outside the grammar.
+    fn read(entry: &'a str) -> Option<Self> {
+        match entry {
+            "webfetch" => Some(Self::Webfetch),
+            "websearch" => Some(Self::Websearch),
+            _ => entry
+                .strip_prefix("mcp:")
+                .filter(|server| {
+                    !server.is_empty()
+                        && !server.contains('*')
+                        && !server.chars().any(char::is_control)
+                })
+                .map(Self::Mcp),
+        }
+    }
+}
+
 /// Where a session looks for skills besides ganja's own two homes.
 ///
 /// Upstream's two keys, spelled as upstream spells them
@@ -2624,6 +2708,30 @@ impl Config {
     #[must_use]
     pub fn webfetch_allows_private(&self) -> bool {
         self.webfetch.allow_private == Some(true)
+    }
+
+    /// Which tool results this session screens; see
+    /// [`EvaluateConfig::screen`].
+    ///
+    /// An absent list and an empty one both screen nothing. An entry outside
+    /// the grammar cannot reach here — the loader's `checked` refused its
+    /// file — so skipping one is a belt to those suspenders rather than a
+    /// second policy.
+    #[must_use]
+    pub fn evaluate_screen(&self) -> Screen {
+        let mut screen = Screen::default();
+        for entry in self.evaluate.screen.iter().flatten() {
+            match ScreenSource::read(entry) {
+                Some(ScreenSource::Webfetch) => screen.webfetch = true,
+                Some(ScreenSource::Websearch) => screen.websearch = true,
+                Some(ScreenSource::Mcp(server)) => {
+                    screen.mcp.insert(server.to_owned());
+                }
+                None => {}
+            }
+        }
+
+        screen
     }
 
     /// The held-dialog review window this config asks for, or the default
@@ -2799,6 +2907,11 @@ impl Config {
         if !other.openrouter.server_tools.is_empty() {
             self.openrouter.server_tools = other.openrouter.server_tools;
         }
+        // Replaced whole between trusted tiers, and `Some([])` replaces too,
+        // because it is how a closer tier switches screening off. A project
+        // file never reaches this line with a list: `merge_project` takes it
+        // first and narrows instead.
+        overlay(&mut self.evaluate.screen, other.evaluate.screen);
         // Arrays replace, which is this file's rule everywhere but
         // `instructions`: a project that names its own skill directories means
         // those, and a global tier that keeps applying underneath would be a
@@ -2852,16 +2965,19 @@ impl Config {
     /// Overlays one **project-tier** file onto the running result (**D523**).
     ///
     /// The project tier is the one tier whose author is the checkout rather
-    /// than the person running it, so four keys diverge from
+    /// than the person running it, so five keys diverge from
     /// [`Config::merge`]'s later-wins: `dialog_expiry` is refused outright —
     /// the complaint names the key and `path` — while `cross_session_inbound`
     /// and `teamless_send` (**D531**) replace the running result only when
     /// strictly more severe on their own [`InboundPolicy::severity`] /
     /// [`TeamlessSend::severity`] orders, so a checkout can tighten the
-    /// person's policy and never loosen it; and `openrouter.server_tools`
+    /// person's policy and never loosen it; `openrouter.server_tools`
     /// only narrows — the running list keeps the names this file also lists,
     /// and a name the trusted tiers did not grant is dropped with a warning,
-    /// never added and never fatal. Every other key merges exactly as
+    /// never added and never fatal; and `evaluate.screen` (**D567**) only
+    /// narrows too, losing every server this file's own `mcp` table defines
+    /// before it is intersected with this file's list — see
+    /// [`EvaluateConfig::screen`]. Every other key merges exactly as
     /// [`Config::merge`] merges it.
     ///
     /// # Errors
@@ -2888,6 +3004,12 @@ impl Config {
         narrow_server_tools(
             &mut self.openrouter.server_tools,
             &std::mem::take(&mut other.openrouter.server_tools),
+            path,
+        );
+        narrow_screen(
+            &mut self.evaluate.screen,
+            other.evaluate.screen.take(),
+            other.mcp.keys(),
             path,
         );
         self.merge(other);
@@ -2961,6 +3083,71 @@ fn narrow_server_tools(granted: &mut Vec<String>, listed: &[String], path: &Path
              granted; this tool was not granted and is ignored"
         );
     }
+}
+
+/// Narrows the running `evaluate.screen` for one project file, in the order
+/// that makes a removal permanent (**D567**).
+///
+/// First every server the file defines in its own `mcp` table leaves the
+/// screen; then, when the file has a list of its own, what is left is
+/// intersected with it. Neither step can add a source, so nothing an inner file
+/// lists puts back what an outer file's definition removed. A running [`None`]
+/// — no trusted tier said anything — intersected with a list is empty, because
+/// the list names nothing that was granted.
+///
+/// Every entry either step drops gets exactly one warning naming it and
+/// `path`, [`narrow_server_tools`]'s posture: a server removed because the
+/// file defines it, a screened source the file's list leaves out — an empty
+/// list included — and a listed entry the running value did not hold.
+/// Narrowing sends less rather than more, but it also switches off what the
+/// person asked for, and a checkout that gets the agent to fetch a page it
+/// planted gains from exactly that, so it is never silent. A listed entry
+/// the first step just removed is not warned about twice: its removal is its
+/// one line, and the second would say something false about it.
+fn narrow_screen<'a>(
+    running: &mut Option<Vec<String>>,
+    listed: Option<Vec<String>>,
+    defined: impl Iterator<Item = &'a String>,
+    path: &Path,
+) {
+    let defined: BTreeSet<String> = defined.map(|server| format!("mcp:{server}")).collect();
+    let removed: Vec<String> = running
+        .as_mut()
+        .map(|screen| screen.extract_if(.., |entry| defined.contains(entry)).collect())
+        .unwrap_or_default();
+    for entry in &removed {
+        tracing::warn!(
+            path = %path.display(),
+            entry = %entry,
+            "evaluate.screen: this project file defines or redefines this server, so the entry \
+             is removed"
+        );
+    }
+
+    let Some(listed) = listed else {
+        return;
+    };
+    let mut held = running.take().unwrap_or_default();
+    held.retain(|entry| {
+        let kept = listed.contains(entry);
+        if !kept {
+            tracing::warn!(
+                path = %path.display(),
+                entry = %entry,
+                "evaluate.screen: this project file narrows the screened source away"
+            );
+        }
+        kept
+    });
+    for entry in listed.iter().filter(|entry| !held.contains(entry) && !removed.contains(entry)) {
+        tracing::warn!(
+            path = %path.display(),
+            entry = %entry,
+            "evaluate.screen: a project file may only narrow the screen the tiers above it left; \
+             this source is not in it and is ignored"
+        );
+    }
+    *running = Some(held);
 }
 
 /// Replaces `slot` when `incoming` says something.
@@ -3362,7 +3549,7 @@ fn located(message: &str, span: Option<Range<usize>>, text: &str) -> String {
     format!("{message} at line {line}, column {column}")
 }
 
-/// The nine refusals a decoded config still has to pass, and the one place
+/// The ten refusals a decoded config still has to pass, and the one place
 /// they are spelled.
 ///
 /// Checked per file rather than after the merge, so the complaint names the
@@ -3384,6 +3571,7 @@ fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
     check_agents(&config.agents).map_err(refused)?;
     check_teammates(&config.teammates).map_err(refused)?;
     check_openrouter(&config.openrouter).map_err(refused)?;
+    check_evaluate(&config.evaluate).map_err(refused)?;
     check_claude_code(&config.claude_code).map_err(refused)?;
     check_auto_compact_threshold(config.auto_compact_threshold).map_err(refused)?;
 
@@ -3834,6 +4022,43 @@ fn check_openrouter(config: &OpenRouterConfig) -> Result<(), String> {
                 "openrouter.server_tools names \"{name}\", which is not one this gateway \
                  serves; the roster is {}",
                 crate::provider::openrouter::SERVER_TOOLS.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Refuses an `evaluate.screen` entry outside the grammar, and one named twice
+/// (**D567**).
+///
+/// [`check_openrouter`]'s shape — by name, with the accepted shapes beside it —
+/// because the likely mistakes are a near miss (`"web"`, `"mcp:"`) and a
+/// wildcard somebody expected to exist (`"*"`, `"mcp:*"`, `"mcp:github-*"`),
+/// and the answer to each is the list and the word that there is none. A
+/// control character in a server's name is refused as well: no server a
+/// person names holds one, and a project file's entries are written to the
+/// log when that file narrows the screen, where a newline would forge a line
+/// of its own. A duplicate is refused rather than folded: this list decides
+/// what leaves the machine, and an entry written twice is usually a different
+/// entry somebody meant to write.
+fn check_evaluate(config: &EvaluateConfig) -> Result<(), String> {
+    let Some(screen) = &config.screen else {
+        return Ok(());
+    };
+    for (index, entry) in screen.iter().enumerate() {
+        if ScreenSource::read(entry).is_none() {
+            return Err(format!(
+                "evaluate.screen names {entry:?}, which is none of the accepted shapes: {}; \
+                 there is no wildcard, so name each server, by a name with no \"*\" and no \
+                 control character",
+                ScreenSource::SHAPES
+            ));
+        }
+        if screen[..index].contains(entry) {
+            return Err(format!(
+                "evaluate.screen names {entry:?} twice; name each source once, as one of {}",
+                ScreenSource::SHAPES
             ));
         }
     }

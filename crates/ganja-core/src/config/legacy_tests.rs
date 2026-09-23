@@ -115,6 +115,53 @@ fn a_source_the_loader_would_refuse_is_refused_at_the_legacy_read() {
     }
 }
 
+/// **D567**'s `evaluate.screen` refusal holds on this path word for word: an
+/// entry the TOML loader refuses fails the legacy read with the same message,
+/// so `migrate` cannot convert a screen list into a `ganja.toml` whose first
+/// launch declines it. Each list is spelled identically in both dialects,
+/// escapes included, so both readers decode the same entries.
+#[test]
+fn a_screen_entry_the_loader_refuses_is_refused_the_same_way_at_the_legacy_read() {
+    let directory = temporary();
+    let legacy = directory.path().join("ganja.jsonc");
+    let current = directory.path().join("ganja.toml");
+
+    for list in [
+        r#"["web"]"#,
+        r#"["mcp:"]"#,
+        r#"["mcp:*"]"#,
+        r#"["mcp:github-*"]"#,
+        r#"["mcp:x\n2026-09-23T04:00:00.000000Z  WARN ganja_core::config: forged line"]"#,
+        r#"["mcp:a\u0085b"]"#,
+        r#"["webfetch", "webfetch"]"#,
+    ] {
+        fs::write(&legacy, format!(r#"{{"evaluate": {{"screen": {list}}}}}"#))
+            .expect("the legacy fixture is writable");
+        fs::write(&current, format!("[evaluate]\nscreen = {list}\n"))
+            .expect("the TOML fixture is writable");
+
+        let legacy_error = read(&legacy).expect_err("the legacy read refuses the entry");
+        let current_error =
+            crate::config::read(&current).expect_err("the TOML loader refuses the entry");
+        let (
+            ConfigError::Parse { message: legacy_message, .. },
+            ConfigError::Parse { message: current_message, .. },
+        ) = (&legacy_error, &current_error)
+        else {
+            panic!(
+                "expected two parse failures for {list}, got {legacy_error:?} and {current_error:?}"
+            );
+        };
+        assert!(legacy_message.contains("evaluate.screen"), "{list}: {legacy_message}");
+        assert_eq!(legacy_message, current_message, "{list}: one refusal, whichever dialect");
+    }
+
+    fs::write(&legacy, r#"{"evaluate": {"screen": ["webfetch", "mcp:plugin:foo:bar"]}}"#)
+        .expect("the legacy fixture is writable");
+    let config = read(&legacy).expect("an entry inside the grammar reads");
+    assert_eq!(config.evaluate.screen, Some(vec!["webfetch".into(), "mcp:plugin:foo:bar".into()]));
+}
+
 /// One config, two dialects, one value — the whole 1:1 claim of the format
 /// change made mechanical, and the reason `migrate` can compare the two sides
 /// for equality before it writes anything.
