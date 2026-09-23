@@ -181,6 +181,33 @@ impl Settings {
         Ok(Some(Self::new(key, base, model)?))
     }
 
+    /// Settings assembled from values a caller already holds, refused on the
+    /// same two rules [`Settings::from_env`] applies to what it reads.
+    ///
+    /// The public door for a caller that is not the environment, and the one
+    /// a test builds from, so that nothing a developer exported can point it
+    /// at the vendor. `base` is parsed here through [`Settings::base_from`], so
+    /// `Settings::new` keeps that function as the only producer of its
+    /// `Url`; `model` answers to the same id grammar a request's model does.
+    /// `key` is not inspected: `from_env`'s blank-is-unset rule is about what
+    /// a shell profile exports, and a caller passing a value has already
+    /// decided it is one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RefusedBase`] when `base` is not a base URL this module will
+    /// put a credential on, checked first as `from_env` checks it;
+    /// [`Error::RefusedModel`] when `model` is not a usable model id. Neither
+    /// value is echoed.
+    pub fn from_parts(key: String, base: &str, model: String) -> Result<Self, Error> {
+        let base = Self::base_from(base)?;
+        if !is_model(&model) {
+            return Err(Error::RefusedModel);
+        }
+
+        Self::new(key, base, model)
+    }
+
     /// Settings assembled from values rather than from the environment.
     ///
     /// `base` has already passed [`Settings::base_from`], which is the only

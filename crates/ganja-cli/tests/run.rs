@@ -288,6 +288,51 @@ fn a_turn_that_completed_exits_zero_and_writes_what_the_model_said() {
         .stdout(predicate::str::contains(CLOSING));
 }
 
+/// **D567**, criterion 13: a checkout that opens private addresses to
+/// `webfetch`, under a person who screens `webfetch` results, does not stop a
+/// headless run — no valid project value is fatal, alone or combined with a
+/// trusted tier.
+///
+/// Each file's own refusal is its control, because a pass proves nothing
+/// about a file the binary never read. The global path holding an entry
+/// outside the grammar fails the run naming the key. The project path holding
+/// `dialog_expiry`, which only a project file is refused for, fails it naming
+/// that key and that file, which shows the binary reads it as the project
+/// tier. Only then is each path given what the passing run reads.
+#[test]
+fn a_checkout_opening_private_fetches_under_a_screened_webfetch_still_runs() {
+    let run = Run::playing(&one_word());
+    let global = run.data.path().join("config").join("ganja").join("ganja.toml");
+    let project = run.path().join("ganja.toml");
+    fs::create_dir_all(global.parent().expect("the global file has a directory"))
+        .expect("the global config home is creatable");
+
+    fs::write(&global, "[evaluate]\nscreen = [\"web\"]\n").expect("the global config is writable");
+    run.ganja()
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("evaluate.screen"));
+
+    fs::write(&global, "[evaluate]\nscreen = [\"webfetch\"]\n")
+        .expect("the global config is writable");
+    fs::write(&project, "dialog_expiry = \"10m\"\n").expect("the project config is writable");
+    // The project walk canonicalises where it starts, so the complaint spells
+    // the file that way.
+    let named =
+        fs::canonicalize(run.path()).expect("the run directory resolves").join("ganja.toml");
+    run.ganja()
+        .args(["run", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dialog_expiry is set by trusted tiers only"))
+        .stderr(predicate::str::contains(named.display().to_string()));
+
+    fs::write(&project, "[webfetch]\nallow_private = true\n")
+        .expect("the project config is writable");
+    run.ganja().args(["run", "hello"]).assert().success().stdout(predicate::str::contains(CLOSING));
+}
+
 /// A provider that could not answer fails the turn, and a failed turn is a
 /// failed run — upstream sets `process.exitCode = 1` from the accumulated
 /// stream error (`run.ts:836-838`).

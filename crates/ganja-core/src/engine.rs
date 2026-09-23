@@ -62,7 +62,7 @@ use crate::teammate::identity::Identity;
 use crate::teammate::{self};
 use crate::tool::team::Peer;
 use crate::tool::{Credentials, FileTimes, Registry, Tool, plan, send_message, task};
-use crate::{catalog, command, hook, job, lsp, mcp, snapshot, subagent, watch};
+use crate::{catalog, command, hook, job, judge, lsp, mcp, snapshot, subagent, watch};
 
 /// Events each subscriber's queue holds before its policy decides what a full
 /// queue means: a lossless subscriber makes the publisher wait, a droppable
@@ -1141,6 +1141,12 @@ pub struct Engine {
     /// golden run. Nothing starts here: a server is spawned by the first touch
     /// of a file it claims, and nothing else ever touches one.
     lsp: Option<Arc<lsp::Lsp>>,
+    /// What screens this session's untrusted tool results (**D567**).
+    /// [`None`] is a session nobody built one for — the default, every
+    /// scripted and golden run, and every session whose config names no
+    /// source or whose environment holds no TypeSafe key — and every tool call
+    /// then completes exactly as it did before the judge existed.
+    judge: Option<Arc<judge::Judge>>,
     /// What every turn's file changes are recorded against, so `/undo` can put
     /// them back. [`None`] is an engine nobody installed any on — every
     /// scripted, golden and PTY run — where `/undo` refuses rather than
@@ -1675,6 +1681,7 @@ impl Engine {
             tool_definitions: Arc::default(),
             defer_threshold: crate::config::DEFAULT_TOOL_DEFER_THRESHOLD,
             lsp: None,
+            judge: None,
             snapshots: None,
             revert: std::sync::Mutex::new(None),
             tools: std::sync::Mutex::new(tools),
@@ -3424,6 +3431,18 @@ impl Engine {
     #[must_use]
     pub fn with_lsp(mut self, lsp: Arc<lsp::Lsp>) -> Self {
         self.lsp = Some(lsp);
+
+        self
+    }
+
+    /// Sets what screens this session's untrusted tool results (**D567**).
+    ///
+    /// Shared with every `task` child this session spawns, as the language
+    /// servers are: one judge per process keeps one breaker and one in-flight
+    /// cap in front of the vendor. An engine given none screens nothing.
+    #[must_use]
+    pub fn with_judge(mut self, judge: Arc<judge::Judge>) -> Self {
+        self.judge = Some(judge);
 
         self
     }
@@ -5428,6 +5447,7 @@ impl Engine {
             root: self.root.clone(),
             credentials: self.credentials.clone(),
             lsp: self.lsp.clone(),
+            judge: self.judge.clone(),
             persistence: self.persistence.clone(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
@@ -6238,6 +6258,7 @@ impl Engine {
             files: Arc::clone(&self.files),
             credentials: self.credentials.clone(),
             lsp: self.lsp.clone(),
+            judge: self.judge.clone(),
             snapshots: self.snapshots.clone(),
             prompt,
             cancel,

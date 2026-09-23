@@ -267,6 +267,11 @@
       "description": "What the `webfetch` tool may reach.",
       "default": {}
     },
+    "evaluate": {
+      "$ref": "#/$defs/EvaluateConfig",
+      "description": "Which tool results are sent to the TypeSafe host to be screened for text that addresses an AI agent (D567). Experimental, and off by default.",
+      "default": {}
+    },
     "skills": {
       "$ref": "#/$defs/SkillsConfig",
       "description": "Where this session looks for skills besides ganja's own two homes.",
@@ -887,8 +892,26 @@
       "properties": {
         "allow_private": {
           "type": "boolean",
-          "description": "Whether webfetch may fetch a URL resolving onto this machine or a private network. Absent is no: only true opens it.",
+          "description": "Whether webfetch may fetch a URL resolving to an address on this machine, on a private network or in a reserved range. Absent is no: only true opens it.",
           "default": false
+        }
+      }
+    },
+    "EvaluateConfig": {
+      "title": "Screening of tool results",
+      "description": "Which tool results are sent to the TypeSafe host to be screened for text that addresses an AI agent. Experimental, and off by default. No key upstream has (D567).",
+      "$comment": "crates/ganja-core/src/config.rs (EvaluateConfig, deny_unknown_fields); the grammar is config::ScreenSource, enforced at load by config::check_evaluate; the tiers are Config::merge and config::narrow_screen; the resolved value is judge::Screen.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "screen": {
+          "type": "array",
+          "description": "Experimental, and off by default: absent at every tier, or an empty list, screens nothing. The sources screened: \"webfetch\", \"websearch\", or \"mcp:<server>\" for the tools of one MCP server, by its name in the mcp table — colons allowed, so a plugin's plugin:<plugin>:<server> is one entry. There is no wildcard: name each server, because a name holding \"*\" is refused, as is a name holding a control character. The text of every page `webfetch` reads, every `websearch` result and every result of the named servers is sent to the TypeSafe host. Only the trusted tiers — the global config, and the file GANJA_CONFIG or --config names — can add a source, and a closer one replaces the list, where an empty list switches screening off; a project file can only narrow it: its list is intersected with the screen the tiers above it left, every entry either side loses is dropped with a warning, and a server the project file defines in its own mcp table is not screened. An entry outside these shapes, or one named twice, is refused at load.",
+          "items": {
+            "type": "string",
+            "pattern": "^(webfetch|websearch|mcp:[^\\x00-\\x1F\\x7F-\\x9F*]+)$"
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -931,7 +954,7 @@
       "properties": {
         "server_tools": {
           "type": "array",
-          "description": "Tools the model may call and OpenRouter executes, by the name after the `openrouter:` prefix. Each call bills, so an empty list (the default) sends none. A name outside the roster is refused at load.",
+          "description": "Tools the model may call and OpenRouter executes, by the name after the `openrouter:` prefix. Each call bills, so an empty list (the default) sends none. A name outside the roster is refused at load. The global config and the file GANJA_CONFIG or --config names replace the list; a project file may only narrow it: names the trusted tiers did not grant are dropped with a warning, an empty or absent list in a project file changes nothing, and a list that names no granted tool leaves none.",
           "items": {
             "type": "string",
             "enum": [

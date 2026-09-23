@@ -955,6 +955,13 @@ pub struct App {
     /// once every [`COLLISION_RESCAN_INTERVAL`] (**R4**) — [`App::team_polled`]'s
     /// pattern, on the same `Tick`.
     collision_scanned: Option<Instant>,
+    /// The launch disclosure of a session that screens tool results
+    /// (**D567**), kept until the first frame so the notices the first
+    /// socket pass writes stand beside it rather than in its place — see
+    /// [`App::set_startup_notice`]. [`None`] for every session with no
+    /// judge, and for every session once [`App::open`] has made its first
+    /// pass.
+    disclosure: Option<String>,
     /// A `shutdown_request` this member has taken and not yet answered,
     /// because a turn was still running when it arrived.
     ///
@@ -1220,6 +1227,7 @@ impl App {
             session_listing: Vec::new(),
             known_colliders: std::collections::HashSet::new(),
             collision_scanned: None,
+            disclosure: None,
             member_shutdown: None,
             member_finished: None,
             member_asks: Vec::new(),
@@ -1389,6 +1397,20 @@ impl App {
         self
     }
 
+    /// Keeps `disclosure` — the launch line of a session that screens tool
+    /// results (**D567**) — on the status bar through whatever the first
+    /// socket pass has to say, until the first frame has shown it.
+    ///
+    /// A builder beside the opening notice rather than read back out of it:
+    /// that notice is one joined string, and only the startup lane knows
+    /// which of its parts is the one that may not be displaced.
+    #[must_use]
+    pub fn with_disclosure(mut self, disclosure: Option<String>) -> Self {
+        self.disclosure = disclosure;
+
+        self
+    }
+
     /// Where this session's registration record will name its own name
     /// from once it registers — `--name`'s (or a fresh `/rename`'s) is
     /// [`registry::NameSource::User`],
@@ -1548,10 +1570,7 @@ impl App {
     /// Returns an error if the engine refuses a subscription, or if the
     /// terminal cannot be read from or drawn to.
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // Bound before the first frame and after every startup resume, which
-        // is what `lib.rs` has done by the time it hands the app over: the
-        // first socket is named by the session the screen opens on.
-        self.sync_socket().await;
+        self.open().await;
         let outcome = self.drive(terminal).await;
         // The record first, and the socket after it (**D527**): stop
         // advertising before stopping answering. A record without a live
@@ -1610,10 +1629,46 @@ impl App {
             binder::Synced::Unchanged => {}
             binder::Synced::Bound(path) => self.register_self(wanted, path),
             binder::Synced::Refused(sentence) => {
-                self.status.set_notice(Some(sentence));
+                self.set_startup_notice(sentence);
                 self.dirty = true;
             }
         }
+    }
+
+    /// The first socket pass, which [`App::run`] makes before the first
+    /// frame.
+    ///
+    /// Bound before the first frame and after every startup resume, which is
+    /// what `lib.rs` has done by the time it hands the app over: the first
+    /// socket is named by the session the screen opens on. Whatever that pass
+    /// said, it said beside the launch disclosure (**D567**), and the first
+    /// frame is about to show it; so the disclosure is let go here, and from
+    /// then on a notice — a later `/rename` collision, a refused rebind —
+    /// replaces the line the way every other one does.
+    async fn open(&mut self) {
+        self.sync_socket().await;
+        self.disclosure = None;
+    }
+
+    /// Writes `sentence` to the status bar, with the launch disclosure
+    /// (**D567**) ahead of it while [`App::disclosure`] still holds one.
+    ///
+    /// The two notices the first socket pass can write — a refused bind and
+    /// a name collision — land before anything is drawn, and the second is
+    /// routine: every session is named after its project root, so the
+    /// second terminal opened in a checkout collides with the first. Either
+    /// replacing the opening line would drop the one sentence that says tool
+    /// results leave the machine before any has. So the sentence is added
+    /// beside the disclosure rather than in its place, and after it, so a
+    /// narrow terminal cuts the collision and not the disclosure. Once the
+    /// first frame has shown it, [`App::open`] lets it go, and this is
+    /// [`Status::set_notice`] by another name.
+    fn set_startup_notice(&mut self, sentence: String) {
+        let line = match &self.disclosure {
+            Some(disclosure) => format!("{disclosure}{NOTICE_SEPARATOR}{sentence}"),
+            None => sentence,
+        };
+        self.status.set_notice(Some(line));
     }
 
     /// Where this session's own registration lives, and where the
@@ -1734,11 +1789,11 @@ impl App {
         let Some(holder) = holders.first() else {
             return false;
         };
-        self.status.set_notice(Some(format!(
+        self.set_startup_notice(format!(
             "another session is already registered as {name:?} ({} at {})",
             holder.stem,
             holder.record.cwd.display()
-        )));
+        ));
         self.dirty = true;
 
         true

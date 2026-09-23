@@ -46,6 +46,7 @@ pub mod instruction;
 /// through ([`tool::job::Jobs`]) lives in `ganja-tool`, the same seam
 /// `tool::task::Subagents` draws; this module is the one implementation.
 pub mod job;
+pub mod judge;
 pub mod lsp;
 pub mod mcp;
 /// Claude Code plugins: the `.claude-plugin` manifest and marketplace

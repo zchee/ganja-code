@@ -10,6 +10,7 @@ use super::{
     StatuslineElement, TeamlessSend, ThemeMode, existing, merge_files, model_bound_to,
     project_files, read, responses, split_model,
 };
+use crate::judge::Screen;
 use crate::permission::{Action, Decision, Permissions, Rule};
 
 fn temporary() -> TempDir {
@@ -906,6 +907,504 @@ fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
         panic!("expected a parse failure, got {error:?}");
     };
     assert!(message.contains("zzz_probe"), "{message}");
+}
+
+/// Between the person's own files the roster is later-wins, replaced whole
+/// like every list here but `instructions`: the explicit tier outranks the
+/// global one, and a tier that says nothing about the table keeps the one
+/// below it.
+#[test]
+fn a_closer_trusted_tier_replaces_the_openrouter_server_tools() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let explicit = directory.path().join("explicit.toml");
+    let silent = directory.path().join("silent.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+    plant(&explicit, r#"openrouter = { server_tools = ["web_fetch"] }"#);
+    plant(&silent, r#"model = "openrouter/anthropic/claude-3""#);
+
+    let config = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    assert_eq!(
+        config.openrouter.server_tools,
+        ["web_search", "datetime"],
+        "a single tier's roster reaches the merged config"
+    );
+
+    let config = merge_files(&[global.clone(), explicit]).expect("both tiers parse");
+    assert_eq!(config.openrouter.server_tools, ["web_fetch"], "the closer trusted tier replaces");
+
+    let config = merge_files(&[global, silent]).expect("both tiers parse");
+    assert_eq!(
+        config.openrouter.server_tools,
+        ["web_search", "datetime"],
+        "a tier silent on the table keeps the one below it"
+    );
+}
+
+/// A checkout's file is not the person's: the tools on this list run on
+/// the gateway and bill per call, so a project file may only narrow what
+/// the trusted tiers granted — never add to it, never fail the load.
+#[test]
+fn a_project_file_can_only_narrow_the_openrouter_server_tools() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+
+    for (listed, expected) in [
+        // A subset narrows.
+        (r#"["datetime"]"#, vec!["datetime"]),
+        // A name the trusted tiers did not grant is dropped, not added.
+        (r#"["datetime", "shell"]"#, vec!["datetime"]),
+        // Nothing in common leaves nothing.
+        (r#"["shell"]"#, vec![]),
+        // Naming everything granted, and more, changes nothing but the extra.
+        (r#"["web_search", "datetime", "image_generation"]"#, vec!["web_search", "datetime"]),
+    ] {
+        plant(&project, &format!("openrouter = {{ server_tools = {listed} }}"));
+        let mut merged =
+            merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+        merged
+            .merge_project(
+                read(&project).expect("the project file parses").expect("it exists"),
+                &project,
+            )
+            .expect("no valid project value is fatal");
+        assert_eq!(merged.openrouter.server_tools, expected, "project lists {listed}");
+    }
+
+    // A project file silent on the table leaves the grant alone.
+    plant(&project, r#"model = "openrouter/anthropic/claude-3""#);
+    let mut merged = merge_files(&[global]).expect("the global tier parses");
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("an ordinary key is no error");
+    assert_eq!(merged.openrouter.server_tools, ["web_search", "datetime"]);
+
+    // With nothing granted, a project cannot turn anything on.
+    plant(&project, r#"openrouter = { server_tools = ["shell", "web_fetch"] }"#);
+    let mut merged = Config::default();
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("an ungranted roster is dropped, never an error");
+    assert!(merged.openrouter.server_tools.is_empty(), "{:?}", merged.openrouter.server_tools);
+}
+
+/// Narrowing is never silent: every name dropped on either side — a granted
+/// tool the project file left out, and a listed tool nobody granted — gets
+/// exactly one warning that names the tool and the file that dropped it.
+#[test]
+fn each_openrouter_server_tool_a_project_file_drops_is_warned_once() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, r#"openrouter = { server_tools = ["web_search", "datetime"] }"#);
+    plant(&project, r#"openrouter = { server_tools = ["datetime", "web_fetch"] }"#);
+    let mut merged = merge_files(&[global]).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merged
+        .merge_project(read(&project).expect("it parses").expect("it exists"), &project)
+        .expect("narrowing is never fatal");
+
+    assert_eq!(merged.openrouter.server_tools, ["datetime"]);
+    let logged = capture.logged();
+    let lines: Vec<&str> =
+        logged.lines().filter(|line| line.contains("openrouter.server_tools")).collect();
+    assert_eq!(lines.len(), 2, "one warning per dropped name, no more: {logged}");
+    let path = project.display().to_string();
+    for tool in ["web_search", "web_fetch"] {
+        let naming: Vec<&&str> =
+            lines.iter().filter(|line| line.contains(&format!("tool={tool}"))).collect();
+        assert_eq!(naming.len(), 1, "exactly one warning names {tool}: {logged}");
+        assert!(naming[0].contains(&path), "the warning for {tool} names the file: {logged}");
+    }
+    assert!(!logged.contains("tool=datetime"), "a kept tool is not warned about: {logged}");
+}
+
+/// The screen a test expects, spelled the way the grammar spells its three
+/// kinds of source.
+fn screening(webfetch: bool, websearch: bool, mcp: &[&str]) -> Screen {
+    Screen { webfetch, websearch, mcp: mcp.iter().map(|server| (*server).to_owned()).collect() }
+}
+
+/// Overlays the project file at `path` onto `config`, the call
+/// `Config::load_with` makes for every project file its walk finds.
+fn merge_project_file(config: &mut Config, path: &Path) {
+    config
+        .merge_project(read(path).expect("the project file parses").expect("it exists"), path)
+        .expect("no valid project value is fatal");
+}
+
+/// What an `evaluate.screen` warning says when this project file's own `mcp`
+/// table took the entry off the screen.
+const REMOVED: &str = "evaluate.screen: this project file defines or redefines this server, so \
+                       the entry is removed";
+/// What it says when the file's list left out a source the screen held.
+const NARROWED: &str = "evaluate.screen: this project file narrows the screened source away";
+/// What it says when the file's list named a source the screen did not hold.
+const NOT_IN_SCREEN: &str = "evaluate.screen: a project file may only narrow the screen the \
+                             tiers above it left; this source is not in it and is ignored";
+
+/// Asserts that `logged` holds exactly the `evaluate.screen` warnings
+/// `expected` lists, in order — each one's text, the entry it names and the
+/// file — so a warning that says the wrong thing fails as surely as a
+/// missing one.
+fn assert_screen_warnings(logged: &str, expected: &[(&str, &str, &Path)]) {
+    let lines: Vec<&str> = logged.lines().filter(|line| line.contains("evaluate.screen")).collect();
+    assert_eq!(lines.len(), expected.len(), "one warning per dropped entry: {logged}");
+    for (line, (says, entry, path)) in lines.iter().zip(expected) {
+        assert!(line.contains(says), "the warning for {entry} says {says:?}: {line}");
+        assert!(line.contains(&format!("entry={entry:?}")), "it names {entry}: {line}");
+        assert!(line.contains(&format!("path={path:?}")), "it names the file: {line}");
+    }
+}
+
+/// **D567**, criterion 7: every shape the grammar accepts resolves to the
+/// source it names, a colon inside an MCP server's name included — which is
+/// how a plugin's server is named. Default off holds by construction: no
+/// table, a table with no list, and an empty list all screen nothing.
+#[test]
+fn a_trusted_screen_list_resolves_to_the_sources_it_names() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    plant(
+        &global,
+        "[evaluate]\nscreen = [\"webfetch\", \"websearch\", \"mcp:github\", \"mcp:plugin:foo:bar\"]\n",
+    );
+
+    let config = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    assert_eq!(
+        config.evaluate_screen(),
+        screening(true, true, &["github", "plugin:foo:bar"]),
+        "each entry reaches the resolved screen"
+    );
+
+    for text in ["", "[evaluate]\n", "[evaluate]\nscreen = []\n"] {
+        plant(&global, text);
+        let config = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+        assert_eq!(config.evaluate_screen(), Screen::default(), "{text:?} screens nothing");
+    }
+}
+
+/// **D567**, criterion 8: an entry outside the grammar, and an entry named
+/// twice, fail the load — naming the key, the entry and the shapes that
+/// would have worked, `check_openrouter`'s shape. A wildcard is outside the
+/// grammar wherever it stands, and the refusal says there is none; so is a
+/// control character in a server's name, which the narrowing warnings would
+/// otherwise write into the person's log raw — a newline there forges a line
+/// of ganja's own. A colon inside a server's name is neither.
+#[test]
+fn a_screen_entry_outside_the_grammar_or_named_twice_is_refused_with_the_accepted_shapes() {
+    const OUTSIDE: &str = "there is no wildcard, so name each server";
+    const TWICE: &str = "twice; name each source once";
+    let forged = "mcp:x\n2026-09-23T04:00:00.000000Z  WARN ganja_core::config: forged line";
+    for (list, entry, says) in [
+        (r#"["web"]"#, "web", OUTSIDE),
+        (r#"["mcp:"]"#, "mcp:", OUTSIDE),
+        (r#"["mcp"]"#, "mcp", OUTSIDE),
+        (r#"["WebFetch"]"#, "WebFetch", OUTSIDE),
+        (r#"["*"]"#, "*", OUTSIDE),
+        (r#"["mcp:*"]"#, "mcp:*", OUTSIDE),
+        (r#"["mcp:github-*"]"#, "mcp:github-*", OUTSIDE),
+        (
+            r#"["mcp:x\n2026-09-23T04:00:00.000000Z  WARN ganja_core::config: forged line"]"#,
+            forged,
+            OUTSIDE,
+        ),
+        // C1, the other half of what `char::is_control` and the schema's
+        // pattern both call a control character.
+        (r#"["mcp:a\u0085b"]"#, "mcp:a\u{85}b", OUTSIDE),
+        (r#"["websearch", "webfetch", "websearch"]"#, "websearch", TWICE),
+        (r#"["mcp:github", "mcp:github"]"#, "mcp:github", TWICE),
+    ] {
+        let error = parse(&format!("[evaluate]\nscreen = {list}\n"))
+            .expect_err("the entry is refused at load");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure for {list}, got {error:?}");
+        };
+        assert!(message.contains("evaluate.screen"), "{list}: the key is named: {message}");
+        assert!(message.contains(&format!("{entry:?}")), "{list}: the entry is named: {message}");
+        assert!(
+            message.contains(r#""webfetch", "websearch", or "mcp:<server>""#),
+            "{list}: the accepted shapes are listed: {message}"
+        );
+        assert!(message.contains(says), "{list}: the refusal says {says:?}: {message}");
+        assert!(!message.contains('\n'), "{list}: the refusal is one line: {message}");
+    }
+
+    let config = parse("[evaluate]\nscreen = [\"mcp:plugin:foo:bar\"]\n")
+        .expect("a colon inside a server's name is part of the name");
+    assert_eq!(config.evaluate_screen(), screening(false, false, &["plugin:foo:bar"]));
+
+    let error = parse("[evaluate]\nzzz_probe = 1\n").expect_err("the table is curated");
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert!(message.contains("zzz_probe"), "{message}");
+}
+
+/// **D567**, criterion 9: between the person's own files the list is
+/// later-wins and replaced whole, and an empty list is how a closer trusted
+/// tier switches screening off — while a tier silent on the table keeps the
+/// one below it.
+#[test]
+fn a_closer_trusted_tier_replaces_the_screen_and_an_empty_list_switches_it_off() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let explicit = directory.path().join("explicit.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\"]\n");
+
+    plant(&explicit, "[evaluate]\nscreen = [\"websearch\"]\n");
+    let config = merge_files(&[global.clone(), explicit.clone()]).expect("both tiers parse");
+    assert_eq!(config.evaluate_screen(), screening(false, true, &[]), "the closer tier replaces");
+
+    plant(&explicit, "[evaluate]\nscreen = []\n");
+    let config = merge_files(&[global.clone(), explicit.clone()]).expect("both tiers parse");
+    assert_eq!(config.evaluate_screen(), Screen::default(), "an empty list is off");
+
+    plant(&explicit, "model = \"openai/gpt-5.6\"\n");
+    let config = merge_files(&[global, explicit]).expect("both tiers parse");
+    assert_eq!(
+        config.evaluate_screen(),
+        screening(true, false, &[]),
+        "a tier silent on the table keeps the one below it"
+    );
+}
+
+/// **D567**, criterion 10: a project file may only narrow what the trusted
+/// tiers named — never add a source, never fail the load.
+#[test]
+fn a_project_file_can_only_narrow_the_screen() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"websearch\", \"mcp:github\"]\n");
+
+    for (listed, expected) in [
+        // A subset narrows.
+        (r#"["websearch"]"#, screening(false, true, &[])),
+        // A source the trusted tiers did not name is dropped, not added.
+        (r#"["mcp:other"]"#, Screen::default()),
+        (r#"["mcp:github", "mcp:other"]"#, screening(false, false, &["github"])),
+        // An empty list narrows to nothing.
+        ("[]", Screen::default()),
+    ] {
+        plant(&project, &format!("[evaluate]\nscreen = {listed}\n"));
+        let mut merged =
+            merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+        merge_project_file(&mut merged, &project);
+        assert_eq!(merged.evaluate_screen(), expected, "project lists {listed}");
+    }
+
+    // A project file silent on the table inherits the trusted screen.
+    plant(&project, "model = \"openai/gpt-5.6\"\n");
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    merge_project_file(&mut merged, &project);
+    assert_eq!(merged.evaluate_screen(), screening(true, true, &["github"]));
+
+    // With nothing named by a trusted tier, a project turns nothing on.
+    plant(&project, "[evaluate]\nscreen = [\"webfetch\"]\n");
+    let mut merged = Config::default();
+    merge_project_file(&mut merged, &project);
+    assert_eq!(merged.evaluate_screen(), Screen::default());
+}
+
+/// Narrowing is never silent, bfaca0b's posture for `openrouter`: every
+/// entry dropped on either side — a screened source the project file's list
+/// left out, and a listed source the screen did not hold — gets exactly one
+/// warning that names it and the file and says which of the two it was. An
+/// empty list switches the screen off, so it warns once per source it drops.
+#[test]
+fn each_source_a_project_file_drops_from_the_screen_is_warned_once() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"websearch\"]\n");
+    let project_path = project.as_path();
+
+    for (listed, expected, warned) in [
+        (
+            r#"["websearch", "mcp:other"]"#,
+            screening(false, true, &[]),
+            &[(NARROWED, "webfetch", project_path), (NOT_IN_SCREEN, "mcp:other", project_path)][..],
+        ),
+        (
+            "[]",
+            Screen::default(),
+            &[(NARROWED, "webfetch", project_path), (NARROWED, "websearch", project_path)][..],
+        ),
+        // Naming exactly what was screened drops nothing, and says nothing.
+        (r#"["websearch", "webfetch"]"#, screening(true, true, &[]), &[][..]),
+    ] {
+        plant(&project, &format!("[evaluate]\nscreen = {listed}\n"));
+        let mut merged =
+            merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+        let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+        merge_project_file(&mut merged, &project);
+
+        assert_eq!(merged.evaluate_screen(), expected, "project lists {listed}");
+        assert_screen_warnings(&capture.logged(), warned);
+    }
+
+    // A trusted tier that said nothing granted nothing, so every listed
+    // source is one the screen did not hold.
+    plant(&project, "[evaluate]\nscreen = [\"webfetch\"]\n");
+    let mut merged = Config::default();
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    assert_eq!(merged.evaluate_screen(), Screen::default());
+    assert_screen_warnings(&capture.logged(), &[(NOT_IN_SCREEN, "webfetch", project_path)]);
+}
+
+/// A line or paragraph separator and a bidi control are not control
+/// characters, so the grammar lets a project file list an entry holding one;
+/// the warning that names it writes it escaped. Raw, U+2028 starts a new line
+/// in a reader that honours it — one beginning with the checkout's text — and
+/// U+202E reverses how the rest of the line displays. The file's path is
+/// written escaped too, at every warning a project file can draw here: a
+/// checkout names the directories below its root as freely as its entries.
+#[test]
+fn a_separator_or_bidi_control_in_a_dropped_entry_is_logged_escaped() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("sub\u{2028}FORGED-FROM-DIRNAME").join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"mcp:gone\", \"mcp:mine\"]\n");
+    plant(
+        &project,
+        "[evaluate]\nscreen = [\"webfetch\", \"mcp:x\\u2028FORGED\", \"mcp:y\\u202eDESREVER\"]\n\n\
+         [webfetch]\nallow_private = true\n\n\
+         [mcp.mine]\ntype = \"local\"\ncommand = [\"./mine-mcp\"]\n",
+    );
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    let logged = capture.logged();
+    assert_eq!(merged.evaluate_screen(), screening(true, false, &[]));
+    assert_screen_warnings(
+        &logged,
+        &[
+            (REMOVED, "mcp:mine", project.as_path()),
+            (NARROWED, "mcp:gone", project.as_path()),
+            (NOT_IN_SCREEN, "mcp:x\u{2028}FORGED", project.as_path()),
+            (NOT_IN_SCREEN, "mcp:y\u{202e}DESREVER", project.as_path()),
+        ],
+    );
+    let lifted: Vec<&str> =
+        logged.lines().filter(|line| line.contains("webfetch.allow_private")).collect();
+    assert_eq!(lifted.len(), 1, "the lifted guard is warned about once: {logged}");
+    assert!(lifted[0].contains(&format!("path={project:?}")), "it names the file: {logged}");
+    assert!(logged.contains(r#"entry="mcp:x\u{2028}FORGED""#), "escaped: {logged}");
+    assert!(logged.contains(r#"entry="mcp:y\u{202e}DESREVER""#), "escaped: {logged}");
+    assert_eq!(
+        logged.matches(r"sub\u{2028}FORGED-FROM-DIRNAME").count(),
+        5,
+        "each warning writes the directory name escaped: {logged}"
+    );
+    assert!(
+        !logged.contains(['\u{2028}', '\u{202e}']),
+        "neither character reaches the log raw: {logged:?}"
+    );
+    // Every line boundary a Unicode-aware reader may honour, not only `\n`:
+    // five warnings are five lines to all of them.
+    let boundaries = [
+        '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+        '\u{2029}',
+    ];
+    let lines = logged.split(boundaries).filter(|line| !line.is_empty()).count();
+    assert_eq!(lines, 5, "one line per warning, however the log is split: {logged:?}");
+}
+
+/// **D567**, criterion 11: a server a project file defines or redefines is
+/// never screened — the person agreed to send *their* server's results, and a
+/// checkout that replaced the server replaced what they agreed to. One
+/// warning names the entry and the file; a server the file defines that was
+/// not screened is no news and gets none.
+#[test]
+fn a_project_file_that_defines_a_screened_server_unscreens_it_with_one_warning() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"mcp:github\"]\n");
+    plant(
+        &project,
+        "[mcp.github]\ntype = \"local\"\ncommand = [\"./github-mcp\"]\n\n\
+         [mcp.docs]\ntype = \"local\"\ncommand = [\"./docs-mcp\"]\n",
+    );
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    assert_eq!(merged.evaluate_screen(), screening(true, false, &[]));
+    assert!(merged.mcp.contains_key("github"), "the project's server itself still loads");
+    assert_screen_warnings(&capture.logged(), &[(REMOVED, "mcp:github", project.as_path())]);
+}
+
+/// A file that defines a screened server and also lists it gets one line for
+/// that entry, the removal: the entry was named by the tiers above, so a
+/// second line saying it is not in their screen would be the log contradicting
+/// itself about one entry. Where the tiers above never screened the server,
+/// nothing was removed, and the one line is the true one — the listed entry
+/// is not in the screen and is ignored.
+#[test]
+fn a_project_file_that_defines_and_lists_a_server_is_warned_once_for_that_entry() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("ganja.toml");
+    plant(
+        &project,
+        "[mcp.github]\ntype = \"local\"\ncommand = [\"./github-mcp\"]\n\n\
+         [evaluate]\nscreen = [\"webfetch\", \"mcp:github\"]\n",
+    );
+
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"mcp:github\"]\n");
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    assert_eq!(merged.evaluate_screen(), screening(true, false, &[]));
+    assert_screen_warnings(&capture.logged(), &[(REMOVED, "mcp:github", project.as_path())]);
+
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\"]\n");
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    assert_eq!(merged.evaluate_screen(), screening(true, false, &[]));
+    assert_screen_warnings(&capture.logged(), &[(NOT_IN_SCREEN, "mcp:github", project.as_path())]);
+}
+
+/// **D567**, criterion 12: removal is permanent. An outer project file that
+/// redefines a server takes it off the screen, and an inner file listing it
+/// again cannot put it back — the inner list is intersected with a screen
+/// that no longer holds it, so each file's step gets its own warning, and
+/// the inner one's says what is true of it: the source is not in the screen
+/// the files above it left, not that the person never named it.
+#[test]
+fn an_inner_project_file_cannot_screen_a_server_an_outer_one_redefined() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let outer = directory.path().join("ganja.toml");
+    let inner = directory.path().join("inner").join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"websearch\", \"mcp:github\"]\n");
+    plant(&outer, "[mcp.github]\ntype = \"local\"\ncommand = [\"./github-mcp\"]\n");
+    plant(&inner, "[evaluate]\nscreen = [\"websearch\", \"mcp:github\"]\n");
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    // Outermost first, the order `project_files` walks in.
+    merge_project_file(&mut merged, &outer);
+    merge_project_file(&mut merged, &inner);
+
+    assert_eq!(merged.evaluate_screen(), screening(false, true, &[]));
+    assert_screen_warnings(
+        &capture.logged(),
+        &[(REMOVED, "mcp:github", outer.as_path()), (NOT_IN_SCREEN, "mcp:github", inner.as_path())],
+    );
 }
 
 /// OSC 9 degrades to nothing on a terminal that ignores it, which is the

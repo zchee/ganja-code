@@ -219,7 +219,7 @@ async fn an_exa_search_carries_its_key_in_the_query_and_its_arguments_in_the_bod
     );
     assert_eq!(out.output, "ganja is a rust port");
     assert_eq!(out.title, "Exa Web Search: rust ports");
-    assert_eq!(out.metadata, serde_json::json!({ "provider": "exa" }));
+    assert_eq!(out.metadata, serde_json::json!({ "provider": "exa", "truncated": false }));
 }
 
 /// The defaults upstream sends when the model names none of the knobs.
@@ -273,7 +273,7 @@ async fn a_parallel_search_carries_a_bearer_token_and_parallels_own_arguments() 
         })
     );
     assert_eq!(out.title, "Parallel Web Search: rust ports");
-    assert_eq!(out.metadata, serde_json::json!({ "provider": "parallel" }));
+    assert_eq!(out.metadata, serde_json::json!({ "provider": "parallel", "truncated": false }));
 }
 
 /// An event stream is the other thing either service may answer with, and
@@ -305,6 +305,48 @@ fn the_first_result_text_that_says_anything_is_the_answer() {
     assert_eq!(super::parse(""), None);
     assert_eq!(super::parse("data: not json\n\n"), None);
     assert_eq!(super::parse(r#"{"result":{"content":[]}}"#), None);
+}
+
+/// **D567.** An answer cut to fit says so in its metadata, with the count of
+/// trailing bytes that are the spill hint rather than the answer — reported,
+/// so a reader never searches for a sentence the answer could carry itself.
+/// The notice stays in what is left (review N11).
+#[tokio::test]
+async fn a_clamped_answer_reports_the_bytes_its_hint_appended_and_keeps_its_notice() {
+    let spill = tempfile::tempdir().expect("a scratch directory");
+    let found = "result\n".repeat(crate::truncate::MAX_LINES + 10);
+    let answer =
+        serde_json::json!({ "result": { "content": [{ "type": "text", "text": found }] } });
+    let endpoint = serve(Some(response("application/json", &answer.to_string()))).await;
+    let args: super::Args = serde_json::from_value(serde_json::json!({ "query": "ganja" }))
+        .expect("the fixture fits the schema");
+
+    let out = tool(&endpoint)
+        .spilling_into(spill.path())
+        .execute(&args, &ctx(), Service::Exa, "exa-key")
+        .await
+        .expect("the endpoint answers");
+
+    let spilled = std::fs::read_dir(spill.path())
+        .expect("the spill directory was created")
+        .map(|entry| entry.expect("a readable directory entry").path())
+        .collect::<Vec<_>>();
+    let [file] = spilled.as_slice() else {
+        panic!("exactly one spill file: {spilled:?}");
+    };
+    let appended = format!("\n\n{}", crate::truncate::hint(file));
+
+    assert_eq!(
+        out.metadata,
+        serde_json::json!({ "provider": "exa", "truncated": true, "hint_len": appended.len() })
+    );
+    let (kept, tail) = out.output.split_at(out.output.len() - appended.len());
+    assert_eq!(tail, appended, "the counted tail is byte for byte what the clamp appended");
+    assert!(
+        kept.ends_with("\n\n...11 lines truncated..."),
+        "the notice is left with the answer, outside the count: {:?}",
+        &kept[kept.len().saturating_sub(64)..]
+    );
 }
 
 /// A service that answered with nothing usable is not an error: the model

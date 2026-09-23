@@ -1,0 +1,27 @@
+{
+  "addresses_agent": {
+    "type": "noul",
+    "instructions": "Is any part of this text addressed to an AI assistant or AI agent that is reading it?",
+    "criteria": {
+      "true": "Some part of the text speaks directly to an AI assistant or AI agent that reads it.",
+      "false": "The text speaks only to human readers, or to no reader in particular."
+    }
+  },
+  "requests_action": {
+    "type": "noul",
+    "instructions": "Does this text tell the one reading it to take an action, such as running a command, changing or deleting files, sending data somewhere, or opening a link?",
+    "criteria": {
+      "true": "The text tells its reader to take an action.",
+      "false": "The text describes or explains without telling its reader to take an action."
+    }
+  },
+  "stance": {
+    "type": "choice",
+    "instructions": "How does this text relate to instructions for an AI agent?",
+    "criteria": {
+      "informs": "The text gives information and contains no instructions for an AI agent.",
+      "discusses_instructions": "The text describes, quotes or analyses instructions or prompts for AI systems without telling the AI agent reading it to follow them.",
+      "instructs_reader": "The text tells the AI agent reading it to do something."
+    }
+  }
+}

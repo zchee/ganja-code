@@ -1,6 +1,10 @@
-use ganja_core::config::Overrides;
+use std::sync::Arc;
 
-use super::assemble;
+use ganja_core::config::Overrides;
+use ganja_core::judge::{Judge, MODEL, Screen, Tuning};
+use ganja_core::tool::typesafe::Settings;
+
+use super::{Judging, assemble};
 
 /// The two scalars a config names reach the engine this seam builds.
 ///
@@ -21,8 +25,10 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
     let home = tempfile::TempDir::new().expect("a temporary directory is creatable");
     let project = tempfile::TempDir::new().expect("a temporary directory is creatable");
     // SAFETY: process-wide, so this belongs to a test that runs alone in
-    // its process — which `nextest` gives every test, and which the rest
-    // of this binary's unit tests do not contend for.
+    // its process — which `nextest` gives every test. The one other test
+    // here that sets these variables points them at directories of its own
+    // and removes the same names and two more TypeSafe ones, so neither can
+    // be handed a developer's value.
     //
     // The redirects are what make an assembly hermetic, and `assemble` reads
     // one more variable than it used to: **D564** overlays `evaluate` when
@@ -42,7 +48,7 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
     )
     .expect("the fixture config is writable");
 
-    let assembled = assemble(project.path(), &Overrides::default())
+    let assembled = assemble(project.path(), &Overrides::default(), Judging::Withhold)
         .await
         .expect("a project holding two config keys assembles");
 
@@ -59,4 +65,67 @@ async fn the_configured_cap_reaches_an_assembled_engine() {
         60,
         "the assembled engine compacts at the percentage the config named"
     );
+}
+
+/// **D567**: the assembly builds at most one judge in a process, because the
+/// judge's cap of eight requests in flight and its breaker are process-wide
+/// only while there is exactly one.
+///
+/// The process's judge is built first, over a loopback base that nothing
+/// here ever sends to, and every assembly after it that asks for one is
+/// handed **that** judge rather than building its own — which is also why
+/// this sets no TypeSafe variable and removes any a developer exported: an
+/// assembly that read the environment would come back with no judge at all,
+/// and the check below would fail. The config names a source, so an
+/// assembly that comes back with a judge got it from the process. `serve`'s
+/// door is handed none at all.
+#[tokio::test]
+async fn every_assembly_in_a_process_shares_its_one_judge_and_serve_gets_none() {
+    let data = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    let home = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    let project = tempfile::TempDir::new().expect("a temporary directory is creatable");
+    // SAFETY: as in the test above, whose variables these are. The TypeSafe
+    // settings go too: an assembly that read the environment instead of
+    // sharing the process's judge must build nothing here, and never one
+    // over a developer's exported key and the vendor's real host.
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", data.path());
+        std::env::set_var("GANJA_CONFIG_HOME", home.path());
+        std::env::remove_var("GANJA_PROVIDER");
+        std::env::remove_var("GANJA_MODEL");
+        std::env::remove_var("TYPESAFE_API_KEY");
+        std::env::remove_var("TYPESAFE_BASE_URL");
+        std::env::remove_var("TYPESAFE_DEFAULT_MODEL");
+    }
+    let flagged = project.path().join("flagged.toml");
+    std::fs::write(&flagged, "[evaluate]\nscreen = [\"webfetch\"]\n")
+        .expect("the fixture config is writable");
+    let overrides = Overrides { config_file: Some(flagged), ..Overrides::default() };
+    let settings = Settings::from_parts(
+        "sk-assembly-unit-key".to_owned(),
+        "http://127.0.0.1:9",
+        MODEL.to_owned(),
+    )
+    .expect("a loopback base and the measured model are accepted");
+    let screen = Screen { webfetch: true, ..Screen::default() };
+
+    let first = Judge::for_process(&ganja_core::Config::default(), |_| {
+        Judge::from_settings(Some(settings), screen, Tuning::SHIPPED)
+    })
+    .expect("the first build in a process is the process's judge");
+    let run = assemble(project.path(), &overrides, Judging::Build)
+        .await
+        .expect("a project whose config names a source assembles");
+    let again = assemble(project.path(), &overrides, Judging::Build)
+        .await
+        .expect("a second assembly in the same process assembles");
+    let serve = assemble(project.path(), &overrides, Judging::Withhold)
+        .await
+        .expect("the serve door assembles");
+
+    for (door, judge) in [("the first assembly", run.judge), ("the second", again.judge)] {
+        let judge = judge.unwrap_or_else(|| panic!("{door} asked for a judge and got none"));
+        assert!(Arc::ptr_eq(&judge, &first), "{door} built a second judge in one process");
+    }
+    assert!(serve.judge.is_none(), "the serve door builds no judge whatever the config names");
 }

@@ -194,6 +194,76 @@ fn the_log_tab_lists_one_line_per_event_newest_at_the_tail() {
     assert!(oldest_row < newest_row, "the oldest event should be above the newest:\n{screen}");
 }
 
+/// **D567**: the log tab is the one place a frontend draws a call's whole
+/// metadata, `metadata.screen` included — and the answers there hold strings
+/// a vendor chose. They reach the screen neutralized, every control, bidi and
+/// line-separator character spelled out as an escape rather than drawn.
+#[test]
+fn the_log_tab_draws_a_vendors_answer_strings_with_controls_and_bidi_escaped() {
+    let hostile = "\u{1b}[2J\u{202e}\u{2066}\u{200f}\u{2028}\u{85}\u{7f}";
+    let screen_record = serde_json::json!({
+        "fired": true,
+        "model": format!("jev-1.13.0{hostile}"),
+        "answers": {
+            "0": {
+                "stance": {
+                    "type": "choice",
+                    "choice": format!("instructs_reader{hostile}"),
+                    "probabilities": { format!("key{hostile}"): 0.9 },
+                    "confidence": 0.8,
+                },
+            },
+        },
+    });
+    let mut events = VecDeque::new();
+    events.push_back(CoreEvent::PartUpdated {
+        session_id: SessionId::from("ses_fixture".to_owned()),
+        message_id: MessageId::from("msg_1".to_owned()),
+        part: Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "mcp__hub__fetch".to_owned(),
+                state: ToolState::Completed {
+                    input: serde_json::json!({}),
+                    output: "a page".to_owned(),
+                    title: "fetch · screened".to_owned(),
+                    metadata: serde_json::json!({ "server": "hub", "screen": screen_record }),
+                    started: 0,
+                    completed: 1,
+                },
+                custom: false,
+            },
+        },
+    });
+
+    let lines = super::log_lines(&events, &Theme::default());
+    let drawn: String =
+        lines.iter().flat_map(|line| line.spans.iter().map(|span| span.content.as_ref())).collect();
+
+    let unsafe_char = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    };
+    assert!(
+        !drawn.chars().any(unsafe_char),
+        "a vendor string reached the log tab raw: {:?}",
+        drawn.chars().filter(|&c| unsafe_char(c)).collect::<String>()
+    );
+    for escaped in [r"\u{1b}", r"\u{202e}", r"\u{2066}", r"\u{2028}"] {
+        assert!(drawn.contains(escaped), "the log tab spells {escaped} out: {drawn}");
+    }
+}
+
 #[test]
 fn the_log_tab_names_its_own_empty_state() {
     let (events, usages) = (VecDeque::new(), VecDeque::new());

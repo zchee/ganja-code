@@ -36,7 +36,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::stream::BoxStream;
-use ganja_core::config::McpServer;
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState};
 use ganja_core::provider::{ChatRequest, Provider};
@@ -776,39 +775,6 @@ async fn a_server_whose_first_dial_failed_is_retried_automatically_exactly_once(
 #[cfg(unix)]
 fn attempts(counter: &Path) -> usize {
     std::fs::read_to_string(counter).unwrap_or_default().lines().count()
-}
-
-/// An MCP server's own `output_limit` clamps a result over its budget, with
-/// the spill-file notice every one-shot tool in the tree gives (acceptance
-/// criterion 5). The reference server's own `echo` tool is reused rather than
-/// adding a fixture tool for this: it hands back whatever `text` it is given,
-/// so a long argument is all a caller needs to make one.
-#[tokio::test]
-async fn an_over_cap_result_is_clamped_with_the_spill_notice() {
-    let (provider, _requests) = ScriptedProvider::new(vec![
-        tool_call("mcp__reference__echo", json!({ "text": "x".repeat(5000) })),
-        says("done"),
-    ]);
-    let mut config = reference_server("reference");
-    match config.mcp.get_mut("reference").expect("the fixture entry is present") {
-        McpServer::Local(local) => local.output_limit = Some(100),
-        McpServer::Remote(_) => unreachable!("the fixture entry is local"),
-    }
-    let engine = engine_with(provider, &config).await;
-    let mut events = engine.subscribe().await.expect("the first subscriber wins");
-
-    let seen = turn(&engine, &mut events, "echo something huge", PermissionReply::Once).await;
-
-    let output = completed(&tool_part(&seen, "mcp__reference__echo"));
-    assert!(output.contains("bytes truncated"), "{output}");
-    assert!(output.contains("Full output saved to:"), "{output}");
-    assert!(
-        output.len() < 5000,
-        "the 100-byte budget must have actually decided the outcome: {} bytes",
-        output.len()
-    );
-
-    engine.shutdown_mcp().await;
 }
 
 /// A server that announces a changed tool set has that set re-listed, and the

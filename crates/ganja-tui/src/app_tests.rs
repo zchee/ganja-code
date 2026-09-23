@@ -3329,6 +3329,113 @@ async fn a_name_collision_is_a_notice_never_a_refusal_at_registration() {
     assert!(record.exists(), "registration succeeds despite the collision");
 }
 
+/// **D567**: what the first socket pass says — a name collision, which is
+/// routine because every session is named after its project root, or a
+/// refused bind — stands **after** a judging session's launch disclosure and
+/// never in its place, so the line that says tool results leave the machine
+/// is still there when the first frame is drawn.
+#[tokio::test]
+async fn the_first_socket_pass_says_its_notice_after_the_launch_disclosure() {
+    const DISCLOSURE: &str =
+        "evaluate (experimental): screening webfetch via typesafe.example (lead and subagents)";
+    let tests: [(&str, bool, &str); 2] = [
+        (
+            "a name collision",
+            false,
+            "another session is already registered as \"worker\" (0298c1a2 at /work/holder)",
+        ),
+        ("a refused bind", true, "no session socket: the directory is not ours"),
+    ];
+
+    for (case, refuse, said) in tests {
+        let directory = temporary();
+        let registry_dir = temporary();
+        let holder_stem = "0298c1a2";
+        registry::write(
+            registry_dir.path(),
+            holder_stem,
+            &registry::Record {
+                format: registry::FORMAT,
+                session_id: "0298c1a2-0000-7000-8000-000000000002".to_owned(),
+                name: "worker".to_owned(),
+                name_source: registry::NameSource::User,
+                cwd: "/work/holder".into(),
+                root: "/work/holder".into(),
+                pid: 1,
+                started_at: 0,
+            },
+        )
+        .expect("the fixture writes");
+        let held =
+            ganja_tool::socket::open_lock(&registry_dir.path().join(format!("{holder_stem}.sock")))
+                .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+        let (app, recording) = registering_app(&directory, &registry_dir);
+        let mut app = app.with_disclosure(Some(DISCLOSURE.to_owned()));
+        app.engine.set_self_name("worker");
+        recording.refuse.store(refuse, std::sync::atomic::Ordering::SeqCst);
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        let notice = app.status.notice().unwrap_or_else(|| panic!("{case}: nothing was said"));
+        assert_eq!(
+            notice,
+            format!("{DISCLOSURE}{}{said}", crate::NOTICE_SEPARATOR).as_str(),
+            "{case}: the disclosure leads and the sentence follows it"
+        );
+    }
+}
+
+/// **D567**: only the first socket pass speaks beside the launch disclosure.
+/// `App::open` makes that pass and then lets the disclosure go, so a later
+/// collision — a `/rename` onto a name another live session holds — says its
+/// own sentence alone rather than carrying the launch line for the rest of
+/// the session.
+#[tokio::test]
+async fn after_the_first_pass_a_later_collision_says_its_sentence_alone() {
+    const DISCLOSURE: &str =
+        "evaluate (experimental): screening webfetch via typesafe.example (lead and subagents)";
+    let directory = temporary();
+    let registry_dir = temporary();
+    let holder_stem = "0298c1a2";
+    registry::write(
+        registry_dir.path(),
+        holder_stem,
+        &registry::Record {
+            format: registry::FORMAT,
+            session_id: "0298c1a2-0000-7000-8000-000000000002".to_owned(),
+            name: "worker".to_owned(),
+            name_source: registry::NameSource::User,
+            cwd: "/work/holder".into(),
+            root: "/work/holder".into(),
+            pid: 1,
+            started_at: 0,
+        },
+    )
+    .expect("the fixture writes");
+    let held =
+        ganja_tool::socket::open_lock(&registry_dir.path().join(format!("{holder_stem}.sock")))
+            .expect("the lock file opens");
+    held.try_lock().expect("nothing else holds a fresh lock");
+    let (app, _recording) = registering_app(&directory, &registry_dir);
+    let mut app = app.with_disclosure(Some(DISCLOSURE.to_owned()));
+
+    app.open().await;
+    assert!(app.registered.is_some(), "the first pass bound and registered");
+    assert!(app.disclosure.is_none(), "the first pass lets the disclosure go");
+
+    for event in typing("/rename worker") {
+        app.handle(event).await.expect("typing is handled");
+    }
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+
+    assert_eq!(
+        app.status.notice(),
+        Some("another session is already registered as \"worker\" (0298c1a2 at /work/holder)"),
+        "the collision is said alone, without the launch disclosure"
+    );
+}
+
 /// AC-7: `/rename` rewrites a lead's own record in place — same stem,
 /// old name gone from the file — surfacing the collision notice when the
 /// new name is held, and refusing a grammar violation with AC-5's own

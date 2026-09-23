@@ -647,6 +647,7 @@ fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammat
         root: root.to_path_buf(),
         credentials: crate::tool::Credentials::Unguarded,
         lsp: None,
+        judge: None,
         persistence: None,
         jobs: None,
         hooks: None,

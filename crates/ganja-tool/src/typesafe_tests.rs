@@ -579,6 +579,52 @@ fn a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined() {
     assert_eq!(settings.host(), "eu.example");
 }
 
+/// **D567.** The public door refuses what [`Settings::from_env`] refuses, on
+/// the same two rules and in the same order, so a caller holding values
+/// rather than variables — a judge built from configuration, a test that
+/// must never read a developer's exported key — cannot build settings the
+/// environment could not have.
+#[test]
+fn settings_from_parts_refuse_a_cleartext_base_and_an_unusable_model_and_accept_loopback() {
+    let refused = [
+        ("http://example.com", "jev-1.13.0", Error::RefusedBase, "plain http off loopback"),
+        ("http://127.0.0.1.evil.com", "jev-1.13.0", Error::RefusedBase, "a domain, not loopback"),
+        ("https://eu.example/?token=t", "jev-1.13.0", Error::RefusedBase, "a query to drop"),
+        ("not a url", "jev-1.13.0", Error::RefusedBase, "no URL at all"),
+        ("https://api.typesafe.ai", "jev latest", Error::RefusedModel, "a space"),
+        ("https://api.typesafe.ai", "", Error::RefusedModel, "an empty id"),
+        (
+            "https://api.typesafe.ai",
+            "jev-latest · 0 B · 0 question(s)",
+            Error::RefusedModel,
+            "a second disclosure forged into the title",
+        ),
+        // Both wrong: the base is decided first, as `from_env` decides it.
+        ("http://example.com", "jev latest", Error::RefusedBase, "both refused"),
+    ];
+    for (base, model, expected, what) in refused {
+        let refusal = Settings::from_parts(KEY.to_owned(), base, model.to_owned())
+            .expect_err(&format!("{what} is refused: {base} / {model:?}"));
+
+        assert_eq!(refusal, expected, "{what}: {base} / {model:?}");
+    }
+
+    let accepted = [
+        ("http://127.0.0.1:8080", "127.0.0.1", "http://127.0.0.1:8080/v1/systemone"),
+        ("http://[::1]:1", "[::1]", "http://[::1]:1/v1/systemone"),
+        ("http://localhost:1", "localhost", "http://localhost:1/v1/systemone"),
+        ("https://eu.example/typesafe", "eu.example", "https://eu.example/typesafe/v1/systemone"),
+    ];
+    for (base, host, endpoint) in accepted {
+        let settings = Settings::from_parts(KEY.to_owned(), base, "jev-1.13.0".to_owned())
+            .unwrap_or_else(|refusal| panic!("{base} is accepted: {refusal}"));
+
+        assert_eq!(settings.host(), host, "{base}");
+        assert_eq!(settings.endpoint.as_str(), endpoint, "{base}: the path joins onto the base");
+        assert_eq!(settings.model(), "jev-1.13.0", "{base}: the model is carried as given");
+    }
+}
+
 #[tokio::test]
 async fn every_limit_is_decided_before_a_socket_is_opened() {
     let endpoint = fixture::serve(answer(ANSWERED)).await;
