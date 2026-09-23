@@ -73,7 +73,7 @@ use ganja_protocol::{
 use secrecy::ExposeSecret as _;
 use serde_json::Value;
 
-use crate::assemble::{Assembled, assemble};
+use crate::assemble::{Assembled, Judging, assemble};
 use crate::{millis_now, printable};
 
 /// Every `type` an nd-JSON object may carry: upstream's six and no seventh
@@ -334,14 +334,25 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let assembled = assemble(
         &cwd,
         &Overrides { model: args.model, agent: args.agent, config_file: args.config },
+        // A local run is the person's own launch, and this line is where it
+        // tells them what it screens (**D567**), so it may build a judge.
+        Judging::Build,
     )
     .await?;
-    let Assembled { engine, servers, config, provider, .. } = assembled;
+    let Assembled { engine, servers, config, provider, judge, .. } = assembled;
     // Before the session and before the hooks (**D563**): a flag the selected
     // provider cannot carry is a run that would answer in prose whatever the
     // schema said, and saying so costs nothing here where saying it later
     // costs a stored session and a spent request.
     let text_format = json_schema_format(args.json_schema, &provider)?;
+    // The screen's opening line, on stderr (**D567**): a diagnostic about the
+    // run rather than part of the account of it, so it can never land inside
+    // `--format json`'s stream. After the refusal above, so a run that never
+    // starts claims to screen nothing. The ` · screened` a call's title gains
+    // stays on stdout by design — it is part of what the call did.
+    if let Some(judge) = &judge {
+        eprintln!("note: {}", judge.disclosure(config.webfetch_allows_private()));
+    }
     // The D479 trio reaches the receiver classifier (D523): a `run --auto`
     // session is bypass-classed for cross-session admission, exactly as the
     // UI's `--yolo` session is. Classification only — what `auto` does to

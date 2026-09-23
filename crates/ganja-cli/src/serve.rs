@@ -38,7 +38,7 @@ use anyhow::{Context as _, Result};
 use clap::Args;
 use ganja_core::config::Overrides;
 
-use crate::assemble::assemble;
+use crate::assemble::{Judging, assemble};
 
 /// `ganja serve`'s flags — upstream's network options, minus what this build
 /// has no feature behind (see the module docs).
@@ -66,7 +66,11 @@ pub struct ServeArgs {
 /// when SIGINT cannot be listened for (see [`Shutdown::listen`]).
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
-    let assembled = assemble(&cwd, &Overrides::default()).await?;
+    // No judge here, whatever the config names (**D567**): a served engine
+    // runs turns for clients that were never told what it screens or where
+    // the text goes, and until a session can be told that on its own, the
+    // only honest amount to send is none.
+    let assembled = assemble(&cwd, &Overrides::default(), Judging::Withhold).await?;
     // Dialled in the background, exactly as the UI dials them: a server that
     // never answers costs its tools rather than the listener.
     assembled.engine.connect_mcp();

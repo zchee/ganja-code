@@ -235,6 +235,23 @@ pub async fn run(
     if let Some(evaluate) = ganja_tool::evaluate::EvaluateTool::configured() {
         tools = tools.with(evaluate);
     }
+    // **D567**, beside the overlay above and keyed off the same environment:
+    // the judge that screens untrusted tool results, present only when a
+    // trusted config tier named a source *and* `TYPESAFE_API_KEY` is set, so
+    // a session nobody configured sends nothing anywhere. Built through
+    // `Judge::for_process`, because its cap of eight requests in flight and
+    // its breaker are process-wide only while this process holds exactly one
+    // judge — `run` is entered once, and this is its one construction site.
+    // Read once, here: a changed screen, like a changed key, is a restart.
+    // A `/plugin` Reload that flips `allow_private` needs none, since the
+    // judge reads each `webfetch` result's own `private_allowed` stamp.
+    let judge =
+        ganja_core::judge::Judge::for_process(&config, ganja_core::judge::Judge::configured);
+    // What it screens, where the text goes, and who it covers, said in the
+    // opening line: a session that sends tool results to a third party says
+    // so before the first one leaves.
+    let judge_notice =
+        judge.as_ref().map(|judge| judge.disclosure(config.webfetch_allows_private()));
     // Over the top of the roster's rootless one, out of the **same** value the
     // prompt's `<available_skills>` block is built from below: a session that
     // is offered a skill has to be able to load it, and only a caller holding
@@ -288,6 +305,12 @@ pub async fn run(
     .with_skill_roots(skill_roots);
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
+    }
+    // Shared with every `task` child through the engine, the way the language
+    // servers are. An in-process teammate builds an engine of its own and is
+    // handed none; a pane teammate is a process of its own and builds its own.
+    if let Some(judge) = judge {
+        engine = engine.with_judge(judge);
     }
     // The **project root** for the same reason the language server takes one: a
     // hook that runs `git status` means the checkout, not whichever
@@ -617,9 +640,24 @@ pub async fn run(
             // session restores the one it was left on.
             let mut app = App::new(
                 engine,
-                notice(&[selection.notice, theme_notice, snapshot_notice, member_notice]),
+                // The screening disclosure second, after the provider: of what
+                // startup has to say, it is the one about text leaving the
+                // machine, so it is not left to the end of a line a narrow
+                // terminal cuts.
+                notice(&[
+                    selection.notice,
+                    judge_notice.clone(),
+                    theme_notice,
+                    snapshot_notice,
+                    member_notice,
+                ]),
                 themes,
             )
+            // And kept apart from the rest of that line, because the first
+            // socket pass runs before the first frame and a name collision
+            // there is routine: what it says goes beside the disclosure,
+            // never in its place.
+            .with_disclosure(judge_notice)
             .with_provider(provider_id)
             .with_keybinds(keys)
             // Inline image previews, only where the environment says a kitty

@@ -7,7 +7,9 @@
 //! differently stays at their call sites: `run` installs its auto-refuse
 //! permission rules and skips the file watcher, `serve` watches and keeps
 //! dialogs interactive, and both dial MCP themselves so `run`'s rules land
-//! before the dial's tool-set rebuild can. This is only the half that must
+//! before the dial's tool-set rebuild can. The one difference decided here is
+//! whether a judge is built (**D567**), because it is a construction rather
+//! than a step: `run` asks for one, `serve` does not. This is only the half that must
 //! never drift apart — it existed twice, and a tool added to one copy was a
 //! tool the other silently never offered.
 
@@ -16,6 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use ganja_core::config::{Config, Overrides};
+use ganja_core::judge::Judge;
 use ganja_core::{AgentRegistry, Engine, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 
@@ -24,8 +27,8 @@ use crate::STORAGE;
 /// The engine either subcommand drives, and every handle a caller may need to
 /// keep: the MCP server handles whose processes a shutdown ends, the storage
 /// handle read-only routes answer from, and the paths and config the
-/// informational routes serve. `run` takes the engine, the servers and the
-/// config; the paths and the storage handle go.
+/// informational routes serve. `run` takes the engine, the servers, the
+/// config and the judge; the paths and the storage handle go.
 pub(crate) struct Assembled {
     pub(crate) engine: Engine,
     pub(crate) servers: Arc<ganja_core::McpServers>,
@@ -41,10 +44,37 @@ pub(crate) struct Assembled {
     /// selection is where that id is known. The same value the TUI hands its
     /// `App` through `with_provider`, from the same place.
     pub(crate) provider: String,
+    /// The judge the engine screens untrusted tool results through
+    /// (**D567**), when [`Judging::Build`] asked for one and the config and
+    /// the environment configured one. Kept beside the engine because the
+    /// engine does not answer for it, and `run` has to say what it screens
+    /// before the turn.
+    pub(crate) judge: Option<Arc<Judge>>,
+}
+
+/// Whether an assembly builds the judge that screens untrusted tool results
+/// (**D567**).
+///
+/// A parameter of the one assembly rather than a second construction site in
+/// `run`, so that this module stays the only place either headless door
+/// builds its engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Judging {
+    /// Build one when a trusted config tier names a source and the
+    /// environment configures TypeSafe: `run`, which says so on stderr.
+    Build,
+    /// Build none, whatever the config says: `serve`. A served engine takes
+    /// sessions from clients who were never shown what it screens, and there
+    /// is no per-session disclosure yet to show them.
+    Withhold,
 }
 
 /// Builds the engine a headless subcommand drives.
-pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
+pub(crate) async fn assemble(
+    cwd: &Path,
+    overrides: &Overrides,
+    judging: Judging,
+) -> Result<Assembled> {
     let config = Config::load_with(cwd, overrides).context("failed to read the configuration")?;
     // Adopted before anything sizes a request: the disk tier is what the UI
     // last fetched, and an engine that skipped it would compact against the
@@ -83,6 +113,16 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     if let Some(evaluate) = ganja_core::tool::evaluate::EvaluateTool::configured() {
         tools = tools.with(evaluate);
     }
+    // **D567**, beside the overlay above and keyed off the same environment,
+    // for the one door that asked. Through `Judge::for_process`, because the
+    // judge's cap of eight requests in flight and its breaker are
+    // process-wide only while the process holds exactly one judge: `run` and
+    // `serve` each assemble once, and a second assembly in one process would
+    // be handed the first one's judge rather than build another.
+    let judge = match judging {
+        Judging::Build => Judge::for_process(&config, Judge::configured),
+        Judging::Withhold => None,
+    };
     // Over the top of the roster's rootless one, out of the **same** value the
     // prompt's `<available_skills>` block is built from below: a session that
     // is offered a skill has to be able to load it, and only a caller holding
@@ -125,6 +165,11 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
     if let Some(lsp) = lsp {
         engine = engine.with_lsp(lsp);
     }
+    // Shared with every `task` child through the engine, the way the language
+    // servers are.
+    if let Some(judge) = &judge {
+        engine = engine.with_judge(Arc::clone(judge));
+    }
     // Here rather than at either call site, which is this module's whole
     // purpose: a headless turn fires the same hooks a screen does, and a hook
     // installed in one frontend and forgotten in another is the drift this
@@ -152,6 +197,7 @@ pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assemb
         data,
         config,
         provider: provider_id,
+        judge,
     })
 }
 

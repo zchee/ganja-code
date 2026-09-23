@@ -10,9 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Breaker, Class, Judge, MODEL, QUESTIONS, SENTENCE, SUFFIX, Scores, Screen, Seg, Ticket, Tuning,
-    Verdict, chunk, fires, sent_content, state,
+    Verdict, chunk, fires, sent_content, state, unanswered,
 };
 use crate::Config;
+use crate::config::McpServer;
 use crate::tool::ToolOutput;
 use crate::tool::typesafe::{Answer, Question, Settings};
 
@@ -71,6 +72,95 @@ fn the_sentence_and_the_model_are_the_ruled_ones() {
     assert_eq!(MODEL, "jev-1.13.0");
     assert_eq!(Tuning::default(), Tuning::SHIPPED);
     assert_eq!(Tuning::SHIPPED.deadline, Duration::from_secs(8));
+}
+
+/// The launch line names each source as `[evaluate] screen` spells it and the
+/// host alone — never a credential or a port the base URL carries — and adds
+/// the `allow_private` clause only when it is true of a screened `webfetch`.
+#[test]
+fn the_disclosure_names_the_sources_the_host_alone_and_an_unscreened_webfetch() {
+    let base = "https://reader:hunter2@typesafe.example:8443/v1";
+    let mcp = |names: &[&str]| names.iter().map(|&name| name.to_owned()).collect::<BTreeSet<_>>();
+    let tests: [(&str, Screen, bool, &str); 4] = [
+        (
+            "every kind of source, in the order the grammar lists them",
+            Screen { webfetch: true, websearch: true, mcp: mcp(&["plugin:p:s", "github"]) },
+            false,
+            "evaluate (experimental): screening webfetch, websearch, mcp:github, mcp:plugin:p:s \
+             via typesafe.example (lead and subagents)",
+        ),
+        (
+            "a screened webfetch under allow_private says it is not screened",
+            Screen { webfetch: true, websearch: true, mcp: BTreeSet::new() },
+            true,
+            "evaluate (experimental): screening webfetch, websearch via typesafe.example (lead \
+             and subagents); webfetch not screened (allow_private)",
+        ),
+        (
+            "allow_private says nothing about a webfetch nobody screens",
+            Screen { webfetch: false, websearch: true, mcp: BTreeSet::new() },
+            true,
+            "evaluate (experimental): screening websearch via typesafe.example (lead and \
+             subagents)",
+        ),
+        (
+            "one MCP server alone",
+            Screen { webfetch: false, websearch: false, mcp: mcp(&["hub"]) },
+            false,
+            "evaluate (experimental): screening mcp:hub via typesafe.example (lead and subagents)",
+        ),
+    ];
+
+    for (name, screen, allow_private, expected) in tests {
+        let settings = Settings::from_parts("sk-judge-unit-key".to_owned(), base, MODEL.to_owned())
+            .expect("an https base with userinfo and a port is accepted");
+        let judge = Judge::from_settings(Some(settings), screen, Tuning::SHIPPED)
+            .unwrap_or_else(|| panic!("{name}: a screen naming a source builds a judge"));
+
+        let line = judge.disclosure(allow_private);
+
+        assert_eq!(line, expected, "{name}");
+        for leaked in ["reader", "hunter2", "8443", "/v1", "https"] {
+            assert!(!line.contains(leaked), "{name}: the line carries {leaked:?}: {line}");
+        }
+    }
+}
+
+/// Which listed MCP servers a launch warns about: each one nothing will ever
+/// dial — named by no configured or plugin server, or configured and switched
+/// off — and none that an enabled server answers to.
+#[test]
+fn a_listed_mcp_server_is_unanswered_unless_an_enabled_one_answers_to_it() {
+    let server = |enabled: bool| -> McpServer {
+        toml::from_str(&format!(
+            "type = \"remote\"\nurl = \"https://mcp.example/mcp\"\nenabled = {enabled}\n"
+        ))
+        .expect("a remote server decodes")
+    };
+    let tests: [(&str, &str, Option<bool>, bool); 4] = [
+        ("a name no server is configured under", "hub", None, true),
+        ("a configured server switched off", "hub", Some(false), true),
+        ("an enabled configured server", "hub", Some(true), false),
+        (
+            "an enabled plugin server, by its plugin-qualified name",
+            "plugin:p:hub",
+            Some(true),
+            false,
+        ),
+    ];
+
+    for (case, name, configured, warned) in tests {
+        let mut config = Config::default();
+        if let Some(enabled) = configured {
+            config.mcp.insert(name.to_owned(), server(enabled));
+        }
+        let screen = Screen { mcp: BTreeSet::from([name.to_owned()]), ..Screen::default() };
+
+        let listed: Vec<&String> = unanswered(&screen, &config).collect();
+
+        let expected: Vec<&str> = if warned { vec![name] } else { Vec::new() };
+        assert_eq!(listed, expected, "{case}");
+    }
 }
 
 /// The fire rule is `>=` on both thresholds, and the yes/no half is the

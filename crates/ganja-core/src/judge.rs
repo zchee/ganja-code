@@ -44,8 +44,8 @@ mod chunk;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
@@ -54,6 +54,7 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::{Config, McpServer};
 use crate::tool::ToolOutput;
 use crate::tool::typesafe::{Answer, Client, Error, Question, Request, Response, Settings, State};
 
@@ -285,6 +286,79 @@ impl Judge {
         Self::from_settings(settings, screen, Tuning::SHIPPED)
     }
 
+    /// This process's judge: `build` over `config`'s screen on the first
+    /// call, and whatever that call built on every later one, `build`
+    /// unasked.
+    ///
+    /// The door a frontend builds through, passing [`Judge::configured`]. It
+    /// exists because the cap of eight requests in flight and the breaker are
+    /// only process-wide while the process holds one judge: a second would be
+    /// eight more requests in flight in front of the same vendor, and a second
+    /// breaker that could not see the first one's failures. Each frontend assembles
+    /// once per process, so a second call is never expected; if one comes,
+    /// it shares the first judge rather than building another.
+    ///
+    /// When a judge is built, every `mcp:<server>` its screen names that no
+    /// **enabled** server in `config.mcp` answers to — a configured one or a
+    /// plugin's — is one `warn!` naming it: nothing will ever be screened
+    /// under that name, and the disclosure still lists it. A server
+    /// configured with `enabled = false` is never dialled, so it is warned
+    /// about exactly as a missing one is.
+    #[must_use]
+    pub fn for_process(
+        config: &Config,
+        build: impl FnOnce(Screen) -> Option<Arc<Self>>,
+    ) -> Option<Arc<Self>> {
+        static PROCESS: OnceLock<Option<Arc<Judge>>> = OnceLock::new();
+
+        PROCESS
+            .get_or_init(|| {
+                let judge = build(config.evaluate_screen())?;
+                for server in unanswered(&judge.screen, config) {
+                    tracing::warn!(
+                        entry = %format_args!("mcp:{server}"),
+                        "[evaluate] screen names an MCP server no enabled configured or plugin \
+                         server answers to; nothing is screened under that name"
+                    );
+                }
+
+                Some(judge)
+            })
+            .clone()
+    }
+
+    /// What a session that holds this judge says at launch: the sources it
+    /// screens, spelled as `[evaluate] screen` spells them, and the host their
+    /// text is sent to — the host alone, never the rest of the base URL,
+    /// which may carry a credential.
+    ///
+    /// `allow_private` is whether `webfetch` may reach a private address in
+    /// this launch. With it, every `webfetch` result is stamped
+    /// `private_allowed: true` and none is screened, so a screen naming
+    /// `webfetch` says so. It describes the launch: a `/plugin` Reload that
+    /// changes it later is followed by the per-call stamp, not by this line.
+    #[must_use]
+    pub fn disclosure(&self, allow_private: bool) -> String {
+        let mut sources = Vec::new();
+        if self.screen.webfetch {
+            sources.push("webfetch".to_owned());
+        }
+        if self.screen.websearch {
+            sources.push("websearch".to_owned());
+        }
+        sources.extend(self.screen.mcp.iter().map(|server| format!("mcp:{server}")));
+        let mut line = format!(
+            "evaluate (experimental): screening {} via {} (lead and subagents)",
+            sources.join(", "),
+            self.client.settings().host()
+        );
+        if allow_private && self.screen.webfetch {
+            line.push_str("; webfetch not screened (allow_private)");
+        }
+
+        line
+    }
+
     /// Screens `output` when `tool`'s result is one this judge screens, and
     /// marks it: [`SUFFIX`] on the title whenever any text left the machine,
     /// [`SENTENCE`] after the output when a segment fired, and
@@ -505,6 +579,16 @@ impl Judge {
             }
         }
     }
+}
+
+/// The MCP servers `screen` names that nothing in `config` will ever dial —
+/// absent from `config.mcp`, or there and switched off — in the screen's
+/// order.
+///
+/// Apart from [`Judge::for_process`], whose one build per process is what
+/// warns about each, so the rule can be asked once per case in one test.
+fn unanswered<'a>(screen: &'a Screen, config: &'a Config) -> impl Iterator<Item = &'a String> {
+    screen.mcp.iter().filter(|name| !config.mcp.get(*name).is_some_and(McpServer::enabled))
 }
 
 /// The text a screened result sends: the tool's own output minus the clamp's

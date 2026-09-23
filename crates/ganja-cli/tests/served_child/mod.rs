@@ -1,5 +1,6 @@
-//! The half of a `ganja serve` fixture that `serve.rs` and `attach.rs` must
-//! not spell twice: a server child that dies with the test that spawned it,
+//! The half of a `ganja serve` fixture that `serve.rs`, `attach.rs` and
+//! `evaluate_screen.rs` must not spell three times: a server child that dies
+//! with the test that spawned it,
 //! its diagnostics read as they are written rather than after it exits, and
 //! waits that say what they were waiting for when they give up.
 //!
@@ -80,6 +81,22 @@ pub const UNINHERITED: &[&str] = &[
 /// that is not a number — then unwinds through the kill that `Child` itself
 /// would not do (bead `pjc`).
 pub fn spawn(project: &Path, data: &Path, config: &Path, home: &Path, script: &Path) -> Reaped {
+    spawn_with(project, data, config, home, script, &[])
+}
+
+/// [`spawn`], with `env` set on the child **after** [`UNINHERITED`] is taken
+/// out — so a name on both lists is the fixture's own value, never the
+/// developer's. What a drill hands a server this way it hands nothing else:
+/// `evaluate_screen.rs` gives one the same TypeSafe settings and config file
+/// a local run had, to show the served engine sends none of it anywhere.
+pub fn spawn_with(
+    project: &Path,
+    data: &Path,
+    config: &Path,
+    home: &Path,
+    script: &Path,
+    env: &[(&str, &str)],
+) -> Reaped {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
         .args(["serve", "--port", "0"])
@@ -94,6 +111,7 @@ pub fn spawn(project: &Path, data: &Path, config: &Path, home: &Path, script: &P
     for name in UNINHERITED {
         command.env_remove(name);
     }
+    command.envs(env.iter().copied());
 
     Reaped::new(command.spawn().expect("the binary starts"))
 }

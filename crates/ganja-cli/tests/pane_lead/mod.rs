@@ -1,9 +1,11 @@
 //! A real `ganja` lead in a tmux pane of its own, driven from outside.
 //!
 //! Shared by every pane binary in this directory — `teammate_permission.rs`,
-//! `teammate_env.rs`, `teammate_pane.rs`, `team_tasks_pane.rs` and
-//! `team_continuation_pane.rs` — which are the end-to-end half of what
-//! `ganja-teammate-local/tests/pane_support` pins with a fake pane child: here **both**
+//! `teammate_env.rs`, `teammate_pane.rs`, `team_tasks_pane.rs`,
+//! `team_continuation_pane.rs` and `evaluate_screen_pane.rs`. All but the last
+//! are the end-to-end half of what `ganja-teammate-local/tests/pane_support`
+//! pins with a fake pane child (the last only reads a lead's opening line):
+//! here **both**
 //! processes are the shipped binary — the lead is the terminal UI running
 //! inside a private tmux server, and the pane is whatever that lead's `/teammate
 //! spawn w1 --backend ganja` split off — and the test reaches them the way a
