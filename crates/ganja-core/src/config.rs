@@ -2474,8 +2474,8 @@ pub enum NotificationMethod {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WebfetchConfig {
-    /// Whether `webfetch` may fetch a URL resolving onto this machine or a
-    /// private network.
+    /// Whether `webfetch` may fetch a URL resolving to an address on this
+    /// machine, on a private network or in a reserved range.
     ///
     /// **Absent is no.** The tool refuses those by default — the URL is one a
     /// model chose, and a model chooses it after reading files and pages other
@@ -2978,7 +2978,9 @@ impl Config {
     /// narrows too, losing every server this file's own `mcp` table defines
     /// before it is intersected with this file's list — see
     /// [`EvaluateConfig::screen`]. Every other key merges exactly as
-    /// [`Config::merge`] merges it.
+    /// [`Config::merge`] merges it; a `webfetch.allow_private = true` here
+    /// also warns once when the screen, after this file's narrowing, still
+    /// names `webfetch`, because no page fetched with it set is screened.
     ///
     /// # Errors
     ///
@@ -3012,6 +3014,21 @@ impl Config {
             other.mcp.keys(),
             path,
         );
+        // `webfetch.allow_private` keeps its meaning and its tier here: a
+        // project file may still open private fetches. But every page fetched
+        // with the guard lifted is stamped `private_allowed: true` and never
+        // screened, so a checkout that sets it takes webfetch out of the
+        // screen as surely as a list that leaves it out, and that is never
+        // silent either (**D567**).
+        if other.webfetch.allow_private == Some(true)
+            && self.evaluate.screen.iter().flatten().any(|entry| entry == "webfetch")
+        {
+            tracing::warn!(
+                path = ?path,
+                "webfetch.allow_private: this project file takes webfetch out of screening; \
+                 no page webfetch fetches is screened while it is set"
+            );
+        }
         self.merge(other);
 
         Ok(())
@@ -3104,6 +3121,12 @@ fn narrow_server_tools(granted: &mut Vec<String>, listed: &[String], path: &Path
 /// planted gains from exactly that, so it is never silent. A listed entry
 /// the first step just removed is not warned about twice: its removal is its
 /// one line, and the second would say something false about it.
+///
+/// Each entry, and the file's path, is logged `Debug`-formatted. The grammar
+/// refuses control characters, but a line or paragraph separator (U+2028,
+/// U+2029) and a bidi control are not control characters, and a checkout's
+/// entry or directory name holding one would otherwise start a new line, or
+/// reorder one, in a reader that honours them.
 fn narrow_screen<'a>(
     running: &mut Option<Vec<String>>,
     listed: Option<Vec<String>>,
@@ -3117,8 +3140,8 @@ fn narrow_screen<'a>(
         .unwrap_or_default();
     for entry in &removed {
         tracing::warn!(
-            path = %path.display(),
-            entry = %entry,
+            path = ?path,
+            entry = ?entry,
             "evaluate.screen: this project file defines or redefines this server, so the entry \
              is removed"
         );
@@ -3132,8 +3155,8 @@ fn narrow_screen<'a>(
         let kept = listed.contains(entry);
         if !kept {
             tracing::warn!(
-                path = %path.display(),
-                entry = %entry,
+                path = ?path,
+                entry = ?entry,
                 "evaluate.screen: this project file narrows the screened source away"
             );
         }
@@ -3141,8 +3164,8 @@ fn narrow_screen<'a>(
     });
     for entry in listed.iter().filter(|entry| !held.contains(entry) && !removed.contains(entry)) {
         tracing::warn!(
-            path = %path.display(),
-            entry = %entry,
+            path = ?path,
+            entry = ?entry,
             "evaluate.screen: a project file may only narrow the screen the tiers above it left; \
              this source is not in it and is ignored"
         );

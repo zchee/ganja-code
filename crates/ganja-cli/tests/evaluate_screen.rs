@@ -20,11 +20,11 @@
 //! before it started, so a run whose first turn raced the dial would call a
 //! tool it was never lent and screen nothing. The hook waits for the engine's
 //! own word that the server connected — the `an MCP server connected` line
-//! naming `hub` in the child's log, which the engine writes under the lock its
-//! install holds, a few instructions before the install and the bump that has
-//! the next turn rebuild its roster — and both `run` and `serve` await
-//! `SessionStart` before any turn. So the race becomes an ordering on the
-//! engine's own signal rather than on a guess about how long a dial takes.
+//! naming `hub` in the child's log, which the engine writes only after the
+//! install and the bump that has the next turn rebuild its roster — and both
+//! `run` and `serve` await `SessionStart` before any turn. So the race becomes
+//! an ordering on the engine's own signal rather than on a guess about how
+//! long a dial takes.
 //!
 //! No environment variable is set on this process: every one travels to a
 //! child, so the cases may share a binary and a developer whose shell

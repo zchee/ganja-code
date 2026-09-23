@@ -892,7 +892,7 @@
       "properties": {
         "allow_private": {
           "type": "boolean",
-          "description": "Whether webfetch may fetch a URL resolving onto this machine or a private network. Absent is no: only true opens it.",
+          "description": "Whether webfetch may fetch a URL resolving to an address on this machine, on a private network or in a reserved range. Absent is no: only true opens it.",
           "default": false
         }
       }

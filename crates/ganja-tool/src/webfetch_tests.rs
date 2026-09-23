@@ -306,6 +306,80 @@ async fn a_redirect_is_followed_to_the_page_it_names() {
     );
 }
 
+/// The redirect cap is reqwest's own default, counted as reqwest counts it:
+/// ten redirects are followed and an eleventh is not. The page that asked
+/// for the eleventh is what the model is handed, and the hop it named is
+/// never contacted.
+#[tokio::test]
+async fn ten_redirects_are_followed_and_an_eleventh_is_not() {
+    for (redirects, arrives) in [(10, true), (11, false)] {
+        let target = serve(Some(response("text/plain", "arrived"))).await;
+        let mut start = target.url.clone();
+        let mut chain = Vec::new();
+        for hop in (0..redirects).rev() {
+            let endpoint = serve(Some(redirect_saying(&start, &format!("hop {hop}")))).await;
+            start.clone_from(&endpoint.url);
+            chain.push(endpoint);
+        }
+
+        let out = WebfetchTool::allowing_private()
+            .run(serde_json::json!({ "url": start }), &ctx())
+            .await
+            .unwrap_or_else(|error| panic!("{redirects} redirects: {error:?}"));
+
+        if arrives {
+            assert_eq!(out.output, "arrived", "{redirects} redirects reach the page");
+            assert!(target.seen().starts_with("GET /"), "{}", target.seen());
+        } else {
+            assert_eq!(out.output, "hop 10", "{redirects} redirects: the last followed hop");
+            assert!(target.seen().is_empty(), "never contacted: {}", target.seen());
+        }
+        assert!(
+            chain.iter().all(|endpoint| endpoint.seen().starts_with("GET /")),
+            "{redirects} redirects: every hop in the chain was followed"
+        );
+    }
+}
+
+/// An error the client raised itself — a connection nobody answers, a status
+/// the endpoint refused with after a redirect — reaches the model without
+/// the URL it failed on. A URL can carry a token in its query, and a redirect
+/// an SSO server chose can carry a `code=`; neither belongs in a transcript.
+#[tokio::test]
+async fn an_error_the_client_raised_never_carries_the_url_or_its_query() {
+    // Bound and dropped, so nothing listens there any more.
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback is bindable")
+        .local_addr()
+        .expect("a bound socket has an address");
+    let callback = serve(Some(
+        b"HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n".to_vec(),
+    ))
+    .await;
+    let login =
+        serve(Some(redirect_to(&format!("{}/callback?code=secret-code", callback.url)))).await;
+
+    for (url, says) in [
+        (format!("http://{closed}/page?token=secret-token"), "the request did not complete: "),
+        (format!("{}/login?token=secret-token", login.url), "the endpoint refused the request: "),
+    ] {
+        let error = WebfetchTool::allowing_private()
+            .run(serde_json::json!({ "url": url }), &ctx())
+            .await
+            .expect_err("the fetch fails");
+
+        let ToolError::Failed(message) = &error else {
+            panic!("{url}: a failure the client raised: {error:?}");
+        };
+        assert!(message.starts_with(says), "{url}: {message}");
+        for leaked in ["secret-", "token=", "code=", "127.0.0.1"] {
+            assert!(!message.contains(leaked), "{url}: the message carries {leaked:?}: {message}");
+        }
+    }
+    assert!(callback.seen().contains("?code=secret-code"), "the redirect was followed");
+}
+
 /// A name that answers a public address when its hop is checked and a
 /// private one when the connection is made is refused at the second answer:
 /// the connection's own lookup is checked, not trusted to agree with the

@@ -959,7 +959,7 @@ pub struct App {
     /// (**D567**), kept until the first frame so the notices the first
     /// socket pass writes stand beside it rather than in its place — see
     /// [`App::set_startup_notice`]. [`None`] for every session with no
-    /// judge, and for every session once [`App::run`] has made its first
+    /// judge, and for every session once [`App::open`] has made its first
     /// pass.
     disclosure: Option<String>,
     /// A `shutdown_request` this member has taken and not yet answered,
@@ -1570,14 +1570,7 @@ impl App {
     /// Returns an error if the engine refuses a subscription, or if the
     /// terminal cannot be read from or drawn to.
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        // Bound before the first frame and after every startup resume, which
-        // is what `lib.rs` has done by the time it hands the app over: the
-        // first socket is named by the session the screen opens on.
-        self.sync_socket().await;
-        // Whatever that pass said, it said beside the launch disclosure
-        // (**D567**), and the first frame is about to show it. From here on a
-        // notice replaces the line the way every other one does.
-        self.disclosure = None;
+        self.open().await;
         let outcome = self.drive(terminal).await;
         // The record first, and the socket after it (**D527**): stop
         // advertising before stopping answering. A record without a live
@@ -1642,6 +1635,21 @@ impl App {
         }
     }
 
+    /// The first socket pass, which [`App::run`] makes before the first
+    /// frame.
+    ///
+    /// Bound before the first frame and after every startup resume, which is
+    /// what `lib.rs` has done by the time it hands the app over: the first
+    /// socket is named by the session the screen opens on. Whatever that pass
+    /// said, it said beside the launch disclosure (**D567**), and the first
+    /// frame is about to show it; so the disclosure is let go here, and from
+    /// then on a notice — a later `/rename` collision, a refused rebind —
+    /// replaces the line the way every other one does.
+    async fn open(&mut self) {
+        self.sync_socket().await;
+        self.disclosure = None;
+    }
+
     /// Writes `sentence` to the status bar, with the launch disclosure
     /// (**D567**) ahead of it while [`App::disclosure`] still holds one.
     ///
@@ -1653,7 +1661,7 @@ impl App {
     /// results leave the machine before any has. So the sentence is added
     /// beside the disclosure rather than in its place, and after it, so a
     /// narrow terminal cuts the collision and not the disclosure. Once the
-    /// first frame has shown it, [`App::run`] lets it go, and this is
+    /// first frame has shown it, [`App::open`] lets it go, and this is
     /// [`Status::set_notice`] by another name.
     fn set_startup_notice(&mut self, sentence: String) {
         let line = match &self.disclosure {

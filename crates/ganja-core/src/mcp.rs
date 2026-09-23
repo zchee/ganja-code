@@ -355,7 +355,7 @@ impl Servers {
             return;
         }
 
-        tracing::info!(server = name, tools = defs.len(), "an MCP server connected");
+        let tools = defs.len();
         state.insert(
             name.to_owned(),
             Server {
@@ -369,6 +369,11 @@ impl Servers {
         );
         drop(state);
         self.generation.fetch_add(1, Ordering::Release);
+        // After the bump, never before it: a reader that waits for this line
+        // — a `SessionStart` hook polling the log, say — and then starts a
+        // turn is offered this server's tools, because the turn's refresh
+        // reads a generation that already counts them.
+        tracing::info!(server = name, tools, "an MCP server connected");
     }
 
     /// Opens the transport `server` describes and speaks `initialize` over it.

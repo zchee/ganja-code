@@ -73,6 +73,10 @@ const NARROWED: &str = "evaluate.screen: this project file narrows the screened 
 const NOT_IN_SCREEN: &str = "evaluate.screen: a project file may only narrow the screen the \
                              tiers above it left; this source is not in it and is ignored";
 
+/// What the one warning says when a project file's `webfetch.allow_private`
+/// takes webfetch out of a screen that still names it.
+const LIFTED: &str = "webfetch.allow_private: this project file takes webfetch out of screening";
+
 /// Asserts that `warnings` are exactly the ones `expected` lists, in order:
 /// each one's text, the entry it names and the file it names.
 fn assert_warned(warnings: &[String], expected: &[(&str, &str, &str)], step: &str) {
@@ -83,7 +87,7 @@ fn assert_warned(warnings: &[String], expected: &[(&str, &str, &str)], step: &st
     );
     for (line, (says, entry, path)) in warnings.iter().zip(expected) {
         assert!(line.contains(says), "{step}: the warning for {entry} says {says:?}: {line}");
-        assert!(line.contains(&format!("entry={entry}")), "{step}: it names {entry}: {line}");
+        assert!(line.contains(&format!("entry={entry:?}")), "{step}: it names {entry}: {line}");
         assert!(line.contains(path), "{step}: it names {path}: {line}");
     }
 }
@@ -257,4 +261,48 @@ fn the_screen_list_crosses_the_tiers_under_the_narrow_only_rule() {
         &[(REMOVED, "mcp:github", outer), (NOT_IN_SCREEN, "mcp:github", inner_path.as_str())],
         "the outer file's definition is merged first, and the inner file's list second",
     );
+    plant(&inner_file, "");
+
+    // A project file that opens private fetches keeps that power: the key's
+    // meaning and tier are unchanged. But every page fetched with the guard
+    // lifted is stamped `private_allowed: true` and never screened, so the
+    // file takes webfetch out of screening — once, by name, whenever the
+    // screen that survives the file's own narrowing still names webfetch.
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"websearch\"]\n");
+    for (project_text, expected, warned) in [
+        ("[webfetch]\nallow_private = true\n", screening(true, true, &[]), true),
+        // The file narrows webfetch away itself: its own list's warning says
+        // so, and there is nothing left for the key to take out.
+        (
+            "[webfetch]\nallow_private = true\n\n[evaluate]\nscreen = [\"websearch\"]\n",
+            screening(false, true, &[]),
+            false,
+        ),
+        ("[webfetch]\nallow_private = false\n", screening(true, true, &[]), false),
+    ] {
+        plant(&outer_file, project_text);
+        let (capture, _guard) = LogCapture::install(tracing::Level::WARN);
+        let config = Config::load_with(&project, &Overrides::default()).expect("every tier parses");
+        let lifted: Vec<String> = capture
+            .logged()
+            .lines()
+            .filter(|line| line.contains(LIFTED))
+            .map(str::to_owned)
+            .collect();
+
+        assert_eq!(config.evaluate_screen(), expected, "{project_text:?}");
+        assert_eq!(
+            config.webfetch_allows_private(),
+            project_text.contains("true"),
+            "{project_text:?}: the project file's value stands"
+        );
+        assert_eq!(lifted.len(), usize::from(warned), "{project_text:?}: {lifted:?}");
+        assert!(lifted.iter().all(|line| line.contains(outer)), "it names the file: {lifted:?}");
+    }
+    // With no trusted screen naming webfetch there is nothing to take out.
+    plant(&global, "[evaluate]\nscreen = [\"websearch\"]\n");
+    plant(&outer_file, "[webfetch]\nallow_private = true\n");
+    let (capture, _guard) = LogCapture::install(tracing::Level::WARN);
+    Config::load_with(&project, &Overrides::default()).expect("every tier parses");
+    assert!(!capture.logged().contains(LIFTED), "{}", capture.logged());
 }

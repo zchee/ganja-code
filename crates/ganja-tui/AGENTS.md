@@ -74,6 +74,7 @@ CI runs `cargo nextest run --locked --workspace --profile ci` (`.github/workflow
 - Transcript glyphs (`src/component/chat.rs`): `> ` on a prompt, `● ` on replies and settled tool calls, an in-flight call cycles `POINT_GLYPHS` (`· ∙ • ●`), `  ⎿ ` on a call's result, `∴ ` on thinking, `@ <name>❯` heading a teammate message. The working line cycles `WORKING_FRAMES` (`·✢✳✶✻✽` and back); the status bar spinner is braille `SPINNER`.
 - `arboard` is built with `image-data`; `ctrl+v` reads a clipboard image and attaches it as a PNG. Every copy also writes OSC 52 (`src/clipboard.rs`).
 - Custom themes load from `<config home>/themes` via `ganja_core::config::config_home`; a theme that fails to load is skipped with a `tracing` line, not fatal.
+- A session that holds a judge (D567, experimental) says so second in its opening line: `evaluate (experimental): screening <sources> via <host> (lead and subagents)`. `App::with_disclosure` keeps that line through the first socket pass, so a name collision or a refused bind that pass reports stands after it (`set_startup_notice`), never in its place; `App::open` makes the pass and lets the disclosure go, and later notices replace the line as any other does (pinned by `src/app_tests.rs`). The judge is built once in `run`; a `/plugin` Reload rebuilds tools but not the judge, so a changed screen is a restart.
 
 ## Tests
 

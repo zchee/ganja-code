@@ -484,12 +484,18 @@ async fn twelve_segments_that_all_answer_401_warn_once_and_annotate_nothing() {
 
 /// Criterion 22, across results: "off for the rest of this process" holds
 /// for results already being screened too. A twelve-segment result has four
-/// requests held open and eight segments queued behind them, not yet holding
-/// a permit, when a second result's 401 switches the judge off; once
-/// released, the first result sends none of the eight — each checks `off`
-/// after taking its permit and before its request is handed to the client.
+/// requests held open and eight segments queued behind them — waiting on the
+/// result's own four-at-a-time fan-out, not yet issued — when a second
+/// result's 401 switches the judge off; once released, the first result
+/// sends none of the eight: each checks `off` after taking its permit and
+/// before its request is handed to the client. The eight are in no list of
+/// the record, which says so only as `total - issued`.
+///
+/// Two results never contend for the process-wide permits at four segments
+/// each, so the permit wait itself is pinned in `src/judge_tests.rs` by
+/// `the_refused_segment_still_holds_its_permit_when_the_judge_switches_off`.
 #[tokio::test]
-async fn segments_waiting_for_a_permit_are_never_sent_once_another_result_switched_it_off() {
+async fn segments_not_yet_issued_are_never_sent_once_another_result_switched_it_off() {
     let vendor = Vendor::start(|seen| {
         if seen.content.contains("refused") {
             Reply::Status(401)
@@ -1219,4 +1225,63 @@ async fn a_large_mcp_result_sends_fifty_two_segments_cut_on_characters() {
         assert_eq!(first.content.len(), offset + 4 * ((4096 - offset) / 4), "offset {offset}");
     }
     engine.shutdown_mcp().await;
+}
+
+/// Records the tool surface's generation at the moment the engine logs that
+/// an MCP server connected.
+struct AtConnected {
+    servers: Arc<ganja_core::McpServers>,
+    seen: Arc<Mutex<Vec<u64>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AtConnected {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        /// Whether an event's message is the connected line.
+        struct Connected(bool);
+        impl tracing::field::Visit for Connected {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" && format!("{value:?}") == "an MCP server connected" {
+                    self.0 = true;
+                }
+            }
+        }
+
+        let mut connected = Connected(false);
+        event.record(&mut connected);
+        if connected.0 {
+            self.seen.lock().expect("the record is never poisoned").push(self.servers.generation());
+        }
+    }
+}
+
+/// The engine logs that an MCP server connected only once its tools are
+/// installed and the tool surface's generation counts them. The screening
+/// suites in `ganja-cli` start their first turn when a `SessionStart` hook
+/// has read that line in the log; a line written before the bump would let
+/// that turn read the old generation and be offered no MCP tool at all.
+#[tokio::test]
+async fn an_mcp_server_is_logged_as_connected_only_once_the_tool_surface_counts_it() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let address = mcp_server(|_| "unused".to_owned()).await;
+    let config: Config = serde_json::from_value(json!({
+        "mcp": { "hub": { "type": "remote", "url": format!("http://{address}/mcp") } }
+    }))
+    .expect("the fixture config is a config");
+    let servers = ganja_core::McpServers::new(config.mcp.clone(), std::path::Path::new("."));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let layer = AtConnected { servers: Arc::clone(&servers), seen: Arc::clone(&seen) };
+    // The calling thread's default, which is every thread this test polls
+    // on: `connect_all` awaits each dial in place rather than spawning it.
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+    tokio::time::timeout(PATIENCE, servers.connect_all()).await.expect("the double answers");
+
+    assert_eq!(servers.generation(), 1, "one server connected, one bump");
+    assert_eq!(
+        *seen.lock().expect("the record is never poisoned"),
+        vec![1],
+        "the line was written once, with the bump already made"
+    );
+    servers.shutdown().await;
 }

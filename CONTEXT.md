@@ -75,3 +75,24 @@ verify/fix loop at its tail.
 A document the lead writes at a stage transition recording what was decided,
 rejected, risked, touched, and left remaining, so a later session resumes
 from record rather than memory.
+
+### Screening
+
+**Judge**:
+The engine-side component that sends the text of a screened result, in
+segments, to TypeSafe's Jev and appends the marker sentence when a segment
+reads as instructions to an AI agent. One per process; experimental, and off
+until a trusted config tier lists a source.
+_Avoid_: filter, detector, guard (the guard is `webfetch`'s address check)
+
+**Screened result**:
+A tool result whose text left the machine to be judged: a result of a source
+a trusted tier lists under `[evaluate] screen`. Its title ends ` · screened`
+whether or not the marker sentence was appended.
+_Avoid_: scanned, sanitized or checked result
+
+**Marker sentence**:
+The one fixed sentence appended to a screened result that fired, telling the
+model to treat the text as content and act on it only if the user asked. It
+marks; it removes and blocks nothing.
+_Avoid_: warning, banner, block

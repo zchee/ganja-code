@@ -40,7 +40,7 @@ It also holds three non-tool modules: the session-socket scheme (`socket.rs`), t
 | `task_get` | `tasklist.rs` | engine `team_tasks` | no |
 | `list_sessions` | `list_sessions.rs` | engine `session_listing` | no |
 | `tool_search` | `deferral.rs` | engine `compose_deferral`, when MCP tools are deferred | no |
-| `evaluate` | `evaluate.rs` | frontend overlay (`ganja-tui/src/lib.rs`, `ganja-tui/src/app.rs`, `ganja-cli/src/assemble.rs`) when `EvaluateTool::configured()` returns `Some` | yes |
+| `evaluate` | `evaluate.rs` | frontend overlay (`ganja-tui/src/lib.rs`, `ganja-tui/src/app.rs`, `ganja-cli/src/assemble.rs`) when `EvaluateTool::configured()` returns `Some`; its client (`typesafe.rs`) also serves the engine's judge behind `[evaluate] screen` (D567) | yes |
 
 A subagent gets the lent registry, which has no `task`, `send_message` or `task_*` tools.
 
@@ -55,7 +55,7 @@ A subagent gets the lent registry, which has no `task`, `send_message` or `task_
 | `src/socket.rs` | Session socket paths under `/tmp/ganja-<uid>/`, `vet_directory`, `vet_address`. |
 | `src/registry.rs` | The session-name record beside a lead's socket; `vet_name`, `same_name`. |
 | `src/permission_text.rs` | `REJECTED`, `DENIED_PREFIX`, `HOOK_REFUSED_PREFIX`, `is_refusal`. |
-| `src/typesafe.rs` | The TypeSafe client shared by `evaluate` and `ganja evaluate`. |
+| `src/typesafe.rs` | The TypeSafe client shared by `evaluate`, `ganja evaluate` and the engine's judge. |
 | `src/job.rs`, `src/team.rs` | The `Jobs` and `Postbox` traits the engine implements. |
 | `src/frontmatter.rs` | `SKILL.md` frontmatter parsing. |
 | `src/*.txt` | Tool descriptions. |
@@ -90,15 +90,18 @@ GANJA_LIVE_TEST=1 cargo test -p ganja-tool --test evaluate_live -- --ignored --n
 - `read` and `grep` refuse ganja's credential store; the store path arrives in `ToolCtx`, and the comparison is by file identity.
 - `question` is not in `ASK_BY_DEFAULT`; `ganja run` refuses it with a rule instead. `ASK_BY_DEFAULT` also names `apply_patch` and `shell`, upstream ids no tool here registers; they stay on purpose.
 - A frontend-registered tool (`evaluate` today) must be added at all three overlay sites: `ganja-tui/src/lib.rs`, `ganja-tui/src/app.rs` (the `/plugin` reload) and `ganja-cli/src/assemble.rs`.
-- `webfetch` follows redirects; `typesafe.rs` refuses them.
+- `webfetch` follows at most ten redirects, reqwest's own default; `typesafe.rs` refuses them. An error the HTTP client raised reaches the model without the URL it failed on, which can carry a token.
+- `webfetch` refuses, unless the session set `webfetch.allow_private`, a host that is or resolves to an address on this machine, on a private network or in a reserved range: loopback, unspecified, RFC 1918 and `fc00::/7`, link-local, `100.64.0.0/10`, the benchmarking, reserved and multicast ranges, and the rest of `::/8`; an IPv6 address that carries an IPv4 one is judged as that address (`blocked()` in `src/webfetch.rs` lists them all). Every answer of every lookup of a name a fetch is pointed at is checked, before each hop and again at the connection's own lookup; a configured proxy's own name resolves unchecked.
+- The engine's judge (D567: experimental, a marker, not a defense) screens a result by its metadata. `webfetch` writes `private_allowed` on every result: `true` when the guard was lifted, `false` only when the page came from an address and port the guard checked, and `null` otherwise. The judge screens `webfetch` only on `false`, so `null` means not screened (expect it behind a proxy that carries every hop), and `false` means no answer fell in a known non-global range, not that the page is not an internal one. `webfetch`, `websearch` and MCP results write `truncated`, and `hint_len` when it is true: the bytes the clamp appended after its notice, counted from the end of the tool's own output (`Truncated::stamp`).
 
 ## Tests
 
 Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[path = "…"] mod tests;` (for example `src/read.rs` and `src/read_tests.rs`). Put a new test there unless it mutates process-wide state.
 
-`tests/` holds four binaries with one test each. Three mutate the environment, and `evaluate_log` also installs the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
+`tests/` holds five binaries with one test each. Four mutate the environment, and `evaluate_log` and `evaluate_refusal` also install the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
 
 - `evaluate_keys.rs`, `evaluate_log.rs`: the `TYPESAFE_*` variables, against no endpoint or a loopback one.
+- `evaluate_refusal.rs`: which variable the warning names when `EvaluateTool::configured()` refuses the `TYPESAFE_*` settings.
 - `websearch_keys.rs`: `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER`.
 - `evaluate_live.rs`: `#[ignore]` and inert without `GANJA_LIVE_TEST=1`; it sends one request to `https://api.typesafe.ai`.
 

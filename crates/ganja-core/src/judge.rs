@@ -38,6 +38,17 @@
 //! vendor; a result nobody answered advances a breaker that, after
 //! [`Tuning::failures`] such results in a row, pauses screening for
 //! [`Tuning::cooldown`] and then admits exactly one probe.
+//!
+//! # Never screened
+//!
+//! Provider-run server tools; MCP `isError` text; text past the 50 KiB clamp,
+//! which the spill hint tells the model to read from a file; a `webfetch`
+//! result not stamped `private_allowed: false`; in-process and foreign-CLI
+//! teammates, whose engines hold no judge; everything under `serve`; and, of
+//! a screened result, the segments the vendor refuses, those beyond the
+//! fifty-second, those the deadline catches, and those not yet issued when
+//! the judge is switched off. **D567** in `docs/decisions/ledger.md` states
+//! the whole rule.
 
 mod chunk;
 
@@ -474,8 +485,16 @@ impl Judge {
                     return (index, Seg::NotIssued);
                 }
                 issued_flags[index].store(true, Ordering::Release);
+                let seg = classify(self.client.evaluate(&request, cancel).await);
+                // Here, while this segment still holds its permit, and not
+                // when `collect` reads the outcome: the permit is released
+                // when this future returns, and a segment of another result
+                // waiting for it must find the judge already off.
+                if let Seg::Off(status) = seg {
+                    self.switch_off(status);
+                }
 
-                (index, classify(self.client.evaluate(&request, cancel).await))
+                (index, seg)
             })
             .buffer_unordered(PER_RESULT);
 
@@ -483,11 +502,8 @@ impl Judge {
             let mut fan = std::pin::pin!(fan);
             while let Some((index, seg)) = fan.next().await {
                 let stop = match &seg {
-                    Seg::Off(status) => {
-                        self.switch_off(*status);
-                        true
-                    }
-                    Seg::Cancelled => true,
+                    // Already switched off, inside the segment's own future.
+                    Seg::Off(_) | Seg::Cancelled => true,
                     other => {
                         tracing::debug!(tool, segment = index, outcome = other.name(), "screened");
                         false
@@ -795,6 +811,12 @@ impl Verdict {
     }
 
     /// An answered result the deadline cut short.
+    ///
+    /// Only the deadline makes one. An answered result whose segments stopped
+    /// issuing because another result switched the judge off is not
+    /// degraded, and the segments it never sent sit in no list of
+    /// `metadata.screen`: they are unscreened, and show only as
+    /// `min(total, 52) - issued`.
     fn degraded(&self, class: Class) -> bool {
         class == Class::Answered && self.timed_out
     }
@@ -831,6 +853,12 @@ impl Verdict {
     }
 
     /// `metadata.screen`.
+    ///
+    /// The lists hold the segments that were issued, or were caught by a
+    /// stop, by what came of them. A segment never issued — beyond the 52nd,
+    /// or not yet sent when the deadline fired or the judge was switched off
+    /// — is in none of them: it was not screened, and counts only in
+    /// `total - issued`.
     fn record(&self, class: Class, fired: bool) -> Value {
         let model = self.outcomes.iter().find_map(|seg| match seg {
             Seg::Answered(scores) => Some(scores.model.clone()),

@@ -30,6 +30,8 @@ It sits above `ganja-protocol`, `ganja-permission`, `ganja-tool`, `ganja-provide
 | `src/hook.rs` | Config hooks for nine events, spawned under the `bash` tool's shell. |
 | `src/job.rs` | `JobRegistry`: background `bash` jobs, `bash_output`, `kill_shell`. |
 | `src/mcp.rs` | MCP servers and the `mcp__<server>__<tool>` tools they lend; reconnect, OAuth. |
+| `src/judge.rs` | The judge behind `[evaluate] screen` (D567): which results are screened, the segment fan-out under its caps and deadline, the outcome classes and breaker, the marker sentence, the launch disclosure. |
+| `src/judge/` | `chunk.rs` (the segmenter), `questions.json` (the three questions, pinned by sha256), `chunk-vectors.json` and `pipeline-vectors.json` (the measurement's own cuts and state sha256s, which the port reproduces). |
 | `src/lsp/` | Opt-in language servers (`rust`, `gopls` builtins) and the diagnostics appended to tool results. |
 | `src/plugin.rs` | Claude Code plugin and marketplace manifests, install store, per-surface merge. |
 | `src/command.rs` | Slash commands: builtins `/init` and `/team`, config and file commands, expansion. |
@@ -38,6 +40,7 @@ It sits above `ganja-protocol`, `ganja-permission`, `ganja-tool`, `ganja-provide
 | `src/attachment.rs` | Mime table for `@` attachments and `read_bounded`. |
 | `src/prompt/` | Prompt texts compiled in with `include_str!`. Tool descriptions live in `ganja-tool/src`. |
 | `tests/` | Over 100 integration binaries; each file's `//!` header states what it pins and what it needs. |
+| `tests/judge*.rs`, `tests/judge_support/` | The judge end to end against a loopback TypeSafe double and an MCP double over streamable HTTP; `judge_support` is their shared scaffolding. |
 | `tests/fixtures/golden/` | Task scripts for the upstream differential in `tests/golden.rs`. |
 | `tests/fixtures/mcp/` | MCP servers on upstream's `@modelcontextprotocol/sdk`, spawned by `tests/mcp.rs`. |
 | `tests/fixtures/*-identity-probe.txt` | Recordings of what the codex and xAI backends were told; cited by `ganja-provider` auth code. |
@@ -80,6 +83,7 @@ GANJA_LIVE_TEST=1 cargo nextest run -p ganja-core -E 'binary(codex_identity_prob
 - `Engine::watch_files()` touches no filesystem; directories are registered on the watcher's own task. Nothing on a startup path may register a watch.
 - The tool surface changes only between turns: `Engine::refresh_mcp` runs at turn start, so an MCP connect finishing mid-request does not change that request.
 - An MCP tool asks by default through `MCP_PREFIX` in `ganja-permission`, a prefix match. Do not add MCP tool names to `ASK_BY_DEFAULT`.
+- The judge (`src/judge.rs`, D567) is experimental and default off: nothing is screened until a trusted tier lists a source and `TYPESAFE_API_KEY` is set. It is a marker, not a defense: it appends one sentence to a result that reads as instructions to an agent and removes nothing. Never screened: provider server tools, MCP `isError` text, text past the 50 KiB clamp, a `webfetch` page not stamped `private_allowed: false`, in-process and foreign-CLI teammates, anything under `serve`. One judge per process (`Judge::for_process`) holds at most 8 requests in flight for the lead and every `task` child, and a frontend that builds one says so at launch. The rest is D567 in `docs/decisions/ledger.md`.
 - `Command::Undo` deletes nothing: it records an anchor. The anchor and everything after it are deleted at the next `SendPrompt` or `RunShell`.
 - A hook runs with the user's authority and crosses no permission dialog. Only an explicit `permissionDecision: "allow"` on a clean exit allows a call; a killed or timed-out hook never does (`src/hook.rs`).
 - `config.rs` refuses unknown keys, and a legacy config file (`LEGACY_FILES`) is a refusal naming `ganja config migrate`. A new key goes into `schema/ganja-config.schema.json` too (pinned by `tests/config_schema.rs`). Permission rules keep document order (pinned by `src/config_tests.rs`).
@@ -95,6 +99,7 @@ GANJA_LIVE_TEST=1 cargo nextest run -p ganja-core -E 'binary(codex_identity_prob
   - `mcp.rs`, and the MCP rebuild tests in `plan_enter.rs` and `plan_exit.rs`: the same checkout plus its installed `@modelcontextprotocol/sdk`. The test passes the SDK path to the fixture server as `GANJA_MCP_SDK_DIR`; you do not set it. `mcp_oauth.rs` needs no setup.
   - `lsp.rs`: `rust-analyzer` on `PATH`. `GANJA_LSP_EDIT_BUDGET_MS` widens the timed-edit budget (default 3000 ms) on a slow machine.
   - `undo.rs`, `rewind.rs`: `git` on `PATH`.
+- The judge's binaries: `judge.rs` holds the bulk; `judge_env.rs` (sets and removes the `TYPESAFE_*` variables), `judge_log.rs` (installs the global subscriber) and `judge_mcp_clamp.rs` hold one test each, and so does `mcp_output_limit.rs`: the shipped MCP clamp spills only under the data home, so both redirect `XDG_DATA_HOME` for the whole process. `a_stored_fixtures_segment_states_are_the_ones_the_measurement_sent` in `src/judge_tests.rs` is `#[ignore]`d and needs `GANJA_JUDGE_FIXTURE` and `GANJA_JUDGE_FIXTURE_FACTS` naming a local fixture that is never committed; it never runs in CI.
 - `#[ignore]`d binaries: `live.rs`, `live_agent.rs`, `codex_identity_probe.rs`. They are inert unless `GANJA_LIVE_TEST=1` and the vendor credential are set (see Commands).
 - Environment and working directory are process-wide, and plain `cargo test` runs a binary's tests on parallel threads. A binary that mutates either does it in exactly one test, or once under a `LazyLock`/`Once`/lock that every test enters first (`team_command.rs`, `effort.rs`, `nested_agents.rs`). Its other tests must not read the environment.
 - Exceptions to one-test-per-binary: `golden.rs` and `undo.rs` each hold a second test that reads no environment, although their `SAFETY` comments say "one test"; `rewind.rs` and `config_schema.rs` hold one env-mutating test beside others. Add a new env-mutating test in a new file.

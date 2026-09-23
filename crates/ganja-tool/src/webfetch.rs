@@ -127,6 +127,12 @@ const MAX_NESTING: usize = 128;
 /// Most redirects one fetch will follow, which is reqwest's own default. Spelled
 /// out because guarding each hop means policing the chain here rather than
 /// leaving it to the client.
+///
+/// The policy reads it against `previous()`, which holds the URL the fetch
+/// started at as well as every hop already followed, so a chain is stopped
+/// once that list is longer than this — the comparison reqwest's own limit
+/// makes. The response that asked for one hop more is what the model is
+/// handed.
 const MAX_REDIRECTS: usize = 10;
 
 /// How the fetched page should be handed back.
@@ -157,8 +163,9 @@ struct Args {
 
 /// Fetches a URL.
 pub struct WebfetchTool {
-    /// Whether a URL resolving onto this machine or a private network is
-    /// fetched rather than refused. See [`WebfetchTool::allowing_private`].
+    /// Whether a URL resolving to an address on this machine, on a private
+    /// network or in a reserved range is fetched rather than refused. See
+    /// [`WebfetchTool::allowing_private`].
     allow_private: bool,
     /// Where a clamped page spills its whole text, when it must not go where
     /// [`truncate::clamp`] would put it.
@@ -180,8 +187,8 @@ pub struct WebfetchTool {
 }
 
 impl WebfetchTool {
-    /// The tool as it ships: an address on this machine or a private network is
-    /// refused.
+    /// The tool as it ships: an address on this machine, on a private network
+    /// or in a reserved range is refused.
     ///
     /// A deliberate divergence — upstream fetches whatever it is given. The
     /// URL here is one a *model* chose, and a model chooses it after reading
@@ -709,18 +716,25 @@ async fn fetch(
     // rendering — so neither a dribbling server nor a pathological page can
     // hold the call forever.
     tokio::time::timeout(timeout, async {
+        // Every error reqwest renders names a URL — the one asked for, or the
+        // hop it failed on — and a URL can carry a token in its query, as a
+        // redirect an SSO server chose carries a `code=`. So an error the
+        // tool did not raise itself reaches the model without it, as a
+        // `refusal` does.
         let response = request
             .send()
             .await
             .map_err(|error| {
-                ToolError::Failed(
-                    raised_inside(&error)
-                        .unwrap_or_else(|| format!("the request did not complete: {error}")),
-                )
+                ToolError::Failed(raised_inside(&error).unwrap_or_else(|| {
+                    format!("the request did not complete: {}", error.without_url())
+                }))
             })?
             .error_for_status()
             .map_err(|error| {
-                ToolError::Failed(format!("the endpoint refused the request: {error}"))
+                ToolError::Failed(format!(
+                    "the endpoint refused the request: {}",
+                    error.without_url()
+                ))
             })?;
         let private_allowed = if allow_private {
             Some(true)
@@ -846,7 +860,7 @@ fn stamped(
 fn client(guard: &Arc<Guard>) -> Result<reqwest::Client, ToolError> {
     let admitting = Arc::clone(guard);
     let redirects = reqwest::redirect::Policy::custom(move |attempt| {
-        if attempt.previous().len() >= MAX_REDIRECTS {
+        if attempt.previous().len() > MAX_REDIRECTS {
             return attempt.stop();
         }
 

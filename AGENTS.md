@@ -40,7 +40,6 @@ cargo deny check                                              # advisories, lice
 ```
 
 Single tests: `cargo nextest run -p ganja-permission`, `cargo nextest run -E 'binary(golden)'`, `cargo nextest run --workspace <name-substring>`. TUI snapshots: `cargo insta review`.
-
 Suites that need setup hard-fail instead of skipping:
 
 - `golden` and `mcp` (ganja-core): `bun` on PATH and an upstream checkout with `bun install` done, at `GANJA_OPENCODE_DIR` (CI: `upstream/opencode-v1.18.22`) or `.omc/reference/opencode-v1.18.22`.
@@ -87,7 +86,7 @@ dist build                                  # local archive under target/distrib
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY` | Credentials; they outrank the stored `auth.json`. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Endpoint overrides; https or loopback only. |
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER` | `websearch` credentials and which service (`exa` or `parallel`). Without a key the search is refused, not sent. |
-| `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool. Without the key the tool is not registered at all. |
+| `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool and, when a trusted tier lists `[evaluate] screen`, the judge that marks screened tool results (experimental, D567). Without the key the tool is not registered and no judge is built. |
 | `EDITOR` | What `/editor` opens; default `vi`. |
 | `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS` | Test opt-ins and paths; see Gates. |
 
@@ -109,6 +108,7 @@ dist build                                  # local archive under target/distrib
 - `ganja-core` may not depend on `ratatui*` or `axum*`; `ganja-provider` not on `ratatui*`, `crossterm*` or `arboard*`; `ganja-serve` not on `ratatui*` or `ganja-teammate-local`. Something the UI must draw becomes a serde type in `ganja-protocol`.
 - Config is TOML only (`ganja.toml`). A discovered `ganja.jsonc` or `ganja.json` is refused with a pointer to `ganja config migrate`. An unknown key is refused with an error that names it, and `schema/ganja-config.schema.json` must match the loader: `crates/ganja-core/tests/config_schema.rs` is the drift test.
 - `.omc/` is gitignored operational state on the owner's machine (plans, handoffs, the upstream reference checkout). Nothing in the tree may require it; CI checks upstream out to `upstream/`.
+- The judge behind `[evaluate] screen` is a marker, not a defense: experimental and default off, it appends one sentence to a tool result that reads as instructions to an agent and removes nothing. What it sends, what it never screens and how often it misses are D567 in `docs/decisions/ledger.md`.
 - `.cargo/config.toml` sets aarch64-apple-darwin rustflags; an ambient `RUSTFLAGS` replaces the whole block. Gates and CI run with it unset.
 - The nextest `ci` profile runs the `tmux` crate's live suite alone on the runner and kills a wedged pty test after 4 minutes; `retries = 0` in every profile, so a flaky test is a failure.
 - Claude Code loads `AGENTS.md` only when no `CLAUDE.md` is present and its `agents-md` plugin allows it; this user's settings do not, so nested files are read only when an agent opens them. Keep every `AGENTS.md` at 200 lines or fewer and well under the 45,000-byte read cap.

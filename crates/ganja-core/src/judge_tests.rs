@@ -698,3 +698,107 @@ fn a_stored_fixtures_segment_states_are_the_ones_the_measurement_sent() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     assert!(!cut.is_empty(), "a clamped page has segments to compare");
 }
+
+/// A loopback vendor that answers every request HTTP 401.
+async fn refusing_vendor() -> String {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback binds");
+    let base = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let Ok(read) = stream.read(&mut chunk).await else { return };
+                    if read == 0 {
+                        return;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buffer).to_ascii_lowercase();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buffer.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+            });
+        }
+    });
+    base
+}
+
+/// Records the judge's free permits each time a line saying screening is off
+/// is written.
+#[derive(Clone)]
+struct PermitsAtSwitchOff {
+    judge: Arc<Judge>,
+    seen: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+impl std::io::Write for PermitsAtSwitchOff {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if String::from_utf8_lossy(buffer).contains("screening is off") {
+            self.seen
+                .lock()
+                .expect("never poisoned")
+                .push(self.judge.in_flight.available_permits());
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Criterion 22's permit wait: the judge is switched off inside the refused
+/// segment's own future, while that segment still holds its permit, so a
+/// segment of another result handed the permit next finds the judge already
+/// off. The line saying screening is off is written with one permit taken;
+/// had the switch-off waited until the outcome was collected, the segment's
+/// future would have returned and released it first. No interleaving is
+/// forced: the count is read at the moment the line is written.
+#[tokio::test]
+async fn the_refused_segment_still_holds_its_permit_when_the_judge_switches_off() {
+    let base = refusing_vendor().await;
+    let tuning = Tuning { deadline: PATIENCE, failures: 3, cooldown: Duration::from_secs(60) };
+    let settings = Settings::from_parts("sk-judge-unit-key".to_owned(), &base, MODEL.to_owned())
+        .expect("a loopback base and the measured model are accepted");
+    let screen = Screen { webfetch: true, ..Screen::default() };
+    let judge = Judge::from_settings(Some(settings), screen, tuning).expect("a judge");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = PermitsAtSwitchOff { judge: Arc::clone(&judge), seen: Arc::clone(&seen) };
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mut output = fetched("one short segment");
+    tokio::time::timeout(
+        PATIENCE,
+        judge.annotate("webfetch", &mut output, &CancellationToken::new()),
+    )
+    .await
+    .expect("a 401 ends the call");
+
+    assert!(judge.off.load(Ordering::Acquire), "a 401 switches the judge off");
+    assert_eq!(
+        *seen.lock().expect("never poisoned"),
+        [super::IN_FLIGHT - 1],
+        "switched off while the refused segment still held its permit"
+    );
+    assert_eq!(judge.in_flight.available_permits(), super::IN_FLIGHT, "and released after");
+}

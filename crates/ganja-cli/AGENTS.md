@@ -34,7 +34,7 @@ Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`sr
 | Path | Holds |
 |---|---|
 | `src/main.rs` | Clap types, `auth`, `models`, `mcp` list and login, `sessions`, logging, the no-echo key prompt. |
-| `src/assemble.rs` | The engine assembly `run` and `serve` share. |
+| `src/assemble.rs` | The engine assembly `run` and `serve` share; its `Judging` parameter says whether it builds the judge (`Build` for `run`, `Withhold` for `serve`). |
 | `src/run.rs` / `src/serve.rs` | The headless turn; the HTTP server. |
 | `src/login.rs` | Browser and device logins, method selection, Copilot deployment. |
 | `src/import.rs`, `src/migrate.rs`, `src/claude_hooks.rs` | The three `config` writers. |
@@ -71,12 +71,14 @@ cargo nextest run -p ganja-cli -E 'binary(run)'     # one integration binary
 - `GANJA_AUTH_ISSUER` redirects every login endpoint and is refused unless it is `http://<loopback>:<port>` (`src/login.rs`).
 - The log file is `$XDG_DATA_HOME/ganja/log/ganja.<date>.log` on every platform, macOS included, seven kept; `RUST_LOG` overrides `-v`.
 - `models` installs the disk catalog with `catalog::load_cached()` before reading; `--refresh` failures only warn.
+- The judge behind `[evaluate] screen` (D567) is experimental and default off, and a marker, not a defense. `run` builds it through `assemble` (`Judging::Build`) and writes its launch line to stderr as `note: evaluate (experimental): screening …`, never into `--format json`'s stream; the ` · screened` a call's title gains stays on stdout by design. `serve` builds none whatever the config says (`Judging::Withhold`), because a served session has no per-session disclosure yet, and `run --attach` returns before `assemble`, so it builds nothing. In-process teammates are never screened.
 
 ## Tests
 
 Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[path = "…"] mod tests;` and run in the `ganja` binary target. Each integration binary's `//!` header states its prerequisites. The ones with setup:
 
-- tmux server required, hard-fails without one: `teammate_env`, `teammate_pane`, `teammate_permission`, `team_tasks_pane`, `team_continuation_pane` (all through `tests/pane_lead/`).
+- tmux server required, hard-fails without one: `teammate_env`, `teammate_pane`, `teammate_permission`, `team_tasks_pane`, `team_continuation_pane`, `evaluate_screen_pane` (all through `tests/pane_lead/`).
+- The judge's two binaries: `evaluate_screen` drives `run`, `serve` and `run --attach` against a loopback TypeSafe double and a fake MCP server, whose first turn a `SessionStart` hook holds until the child logs `an MCP server connected`; `evaluate_screen_pane` reads the TUI's opening line in a tmux pane.
 - Two or more processes: `serve` and `attach` (through `tests/served_child/`), `uds`, `peer_drills`, `id_collision`, `claude_code_run`.
 - `claude_code_run` is `harness = false` (`Cargo.toml`): it re-execs itself as the fake `claude` CLI when `GANJA_FAKE_CLAUDE_SCRIPT` is set.
 - Unix only: 15 of the 30 test files carry `#![cfg(unix)]` (pty through `expectrl`, Unix sockets, or signals), among them `pty_smoke`, `resume_drill`, `rewind_drill`, `yolo_drill` and `serve`; each header says so.

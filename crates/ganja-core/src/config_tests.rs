@@ -1055,8 +1055,8 @@ fn assert_screen_warnings(logged: &str, expected: &[(&str, &str, &Path)]) {
     assert_eq!(lines.len(), expected.len(), "one warning per dropped entry: {logged}");
     for (line, (says, entry, path)) in lines.iter().zip(expected) {
         assert!(line.contains(says), "the warning for {entry} says {says:?}: {line}");
-        assert!(line.contains(&format!("entry={entry}")), "it names {entry}: {line}");
-        assert!(line.contains(&path.display().to_string()), "it names the file: {line}");
+        assert!(line.contains(&format!("entry={entry:?}")), "it names {entry}: {line}");
+        assert!(line.contains(&format!("path={path:?}")), "it names the file: {line}");
     }
 }
 
@@ -1256,6 +1256,66 @@ fn each_source_a_project_file_drops_from_the_screen_is_warned_once() {
 
     assert_eq!(merged.evaluate_screen(), Screen::default());
     assert_screen_warnings(&capture.logged(), &[(NOT_IN_SCREEN, "webfetch", project_path)]);
+}
+
+/// A line or paragraph separator and a bidi control are not control
+/// characters, so the grammar lets a project file list an entry holding one;
+/// the warning that names it writes it escaped. Raw, U+2028 starts a new line
+/// in a reader that honours it — one beginning with the checkout's text — and
+/// U+202E reverses how the rest of the line displays. The file's path is
+/// written escaped too, at every warning a project file can draw here: a
+/// checkout names the directories below its root as freely as its entries.
+#[test]
+fn a_separator_or_bidi_control_in_a_dropped_entry_is_logged_escaped() {
+    let directory = temporary();
+    let global = directory.path().join("global.toml");
+    let project = directory.path().join("sub\u{2028}FORGED-FROM-DIRNAME").join("ganja.toml");
+    plant(&global, "[evaluate]\nscreen = [\"webfetch\", \"mcp:gone\", \"mcp:mine\"]\n");
+    plant(
+        &project,
+        "[evaluate]\nscreen = [\"webfetch\", \"mcp:x\\u2028FORGED\", \"mcp:y\\u202eDESREVER\"]\n\n\
+         [webfetch]\nallow_private = true\n\n\
+         [mcp.mine]\ntype = \"local\"\ncommand = [\"./mine-mcp\"]\n",
+    );
+    let mut merged = merge_files(std::slice::from_ref(&global)).expect("the global tier parses");
+
+    let (capture, _guard) = ganja_testkit::LogCapture::install(tracing::Level::WARN);
+    merge_project_file(&mut merged, &project);
+
+    let logged = capture.logged();
+    assert_eq!(merged.evaluate_screen(), screening(true, false, &[]));
+    assert_screen_warnings(
+        &logged,
+        &[
+            (REMOVED, "mcp:mine", project.as_path()),
+            (NARROWED, "mcp:gone", project.as_path()),
+            (NOT_IN_SCREEN, "mcp:x\u{2028}FORGED", project.as_path()),
+            (NOT_IN_SCREEN, "mcp:y\u{202e}DESREVER", project.as_path()),
+        ],
+    );
+    let lifted: Vec<&str> =
+        logged.lines().filter(|line| line.contains("webfetch.allow_private")).collect();
+    assert_eq!(lifted.len(), 1, "the lifted guard is warned about once: {logged}");
+    assert!(lifted[0].contains(&format!("path={project:?}")), "it names the file: {logged}");
+    assert!(logged.contains(r#"entry="mcp:x\u{2028}FORGED""#), "escaped: {logged}");
+    assert!(logged.contains(r#"entry="mcp:y\u{202e}DESREVER""#), "escaped: {logged}");
+    assert_eq!(
+        logged.matches(r"sub\u{2028}FORGED-FROM-DIRNAME").count(),
+        5,
+        "each warning writes the directory name escaped: {logged}"
+    );
+    assert!(
+        !logged.contains(['\u{2028}', '\u{202e}']),
+        "neither character reaches the log raw: {logged:?}"
+    );
+    // Every line boundary a Unicode-aware reader may honour, not only `\n`:
+    // five warnings are five lines to all of them.
+    let boundaries = [
+        '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+        '\u{2029}',
+    ];
+    let lines = logged.split(boundaries).filter(|line| !line.is_empty()).count();
+    assert_eq!(lines, 5, "one line per warning, however the log is split: {logged:?}");
 }
 
 /// **D567**, criterion 11: a server a project file defines or redefines is
