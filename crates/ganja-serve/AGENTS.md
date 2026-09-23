@@ -1,68 +1,75 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-05 | Updated: 2026-08-18 -->
-
 # ganja-serve
 
-## Purpose
+The engine over HTTP: REST routes and an SSE event stream over `ganja-core`, on TCP and on a per-session Unix socket. It holds no transcript state; handlers translate requests onto engine commands and engine events onto frames. `ganja-cli` links it for `ganja serve` and for binding each session's socket. `ganja-client` is its consumer and must not link it.
 
-The engine over a socket: REST routes and an SSE event stream over `ganja-core`, so a remote client can drive the same sessions a terminal does. Spec: upstream `packages/opencode/src/server/server.ts` and `server/routes/instance/httpapi/*`, on the legacy `/session/…` path spellings. Its own crate for the same reason the engine carries no terminal dependency: a build that only wants the terminal must never pull an HTTP server, and the root `depgate.toml` asserts it the same way — `ganja-core`'s deny rule lists `axum*` — gated in CI by `cargo depgate check`.
+## Boundary
 
-## Key Files
+- `depgate.toml` `[rules."ganja-serve"]`: `deny = ["ratatui*", "ganja-teammate-local"]`. The `ganja serve` dependency closure never contains the terminal or the pane backends.
+- `ganja-core`'s rule denies `axum*`, and so do the `ganja-tui` and `ganja-client` rules; this crate is the only member manifest that names `axum`.
+- The socket scheme (directory, names, modes) belongs to `ganja_core::tool::socket`; `src/socket.rs` re-exports it and owns only the binding.
 
-| File | Description |
-|------|-------------|
-| `Cargo.toml` | Member manifest: `axum` for the routed REST-plus-SSE shape, `secrecy` for the configured password, `base64` for the Basic credential, `tokio-stream` for the SSE body. No `tower`/`tower-http`: the one middleware this surface needs is an `axum::middleware::from_fn` away. |
-| `src/lib.rs` | `serve(Arc<Engine>, ServeConfig) -> Handle`: hostname/port policy (explicit port or fail; none means 4096 then OS-assigned), the startup refusal of a passwordless non-loopback bind, the permission tracker's lossless subscription, graceful shutdown through the `Handle`. |
-| `src/routes.rs` | Every route and the guard in front of them: request log (method and path, **never** the query), auth, the served-directory check, and the session-routing policy — a route naming a session that is not current resumes it first, `404`/`409` when it cannot. **P25 (D505)** made the guard transport-aware and split the table: `socket_routes` is exactly `GET /global/health`, `GET /team` and `POST /team/{name}/message` (the name must be the lead, else `400`), and everything else — every session-mutating route and every other read — is TCP's alone and answers `404` on the socket. Same-uid is not trusted, which is the whole argument: `ganja-permission`'s premise is that code this user runs is not the user, so a credential-less socket serving the write API would hand every MCP server, hook and model `bash` line a prompt into every session on the machine. A route added to the socket later is a deliberate edit, named in `socket_routes`' own doc and pinned by `tests/team.rs`. |
-| `src/sse.rs` | `GET /event`: `event: connected` first, engine events as `event: message`, ten-second `event: heartbeat`, and a terminal `event: evicted` frame when the subscriber fell behind. Registration happens before the response body exists. |
-| `src/auth.rs` | `GANJA_SERVER_PASSWORD`/`GANJA_SERVER_USERNAME` (upstream's `OPENCODE_`-spelled pair), the `Basic realm="Secure Area"` challenge, the `?auth_token=` escape hatch an `EventSource` needs, and the whole-fold credential compare. |
-| `src/error.rs` | The refusal table: `SessionNotFound`→404, `Busy`→409, `HookRefused`→400 (**P13** — nothing went wrong on the server when the operator's own hook refused a prompt; was falling into the `_ => 500` arm), unparseable payload→400, everything else→500, each as `{"type": …, "message": …}`. |
-| `src/socket.rs` | **P25 (D505)**: the binder's half of the Unix-socket transport, over the scheme `ganja_tool::socket` owns (re-exported here, so the tool, the deliverer, this binder and `ganja sessions --live` cannot come to disagree about what a session socket is). What is *this* crate's is what binds: the walk over a session's candidate names, `NameLock` — the flock'd `.lock` sibling that says a name is live, whose `unlink_stale(&self)` signature makes unlinking-without-the-lock inexpressible rather than merely discouraged — the `0700` directory refusal, and the peer-uid check on every accepted connection. The `.lock` file is **never removed**: a connect probe was tried and deleted as unsound, since a listener with a full backlog refuses exactly like a dead one. |
-| `src/state.rs` | What handlers share: the engine, the served directory (given and canonical), the read-only storage handle, the config projection, the pending-permission map. |
+## Layout
 
-## Subdirectories
+| Path | Holds |
+|---|---|
+| `src/lib.rs` | `serve(Arc<Engine>, ServeConfig) -> Result<Handle, ServeError>`, `Listen`, `Address`, `DEFAULT_HOSTNAME`, `DEFAULT_PORT`, `HEARTBEAT`, the permission tracker. |
+| `src/routes.rs` | `tcp_routes`, `socket_routes`, the `guard` middleware (log, credential, directory), every handler. |
+| `src/sse.rs` | `GET /event`: the frame pump. |
+| `src/auth.rs` | `PASSWORD_ENV`, `USERNAME_ENV`, Basic parsing, the `auth_token` query, the `401` challenge. |
+| `src/error.rs` | `ApiError` and the `EngineError` to status mapping. |
+| `src/socket.rs` | `NameLock`, candidate-name walk, `0700` directory check, peer-uid check on accept. |
+| `src/state.rs` | `AppState`: engine, served directory, storage, config projection, pending permissions, transport. |
+| `tests/support/` | Shared fixtures (a directory module, not a binary). |
 
-| Directory | Purpose |
-|-----------|---------|
-| `tests/` | Socket-driving suites, each a self-contained binary on an OS-assigned loopback port: `replay_identity.rs` (one turn, two readers — a direct subscriber and an SSE client hold the same transcript frame for frame), `surface.rs` (the REST pins and the 404/409/400 table over real routes), `permissions.rs` (a dialog listed, answered over HTTP, gone), `posture.rs` (the startup refusal, the directory `400`, the auth trio), `ports.rs` (4096-first-then-fallback on real sockets), `no_secrets_in_logs.rs` (the canary: a configured password reaches no log line, `Debug`, or error body — one test, one binary, global subscriber), `support/` (shared fixtures; a directory module, not a binary). **P25** added two: `team.rs` (AC-15, AC-26 — `GET /team` answering identically on TCP and socket, `POST /team/{name}/message` **not registered** on TCP, and the transport-aware guard asserted both ways with a credential configured on both servers — built directly, so no test mutates the process environment — since a uds request needs no password while a TCP one still does) and `uds.rs` (the bind itself: the directory refusal, a stale socket reused, a live one never stolen; the peer-uid refusal leg is pinned as `src/socket.rs`'s own unit test, since everything here carries the test's own uid). |
+## Routes
 
-## For AI Agents
+TCP (`tcp_routes`), behind the credential when one is configured:
 
-### Working In This Directory
+| Method | Path |
+|---|---|
+| GET | `/global/health`, `/config`, `/path`, `/agent`, `/command`, `/event`, `/session`, `/session/{id}`, `/session/{id}/message`, `/permission`, `/team` |
+| POST | `/session`, `/session/{id}/message`, `/session/{id}/prompt_async`, `/session/{id}/abort`, `/session/{id}/summarize`, `/session/{id}/command`, `/session/{id}/shell`, `/session/{id}/revert`, `/session/{id}/unrevert`, `/session/{id}/agent`, `/session/{id}/model`, `/permission/{id}/reply` |
 
-The three postures are invariants, not defaults to soften:
+Unix socket (`socket_routes`), no credential, exactly four: `GET /global/health`, `GET /team`, `POST /team/{name}/message`, `POST /peer/receipt`. Every other path answers `404` on the socket.
 
-- **A non-loopback bind with no password is refused at startup.** Upstream warns and serves anyway; this build does not, and the refusal names `GANJA_SERVER_PASSWORD`. Weakening this to a warning is a spec change, not a cleanup.
-- **The launch directory is the only directory served.** A request whose `?directory=` or `x-ganja-directory` header names anywhere else is `400`, never silently answered about the wrong worktree — upstream would load an instance per directory; this engine cannot.
-- **No query string ever reaches a log line.** The request log writes method and path; `?auth_token=` is a credential in a URL, which is exactly why. The canary suite fails if any log line carries `auth_token`, the password, or its base64.
+The socket takes no password, so it must not serve any route that changes what the session does next. Adding a route here is a deliberate change: document it in the `socket_routes` doc comment and pin it in `tests/team.rs`.
 
-Two shapes worth knowing before editing:
-
-- **The engine is the truth and the stream is complete.** Handlers translate onto `Command` and off `Event`; nothing here invents transcript state. `GET /permission` is the one derived view, kept by a tracker task on a lossless subscription — it only moves map entries, so it always drains and the turn task never waits on it.
-- **One session at a time.** The engine holds one current session; a route naming another resumes it first. `409` while a turn streams is engine law surfacing, not a serve-layer choice.
-
-### Testing Requirements
+## Commands
 
 ```sh
-cargo nextest run -p ganja-serve                       # everything
+cargo nextest run -p ganja-serve
 cargo nextest run -p ganja-serve -E 'binary(replay_identity)'
-cargo test -p ganja-serve --test no_secrets_in_logs   # the canary, its own binary
+cargo nextest run -p ganja-serve --test no_secrets_in_logs
+cargo nextest run -p ganja-cli --test frames      # frame vocabulary pinned against ganja-client
+cargo depgate check --config depgate.toml         # the boundary rules above
 ```
 
-Every socket suite binds `127.0.0.1:0` so parallel runs cannot collide; `ports.rs` is the one that touches 4096 and it tolerates an environment that already holds it. Adding a route means adding its pin in `surface.rs` and, if it takes a payload, its `400` case.
+## Conventions
 
-### Common Patterns
+- A new TCP route gets a pin in `tests/surface.rs`, plus a `400` case if it takes a body.
+- Handlers take the body as `Bytes` and parse it with `serde_json` through `parse` in `src/routes.rs`, so a bad payload is `400`, not axum's `415`/`422`. Request bodies use `#[serde(deny_unknown_fields)]`.
+- The engine holds one current session. A route naming another session resumes it first; it answers `404` when the session does not exist and `409` while a turn is running (`src/routes.rs`, pinned by `tests/surface.rs`).
+- The request log writes method and path only, never the query string, because `?auth_token=` carries the credential (pinned by `tests/no_secrets_in_logs.rs`).
 
-Handlers take the body as `Bytes` and parse with `serde_json` directly rather than through axum's `Json` extractor: the refusal table says an unparseable payload is `400`, and the extractor's rejection is a 415/422. Bodies use `#[serde(deny_unknown_fields)]` so a client's typo is a refusal, not a silent drop.
+## Gotchas
 
-## Dependencies
+- Bind rules (`serve` in `src/lib.rs`): hostname is an IP or `localhost`, anything else is `UnknownHostname`. An explicit port is taken or refused; no port tries `DEFAULT_PORT` (4096) and falls back to an OS-assigned port. A non-loopback TCP bind with no credential fails with `UnsecuredNonLoopback`, naming `GANJA_SERVER_PASSWORD`.
+- Password: `GANJA_SERVER_PASSWORD`, with `GANJA_SERVER_USERNAME` defaulting to `ganja` (`src/auth.rs`). With a password set, every TCP route answers `401` with `Basic realm="Secure Area"` unless the request carries the Basic header or `?auth_token=`. The socket never asks for the password, even when one is configured.
+- `ganja serve` (`ganja-cli/src/serve.rs`, flags `--port`, `--hostname`) warns on stderr when the password is unset.
+- Directory rule: a `?directory=` query or `x-ganja-directory` header naming anything but the launch directory is `400` (`wrong_directory` in `src/routes.rs`).
+- SSE frames on `GET /event` (`src/sse.rs`): `event: connected` (`{}`) first, then each engine event as `event: message`, `event: heartbeat` (`{}`) every `HEARTBEAT` (10 s), and a final `event: evicted` with `{"type": "evicted", "message": ...}` when the subscriber falls behind. The subscription is registered before the response starts.
+- Error mapping (`src/error.rs`), body `{"type", "message"}`: `SessionNotFound` is `404 not_found`; `Busy` is `409 conflict`; `HookRefused`, `MisdirectedCommand`, `TeamSpec`, `ProviderToolReach` and unparseable payloads are `400 invalid_request`; everything else is `500 unknown`.
+- `POST /team/{name}/message` accepts only the lead's name. Past the engine's shape checks it answers `200` with identical bytes for accept, refuse and drop; only a hold is announced (pinned by `tests/inbound_admission.rs`). `POST /peer/receipt` answers the same bytes whether or not the id is outstanding.
+- Socket files: directory `/tmp/ganja-<uid>/` at `0700` (refused otherwise, `UnsafeSocketDirectory`), socket `0600`, a live name is `SocketInUse`, a stale socket file is unlinked and reused. The `.lock` sibling is never removed; `NameLock::unlink_stale` requires the lock to be held (`src/socket.rs`).
+- `GET /permission` is kept by a tracker task on a lossless engine subscription taken before the router exists (`spawn_permission_tracker` in `src/lib.rs`).
 
-### Internal
+## Tests
 
-`ganja-core` (`Engine`, `Storage`, `Config`, `EngineError`, the `permission` re-export in tests), `ganja-protocol` (`Command`, `Event`, the ids). Dev: `ganja-testkit` (scripted provider, recorder/blocking tools, drain, storage seeding).
+Unit tests live in sibling `*_tests.rs` files through `#[path]`. One inline exception: the private `unix` module in `src/socket.rs` has its own `mod tests` for the peer-uid refusal.
 
-### External
+Every integration binary binds `127.0.0.1:0` or a private temp directory, so they run in parallel; `ports.rs` touches 4096 and tolerates it being taken. `no_secrets_in_logs.rs` installs a global tracing subscriber and holds one test. `uds.rs` is `#![cfg(unix)]`. Each binary's `//!` header states what it covers.
 
-`axum` (routes, middleware, SSE body), `secrecy`, `base64`, `tokio` (with this crate's own `net` opt-in for the listeners it binds)/`tokio-stream`/`futures`, `serde`/`serde_json`, `thiserror`, `tracing`. Dev: `reqwest` (the suites' client; `stream` reads SSE frames as they arrive), `tempfile`, `tracing-subscriber` (the canary's capture).
+## History
 
-<!-- MANUAL: -->
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-serve.md`, frozen from commit 35d1720. New decisions are recorded there, not here.

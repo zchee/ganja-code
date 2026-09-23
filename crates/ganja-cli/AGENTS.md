@@ -1,61 +1,88 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-04 | Updated: 2026-08-05 -->
-
 # ganja-cli
 
-## Purpose
+The `ganja` binary (`[[bin]] name = "ganja"`, `src/main.rs`). With no subcommand it runs the `ganja-tui` interface; the subcommands store credentials, write config files, list what ganja knows, take one headless turn, or serve the engine over HTTP. No workspace member depends on it. It is the only member that links both the terminal frontend and the HTTP server.
 
-The `ganja` binary. Running it with no subcommand starts the terminal UI — optionally pointed somewhere by `--model`, `--agent`, `--config`, and by `--continue` or `--session <id>` — which is what the tool is for; the subcommands exist to set it up (`auth login` — a key, or a browser or device login where the provider has one — plus `auth list`/`logout` and `config import-opencode`), to answer questions about it (`models`, `sessions`, `mcp`) without taking the screen over, — with `run` — to take one turn with no screen at all, and — with `serve` — to put the same engine behind a socket until a signal ends it.
+## Boundary
 
-`run --deadline <DURATION|HH:MM>` is **D557**'s headless half (`ganja-code-qecz`): it tells a headless turn how long it has, exactly as `/deadline` tells a screen's. The value is `/deadline`'s own grammar, read by the one parser both doors share — `ganja_tui::command::resolve_deadline`, called from the flag's clap value parser — so the flag and the slash command cannot come to mean two things by one span. Resolving at the clap boundary is the point: a value the grammar has not got, a clock time already behind, and `off` (the slash command's word for clearing, and a fresh run has nothing to clear) are refused before an engine is assembled, so no session is created and no request is spent to report a typo; and the clock is read once, there, so the instant is the one that reading names. `run` sends the instant as `Command::SetDeadline` after the session is selected and before the prompt, so the turn's **first** request already carries the request-only block — a budget that bit from the second step on would leave the step most likely to wander unhurried. Nothing is cancelled when it passes, as on a screen. `--attach` with it is a parse error for `--effort`'s reason: the attached client's surface has no deadline route, and a flag that parsed and then hurried nothing is what that flag table refuses to hold. `tests/run.rs` sees the block reach the first request through the one output of this binary that measures a request rather than a reply — the fake provider's word count, reported as the step's `step_finish` input tokens.
+- No `depgate.toml` rule names this crate (see the comment above the depgate step in `.github/workflows/ci.yaml`).
+- `depgate.toml` denies `axum*` to `ganja-core` and `ganja-tui`, and `ganja-tui` depends on neither `ganja-serve` nor `ganja-client`. So the two trait implementations that need them live here.
+- `src/binder.rs` implements `ganja_tui::binder::Binder` over `ganja-serve` (the per-session Unix socket). `src/lister.rs` implements `ganja_tui::lister::Lister` over `ganja-tool`'s registry plus a `ganja-client` health probe (the `@` menu).
 
-`run --json-schema <FILE|JSON>` is **D563**'s headless half: the JSON Schema a run's answer has to satisfy, sent as the Responses API's `text.format` on every step request of that run's own turn and on nothing else — never the title request, never a compaction, never a `Turn::child`. The value is read as a **file first** and as an inline document only when no such path is there, because a path is never valid JSON and the other order would report a typo'd filename as a syntax error at column 1; the branch is `Path::exists`, so a directory named here fails as a path that could not be read rather than as one that is not there (**Dv-50**). Four refusals rather than one, each about the thing that actually went wrong (**Dv-33**, **Dv-49**): a value that is neither a file nor JSON is E2 (`--json-schema takes a path to a JSON file or an inline JSON document; …`), a path that is there and cannot be read or parsed says so about the file, and a document that parses and is not a JSON **object** names its source and the type that arrived — a schema is an object by definition, and a bare `42` or an array would otherwise ride all the way to the vendor and come back as somebody else's error about a request this build assembled. E3 refuses the flag on a provider that does not speak Responses, checked right after `assemble` returns, before hooks and before any session exists — which is why `Assembled` carries the selection's provider id (**Dv-34**): an `Engine` answers for no provider. The document is wrapped `{type: "json_schema", name: "ganja_run", schema, strict: true}` and installed through `Engine::set_text_format` before the prompt. There is deliberately no `--fast` flag: a headless run takes its tier from config.
+## Subcommands
 
-`assemble.rs` is the **one** install site for the Responses options tables (**Dv-29**): `run` and `serve` both build their engine through it, so `.with_provider_options(config.responses_options())` is one line rather than a pair that can drift, and `Config::responses_options()` is the accessor this site and `ganja-tui`'s two both read.
+Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`src/serve.rs`), `EvaluateArgs` (`src/evaluate.rs`), `PluginAction` (`src/plugin.rs`), `AddArgs`/`RemoveArgs` (`src/mcp.rs`).
 
-## Key Files
+| Subcommand | What it does | Flags that matter |
+|---|---|---|
+| (none) | The TUI. | `--model P/M`, `--agent`, `--config`, `-c/--continue` or `-s/--session <ID>` (clap refuses both), `--auto` (hidden aliases `--yolo`, `--dangerously-skip-permissions`), `--name`. Hidden: `--socket-dir`, and the pane-member set `--agent-id`, `--agent-name`, `--team-name`, `--agent-color`, `--parent-session-id`. |
+| `auth login` / `list` / `logout` | Store, list, or forget a provider credential. | `login --provider <ID> --key -m/--method api\|browser\|device --deployment public\|enterprise --enterprise-url`; `logout --provider`. Builtin ids are `ProviderId` in `src/main.rs`. |
+| `config import-opencode` / `migrate` / `import-claude-hooks` | Write a `ganja.toml` from opencode's config, a legacy `ganja.jsonc`/`ganja.json`, or Claude Code's `hooks` block. | Each takes `--file`, `--global`, `--dry-run`. |
+| `evaluate` | The TypeSafe client with no engine, for scripts and `PreToolUse` hooks. | `--questions JSON\|@PATH` (required), `--state JSON\|@PATH\|-` (default stdin), `--model`, `--format json\|text`. |
+| `mcp` [`list`] / `add` / `get` / `remove` / `login` | List (connects every enabled server), or edit the config's `mcp` table, or run one server's OAuth login. | `add <name> --url <URL>` or `add <name> -- <cmd> [args]`; `--global`, `--force`, `--header`, `--oauth`, `--env`, `--cwd`, `--timeout`, `--output-limit`, `--disabled`; `remove <name> --global`. |
+| `models [PROVIDER]` | The model catalog. | `--refresh`. |
+| `plugin` | `list`, `marketplace add\|list\|remove\|update`, `install`, `enable`, `disable`, `remove`, `details`. | Positional names only. |
+| `run [MESSAGE]` | One headless turn, then exit. | `--command`, `-c/--continue`, `-s/--session`, `--fork` (always refused), `--model`, `--agent`, `--effort`, `--deadline DURATION\|HH:MM`, `--json-schema FILE\|JSON`, `--config`, `--attach <URL>`, `--format default\|json`, `--auto`. |
+| `serve` | The engine over HTTP + SSE until SIGINT or SIGTERM. | `--port` (absent: 4096, else any free port), `--hostname` (default `127.0.0.1`; a non-loopback host requires `GANJA_SERVER_PASSWORD`). |
+| `sessions` | Stored root sessions of this project. | `--live`: sessions answering on a socket now, every project. Hidden `--socket-dir`. |
+| `skills` | The skill roster a session can load. | None. |
 
-| File | Description |
-|------|-------------|
-| `Cargo.toml` | Member manifest. Declares `[[bin]] name = "ganja"`. Depends on `tokio-util` for exactly one thing — the `CancellationToken` a login flow's wait takes, which only the binary can fire because only the binary catches the keystroke — on `ratatui` for exactly one other — the raw-mode read that keeps a typed API key off the screen — on `secrecy` so a key is wrapped the moment it is whole, on `futures` because `run` consumes the engine's event stream and the `Stream` trait behind a `BoxStream` has to be named to be reached, and on `serde_json` because `run --format json` writes one serde-derived object per event. |
+`-v/--verbose` is global but must follow the subcommand (`ganja models -v`); `ganja -v models` is refused because the root sets `args_conflicts_with_subcommands` (`src/main.rs`).
 
-## Subdirectories
+## Layout
 
-| Directory | Purpose |
-|-----------|---------|
-| `src/` | `main.rs`: clap surface and the credential prompt; `run.rs`: the headless turn; `serve.rs`: the HTTP server (see `src/AGENTS.md`) |
-| `tests/` | CLI assertions, the headless-turn suite, the serve smoke, and pty smoke tests (see `tests/AGENTS.md`) |
+| Path | Holds |
+|---|---|
+| `src/main.rs` | Clap types, `auth`, `models`, `mcp` list and login, `sessions`, logging, the no-echo key prompt. |
+| `src/assemble.rs` | The engine assembly `run` and `serve` share. |
+| `src/run.rs` / `src/serve.rs` | The headless turn; the HTTP server. |
+| `src/login.rs` | Browser and device logins, method selection, Copilot deployment. |
+| `src/import.rs`, `src/migrate.rs`, `src/claude_hooks.rs` | The three `config` writers. |
+| `src/report.rs`, `src/staging.rs`, `src/position.rs` | The mapped/skipped table, the staged file write, and source positions the config writers share. |
+| `src/mcp.rs`, `src/plugin.rs`, `src/skills.rs`, `src/evaluate.rs` | Their subcommands. |
+| `src/binder.rs`, `src/lister.rs` | The socket binder and the live-session lister handed to `ganja-tui`. |
+| `tests/pane_lead/`, `tests/served_child/` | Shared helpers for the tmux suites and the `serve` suites. |
+| `tests/fixtures/opencode.jsonc` | The importer fixture, also read by `src/import_tests.rs`. |
 
-## For AI Agents
-
-### Working In This Directory
-
-This crate is where a secret is most likely to escape, because it is the only place a human types one. Before touching credential paths, read `src/AGENTS.md` — the rules there (no echo, wipe the buffer, print only the redacted tail, warn when an environment variable shadows a stored key) are each pinned by a test.
-
-### Testing Requirements
+## Commands
 
 ```sh
-cargo test -p ganja-cli                    # includes pty tests on unix
-cargo test -p ganja-cli --test cli         # CLI surface only, fast
-cargo test -p ganja-cli --test auth_login  # the login flows, against an issuer the suite owns
-cargo test -p ganja-cli --test run         # the headless turn, fast
-cargo test -p ganja-cli --test serve       # the server end to end, unix only
+cargo nextest run -p ganja-cli
+cargo nextest run -p ganja-cli -E 'binary(ganja)'   # the unit suites in src/
+cargo nextest run -p ganja-cli -E 'binary(run)'     # one integration binary
 ```
 
-The pty suite drives the real binary through a terminal and is unix-only (`#![cfg(unix)]`).
+## Conventions
 
-### Common Patterns
+- Stdout carries only the payload; prompts, warnings and diagnostics go to stderr, so `run --format json` stays parseable (`src/run.rs`, pinned by `tests/run.rs`).
+- Key material: `secret()` wraps a key in `SecretString` and zeroizes the buffer; the prompt reads in raw mode with no echo and a `Drop` guard; output shows only `auth::RedactedTail`; a key shadowed by an environment variable is reported as shadowed (`src/main.rs`, pinned by `tests/cli.rs`). New key-handling code must prove the key reaches no output or stored file in the clear.
+- Anything `run` and `serve` both need is installed once in `src/assemble.rs`, never at the two call sites.
+- A flag that would parse and then decide nothing is refused by clap: `--attach` conflicts with `--config`, `--command`, `--effort`, `--deadline` and `--json-schema` (`src/run.rs`).
+- `run --deadline` parses with `ganja_tui::command::resolve_deadline`, the same grammar as `/deadline`, at the clap boundary.
+- The config writers edit with `toml_edit`, so a target's comments and key order survive; the importers never write an API key and never expand `{env:…}`/`{file:…}` (pinned by `src/import_tests.rs`).
+- A new subcommand gets an assertion in `tests/cli.rs`.
 
-Subcommands print to stdout and diagnostics to stderr, so a caller capturing stdout gets a clean channel; the API-key prompt writes to stderr for the same reason, and so does everything `run` has to say about a turn that is not the turn itself — a warning inside `--format json`'s stream would corrupt it.
+## Gotchas
 
-## Dependencies
+- Provider selection is `ganja_core::provider::select`: `--model`, then `GANJA_PROVIDER`/`GANJA_MODEL`, then the config `model`, then `default_provider`, then the oldest stored login, then the built-in fake provider. A machine with any stored login does not get the fake.
+- Every subcommand exits 0 or 1 except `evaluate`: 0 answered, 3 not configured, 4 vendor refused, 5 unavailable, 64 bad argument. Clap's own parse failure still exits 2 (`src/evaluate.rs`).
+- `run --json-schema` reads a file first and inline JSON second, requires a JSON object, and is refused unless the provider is `chatgpt` or `openai` (`speaks_options` in `ganja-provider/src/provider/responses/options.rs`).
+- `run` refuses every call that would open a dialog unless `--auto` is given, and always refuses `question`, `plan_enter` and `plan_exit`. It waits `SETTLE_LIMIT` (90 s) for hooks before exit; `serve` installs none of these refusals.
+- `GANJA_AUTH_ISSUER` redirects every login endpoint and is refused unless it is `http://<loopback>:<port>` (`src/login.rs`).
+- The log file is `$XDG_DATA_HOME/ganja/log/ganja.<date>.log` on every platform, macOS included, seven kept; `RUST_LOG` overrides `-v`.
+- `models` installs the disk catalog with `catalog::load_cached()` before reading; `--refresh` failures only warn.
 
-### Internal
+## Tests
 
-`ganja-provider` (`auth`, for the login flows `auth login` drives — named directly because that command assembles no engine), `ganja-core` (`catalog`, and — for `run` and `serve` — `Engine`, `config`, `provider`, `instruction`, `permission`, `tool`), `ganja-tui` (`run()`, and `command::resolve_deadline` for `run --deadline`), `ganja-serve` (`serve()`, behind the `serve` subcommand).
+Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[path = "…"] mod tests;` and run in the `ganja` binary target. Each integration binary's `//!` header states its prerequisites. The ones with setup:
 
-### External
+- tmux server required, hard-fails without one: `teammate_env`, `teammate_pane`, `teammate_permission`, `team_tasks_pane`, `team_continuation_pane` (all through `tests/pane_lead/`).
+- Two or more processes: `serve` and `attach` (through `tests/served_child/`), `uds`, `peer_drills`, `id_collision`, `claude_code_run`.
+- `claude_code_run` is `harness = false` (`Cargo.toml`): it re-execs itself as the fake `claude` CLI when `GANJA_FAKE_CLAUDE_SCRIPT` is set.
+- Unix only: 15 of the 30 test files carry `#![cfg(unix)]` (pty through `expectrl`, Unix sockets, or signals), among them `pty_smoke`, `resume_drill`, `rewind_drill`, `yolo_drill` and `serve`; each header says so.
 
-`clap` (derive), `tokio`, `tokio-util` (the login flows' cancellation), `anyhow`, `secrecy`, `futures` (the engine's event stream), `serde_json` (`run --format json`), `ratatui` (raw mode only), `jiff` (the daily log's civil-date rollover), `tempfile` (the staged `mcp add`/`remove` config write); dev: `assert_cmd`, `predicates`, and `expectrl` on unix.
+No test here is `#[ignore]` or reaches a real service. Suites set `GANJA_PROVIDER=fake` with `GANJA_FAKE_SCRIPT`, point `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `GANJA_CONFIG_HOME` at temp dirs, pass the hidden `--socket-dir`, and set `GANJA_DISABLE_MODELS_FETCH`, `GANJA_AUTH_ISSUER`, `OPENAI_BASE_URL` (`ganja_testkit::responses_server`) or `TYPESAFE_BASE_URL` (a loopback listener) as needed.
 
-<!-- MANUAL: -->
+## History
+
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-cli.md`, `docs/decisions/ganja-cli-src.md`, `docs/decisions/ganja-cli-tests.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
