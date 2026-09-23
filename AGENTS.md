@@ -197,4 +197,4 @@ git push                # Push to remote
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase and wave ledgers, rationale) are in `docs/decisions/`, frozen from commit 35d1720: `root.md` for this file, one file per old nested `AGENTS.md`. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase and wave ledgers, rationale) are in `docs/decisions/`, frozen from commit 35d1720: `root.md` for this file, one file per old nested `AGENTS.md`. New decisions go in `docs/decisions/ledger.md`, not here.

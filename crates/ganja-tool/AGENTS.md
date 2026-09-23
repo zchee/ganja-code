@@ -106,4 +106,4 @@ Fixtures rule: a test must never write into the real data directory (`~/.local/s
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-tool.md`, `docs/decisions/ganja-tool-src.md`, `docs/decisions/ganja-tool-tests.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-tool.md`, `docs/decisions/ganja-tool-src.md`, `docs/decisions/ganja-tool-tests.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

@@ -107,4 +107,4 @@ GANJA_LIVE_TEST=1 cargo nextest run -p ganja-core -E 'binary(codex_identity_prob
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-core.md`, `ganja-core-src.md`, `ganja-core-src-prompt.md`, `ganja-core-tests.md`, `ganja-core-tests-fixtures.md` and `ganja-core-tests-fixtures-golden.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-core.md`, `ganja-core-src.md`, `ganja-core-src-prompt.md`, `ganja-core-tests.md`, `ganja-core-tests-fixtures.md` and `ganja-core-tests-fixtures-golden.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

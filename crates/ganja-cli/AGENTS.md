@@ -85,4 +85,4 @@ No test here is `#[ignore]` or reaches a real service. Suites set `GANJA_PROVIDE
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-cli.md`, `docs/decisions/ganja-cli-src.md`, `docs/decisions/ganja-cli-tests.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-cli.md`, `docs/decisions/ganja-cli-src.md`, `docs/decisions/ganja-cli-tests.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

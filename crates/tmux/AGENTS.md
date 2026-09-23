@@ -66,4 +66,4 @@ Unit tests are sibling `<module>_tests.rs` files attached with `#[path]` (for ex
 
 ## History
 
-Decisions before 2026-09-23 (phase ledgers, port notes): `docs/decisions/tmux.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (phase ledgers, port notes): `docs/decisions/tmux.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

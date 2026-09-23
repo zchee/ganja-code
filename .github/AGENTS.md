@@ -62,4 +62,4 @@ For `GANJA_OPENCODE_DIR`, check out `anomalyco/opencode` at tag `v1.18.22` and r
 
 ## History
 
-Decisions before 2026-09-23: `docs/decisions/github.md` and `docs/decisions/github-workflows.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23: `docs/decisions/github.md` and `docs/decisions/github-workflows.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

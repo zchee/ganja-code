@@ -56,4 +56,4 @@ cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'   # the m
 
 ## History
 
-Decisions before 2026-09-23: `docs/decisions/crates.md`, frozen from commit 35d1720.
+Decisions before 2026-09-23: `docs/decisions/crates.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

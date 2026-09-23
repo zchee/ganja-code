@@ -59,4 +59,4 @@ Unit tests are sibling `*_tests.rs` files attached with `#[path]`. Each `tests/*
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-team.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase ledgers): `docs/decisions/ganja-team.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.

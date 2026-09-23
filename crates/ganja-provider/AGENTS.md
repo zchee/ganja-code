@@ -113,4 +113,4 @@ Fixture rules (`tests/fixtures/`):
 
 ## History
 
-Decisions before 2026-09-23 (D-numbers, phase ledgers, the cursor and claude-code rulings, per-host identity evidence): `docs/decisions/ganja-provider.md`, `docs/decisions/ganja-provider-src.md`, `docs/decisions/ganja-provider-src-provider.md`, `docs/decisions/ganja-provider-tests-fixtures.md`, frozen from commit 35d1720. New decisions are recorded there, not here.
+Decisions before 2026-09-23 (D-numbers, phase ledgers, the cursor and claude-code rulings, per-host identity evidence): `docs/decisions/ganja-provider.md`, `docs/decisions/ganja-provider-src.md`, `docs/decisions/ganja-provider-src-provider.md`, `docs/decisions/ganja-provider-tests-fixtures.md`, frozen from commit 35d1720. New decisions go in `docs/decisions/ledger.md`, not here.
