@@ -3729,7 +3729,7 @@ impl Engine {
                 + definition.schema.to_string().chars().count();
             // The registry's own naming rule: everything a server lends is
             // `mcp__<server>__<tool>`, and nothing else may be.
-            if definition.name.starts_with("mcp__") {
+            if definition.name.starts_with(ganja_permission::permission::MCP_PREFIX) {
                 mcp_chars += chars;
                 mcp_count += 1;
             } else {

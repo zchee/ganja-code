@@ -18,8 +18,8 @@ publish = false
 # `ganja-*` crate may appear in this file, in either table, and no
 # `ganja-*` crate may depend on this one. Both directions are CI-asserted —
 # see the workspace root Cargo.toml's comment where member path
-# dependencies are declared, and the boundary-gate job in
-# `.github/workflows/ci.yaml`.
+# dependencies are declared, and the `[rules.tmux]` entry in the root
+# `depgate.toml`, which CI evaluates with `cargo depgate check`.
 [dependencies]
 # Typed, message-carrying errors across the rendering, decoding, and
 # protocol surfaces — the same choice every other member of this workspace

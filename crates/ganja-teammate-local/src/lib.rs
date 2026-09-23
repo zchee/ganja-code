@@ -36,8 +36,8 @@
 //! panes a dead lead left standing, and the transcript readers that carry a
 //! pane teammate's answers home.
 
-/// The `agy` backend: a name that parses and a spawn that refuses, because
-/// W4's ship test measured `--sandbox` as terminal-only (**D508(a)**).
+/// The `agy` backend: driven in its own TUI under a bare `--sandbox`, which
+/// bounds the terminal only (**D508(a)**); it spawns write-capable since **Dv-7**.
 pub mod agy;
 /// A teammate that is a real `claude` pane (P25b).
 pub mod claude;

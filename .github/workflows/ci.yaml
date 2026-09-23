@@ -60,7 +60,7 @@ jobs:
         with:
           tool: nextest
 
-      # The pane suites (ganja-core's teammate_pane_*, ganja-cli's
+      # The pane suites (ganja-teammate-local's teammate_pane_* and shim_tui, ganja-cli's
       # teammate_* and pane_lead consumers) and the tmux crate's own
       # hard-fail live suite drive a real tmux server, so CI has to provide
       # one — the same posture as the golden differential's bun below. Both
