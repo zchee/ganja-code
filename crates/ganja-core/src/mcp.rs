@@ -751,6 +751,7 @@ impl Servers {
 
                 Some(Arc::new(McpTool {
                     id,
+                    server: server.clone(),
                     remote: def.name.to_string(),
                     description: def.description.clone().unwrap_or_default().into_owned(),
                     schema: force_object(&def.input_schema),
@@ -1122,6 +1123,13 @@ impl ClientHandler for Handler {
 struct McpTool {
     /// The namespaced name the model calls and the permission engine gates.
     id: String,
+    /// The server's name as the config's `mcp` table keys it, unsanitized —
+    /// what `[evaluate] screen`'s `mcp:<name>` entries name, and so what the
+    /// judge reads back out of a result's metadata rather than parsing [`id`],
+    /// whose halves are sanitized.
+    ///
+    /// [`id`]: McpTool::id
+    server: String,
     /// What the server calls it, which is what goes back over the wire.
     remote: String,
     description: String,
@@ -1175,7 +1183,7 @@ impl Tool for McpTool {
             }
         };
 
-        render(&self.id, result, self.output_limit)
+        render(&self.id, &self.server, result, self.output_limit)
     }
 }
 
@@ -1185,7 +1193,16 @@ impl Tool for McpTool {
 /// which the agent loop hands the model as the call's result: an error here is
 /// something to read, never something that ends a turn. `output_limit` clamps
 /// only the successful case — see this module's "Output caps" doc section.
-fn render(id: &str, result: CallToolResult, output_limit: usize) -> Result<ToolOutput, ToolError> {
+///
+/// The metadata names `server` and says what the clamp did — `truncated`
+/// always, `hint_len` when it cut — so a reader separates the server's text
+/// from the spill hint by count (**D567**).
+fn render(
+    id: &str,
+    server: &str,
+    result: CallToolResult,
+    output_limit: usize,
+) -> Result<ToolOutput, ToolError> {
     let text = result
         .content
         .iter()
@@ -1210,12 +1227,10 @@ fn render(id: &str, result: CallToolResult, output_limit: usize) -> Result<ToolO
         _ => text,
     };
     let clamped = crate::tool::truncate::clamp_bytes(&output, output_limit);
+    let mut metadata = serde_json::json!({ "server": server });
+    clamped.stamp(&mut metadata);
 
-    Ok(ToolOutput {
-        title: id.to_owned(),
-        output: clamped.text,
-        metadata: serde_json::json!({ "truncated": clamped.truncated }),
-    })
+    Ok(ToolOutput { title: id.to_owned(), output: clamped.text, metadata })
 }
 
 /// One content block as a line of text.

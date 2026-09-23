@@ -472,12 +472,19 @@ async fn every_fetched_result_says_whether_private_addresses_were_allowed_and_wh
 
     let guarded = WebfetchTool::new();
     assert_eq!(
-        super::stamped(guarded.allow_private, false, 0),
+        super::stamped(guarded.allow_private, None),
         serde_json::json!({ "private_allowed": false, "truncated": false }),
         "the tool as it ships stamps an explicit false"
     );
     assert_eq!(
-        super::stamped(guarded.allow_private, true, 213),
+        super::stamped(
+            guarded.allow_private,
+            Some(&crate::truncate::Truncated {
+                text: String::new(),
+                truncated: true,
+                hint_len: 213,
+            })
+        ),
         serde_json::json!({ "private_allowed": false, "truncated": true, "hint_len": 213 }),
     );
 }

@@ -938,6 +938,10 @@ pub(crate) struct Turn {
     /// config asked for none, and every tool call then completes exactly as it
     /// did before this existed.
     pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
+    /// What screens this turn's untrusted tool results (**D567**). [`None`] is
+    /// a session nobody built one for, and every tool call then completes
+    /// exactly as it did before this existed.
+    pub(crate) judge: Option<Arc<crate::judge::Judge>>,
     /// What this turn's file changes are recorded against, so `/undo` can put
     /// them back. [`None`] on a turn nobody gave snapshots — every scripted and
     /// golden run — and on every turn a subagent runs: the parent's own patch
@@ -1190,6 +1194,10 @@ impl Turn {
             // more: nobody is watching a subagent's turn.
             credentials: host.credentials.clone(),
             lsp: host.lsp.clone(),
+            // The parent's, for the language servers' reason: one breaker and
+            // one in-flight cap per process, so a child's screened call waits
+            // in the same queue its parent's does.
+            judge: host.judge.clone(),
             // No snapshots of its own: a patch is a diff of the working tree
             // rather than a record of who wrote to it, so the step of the
             // *parent* that made this call already covers everything the child
@@ -5081,6 +5089,17 @@ async fn finish(
             // never cost it its result.
             if let Some(lsp) = &turn.lsp {
                 output.output.push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
+            }
+
+            // The judge's seam (**D567**): after the language server — which
+            // appends nothing to the three kinds of result it screens, so
+            // `hint_len` still counts from the end of the tool's own text —
+            // and before the `PostToolUse` hook, which then sees the sentence
+            // and `metadata.screen` and whose own context lands after both.
+            // Everything inside swallows its own failures, as `annotate` above
+            // does; a cancelled turn annotates nothing.
+            if let Some(judge) = &turn.judge {
+                judge.annotate(&call.name, &mut output, &turn.cancel).await;
             }
 
             // After the annotation, so a `PostToolUse` hook is shown what the

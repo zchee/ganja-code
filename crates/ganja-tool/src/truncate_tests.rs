@@ -733,3 +733,36 @@ fn a_server_tool_output_is_written_owner_only_and_only_under_a_plain_name() {
     }
     assert!(!home.path().join("escape.png").exists(), "nothing was written outside the directory");
 }
+
+/// The metadata rule every clamped tool result follows, in its one spelling:
+/// `truncated` always, `hint_len` only beside a `true` — and a `metadata` that
+/// is not an object is left exactly as it was rather than replaced.
+#[test]
+fn a_stamp_writes_truncated_always_and_hint_len_only_when_something_was_cut() {
+    let whole = Truncated { text: "kept".to_owned(), truncated: false, hint_len: 0 };
+    let cut = Truncated { text: "kept".to_owned(), truncated: true, hint_len: 213 };
+    let spill_failed = Truncated { text: "kept".to_owned(), truncated: true, hint_len: 0 };
+
+    let tests: [(&str, &Truncated, serde_json::Value); 3] = [
+        ("nothing cut", &whole, serde_json::json!({ "server": "s", "truncated": false })),
+        (
+            "cut with a hint",
+            &cut,
+            serde_json::json!({ "server": "s", "truncated": true, "hint_len": 213 }),
+        ),
+        (
+            "cut with no spill file",
+            &spill_failed,
+            serde_json::json!({ "server": "s", "truncated": true, "hint_len": 0 }),
+        ),
+    ];
+    for (name, clamped, want) in tests {
+        let mut metadata = serde_json::json!({ "server": "s" });
+        clamped.stamp(&mut metadata);
+        assert_eq!(metadata, want, "{name}");
+    }
+
+    let mut not_an_object = serde_json::json!("a tool's own string");
+    cut.stamp(&mut not_an_object);
+    assert_eq!(not_an_object, serde_json::json!("a tool's own string"));
+}

@@ -134,6 +134,26 @@ pub struct Truncated {
     pub hint_len: usize,
 }
 
+impl Truncated {
+    /// Writes what this clamp did into a tool result's `metadata`:
+    /// `truncated`, always, and `hint_len` whenever `truncated` is true.
+    ///
+    /// The one spelling of that rule, shared by every tool whose result a
+    /// reader separates from the spill hint by count — `webfetch`,
+    /// `websearch` and an MCP server's tools — so no reader has to decide
+    /// what a missing `truncated` means or search for a sentence a page could
+    /// carry too. A `metadata` that is not an object is left as it is.
+    pub fn stamp(&self, metadata: &mut serde_json::Value) {
+        let Some(metadata) = metadata.as_object_mut() else {
+            return;
+        };
+        metadata.insert("truncated".to_owned(), self.truncated.into());
+        if self.truncated {
+            metadata.insert("hint_len".to_owned(), self.hint_len.into());
+        }
+    }
+}
+
 /// Clamps `text` to the line and byte budgets, spilling the full original to
 /// a file when anything was cut — the ganja data directory first, a temp
 /// directory second if that could not be resolved or written to (see this
@@ -156,8 +176,12 @@ pub fn clamp(text: &str) -> Truncated {
 /// its reason: a tool that spills carries the directory as an `Option` no
 /// shipped constructor fills, so the choice is made where the tool is built
 /// and only a `#[cfg(test)]` constructor ever names one (`shell.rs`'s
-/// `spilling_into`, `tasklist.rs`'s).
-pub(crate) fn clamp_with(text: &str, dir: &Path) -> Truncated {
+/// `spilling_into`, `tasklist.rs`'s). Public for the same reason
+/// [`open_spill_in`] is: another crate's tests clamp too — `ganja-core`'s
+/// judge suites (**D567**) build clamped results through it — and must not
+/// spill into a real person's data directory either.
+#[must_use]
+pub fn clamp_with(text: &str, dir: &Path) -> Truncated {
     clamp_in(text, MAX_CHARS, [dir.to_owned()])
 }
 

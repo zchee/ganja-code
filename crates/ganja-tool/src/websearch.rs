@@ -476,11 +476,8 @@ async fn search(
     // What the clamp did is reported, never left to be searched for: the
     // spill hint is a fixed sentence an answer could carry too, so a reader
     // separates the two by the count in `Truncated::hint_len`.
-    let mut metadata =
-        serde_json::json!({ "provider": service.id(), "truncated": clamped.truncated });
-    if clamped.truncated {
-        metadata["hint_len"] = clamped.hint_len.into();
-    }
+    let mut metadata = serde_json::json!({ "provider": service.id() });
+    clamped.stamp(&mut metadata);
 
     Ok(ToolOutput {
         title: format!("{}: {}", service.label(), args.query),

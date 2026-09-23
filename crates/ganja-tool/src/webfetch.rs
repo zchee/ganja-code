@@ -393,7 +393,7 @@ async fn fetch(
         // The protocol carries no attachments yet, so an image is reported
         // rather than returned; upstream hands the bytes back as a data URL.
         if mime.starts_with("image/") {
-            let mut metadata = stamped(allow_private, false, 0);
+            let mut metadata = stamped(allow_private, None);
             metadata["mime"] = mime.as_str().into();
             metadata["bytes"] = body.len().into();
 
@@ -434,7 +434,7 @@ async fn fetch(
 
         Ok::<_, ToolError>(ToolOutput {
             title,
-            metadata: stamped(allow_private, clamped.truncated, clamped.hint_len),
+            metadata: stamped(allow_private, Some(&clamped)),
             output: clamped.text,
         })
     })
@@ -453,12 +453,13 @@ async fn fetch(
 /// absence means, and `hint_len` — the bytes [`truncate::clamp`] appended
 /// after its notice ([`truncate::Truncated::hint_len`]) — whenever it is
 /// true, so a reader separates the page from the spill hint by count rather
-/// than by searching for a sentence the page could have carried itself.
-fn stamped(allow_private: bool, truncated: bool, hint_len: usize) -> serde_json::Value {
-    let mut metadata =
-        serde_json::json!({ "private_allowed": allow_private, "truncated": truncated });
-    if truncated {
-        metadata["hint_len"] = hint_len.into();
+/// than by searching for a sentence the page could have carried itself. Both
+/// are [`truncate::Truncated::stamp`]'s; `clamped` is [`None`] for the one
+/// branch that never clamps, an image.
+fn stamped(allow_private: bool, clamped: Option<&truncate::Truncated>) -> serde_json::Value {
+    let mut metadata = serde_json::json!({ "private_allowed": allow_private, "truncated": false });
+    if let Some(clamped) = clamped {
+        clamped.stamp(&mut metadata);
     }
 
     metadata

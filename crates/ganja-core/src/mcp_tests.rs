@@ -146,8 +146,9 @@ fn an_error_result_carries_the_servers_own_words() {
     ]);
     result.is_error = Some(true);
 
-    let error = render("mcp__github__create_issue", result, crate::tool::truncate::MAX_CHARS)
-        .expect_err("isError is an error");
+    let error =
+        render("mcp__github__create_issue", "github", result, crate::tool::truncate::MAX_CHARS)
+            .expect_err("isError is an error");
     assert!(
         matches!(&error, ToolError::Failed(text) if text == "the repository is archived"),
         "{error}"
@@ -159,7 +160,7 @@ fn an_error_result_with_nothing_to_say_still_says_something() {
     let mut result = rmcp::model::CallToolResult::success(Vec::new());
     result.is_error = Some(true);
 
-    let error = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+    let error = render("mcp__x__y", "x", result, crate::tool::truncate::MAX_CHARS)
         .expect_err("isError is an error");
     assert!(matches!(&error, ToolError::Failed(text) if text == super::UNSPOKEN_ERROR), "{error}");
 }
@@ -169,7 +170,7 @@ fn a_structured_only_result_becomes_one_json_block() {
     let mut result = rmcp::model::CallToolResult::success(Vec::new());
     result.structured_content = Some(json!({ "count": 2 }));
 
-    let output = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+    let output = render("mcp__x__y", "x", result, crate::tool::truncate::MAX_CHARS)
         .expect("a structured answer is an answer");
     assert_eq!(output.output, r#"{"count":2}"#);
 }
@@ -182,7 +183,7 @@ fn binary_content_is_described_rather_than_carried() {
         rmcp::model::ContentBlock::image("MTIzNDU2Nzg5", "image/png"),
     ]);
 
-    let output = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
+    let output = render("mcp__x__y", "x", result, crate::tool::truncate::MAX_CHARS)
         .expect("an image answer is an answer");
     assert_eq!(output.output, "here it is\n[binary MCP content omitted: image/png, 9 bytes]");
 }
@@ -256,4 +257,20 @@ fn instructions_come_only_from_a_server_that_lent_a_tool() {
     }
 
     assert_eq!(servers.instructions(), None);
+}
+
+/// **D567**: a result names its server as the config keys it — unsanitized,
+/// colons and all — because that name, not the tool's sanitized id, is what
+/// `[evaluate] screen` lists; and it says what the clamp did in the one
+/// spelling `webfetch` and `websearch` use, so a reader separates the
+/// server's text from the spill hint by count. The clamped half — `truncated:
+/// true` and `hint_len` — is `tests/judge_mcp_clamp.rs`, whose binary points
+/// the data home the clamp spills into at a temporary directory; here the
+/// clamp would spill into the developer's own.
+#[test]
+fn a_result_names_its_server_and_says_what_the_clamp_did() {
+    let fits = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]);
+    let output = render("mcp__plugin_foo_bar__t", "plugin:foo:bar", fits, 100)
+        .expect("a text answer is an answer");
+    assert_eq!(output.metadata, json!({ "server": "plugin:foo:bar", "truncated": false }));
 }

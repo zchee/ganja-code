@@ -201,6 +201,10 @@ pub(crate) struct Host {
     /// client is identified by `(root, server)`, so a child working in the
     /// same project reuses the server the parent already has warm.
     pub(crate) lsp: Option<Arc<crate::lsp::Lsp>>,
+    /// The session's judge (**D567**), shared rather than built again: its
+    /// breaker and its in-flight cap are about the vendor, so a child's
+    /// screened calls count against the same ones the parent's do.
+    pub(crate) judge: Option<Arc<crate::judge::Judge>>,
     /// The store, when the engine persists. A child session is an ordinary
     /// stored session that names its parent.
     pub(crate) persistence: Option<Arc<SessionState>>,
