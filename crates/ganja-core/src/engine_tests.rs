@@ -44,15 +44,30 @@ struct ScriptedProvider {
     events: Vec<ProviderEvent>,
     failure: Option<ProviderError>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
+    /// Answers `composes_base_prompt` — the claude-code wire's posture
+    /// (**D568**), so a lib test can see what such a wire is handed without
+    /// spawning one.
+    composes_base_prompt: bool,
 }
 
 impl ScriptedProvider {
     fn new(events: Vec<ProviderEvent>) -> Self {
-        Self { events, failure: None, seen: Arc::default() }
+        Self { events, failure: None, seen: Arc::default(), composes_base_prompt: false }
     }
 
     fn failing(failure: ProviderError) -> Self {
-        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default() }
+        Self {
+            events: Vec::new(),
+            failure: Some(failure),
+            seen: Arc::default(),
+            composes_base_prompt: false,
+        }
+    }
+
+    fn composing_its_own_prompt(mut self) -> Self {
+        self.composes_base_prompt = true;
+
+        self
     }
 }
 
@@ -60,6 +75,10 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+
+    fn composes_base_prompt(&self) -> bool {
+        self.composes_base_prompt
     }
 
     async fn stream(
@@ -859,22 +878,99 @@ async fn a_claude_code_effort_survives_a_model_switch() {
     );
 }
 
+/// A suffix in the composer's own shape: the environment block, then an
+/// instruction file, then the skills block.
+const FURNISHED_SUFFIX: &str = "You are powered by the model named fake.\n<env>\n  Working directory: /\n</env>\
+                      \nInstructions from: /project/AGENTS.md\nalways run the tests\
+                      \nSkills provide specialized instructions and workflows for specific tasks.\n<available_skills>\n</available_skills>";
+
 /// An engine with something in every fixed category, for the breakdown
 /// tests: a base prompt, a suffix carrying an instruction file and a
 /// skills block spelled with the composer's own markers, and the builtin
 /// tools.
 fn furnished(model: &str) -> Engine {
-    let suffix = "You are powered by the model named fake.\n<env>\n  Working directory: /\n</env>\
-                      \nInstructions from: /project/AGENTS.md\nalways run the tests\
-                      \nSkills provide specialized instructions and workflows for specific tasks.\n<available_skills>\n</available_skills>";
-
     Engine::new(
         Arc::new(FakeProvider::new("one two", std::time::Duration::from_millis(1))),
         model,
         Arc::new(Registry::with_builtins()),
         Permissions::default(),
     )
-    .with_system_parts(Some("obey the tests".to_owned()), Some(suffix.to_owned()))
+    .with_system_parts(Some("obey the tests".to_owned()), Some(FURNISHED_SUFFIX.to_owned()))
+}
+
+/// A wire whose client composes its own base prompt and environment block
+/// (**D568**) is handed the appendix alone: no family base, no `<env>`
+/// block, and the instruction files and skills exactly as composed.
+#[tokio::test]
+async fn a_wire_that_composes_its_own_prompt_is_sent_only_what_it_appends() {
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            ProviderEvent::TextDelta("sure".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ])
+        .composing_its_own_prompt(),
+    );
+    let seen = Arc::clone(&provider.seen);
+    let engine = bare(provider, "scripted-model")
+        .with_system_parts(Some("obey the tests".to_owned()), Some(FURNISHED_SUFFIX.to_owned()));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "hello".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    let system = requests[0].system.as_deref().expect("the appendix is sent");
+    let cwd = std::env::current_dir().expect("the engine was built in a directory");
+    let note = crate::instruction::workplace(&cwd);
+    assert_eq!(
+        system,
+        format!(
+            "{note}\nInstructions from: /project/AGENTS.md\nalways run the tests\
+             \nSkills provide specialized instructions and workflows for specific tasks.\n<available_skills>\n</available_skills>"
+        )
+    );
+    assert!(!system.contains("obey the tests"), "no family base leads the appendix");
+    assert!(!system.contains("<env>"), "and the block the client writes itself is not sent twice");
+    assert!(
+        system.contains(&cwd.display().to_string()),
+        "where the tools run is still said, in prose: {system}"
+    );
+}
+
+/// The breakdown prices what such a wire is sent: the workplace note alone
+/// under the system prompt, and the instruction file and skills as before.
+#[tokio::test]
+async fn the_breakdown_prices_nothing_a_self_composing_wire_is_not_sent() {
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()).composing_its_own_prompt());
+    let engine = bare(provider, MODEL)
+        .with_system_parts(Some("obey the tests".to_owned()), Some(FURNISHED_SUFFIX.to_owned()));
+
+    let stripped = engine.context_breakdown().await;
+    let whole = furnished(MODEL).context_breakdown().await;
+
+    // What is priced under the system prompt is the workplace note alone:
+    // no base, no block, and nothing for the client's own preset.
+    let cwd = std::env::current_dir().expect("the engine was built in a directory");
+    let note = crate::instruction::workplace(&cwd);
+    assert_eq!(
+        stripped.system_prompt,
+        crate::session::estimate_tokens(note.chars().count()),
+        "{stripped:?}"
+    );
+    // The token estimate rounds, so the one joining newline the cut took
+    // with the block is invisible here; the categories are what is compared.
+    assert_eq!(stripped.instructions, whole.instructions, "{stripped:?} against {whole:?}");
+    assert_eq!(stripped.skills, whole.skills, "{stripped:?} against {whole:?}");
+    assert!(whole.system_prompt > 0, "the same suffix priced whole carries the block: {whole:?}");
 }
 
 /// The grid's contract: the legend can only add up to the panel's total

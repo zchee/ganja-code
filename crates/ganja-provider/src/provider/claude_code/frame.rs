@@ -479,10 +479,14 @@ fn request(value: &serde_json::Value) -> Request {
 /// The first line this wire writes: what the CLI is being driven as.
 #[derive(Debug, Serialize)]
 pub struct Initialize {
-    /// The prompt this record runs under, or [`None`] for the CLI's own
-    /// preset. A `Vec` because that is the shape the CLI parses.
-    #[serde(rename = "systemPrompt", skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<Vec<String>>,
+    /// What this record's prompt says **after** the CLI's own, or [`None`]
+    /// for the bare preset. A string because that is the shape the CLI
+    /// parses for this key. Never `systemPrompt`, the key that replaces the
+    /// preset: a replaced prompt carrying ganja's `<env>` block was billed
+    /// as a third-party app's (**D568**), so the type has no field that
+    /// could send one.
+    #[serde(rename = "appendSystemPrompt", skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
     /// The servers this side will answer `mcp_message` for.
     #[serde(rename = "sdkMcpServers")]
     pub sdk_mcp_servers: Vec<String>,
@@ -535,8 +539,8 @@ impl Attachment {
 #[must_use]
 pub fn initialize_line(request_id: &str, initialize: &Initialize) -> String {
     // Serialized rather than hand-built, so that `skip_serializing_if` is
-    // what decides: a record on the CLI's own preset sends **no**
-    // `systemPrompt` key, where a `null` would be this side asserting
+    // what decides: a record on the CLI's bare preset sends **no**
+    // `appendSystemPrompt` key, where a `null` would be this side asserting
     // something about a field the recording never carries.
     let mut request = serde_json::to_value(initialize)
         .expect("an Initialize holds only strings and a JSON value");

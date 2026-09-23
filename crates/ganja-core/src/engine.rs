@@ -151,7 +151,11 @@ pub struct ContextBreakdown {
     /// a catalog display name) without a second accessor round trip.
     pub model: String,
     /// The system prompt's fixed half: the agent's own prompt (or the model
-    /// family's base prompt), plus the environment block.
+    /// family's base prompt), plus the environment block. On a wire whose
+    /// client composes its own base prompt (**D568**) this is the agent's
+    /// prompt, where one is set, plus the one-sentence workplace note ganja
+    /// appends; the client's own preset is carried but not priced, since
+    /// what it costs is not ganja's to know.
     pub system_prompt: u64,
     /// The instruction files — the `AGENTS.md` family — headers included,
     /// the ones a session walked in from below the root (**D480**) among them.
@@ -3694,9 +3698,13 @@ impl Engine {
     pub async fn context_breakdown(&self) -> ContextBreakdown {
         use crate::session::{compaction_reserve, estimate_tokens};
 
-        // The head the next request would carry: the agent's own prompt where
-        // the session runs as one, the base half where it does not —
-        // `system_for`'s rule, read from the same fields.
+        // The halves the next request would carry, `system_for`'s own read:
+        // the agent's prompt where the session runs as one, the base half
+        // where it does not — and for a provider that composes its own base
+        // prompt (**D568**) no base and no environment block, neither of
+        // which is priced here; what that client's own preset costs is not
+        // ganja's to know.
+        let (base, suffix) = self.halves_for_wire();
         let head = {
             let agent = self.active().agent.clone();
             agent
@@ -3706,9 +3714,9 @@ impl Engine {
                         .and_then(|registry| registry.get(&name))
                         .and_then(|agent| agent.prompt.clone())
                 })
-                .or_else(|| self.base_half())
+                .or(base)
         };
-        let suffix = self.environment_half().unwrap_or_default();
+        let suffix = suffix.unwrap_or_default();
         let measure = crate::instruction::suffix_measure(&suffix);
         let head_chars = head.as_deref().map_or(0, |head| head.chars().count());
 
@@ -4045,13 +4053,35 @@ impl Engine {
         self.recompose_base();
     }
 
+    /// The two halves as the wire will carry them: as composed, or — for a
+    /// provider that composes its own base prompt and environment block
+    /// (**D568**, `Provider::composes_base_prompt`) — no base at all and
+    /// [`crate::instruction::appendix`] for the suffix: where ganja's tools
+    /// run, said in prose, then the suffix with its block cut off. The prose
+    /// is not optional: that client's process runs in the wire's scratch
+    /// directory, so the block it writes itself names a directory ganja's
+    /// tools never work in. One place, read by the request, the subagent
+    /// host and the context breakdown alike, so the three cannot disagree
+    /// about what a turn carries.
+    fn halves_for_wire(&self) -> (Option<String>, Option<String>) {
+        if self.provider.composes_base_prompt() {
+            let suffix = self.environment_half();
+            let appendix = crate::instruction::appendix(&self.cwd, suffix.as_deref());
+
+            return (None, Some(appendix));
+        }
+
+        (self.base_half(), self.environment_half())
+    }
+
     /// The system prompt one turn carries: the agent's own prompt where it has
     /// one, the model family's base prompt where it does not, and the
-    /// environment half after either.
+    /// environment half after either — each as [`Engine::halves_for_wire`]
+    /// hands them, so a wire whose client composes its own base sees an
+    /// agent's prompt lead what it appends and no base otherwise.
     fn system_for(&self, agent: Option<&Agent>) -> Option<String> {
-        let base = self.base_half();
+        let (base, suffix) = self.halves_for_wire();
         let head = agent.and_then(|agent| agent.prompt.as_deref()).or(base.as_deref());
-        let suffix = self.environment_half();
 
         // What the connected servers said about themselves, after the
         // instruction files and before nothing — upstream's own position for
@@ -5382,6 +5412,8 @@ impl Engine {
             self.lent()
         };
 
+        let (base_prompt, prompt_suffix) = self.halves_for_wire();
+
         Some(Arc::new(subagent::Host {
             provider: Arc::clone(&self.provider),
             model,
@@ -5390,8 +5422,8 @@ impl Engine {
             tools,
             deferral,
             permissions: Arc::clone(&self.permissions),
-            base_prompt: self.base_half(),
-            prompt_suffix: self.environment_half(),
+            base_prompt,
+            prompt_suffix,
             cwd: self.cwd.clone(),
             root: self.root.clone(),
             credentials: self.credentials.clone(),

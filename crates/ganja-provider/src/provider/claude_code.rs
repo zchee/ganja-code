@@ -43,8 +43,10 @@
 //!
 //! Under the CLI's own preset prompt a process finds a warm prefix across
 //! processes (runs 4, 5 and 2e-2 read 3 364, 712 and 3 817). Under ganja's
-//! **replaced** prompt every cold process — fresh, resumed or replayed —
-//! reads **0** and pays its whole prefix. A turn carrying a tool call is two
+//! **replaced** prompt — what the wire sent before **D568**; it now appends
+//! to the preset, and what a cold process reads under that is unmeasured
+//! (bead `54wk`) — every cold process, fresh, resumed or replayed,
+//! read **0** and paid its whole prefix. A turn carrying a tool call is two
 //! API requests whose usage is summed, so such a turn's cache read is largely
 //! its own second request reading its first request's write. What follows is
 //! that a held process's cache is warm within the TTL and a fresh record's is
@@ -566,6 +568,12 @@ impl Provider for ClaudeCodeProvider {
     /// name in the frame's text, which is what the trait's default means.
     fn accepts_attachment(&self, mime: &str) -> bool {
         MESSAGES_API_MIMES.contains(&mime)
+    }
+
+    /// The CLI writes its own base prompt and its own `<env>` block, and its
+    /// API bills by them (**D568**): what this wire is handed is appended.
+    fn composes_base_prompt(&self) -> bool {
+        true
     }
 
     fn served_model(&self) -> Option<crate::provider::ServedModel> {
@@ -1438,7 +1446,9 @@ impl ClaudeCodeProvider {
 
 /// The `initialize` a process is opened with, under `request_id`.
 ///
-/// `system` replaces the CLI's own prompt, or leaves it the preset when
+/// `system` is **appended** to the CLI's own prompt — never sent as a
+/// replacement (**D568**: a replaced prompt carrying ganja's `<env>` block
+/// was billed as a third-party app's) — or leaves it the bare preset when
 /// [`None`]; `serves_tools` declares this side's server, which only a process
 /// that will be asked for a roster needs.
 fn opening(request_id: &str, system: Option<&str>, serves_tools: bool) -> String {
@@ -1453,7 +1463,7 @@ fn opening(request_id: &str, system: Option<&str>, serves_tools: bool) -> String
     frame::initialize_line(
         request_id,
         &frame::Initialize {
-            system_prompt: system.map(|system| vec![system.to_owned()]),
+            append_system_prompt: system.map(str::to_owned),
             sdk_mcp_servers,
             sdk_mcp_server_configs,
         },

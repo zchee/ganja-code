@@ -319,15 +319,15 @@ fn a_line_that_is_not_json_is_reported_rather_than_read_past() {
 
 // ------------------------------------------------------------- outbound
 
-/// A record on the CLI's own preset sends **no** `systemPrompt` key: a
-/// `null` there would be this side asserting something about a field the
+/// A record on the CLI's bare preset sends **no** `appendSystemPrompt` key:
+/// a `null` there would be this side asserting something about a field the
 /// recording never carries.
 #[test]
-fn a_record_on_the_clis_own_preset_sends_no_system_prompt_key() {
+fn a_record_on_the_clis_bare_preset_sends_no_append_key() {
     let line = super::initialize_line(
         "req-1",
         &Initialize {
-            system_prompt: None,
+            append_system_prompt: None,
             sdk_mcp_servers: vec!["ganja".to_owned()],
             sdk_mcp_server_configs: json!({"ganja": {"timeout": 3_600_000}}),
         },
@@ -336,7 +336,7 @@ fn a_record_on_the_clis_own_preset_sends_no_system_prompt_key() {
 
     assert_eq!(sent["request"]["subtype"], "initialize");
     assert!(
-        sent["request"].get("systemPrompt").is_none(),
+        sent["request"].get("appendSystemPrompt").is_none(),
         "absent, never null: {}",
         sent["request"]
     );
@@ -344,19 +344,26 @@ fn a_record_on_the_clis_own_preset_sends_no_system_prompt_key() {
     assert_eq!(sent["request"]["sdkMcpServerConfigs"]["ganja"]["timeout"], 3_600_000);
 }
 
+/// The prompt rides as `appendSystemPrompt`, a string, and the key that
+/// would replace the CLI's own prompt is never written (**D568**).
 #[test]
-fn a_replaced_prompt_rides_the_initialize_as_a_list() {
+fn the_prompt_rides_the_initialize_as_an_appendix_and_never_a_replacement() {
     let line = super::initialize_line(
         "req-1",
         &Initialize {
-            system_prompt: Some(vec!["you are ganja".to_owned()]),
+            append_system_prompt: Some("you are ganja".to_owned()),
             sdk_mcp_servers: Vec::new(),
             sdk_mcp_server_configs: json!({}),
         },
     );
     let sent: serde_json::Value = serde_json::from_str(line.trim()).expect("a JSON line");
 
-    assert_eq!(sent["request"]["systemPrompt"], json!(["you are ganja"]));
+    assert_eq!(sent["request"]["appendSystemPrompt"], json!("you are ganja"));
+    assert!(
+        sent["request"].get("systemPrompt").is_none(),
+        "the replacing key is never sent: {}",
+        sent["request"]
+    );
 }
 
 #[test]

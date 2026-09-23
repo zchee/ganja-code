@@ -483,6 +483,48 @@ async fn a_title_request_spawns_a_one_shot_beside_the_held_conversation() {
         "and like every other spawn on this wire it resumes nothing: {:?}",
         one_shot.argv
     );
+    // Its prompt too is an appendix to the CLI's own, never a replacement
+    // (**D568**): the title instruction rides after the preset.
+    assert!(
+        one_shot
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.starts_with("You are a title generator")),
+        "the one-shot appends its own instruction: {:?}",
+        one_shot.system_prompt
+    );
+    assert!(one_shot.replaced_prompt.is_none(), "{:?}", one_shot.replaced_prompt);
+}
+
+/// **D568.** The CLI runs in the wire's scratch directory, so the block it
+/// writes itself names that directory; what ganja appends opens by saying,
+/// in prose, where its tools really run — and carries none of the block's
+/// line shapes, which are what the API refused.
+#[tokio::test]
+async fn the_appendix_says_where_the_tools_run_and_wears_no_env_block() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["found it"]));
+    let (tool, _calls) = RecorderTool::new(TOOL, "lookup ran", ANSWER);
+    let provider = wired(&cli, home.path(), None);
+    let engine = seated(&provider, tool, rule(Action::Allow));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt("hello")).await.expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let record = cli.record(0);
+    let cwd = std::env::current_dir().expect("the engine was built in a directory");
+    let appended = record.system_prompt.as_deref().expect("the appendix is sent");
+    assert!(
+        appended.starts_with(&ganja_core::instruction::workplace(&cwd)),
+        "the note leads, naming {}: {appended:?}",
+        cwd.display()
+    );
+    assert_ne!(record.cwd, cwd.display().to_string(), "while the CLI itself ran elsewhere");
+    for shape in ["<env>", "Working directory:", "Is directory a git repo:"] {
+        assert!(!appended.contains(shape), "{shape:?} is the CLI's own line shape: {appended}");
+    }
+    assert!(record.replaced_prompt.is_none(), "{:?}", record.replaced_prompt);
 }
 
 /// **AC-4.16**, first half. After a turn the wire reports what the vendor
@@ -1059,15 +1101,12 @@ async fn an_agent_switch_keeps_the_process_and_only_an_eviction_opens_a_new_one(
     let [opening, fresh] = records.as_slice() else {
         panic!("the eviction is what opens the next record, got {records:?}");
     };
-    assert_eq!(
-        cli.record(*fresh).system_prompt.as_ref().map(Vec::len),
-        Some(1),
+    assert!(
+        cli.record(*fresh).system_prompt.is_some(),
         "and that record really did carry a system prompt of its own"
     );
     let carries_the_new_prompt = |at: usize| {
-        cli.record(at)
-            .system_prompt
-            .is_some_and(|lines| lines.iter().any(|line| line.contains(OTHER_PROMPT)))
+        cli.record(at).system_prompt.is_some_and(|prompt| prompt.contains(OTHER_PROMPT))
     };
     assert!(
         carries_the_new_prompt(*fresh),

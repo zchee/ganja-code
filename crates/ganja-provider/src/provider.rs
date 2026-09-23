@@ -789,6 +789,35 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Whether the far end composes the base prompt and the environment
+    /// block itself, so that [`ChatRequest::system`] carries only what is
+    /// to be **appended** to them (**D568**).
+    ///
+    /// The one wire that answers yes drives a vendor's own client, which
+    /// writes its own base prompt and its own `<env>` block and whose API
+    /// bills by them: a request that replaced that prompt with ganja's — the
+    /// family base plus ganja's own `<env>` block, in the client's shape —
+    /// was classified as a third-party app's and refused for the seat's
+    /// lack of extra usage. Bisected to the block's lines on 2026-09-23;
+    /// the identity, the betas, the argv, the roster and the prompt's length
+    /// were each cleared first.
+    ///
+    /// For such a wire the engine sends no family base prompt and strips
+    /// the environment block off the suffix, saying in prose instead where
+    /// ganja's tools run — the client's own block names the scratch
+    /// directory its process is spawned in; an agent's own prompt, where
+    /// one is set, is appended rather than leading. The wire in turn hands
+    /// whatever `system` it is given to the client as an appendix and never
+    /// as a replacement — a one-shot's prompt too, so a title or a
+    /// compaction summary is asked under the client's preset plus its own
+    /// instruction rather than under that instruction alone.
+    ///
+    /// The default is **no**: every vendor API takes the prompt ganja
+    /// composes, whole.
+    fn composes_base_prompt(&self) -> bool {
+        false
+    }
+
     /// The idle eviction this wire last performed, until the turn that pays
     /// for it opens (**D556**).
     ///

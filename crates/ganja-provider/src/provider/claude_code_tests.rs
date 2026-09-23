@@ -774,9 +774,11 @@ async fn the_records_own_prompt_is_the_one_the_request_carried() {
 
     turn(&provider, request(vec![user("m1", "ping")], 0)).await;
 
-    assert_eq!(
-        cli.record(0).system_prompt.as_deref(),
-        Some(["you are ganja".to_owned()].as_slice())
+    assert_eq!(cli.record(0).system_prompt.as_deref(), Some("you are ganja"));
+    assert!(
+        cli.record(0).replaced_prompt.is_none(),
+        "appended to the CLI's own prompt, never in its place (D568): {:?}",
+        cli.record(0).replaced_prompt
     );
 
     provider.shutdown().await;

@@ -307,9 +307,16 @@ pub(crate) struct SuffixMeasure {
 /// contains one of the markers shifts characters between neighbouring
 /// categories and changes no total.
 pub(crate) fn suffix_measure(suffix: &str) -> SuffixMeasure {
-    let files = suffix.find(&format!("\n{HEADER}"));
-    let memory = suffix.find(&format!("\n{MEMORY_HEAD}"));
-    let skills = suffix.find(&format!("\n{SKILLS_HEAD}"));
+    // A marker on the very first line is a boundary too: a suffix whose
+    // environment block was cut off (`without_environment`, **D568**) opens
+    // on its first instruction file, and that file is instructions rather
+    // than environment.
+    let opener = |head: &str| {
+        if suffix.starts_with(head) { Some(0) } else { suffix.find(&format!("\n{head}")) }
+    };
+    let files = opener(HEADER);
+    let memory = opener(MEMORY_HEAD);
+    let skills = opener(SKILLS_HEAD);
 
     let environment_end =
         [files, memory, skills].into_iter().flatten().min().unwrap_or(suffix.len());
@@ -710,6 +717,81 @@ fn escaped(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// What closes the environment block [`environment`] writes, and what
+/// [`without_environment`] cuts through — one constant so the two cannot
+/// disagree about where the block ends. The closer on a line of its own,
+/// because the block quotes two paths before it and a path may spell
+/// `</env>`; one that spells a newline before it is legal too and is not
+/// guarded against — bead `54wk` retires the cut altogether.
+const ENVIRONMENT_CLOSE: &str = "\n</env>";
+
+/// `suffix` with the environment block cut off: everything after the first
+/// [`ENVIRONMENT_CLOSE`], less the newline that joined it, or [`None`] when
+/// nothing follows — a suffix the block was the whole of. A suffix carrying
+/// no block at all — a scripted engine's own text — comes back whole.
+///
+/// For a provider that composes its own base prompt and environment block
+/// (**D568**, `Provider::composes_base_prompt`): the block's lines are the
+/// vendor client's own shape, and a request wearing them under any other
+/// prompt was billed as a third-party app's. A cut rather than a second
+/// composition without the block, so the one suffix the engine holds is the
+/// one [`suffix_measure`] prices and the one a wire is handed.
+#[must_use]
+pub(crate) fn without_environment(suffix: &str) -> Option<String> {
+    let Some((_, rest)) = suffix.split_once(ENVIRONMENT_CLOSE) else {
+        return Some(suffix.to_owned());
+    };
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// Where ganja's tools run, said in prose for a wire whose client writes its
+/// own environment block (**D568**).
+///
+/// That client's process runs in an empty scratch directory of the wire's
+/// own, so the block it writes names that directory and calls it no git
+/// checkout — which is where ganja's tools do **not** run. The facts the
+/// block ganja no longer sends carried, restated: the cwd, the project root
+/// and whether that root is a git checkout. Prose rather than the block's
+/// line shape (`Working directory:`, `Is directory a git repo:` …), because
+/// the shape is what the API read as a third-party app wearing the client's
+/// block; the owner's bisect passed prose carrying paths (`Instructions
+/// from:` lines) and the model line alone.
+///
+/// "Stated above" is a claim about where this sentence lands: after a
+/// preset that states a working directory, which is what every wire that
+/// answers `composes_base_prompt` today does. A second such wire whose
+/// preset says nothing of the kind needs its own sentence, not this one.
+#[must_use]
+pub fn workplace(cwd: &Path) -> String {
+    let project = Project::resolve(cwd);
+    let checkout =
+        if project.root().join(".git").exists() { "a git checkout" } else { "not a git checkout" };
+
+    format!(
+        "Ganja's tools run in {}, whose project root is {} ({checkout}); the working directory \
+         stated above is the host process's own scratch directory, not where the work happens.",
+        cwd.display(),
+        project.root().display(),
+    )
+}
+
+/// What a wire whose client composes its own base prompt is handed
+/// (**D568**): [`workplace`] first, where the environment block stood, then
+/// `suffix` with that block cut off — the instruction files, the memory
+/// section and the skills block exactly as composed.
+#[must_use]
+pub(crate) fn appendix(cwd: &Path, suffix: Option<&str>) -> String {
+    let mut appendix = workplace(cwd);
+    if let Some(rest) = suffix.and_then(without_environment) {
+        appendix.push('\n');
+        appendix.push_str(&rest);
+    }
+
+    appendix
+}
+
 /// The environment block, ported from upstream's `SystemPrompt.environment`.
 fn environment(cwd: &Path, model_id: &str) -> String {
     let project = Project::resolve(cwd);
@@ -727,8 +809,7 @@ fn environment(cwd: &Path, model_id: &str) -> String {
            Workspace root folder: {}\n  \
            Is directory a git repo: {git}\n  \
            Platform: {}\n  \
-           Today's date: {}\n\
-         </env>",
+           Today's date: {}{ENVIRONMENT_CLOSE}",
         cwd.display(),
         project.root().display(),
         std::env::consts::OS,

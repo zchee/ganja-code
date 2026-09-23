@@ -210,9 +210,14 @@ pub struct Record {
     /// The `tools/list` result it received: the roster this process was
     /// declared, so a test can see that a fresh record carried a new one.
     pub tools_list: Vec<String>,
-    /// The `initialize`'s `systemPrompt`, so a test can see which prompt a
-    /// respawn carried. [`None`] is a record on the CLI's own preset.
-    pub system_prompt: Option<Vec<String>>,
+    /// The `initialize`'s `appendSystemPrompt`, so a test can see which
+    /// prompt a respawn carried. [`None`] is a record on the CLI's bare
+    /// preset.
+    pub system_prompt: Option<String>,
+    /// The `initialize`'s `systemPrompt` — the key that **replaces** the
+    /// CLI's own prompt, which the wire never sends since **D568**.
+    /// Recorded so a test can assert it absent rather than trust the type.
+    pub replaced_prompt: Option<Vec<String>>,
     /// The `--session-id` it echoed.
     pub session_id: String,
     /// How many of the script's turns this process played.
@@ -544,10 +549,14 @@ where
 
         match frame["request"]["subtype"].as_str() {
             Some("initialize") => {
-                let prompt = frame["request"]["systemPrompt"].as_array().map(|lines| {
+                let appended = frame["request"]["appendSystemPrompt"].as_str().map(str::to_owned);
+                let replaced = frame["request"]["systemPrompt"].as_array().map(|lines| {
                     lines.iter().map(|line| line.as_str().unwrap_or_default().to_owned()).collect()
                 });
-                self.edit(|record| record.system_prompt = prompt);
+                self.edit(|record| {
+                    record.system_prompt = appended;
+                    record.replaced_prompt = replaced;
+                });
 
                 let mut reply = serde_json::json!({
                     "commands": [],

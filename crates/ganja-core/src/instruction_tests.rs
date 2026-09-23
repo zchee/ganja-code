@@ -5,9 +5,9 @@ use jiff::Timestamp;
 use tempfile::TempDir;
 
 use super::{
-    ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, base_prompt, date_at, discover, environment,
-    find_up, glob, joined, nested_files, nested_suffix, resolve_entry, resolved, skill,
-    skills_block, suffix_from, suffix_measure,
+    ANTHROPIC, DEFAULT, GPT, HEADER, NESTED_MAX, appendix, base_prompt, date_at, discover,
+    environment, find_up, glob, joined, nested_files, nested_suffix, resolve_entry, resolved,
+    skill, skills_block, suffix_from, suffix_measure, without_environment, workplace,
 };
 use crate::config::{Config, SkillsConfig};
 
@@ -644,6 +644,131 @@ fn a_bare_environment_suffix_measures_as_environment_alone() {
     assert_eq!(measure.environment, suffix.chars().count());
     assert_eq!(measure.instructions, 0);
     assert_eq!(measure.skills, 0);
+}
+
+/// The cut a self-composing wire's suffix takes (**D568**): through the
+/// block's own closer, then the newline that joined the first file, so what
+/// remains opens on that file exactly as the composer wrote it.
+#[test]
+fn the_environment_block_is_cut_at_the_closer_the_composer_wrote() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    fs::create_dir_all(&root).expect("the fixture tree is creatable");
+    checkout(&root);
+    fs::write(root.join("AGENTS.md"), "always run the tests\n").expect("the file is written");
+
+    let suffix = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
+    let cut = without_environment(&suffix).expect("an instruction file follows the block");
+
+    assert!(suffix.contains("<env>"), "{suffix}");
+    assert!(!cut.contains("</env>"), "{cut}");
+    assert!(cut.starts_with(HEADER), "the cut opens on the first file, not a blank line: {cut:?}");
+    assert!(cut.ends_with("always run the tests\n"), "{cut}");
+    assert_eq!(suffix.len(), suffix.find(HEADER).expect("the file follows") + cut.len());
+}
+
+/// A suffix the block was the whole of leaves nothing to append; a suffix
+/// carrying no block at all — a scripted engine's own text — comes back
+/// whole rather than cut at a closer it never had.
+#[test]
+fn a_bare_environment_leaves_nothing_and_a_blockless_suffix_is_kept_whole() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    fs::create_dir_all(&root).expect("the fixture tree is creatable");
+    checkout(&root);
+
+    let bare = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
+    assert_eq!(without_environment(&bare), None);
+
+    assert_eq!(without_environment("obey the tests").as_deref(), Some("obey the tests"));
+}
+
+/// The closer is the one on a line of its own: a checkout whose path spells
+/// `</env>` — legal on every Unix — does not end the block early and leave
+/// the client's own lines behind to be refused again.
+#[test]
+fn a_path_spelling_the_closer_does_not_end_the_block_early() {
+    let directory = temporary();
+    let root = directory.path().join("a</env>");
+    fs::create_dir_all(&root).expect("the fixture tree is creatable");
+    checkout(&root);
+    fs::write(root.join("AGENTS.md"), "always run the tests\n").expect("the file is written");
+
+    let suffix = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
+    assert!(suffix.contains("a</env>"), "the fixture path is quoted in the block: {suffix}");
+    let cut = without_environment(&suffix).expect("an instruction file follows the block");
+
+    assert!(cut.starts_with(HEADER), "cut at the block's own closer, not the path's: {cut:?}");
+    assert!(!cut.contains("Today's date:"), "{cut}");
+}
+
+/// The prose that stands where the block stood for a self-composing wire
+/// (**D568**): the cwd, the root and the checkout, and none of the block's
+/// line shapes.
+#[test]
+fn the_workplace_note_says_where_the_tools_run_in_prose() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    let deep = root.join("src");
+    fs::create_dir_all(&deep).expect("the fixture tree is creatable");
+    checkout(&root);
+
+    let note = workplace(&deep);
+    assert!(note.contains(&deep.display().to_string()), "{note}");
+    assert!(note.contains(&resolved(&root).display().to_string()), "{note}");
+    assert!(note.contains("(a git checkout)"), "{note}");
+    for shape in ["<env>", "Working directory:", "Is directory a git repo:", "Platform:"] {
+        assert!(!note.contains(shape), "{shape:?} is the client's own line shape: {note}");
+    }
+
+    let loose = directory.path().join("loose");
+    fs::create_dir_all(&loose).expect("the fixture tree is creatable");
+    assert!(workplace(&loose).contains("(not a git checkout)"), "{}", workplace(&loose));
+}
+
+/// The appendix opens on the note, then the cut suffix; with no suffix it is
+/// the note alone.
+#[test]
+fn the_appendix_is_the_note_then_the_cut_suffix() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    fs::create_dir_all(&root).expect("the fixture tree is creatable");
+    checkout(&root);
+    fs::write(root.join("AGENTS.md"), "always run the tests\n").expect("the file is written");
+
+    let suffix = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
+    let cut = without_environment(&suffix).expect("an instruction file follows the block");
+
+    assert_eq!(appendix(&root, Some(&suffix)), format!("{}\n{cut}", workplace(&root)));
+    assert_eq!(appendix(&root, None), workplace(&root));
+}
+
+/// A marker on the very first line is a boundary too: the cut suffix opens
+/// on its first instruction file, and that file is priced as instructions
+/// rather than swept up as environment.
+#[test]
+fn the_suffix_measure_prices_a_cut_suffix_as_instructions_from_its_first_line() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    fs::create_dir_all(&root).expect("the fixture tree is creatable");
+    checkout(&root);
+    fs::write(root.join("AGENTS.md"), "always run the tests\n").expect("the file is written");
+
+    let suffix = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
+    let cut = without_environment(&suffix).expect("an instruction file follows the block");
+
+    let whole = suffix_measure(&suffix);
+    let measured = suffix_measure(&cut);
+    assert_eq!(measured.environment, 0, "{measured:?}");
+    // One character short: the newline that joined the block to the first
+    // file went with the block, and whole pricing counts it as instructions.
+    assert_eq!(measured.instructions + 1, whole.instructions, "{measured:?} against {whole:?}");
+    assert_eq!(measured.skills, whole.skills, "{measured:?} against {whole:?}");
 }
 
 /// The nested walk (**D480**), named the way the assertions below read it:

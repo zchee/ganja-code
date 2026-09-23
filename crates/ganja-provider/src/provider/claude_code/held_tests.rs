@@ -302,7 +302,7 @@ async fn a_changed_system_prompt_rides_the_same_process_and_the_next_fresh_recor
     assert_eq!(cli.record(0).user_frames.len(), 2);
     assert_eq!(
         cli.record(0).system_prompt.as_deref(),
-        Some(["you are ganja".to_owned()].as_slice()),
+        Some("you are ganja"),
         "it keeps what it opened with"
     );
 
@@ -326,7 +326,7 @@ async fn a_changed_system_prompt_rides_the_same_process_and_the_next_fresh_recor
     assert_eq!(cli.count(), 2);
     assert_eq!(
         cli.record(1).system_prompt.as_deref(),
-        Some(["you are ganja, and you have walked into a subtree".to_owned()].as_slice())
+        Some("you are ganja, and you have walked into a subtree")
     );
 
     provider.shutdown().await;
