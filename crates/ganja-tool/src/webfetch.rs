@@ -10,7 +10,7 @@
 //! and refusing them would break the large fraction of the web that answers
 //! `http` with a 301 to `https`.
 
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -271,6 +271,28 @@ impl Tool for WebfetchTool {
 /// The unspecified addresses are in the set too, though nothing named them:
 /// `0.0.0.0` and `::` route to this machine on every stack that matters, so
 /// leaving them out would make the loopback line above decorative.
+///
+/// So are these special-purpose ranges, because each is either somebody's
+/// private network or no single host on the internet at all:
+///
+/// - `0.0.0.0/8`, "this host on this network" (RFC 1122), which a stack
+///   routes the way it routes `0.0.0.0`;
+/// - `100.64.0.0/10`, the shared address space (RFC 6598) — a carrier's NAT,
+///   and the range overlay networks such as Tailscale number their peers in;
+/// - `192.0.0.0/24`, IETF protocol assignments (RFC 6890);
+/// - `198.18.0.0/15`, benchmarking (RFC 2544), a lab network by definition;
+/// - `240.0.0.0/4`, reserved (RFC 1112), and the limited broadcast address
+///   `255.255.255.255` at its top (RFC 919);
+/// - multicast, `224.0.0.0/4` (RFC 5771) and `ff00::/8` (RFC 4291), which
+///   names a group on some network rather than one host;
+/// - `fec0::/10`, IPv6 site-local — deprecated by RFC 3879, and still routed
+///   by a stack that never dropped it.
+///
+/// An IPv6 address that carries an IPv4 one is refused as the address it
+/// carries: v4-mapped `::ffff:0:0/96` (RFC 4291), NAT64's well-known prefix
+/// `64:ff9b::/96` (RFC 6052) and 6to4's `2002::/16` (RFC 3056). A translator or
+/// relay turns the last two into a packet to that v4 address, so
+/// `64:ff9b::a00:1` reaches exactly what `10.0.0.1` would.
 fn blocked(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
@@ -278,19 +300,41 @@ fn blocked(address: IpAddr) -> bool {
                 || address.is_private()
                 || address.is_link_local()
                 || address.is_unspecified()
+                || address.is_broadcast()
+                || address.is_multicast()
+                // The rest have no stable predicate — `is_shared`,
+                // `is_benchmarking` and `is_reserved` are still unstable, and
+                // `0/8` and `192.0.0/24` have none at all — so they are spelled
+                // as octets here rather than paid for with a crate-wide feature
+                // gate.
+                || matches!(
+                    address.octets(),
+                    [0, ..]
+                        | [100, 64..=127, ..]
+                        | [192, 0, 0, _]
+                        | [198, 18..=19, ..]
+                        | [240..=255, ..]
+                )
         }
-        // An address written as `::ffff:127.0.0.1` is the v4 address it wraps,
-        // and refusing it as one is the whole point of unwrapping here.
-        IpAddr::V6(address) => match address.to_ipv4_mapped() {
-            Some(mapped) => blocked(IpAddr::V4(mapped)),
-            // `is_unique_local` and `is_unicast_link_local` are still unstable,
-            // so the two prefixes are matched here rather than paid for with a
-            // crate-wide feature gate.
-            None => {
+        IpAddr::V6(address) => match address.segments() {
+            // An address written as `::ffff:127.0.0.1` is the v4 address it
+            // wraps, and refusing it as one is the whole point of unwrapping
+            // here — as it is for the NAT64 and 6to4 forms, whose v4 address a
+            // translator or relay connects to one hop further on.
+            [0, 0, 0, 0, 0, 0xffff, high, low]
+            | [0x64, 0xff9b, 0, 0, 0, 0, high, low]
+            | [0x2002, high, low, ..] => {
+                blocked(IpAddr::V4(Ipv4Addr::from_bits((u32::from(high) << 16) | u32::from(low))))
+            }
+            // Site-local has no stable predicate, so its prefix is matched
+            // here.
+            [first, ..] => {
                 address.is_loopback()
                     || address.is_unspecified()
-                    || (address.segments()[0] & 0xfe00) == 0xfc00
-                    || (address.segments()[0] & 0xffc0) == 0xfe80
+                    || address.is_multicast()
+                    || address.is_unique_local()
+                    || address.is_unicast_link_local()
+                    || (first & 0xffc0) == 0xfec0
             }
         },
     }
@@ -337,8 +381,9 @@ fn resolved_and_allowed(url: &reqwest::Url) -> Result<Vec<SocketAddr>, ToolError
 /// exists for — and a refusal is not a reason to put one in a transcript.
 fn refusal(host: &str) -> ToolError {
     ToolError::Failed(format!(
-        "{host} resolves to an address on this machine or a private network, which webfetch \
-         does not reach. Set webfetch.allow_private in the config to allow it."
+        "{host} resolves to an address on this machine, on a private network or in a reserved \
+         range, which webfetch does not reach. Set webfetch.allow_private in the config to \
+         allow it."
     ))
 }
 

@@ -102,7 +102,7 @@ const PAGE: &str = "<html><head><title>t</title><style>body{color:red}</style>\
 /// that ask the tool what it *is*, rather than fetching anything, use
 /// `new` because that is the tool a session gets.
 #[tokio::test]
-async fn a_url_on_this_machine_or_a_private_network_is_refused_before_anything_is_opened() {
+async fn a_local_private_or_reserved_address_is_refused_before_anything_is_opened() {
     // Nothing here is listening, and nothing needs to be: a refusal that
     // opened a socket first would not be this refusal.
     let refused = [
@@ -112,10 +112,25 @@ async fn a_url_on_this_machine_or_a_private_network_is_refused_before_anything_i
         ("http://192.168.1.1/", "an RFC 1918 192"),
         ("http://169.254.169.254/latest/meta-data/", "link-local"),
         ("http://0.0.0.0/", "the unspecified address"),
+        ("http://0.1.2.3/", "this network, past its unspecified address"),
+        ("http://100.64.0.1/", "the bottom of the shared address space"),
+        ("http://100.127.255.255/", "the top of the shared address space"),
+        ("http://192.0.0.1/", "an IETF protocol assignment"),
+        ("http://198.18.0.1/", "the bottom of the benchmarking range"),
+        ("http://198.19.255.255/", "the top of the benchmarking range"),
+        ("http://224.0.0.1/", "v4 multicast"),
+        ("http://240.0.0.1/", "a reserved v4"),
+        ("http://255.255.255.255/", "the limited broadcast address"),
         ("http://[::1]/", "loopback, written as v6"),
         ("http://[::ffff:127.0.0.1]/", "loopback, wrapped in a v6"),
         ("http://[fd00::1]/", "a unique-local v6"),
         ("http://[fe80::1]/", "a link-local v6"),
+        ("http://[fec0::1]/", "a site-local v6"),
+        ("http://[ff02::1]/", "v6 multicast"),
+        ("http://[64:ff9b::a00:1]/", "a ten, through NAT64"),
+        ("http://[64:ff9b::6464:6401]/", "the shared address space, through NAT64"),
+        ("http://[2002:a00:1::]/", "a ten, through 6to4"),
+        ("http://[2002:6464:6401::]/", "the shared address space, through 6to4"),
     ];
 
     for (url, what) in refused {
@@ -127,7 +142,10 @@ async fn a_url_on_this_machine_or_a_private_network_is_refused_before_anything_i
         let ToolError::Failed(message) = &error else {
             panic!("{what} should be refused as a failure: {error:?}");
         };
-        assert!(message.contains("private network"), "{what} should say why: {message}");
+        assert!(
+            message.contains("on this machine, on a private network or in a reserved range"),
+            "{what} should say why: {message}"
+        );
         assert!(
             !message.contains("latest/meta-data"),
             "a refusal names the host and not the whole URL, which can carry a \
@@ -176,9 +194,16 @@ fn a_public_address_is_not_what_the_guard_refuses() {
         ("http://192.167.255.255/", "just below the 192 range"),
         ("http://192.169.0.1/", "just above the 192 range"),
         ("http://169.253.0.1/", "just below link-local"),
+        ("http://100.63.255.255/", "just below the shared address space"),
+        ("http://100.128.0.0/", "just above the shared address space"),
+        ("http://192.0.1.1/", "just above the protocol assignments"),
+        ("http://198.17.255.255/", "just below the benchmarking range"),
+        ("http://198.20.0.0/", "just above the benchmarking range"),
         ("http://[2001:4860:4860::8888]/", "a public v6"),
+        ("http://[2003:a00:1::]/", "a public v6 just past 6to4, whose next bits read as a ten"),
         ("http://[fe00::1]/", "just below the unique-local prefix"),
-        ("http://[fec0::1]/", "just above the link-local prefix"),
+        ("http://[64:ff9b::0808:0808]/", "a public v4, through NAT64"),
+        ("http://[2002:808:808::]/", "a public v4, through 6to4"),
     ];
 
     for (url, what) in allowed {
