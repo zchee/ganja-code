@@ -142,7 +142,7 @@ backon = { version = "1.6.0", default-features = false, features = [
 # `simd-unsafe` is one of this crate's own defaults; it is named here so that a
 # later `default-features = false` cannot drop the vectorised codec silently.
 base64 = { version = "0.23.1", features = ["simd-unsafe"] }
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -190,7 +190,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 # retires the CLI's silent UTC degradation. Pre-1.0 accepted deliberately;
 # each adopting crate's jiff surface is enumerated in its commit so a future
 # major is a grep-sized migration.
-jiff = "0.2.35"
+jiff = "0.2.37"
 # The JSONC dialect ganja's own config has left, kept for the two readers that
 # still meet a file written in it: `config::legacy`, which is how `ganja config
 # migrate` reads what it converts, and `import.rs`, which reads upstream
@@ -200,7 +200,7 @@ jiff = "0.2.35"
 # written in, which is what a translation of `permission` rules needs.
 # Nothing writes this dialect any more, and the `cst` feature left with the
 # last writer — `mcp add` edits TOML through toml_edit now.
-jsonc-parser = "0.33.1"
+jsonc-parser = "0.33.2"
 # Compiles and validates the in-repo config schema against Draft 2020-12, both
 # in the drift test (crates/ganja-core/tests/config_schema.rs) and nowhere
 # else — dev-only. Default features add a `reqwest`-backed resolver for
@@ -301,7 +301,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.3.0", default-features = false, features = [
+rmcp = { version = "3.4.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -322,7 +322,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # verification gate: rustix must pass O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC
 # through unmodified, checked in the vendored source before any code moves,
 # and this declaration is inert if that gate fails.
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs"] }
 schemars = "1.2.2"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
@@ -395,7 +395,7 @@ toml = { version = "1.1.6", features = ["preserve_order"] }
 # comments away, which is this crate's whole job. `serde` is on because the
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
-toml_edit = { version = "0.25.14", features = ["serde"] }
+toml_edit = { version = "0.25.15", features = ["serde"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
