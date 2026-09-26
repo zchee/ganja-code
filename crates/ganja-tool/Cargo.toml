@@ -40,7 +40,8 @@ jiff.workspace = true
 htmd.workspace = true
 # The TypeSafe SDK takes a custom transport as a `tower_service::Service` over
 # `http` requests; this and `tower-service` below are what the adapter handing
-# it `reqwest` is written in.
+# it `reqwest` is written in, and `Settings::base_from` refuses a base URL
+# `http::Uri` does not parse.
 http.workspace = true
 # `webfetch`'s text format walks the parse tree htmd hands back rather than
 # htmd's rendering of it: that rendering markdown-escapes every text node and

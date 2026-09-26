@@ -168,7 +168,8 @@ grep-searcher = "0.1.17"
 htmd = "0.5.5"
 # The request and response types of the TypeSafe SDK's transport seam: the
 # `evaluate` client hands the SDK its own reqwest client, and the adapter
-# between the two speaks `http::Request`/`http::Response`. Already in the lock
+# between the two speaks `http::Request`/`http::Response`. `Settings::base_from`
+# also refuses a base URL `http::Uri` does not parse. Already in the lock
 # beneath hyper and reqwest.
 http = "1.5.0"
 # `Retry-After` can be an IMF-fixdate; the exact-purpose parser for it,

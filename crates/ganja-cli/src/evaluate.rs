@@ -55,12 +55,6 @@
 //! consulted only for the client and the exchange, neither of which can
 //! raise either error.
 //!
-//! One configuration row *is* decided by `code_for`: `RefusedKey`, which
-//! only building the client raises, because the SDK is what refuses a key it
-//! will not send. The client is built straight after `from_env`, before any
-//! argument or stdin is read, so this 3 wins over a 64 exactly as the other
-//! configuration refusals do.
-//!
 //! Its `RefusedBase | RefusedModel` and `InvalidRequest` arms are therefore
 //! **unreachable**, and kept deliberately: they are totality for a
 //! `#[non_exhaustive]` enum, and they agree with the two call sites, so this
@@ -86,6 +80,12 @@
 //! into the permission dialog's `·`-separated title, where an unbounded value
 //! could forge a second, smaller-looking disclosure. Printing the forgery in
 //! the refusal would put it on the screen anyway.
+//!
+//! One configuration row *is* decided by `code_for`: `RefusedKey`, which
+//! only building the client raises, because the SDK is what refuses a key it
+//! will not send. The client is built straight after `from_env`, before any
+//! argument or stdin is read, so this 3 wins over a 64 exactly as the other
+//! configuration refusals do.
 //!
 //! **2 is the one that matters**, and nothing here ever returns it: under a
 //! `PreToolUse` hook an exit 2 *blocks the tool call*
@@ -407,9 +407,6 @@ fn model_refusal(model: &str) -> Option<typesafe::Error> {
 /// about its own request.
 fn code_for(error: &typesafe::Error) -> u8 {
     match error {
-        // `RefusedKey` is the one configuration arm this function is the
-        // call site for: the client is built straight after `from_env`, and
-        // building it is where the SDK refuses a key.
         typesafe::Error::RefusedBase
         | typesafe::Error::RefusedModel
         | typesafe::Error::RefusedKey => NOT_CONFIGURED,

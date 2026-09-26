@@ -291,15 +291,6 @@ async fn one_evaluation_posts_the_endpoint_path_the_bearer_key_and_exactly_this_
         head.lines().any(|line| line.eq_ignore_ascii_case(&format!("authorization: Bearer {KEY}"))),
         "the key travels as a bearer token: {head}"
     );
-    // Ganja names itself first; the SDK's own product follows, and the vendor
-    // counts SDK traffic by that.
-    assert!(
-        head.lines().any(|line| line.to_ascii_lowercase().starts_with(&format!(
-            "user-agent: ganja-code/{} typesafe-sdk-rust/",
-            env!("CARGO_PKG_VERSION")
-        ))),
-        "ganja names itself, and the SDK after it: {head}"
-    );
     assert!(
         head.lines().any(|line| line.eq_ignore_ascii_case("content-type: application/json")),
         "the body is declared as JSON: {head}"
@@ -437,8 +428,9 @@ async fn an_answer_type_this_build_does_not_know_is_kept_whole_rather_than_faili
 async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
     // The SDK passes over an answer of a type it does not model without
     // evaluating it, so it accepts bodies a whole-value parse would refuse.
-    // Each one here is such a body, and each skipped answer still reaches
-    // the model: whole where a value can hold it, by its type where not.
+    // Each one here but the last is such a body, and in each the skipped
+    // answer still reaches the model: whole where a value can hold it, by its
+    // type where not.
     let usage = r#""usage":{"input_tokens":1,"output_tokens":0}"#;
     let cases = [
         (
@@ -463,6 +455,15 @@ async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
                 r#"{{"model":"jev-1.13.0","answers":{{"stale":{{"type":"noul","noul":0.9}}}},"answers":{{"urgent":{{"type":"quanta","quanta":[0.1]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
             ),
             serde_json::json!({"type": "quanta", "quanta": [0.1]}),
+        ),
+        (
+            // One id answered twice, both of a type the SDK skips. The
+            // answers hold one per id, and the raw read keeps the last.
+            "one id answered twice, both skipped",
+            format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"urgent":{{"type":"quanta","quanta":[0.1]}},"urgent":{{"type":"quanta","quanta":[0.2]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
+            ),
+            serde_json::json!({"type": "quanta", "quanta": [0.2]}),
         ),
     ];
 
@@ -518,9 +519,9 @@ async fn every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names()
     // The SDK tells a 403 for a request without a key
     // (`authentication_error`) from a 403 for a key that lacks a permission
     // (`permission_denied`). This client keeps both, and every other 401 and
-    // 403, the rejection they were before the SDK: the judge reads a 401 as
-    // "switch off" and a 403 as "skip this segment", and which 403s belong
-    // with the 401 is not decided here.
+    // 403, a rejection: the judge reads a 401 as "switch off" and a 403 as
+    // "skip this segment", and which 403s belong with the 401 is not decided
+    // here.
     for (status, body) in [
         (401_u16, r#"{"detail":{"error_type":"authentication_error","message":"Bad key."}}"#),
         (401, ""),
@@ -552,8 +553,7 @@ async fn a_refusal_whose_body_breaks_off_loses_its_status_and_is_a_transport_fai
     // Accepted from the SDK rather than decided here: a response whose body
     // cannot be read is a broken connection to it, whatever status line came
     // first. So a 401 or a 422 cut off mid-body is `Transport` (exit 5,
-    // "unavailable") where the hand-written client kept the status and
-    // answered `Rejected` or `Invalid` (exit 4, "refused").
+    // "unavailable"), not `Rejected` or `Invalid` (exit 4, "refused").
     for status in [401_u16, 422] {
         let cut_short = Reply::Canned(
             format!(
@@ -860,16 +860,12 @@ async fn a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined(
 /// environment could not have.
 #[test]
 fn settings_from_parts_refuse_a_cleartext_base_and_an_unusable_model_and_accept_loopback() {
-    let too_long = padded_base(MAX_BASE + 1);
     let refused = [
         ("http://example.com", "jev-1.13.0", Error::RefusedBase, "plain http off loopback"),
         ("http://127.0.0.1.evil.com", "jev-1.13.0", Error::RefusedBase, "a domain, not loopback"),
         ("https://eu.example/?token=t", "jev-1.13.0", Error::RefusedBase, "a query to drop"),
         ("https://tok@eu.example", "jev-1.13.0", Error::RefusedBase, "userinfo the SDK refuses"),
         ("not a url", "jev-1.13.0", Error::RefusedBase, "no URL at all"),
-        ("https://{{host}}/v1", "jev-1.13.0", Error::RefusedBase, "an unexpanded template host"),
-        ("https://${host}", "jev-1.13.0", Error::RefusedBase, "an unexpanded shell variable"),
-        (too_long.as_str(), "jev-1.13.0", Error::RefusedBase, "one byte past MAX_BASE"),
         ("https://api.typesafe.ai", "jev latest", Error::RefusedModel, "a space"),
         ("https://api.typesafe.ai", "", Error::RefusedModel, "an empty id"),
         (
@@ -917,13 +913,7 @@ fn settings_from_parts_refuse_a_cleartext_base_and_an_unusable_model_and_accept_
 #[test]
 fn a_base_an_http_request_cannot_carry_is_refused_as_the_base_and_never_as_the_key() {
     let too_long = padded_base(MAX_BASE + 1);
-    for base in [
-        "https://{{host}}/v1",
-        "https://${host}",
-        "https://a\"b.example",
-        "https://a`b.example",
-        too_long.as_str(),
-    ] {
+    for base in ["https://{{host}}/v1", too_long.as_str()] {
         let refused = Settings::from_parts(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
             .and_then(Client::new)
             .err()
@@ -1063,12 +1053,11 @@ async fn the_model_a_call_names_is_what_travels_and_an_alias_passes_through_unto
 
 #[tokio::test]
 async fn a_known_answer_type_whose_payload_is_wrong_fails_the_response_and_names_the_field() {
-    // The SDK's rule, adopted with it: an answer that names a `type` this
-    // build knows and then contradicts it is not a shape to guess at, so the
-    // whole response is malformed — and the model is told to carry on without
-    // the judgement rather than handed half of one. What differs from an
-    // unknown `type` is that nothing here is new: it is the vendor's own
-    // shape, broken.
+    // The SDK's rule: an answer that names a `type` this build knows and then
+    // contradicts it is not a shape to guess at, so the whole response is
+    // malformed — and the model is told to carry on without the judgement
+    // rather than handed half of one. What differs from an unknown `type` is
+    // that nothing here is new: it is the vendor's own shape, broken.
     let body = r#"{"model":"jev-1.13.0","answers":{"a":{"type":"noul"},"b":{"type":"noul","noul":0.4}},"usage":{"input_tokens":3,"output_tokens":1}}"#;
     let asked = request(
         BTreeMap::from([

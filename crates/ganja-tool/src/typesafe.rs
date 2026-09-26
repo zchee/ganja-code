@@ -27,10 +27,8 @@
 //! numbers, how a 422 is reduced to a sentence, and what each failure tells
 //! the model to do next.
 //!
-//! The bytes still travel through ganja's own `reqwest` client, handed to the
-//! SDK through its custom-transport seam (`Transport`). The SDK's own
-//! transport is not compiled here and speaks no proxy; this one honours the
-//! system proxy settings every other HTTP client in the tree honours.
+//! The bytes travel through ganja's own `reqwest` client, handed to the SDK
+//! through its custom-transport seam (`Transport`).
 //!
 //! The vendor is told who is asking in `User-Agent`, ganja's product token
 //! first and the SDK's last, and `X-TypeSafe-SDK` names the SDK. The
@@ -191,13 +189,12 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// [`Error::RefusedBase`] when [`BASE_ENV`] is set to something that
-    /// would put the key on the wire in the clear, or that carries userinfo,
-    /// a query or a fragment, a host an HTTP request cannot carry or more than
-    /// [`MAX_BASE`] bytes; [`Error::RefusedModel`] when [`MODEL_ENV`] is
-    /// not a usable model id. A missing [`KEY_ENV`] is `Ok(None)` and not an
-    /// error: not being configured is the ordinary case. A key the SDK will
-    /// not send is found when the client is built ([`Error::RefusedKey`]).
+    /// [`Error::RefusedBase`] when [`BASE_ENV`] is set to a base
+    /// [`Settings::base_from`] refuses; [`Error::RefusedModel`] when
+    /// [`MODEL_ENV`] is not a usable model id. A missing [`KEY_ENV`] is
+    /// `Ok(None)` and not an error: not being configured is the ordinary
+    /// case. A key the SDK will not send is found when the client is built
+    /// ([`Error::RefusedKey`]).
     pub fn from_env() -> Result<Option<Self>, Error> {
         let read = |name| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
 
@@ -318,9 +315,6 @@ impl Settings {
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return Err(Error::RefusedBase);
         }
-        // `url` and the HTTP client's URI parser disagree on which characters
-        // a host may hold, and the SDK's refusal of such a base, when the
-        // client is built, would otherwise be reported as the key's.
         let handed = parsed.as_str();
         if handed.len() > MAX_BASE || handed.parse::<http::Uri>().is_err() {
             return Err(Error::RefusedBase);
@@ -908,8 +902,8 @@ fn is_id(id: &str) -> bool {
 /// [`Error::Malformed`]: that is the SDK's rule, and a payload that
 /// contradicts its own `type` is not one to guess at.
 ///
-/// `Deserialize` stays for the JSON form `ganja evaluate --format json`
-/// prints, so a caller can read that document back.
+/// `Deserialize` is for the JSON form `ganja evaluate --format json` prints,
+/// so a caller can read that document back.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
@@ -1031,11 +1025,9 @@ impl Client {
             .max_response_bytes(MAX_RESPONSE)
             // One consent is one transmission.
             .retry(RetryPolicy::none())
-            // Ganja names itself in `User-Agent`, in front of the SDK's own
-            // product, as it did before the SDK sent the request.
             .user_agent_product(USER_AGENT_PRODUCT)
             // The operating system and CPU architecture are nobody's
-            // business at the vendor, and ganja never sent them.
+            // business at the vendor.
             .send_runtime_header(false)
             .build_with_service(Transport(http))
             .map_err(|error| match error.kind() {
@@ -1111,7 +1103,7 @@ impl Client {
 ///
 /// The SDK skips an answer whose `type` it does not model and keeps the bytes
 /// it received. Such an answer still becomes [`Answer::Other`] here, read
-/// back out of those bytes by [`skipped`], so the model is told it asked
+/// back out of those bytes by [`raw_answers`], so the model is told it asked
 /// something this build cannot read rather than finding the id missing. That
 /// second read is of a body the SDK already held under the response cap;
 /// guessing from counts whether one was skipped would miss the vendor
@@ -1122,10 +1114,12 @@ fn converted(answered: &typesafe_sdk::SystemOneResponse) -> Response {
         let Some(answer) = known(answer) else {
             continue;
         };
-        // The first of a repeated id, as the SDK's own lookups return.
+        // The first of a repeated id, as the SDK's own lookups return. Where
+        // the SDK skipped every answer under an id, the loop below takes the
+        // last of them, the one `raw_answers` keeps.
         answers.entry(id.to_owned()).or_insert(answer);
     }
-    for (id, raw) in skipped(answered.meta().raw_body()) {
+    for (id, raw) in raw_answers(answered.meta().raw_body()) {
         answers.entry(id).or_insert_with(|| other(raw));
     }
 
@@ -1185,7 +1179,7 @@ fn known(answer: &typesafe_sdk::Answer) -> Option<Answer> {
 /// repeated `answers` member resolves as the SDK resolves it, to the last
 /// one. A body with no `answers` at all, which the SDK accepts as no
 /// answers, is the empty map.
-fn skipped(body: &[u8]) -> BTreeMap<String, &RawValue> {
+fn raw_answers(body: &[u8]) -> BTreeMap<String, &RawValue> {
     let members = serde_json::from_slice::<BTreeMap<String, &RawValue>>(body).unwrap_or_default();
 
     members
@@ -1229,7 +1223,7 @@ fn failure(error: typesafe_sdk::Error) -> Error {
         // `detail.error_type` is `authentication_error`. `refusal` makes
         // every other 401 and 403 a rejection too, so a 403 the vendor sends
         // for another reason, `permission_denied` among them, is exactly the
-        // rejection it was before the SDK (D569).
+        // same rejection (D569).
         ErrorKind::Api(refused)
             if matches!(refused.status().as_u16(), 401 | 403) && refused.is_authentication() =>
         {
