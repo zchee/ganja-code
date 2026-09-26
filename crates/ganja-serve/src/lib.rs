@@ -109,6 +109,10 @@ pub const DEFAULT_PORT: u16 = 4096;
 
 /// How often the event stream proves it is alive when nothing is happening,
 /// upstream's tick (`server/routes/instance/httpapi/handlers/event.ts:63`).
+///
+/// Load-bearing for `ganja-client`: it gives up on a stream silent for its
+/// `READ_DEADLINE`, so this has to stay well inside that bound
+/// (`ganja-cli/tests/frames.rs` holds it to a third).
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// Where a server listens: the ask, which [`Address`] answers with the truth.

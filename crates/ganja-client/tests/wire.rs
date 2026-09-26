@@ -10,6 +10,8 @@
 
 mod support;
 
+use std::time::Duration;
+
 use futures::StreamExt as _;
 use ganja_client::sse::EvictedNotice;
 use ganja_client::{Client, ClientError, Credentials, PermissionReply, Prompt, SessionId};
@@ -383,4 +385,116 @@ async fn a_frame_named_outside_the_vocabulary_ends_the_stream_readably() {
     let said = read[0].as_ref().expect_err("an undeclared frame is an error").to_string();
     assert!(said.contains("server.goodbye"), "{said}");
     assert!(said.contains("different versions of ganja"), "{said}");
+}
+
+// ---------------------------------------------------------------------------
+// The bounds: a server that stops answering is a named failure, and only that.
+// ---------------------------------------------------------------------------
+
+/// Longer than the client's per-read bound (30 s, `READ_DEADLINE`), with room
+/// for a loaded runner: a wait that outlasts this is a wait with no bound.
+const PAST_THE_BOUND: Duration = Duration::from_secs(45);
+
+/// The cadence serve heartbeats `GET /event` at (its `HEARTBEAT`), spelled
+/// here because this crate may not link the server.
+const SERVE_HEARTBEAT: Duration = Duration::from_secs(10);
+
+/// A stream that said hello and then nothing — no heartbeat, no close — ends
+/// with a transport error naming the server, rather than holding its reader
+/// forever. An attached run reads exactly this stream, and a stall behind it
+/// used to be a run that never exited.
+#[tokio::test]
+async fn an_event_stream_that_goes_silent_ends_with_a_transport_error_instead_of_waiting_forever() {
+    let stub =
+        Stub::always(Reply::Held { chunks: vec![(Duration::ZERO, frame("connected", "{}"))] })
+            .await;
+
+    let client = stub.client();
+    let mut events = client.events().await.expect("the stream opens");
+    let ended = tokio::time::timeout(PAST_THE_BOUND, events.next())
+        .await
+        .unwrap_or_else(|_| panic!("a stream silent for {PAST_THE_BOUND:?} was still waited on"))
+        .expect("a silent stream ends with an error, not quietly");
+
+    match ended.expect_err("silence is not an event") {
+        ClientError::Transport { address, source } => {
+            assert_eq!(address, stub.address(), "the error names the server");
+            assert!(source.is_timeout(), "and it is the bound that ended it: {source:?}");
+        }
+        other => panic!("a transport failure, not {other:?}"),
+    }
+    assert!(events.next().await.is_none(), "nothing follows the error");
+}
+
+/// The same bound on a read that never gets an answer at all: `health` is
+/// the first call everything that attaches makes.
+#[tokio::test]
+async fn a_read_the_server_never_answers_is_a_transport_error_instead_of_a_hang() {
+    let stub = Stub::always(Reply::Silent).await;
+
+    let error = tokio::time::timeout(PAST_THE_BOUND, stub.client().health())
+        .await
+        .unwrap_or_else(|_| panic!("a read unanswered for {PAST_THE_BOUND:?} was still waited on"))
+        .expect_err("silence is not an answer");
+
+    match &error {
+        ClientError::Transport { source, .. } => {
+            assert!(source.is_timeout(), "the bound ended it: {source:?}");
+        }
+        other => panic!("a transport failure, not {other:?}"),
+    }
+    assert!(error.to_string().contains(stub.address()), "{error}");
+    assert_eq!(stub.only_request().path, "/global/health");
+}
+
+/// The bound is per read, not per stream: serve's heartbeat keeps an idle
+/// stream alive however long it idles — a session waiting minutes on a
+/// person's dialog sends nothing else — so a stream open for longer than the
+/// bound in total, but never silent for longer than one heartbeat, still
+/// delivers what comes next.
+#[tokio::test]
+async fn a_stream_that_keeps_heartbeating_outlives_the_read_bound() {
+    let (event, json) = started();
+    let heartbeat = || (SERVE_HEARTBEAT, frame("heartbeat", "{}"));
+    let stub = Stub::always(Reply::Held {
+        chunks: vec![
+            (Duration::ZERO, frame("connected", "{}")),
+            heartbeat(),
+            heartbeat(),
+            heartbeat(),
+            heartbeat(),
+            (Duration::ZERO, frame("message", &json)),
+        ],
+    })
+    .await;
+
+    let client = stub.client();
+    let mut events = client.events().await.expect("the stream opens");
+    let read = tokio::time::timeout(SERVE_HEARTBEAT * 4 + DEADLINE, events.next())
+        .await
+        .expect("the event arrives once the heartbeats are through")
+        .expect("the stream is still open");
+
+    assert_eq!(read.expect("forty heartbeat-kept seconds are not a stall"), event);
+}
+
+/// A `POST` is not read-bounded: its handler may be running the session's
+/// `UserPromptSubmit` hooks before it answers, each under a minute of its own
+/// by default, and cutting that wait would fail a prompt the server was still
+/// accepting.
+#[tokio::test]
+async fn a_prompt_the_server_takes_its_time_accepting_is_not_cut_by_the_read_bound() {
+    let accepting = Duration::from_secs(35);
+    let stub =
+        Stub::always(Reply::Late { after: accepting, reply: Box::new(Reply::Accepted) }).await;
+
+    tokio::time::timeout(
+        accepting + DEADLINE,
+        stub.client().prompt(&session(), &Prompt::new("hi")),
+    )
+    .await
+    .expect("the prompt is answered once the server gets to it")
+    .expect("a slow acceptance is still an acceptance");
+
+    assert_eq!(stub.only_request().path, "/session/ses_attached/prompt_async");
 }

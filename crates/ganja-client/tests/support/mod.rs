@@ -48,6 +48,16 @@ pub enum Reply {
     /// An event stream: the chunks are written in order, and the connection
     /// then closes — which is how a stream ends when nothing evicted it.
     Stream { chunks: Vec<String> },
+    /// An event stream whose chunks are each written after their own pause,
+    /// and which is then held open saying nothing — neither a heartbeat nor
+    /// a close. What a stalled server looks like from the client's side.
+    Held { chunks: Vec<(Duration, String)> },
+    /// The request is read and never answered, and the connection is held
+    /// open: the peer a read bound exists for.
+    Silent,
+    /// `reply`, once `after` has passed — a handler that was busy before it
+    /// answered, not one that stalled.
+    Late { after: Duration, reply: Box<Reply> },
 }
 
 impl Reply {
@@ -200,7 +210,13 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     };
     received.lock().expect("the request log is never poisoned").push(request.clone());
 
-    match answer(&request) {
+    let mut reply = answer(&request);
+    while let Reply::Late { after, reply: later } = reply {
+        tokio::time::sleep(after).await;
+        reply = *later;
+    }
+
+    match reply {
         Reply::Json { status, body } => {
             let head = format!(
                 "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -233,9 +249,38 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
+        Reply::Held { chunks } => {
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                      cache-control: no-cache, no-transform\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            for (after, chunk) in chunks {
+                tokio::time::sleep(after).await;
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+                let _ = socket.flush().await;
+            }
+            hold(socket).await;
+            return;
+        }
+        Reply::Silent => {
+            hold(socket).await;
+            return;
+        }
+        Reply::Late { .. } => unreachable!("a late reply is unwrapped before it is answered"),
     }
 
     let _ = socket.shutdown().await;
+}
+
+/// Keeps `socket` open and says nothing on it, until the peer leaves or the
+/// test's runtime ends — never a close the client could read as an answer.
+async fn hold<S: AsyncRead + Unpin>(mut socket: S) {
+    let mut chunk = [0u8; 1024];
+    while matches!(socket.read(&mut chunk).await, Ok(read) if read > 0) {}
 }
 
 /// The request head plus its body, or [`None`] when the peer left first.

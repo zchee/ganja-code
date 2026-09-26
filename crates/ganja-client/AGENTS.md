@@ -12,9 +12,9 @@ A typed client for `ganja-serve`'s REST routes and SSE event stream. `ganja run 
 
 | Path | Holds |
 |---|---|
-| `src/lib.rs` | `Client` (`health`, `create_session`, `sessions`, `prompt`, `events`, `permissions`, `reply_permission`), `Client::new`, `Client::on_socket`, `Credentials`, `ClientError`, `BODY_CAP`, the declared bodies `Health`, `SessionRow`, `PendingPermission`, `Prompt`, and the `Events` stream. |
+| `src/lib.rs` | `Client` (`health`, `create_session`, `sessions`, `prompt`, `events`, `permissions`, `reply_permission`), `Client::new`, `Client::on_socket`, `Credentials`, `ClientError`, `BODY_CAP`, `READ_DEADLINE`, the declared bodies `Health`, `SessionRow`, `PendingPermission`, `Prompt`, and the `Events` stream. |
 | `src/sse.rs` | Frame vocabulary: `CONNECTED`, `MESSAGE`, `HEARTBEAT`, `EVICTED`, `FRAMES`, `EvictedNotice`, `Frame`, the `Frames` splitter. |
-| `tests/wire.rs` | Every surface against a stub answering real bytes, including malformed ones. |
+| `tests/wire.rs` | Every surface against a stub answering real bytes, including malformed and silent ones. |
 | `tests/socket.rs` | The Unix-socket form: health with no credential, a dead socket, an oversized answer. |
 | `tests/support/` | Hand-rolled loopback HTTP stub on a port or a Unix socket (a directory module, not a binary). |
 
@@ -44,7 +44,7 @@ The `frames` and `attach` tests live in `ganja-cli/tests/` because `ganja-cli` i
 - Credentials: this crate reads no environment. `ganja run --attach` builds `Credentials` from `GANJA_SERVER_PASSWORD` and `GANJA_SERVER_USERNAME` (`ganja-cli/src/run.rs`); a `401` is `ClientError::Unauthorized`, whose message names both variables.
 - `events()` returns only after the `connected` frame, so a caller subscribes first and prompts second without losing events. A stream that opens with anything else is `Skew`; an `evicted` frame is `ClientError::Evicted`.
 - Every body is read under `BODY_CAP` (8 MiB); a longer one is `ClientError::Oversized`, refused unread.
-- A socket client times out a connect after 2 s and a stalled read after 30 s (`SOCKET_CONNECT_DEADLINE`, `SOCKET_READ_DEADLINE`).
+- Every bound is a `ClientError::Transport`. A socket client times out a connect after 2 s and any read silent for 30 s (`SOCKET_CONNECT_DEADLINE`, `READ_DEADLINE`). A TCP client times out a connect after 10 s (`TCP_CONNECT_DEADLINE`) and a `GET`, the event stream included, silent for 30 s; its `POST` routes have no read bound, because a prompt runs the session's `UserPromptSubmit` hooks before it answers. The stream's bound is safe only while serve heartbeats well inside it (10 s); `ganja-cli/tests/frames.rs` pins that.
 - Of the four socket routes, this crate declares only `health`. The team and receipt routes are called from the engine side, which may not link this crate.
 
 ## Tests

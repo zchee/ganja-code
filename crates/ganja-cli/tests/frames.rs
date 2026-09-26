@@ -326,3 +326,19 @@ fn the_declared_vocabulary_is_the_four_names_the_pin_covers() {
         "the names are serve's, spelled out so a rename on either side reddens"
     );
 }
+
+/// The client's read bound is safe only because serve heartbeats the event
+/// stream well inside it: a stream idle on a person's dialog carries nothing
+/// else, and a client that gave up on it would fail a run nobody stalled.
+/// Three heartbeats to one bound, so one delayed by a busy server is not a
+/// cut stream — and a change to either constant that closes the gap reddens
+/// here rather than in an attached run waiting on a dialog.
+#[test]
+fn serve_heartbeats_the_event_stream_well_inside_the_clients_read_bound() {
+    assert!(
+        ganja_serve::HEARTBEAT * 3 <= ganja_client::READ_DEADLINE,
+        "a heartbeat every {:?} leaves too little room under a {:?} read bound",
+        ganja_serve::HEARTBEAT,
+        ganja_client::READ_DEADLINE,
+    );
+}

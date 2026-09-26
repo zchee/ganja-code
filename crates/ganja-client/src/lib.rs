@@ -136,7 +136,8 @@ pub enum ClientError {
         /// Why it cannot be used.
         reason: String,
     },
-    /// Nothing answered, or the connection failed part-way through.
+    /// Nothing answered, the connection failed part-way through, or the
+    /// server stayed silent past one of the client's bounds.
     #[error("failed to reach the ganja server at {address}")]
     Transport {
         /// The server that was being reached.
@@ -299,13 +300,26 @@ const SOCKET_URL: &str = "http://ganja";
 #[cfg(unix)]
 const SOCKET_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long a socket-bound client waits between bytes of an answer before
-/// it gives the peer up. A per-read bound rather than a whole-request one,
-/// deliberately: the same client may open `GET /event`, whose body is
-/// endless by design and heartbeats every ten seconds, and a total deadline
-/// would end that stream while a per-read one only ends a silent peer.
-#[cfg(unix)]
-const SOCKET_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a TCP client waits to connect, TLS handshake included. Longer
+/// than a socket's because the server may be across a network, where a lost
+/// SYN is retried after a second and a handshake can take a few round trips;
+/// a connect still pending after this is a server that is not there, named
+/// in seconds rather than after the kernel's own give-up well past a minute.
+const TCP_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a client waits between bytes of an answer before it gives the
+/// peer up: on a socket for every call, and over TCP for every `GET` — the
+/// reads and the event stream (see [`Client::new`] for why not the `POST`
+/// routes).
+///
+/// A per-read bound rather than a whole-request one, deliberately: `GET
+/// /event`'s body is endless by design, and a total deadline would end a
+/// healthy stream. Serve writes a heartbeat frame on that stream every ten
+/// seconds whatever else it carries — while a turn streams and while a session
+/// waits minutes on a person's dialog alike — so a live stream is never
+/// silent for this long, and only a peer that missed three heartbeats is cut.
+/// `ganja-cli/tests/frames.rs` pins serve's heartbeat inside this bound.
+pub const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The most of any answer this client reads into memory, in bytes — a
 /// refusal's envelope included. Every route here answers a bounded document;
@@ -330,7 +344,11 @@ const SOCKET_SCHEME: &str = "uds:";
 /// socket-bound one, whose requests need an `http://` base the socket does
 /// not have and whose errors should name the socket, not the label.
 pub struct Client {
+    /// Every `GET`: the reads and the event stream.
     http: reqwest::Client,
+    /// Every `POST`. The same client as `http` on a socket; over TCP, one
+    /// without [`READ_DEADLINE`] — see [`Client::new`].
+    patient: reqwest::Client,
     address: String,
     base: String,
     credentials: Option<Credentials>,
@@ -350,12 +368,24 @@ impl Client {
     /// A client for the server at `address`, presenting `credentials` when the
     /// server has a password.
     ///
+    /// Bounded in time as far as that is safe over TCP, and every bound it
+    /// hits is a [`ClientError::Transport`] naming the address rather than a
+    /// wait with no end: a connect that has not completed inside ten seconds,
+    /// and a `GET` — a read, or the event stream — whose answer stays silent
+    /// past [`READ_DEADLINE`]. The `POST` routes are bounded at the connect
+    /// only, because their handlers may wait on the engine before they
+    /// answer: a prompt runs the session's `UserPromptSubmit` hooks, each
+    /// under a minute of its own by default, and a new session or a reply
+    /// waits for another client's prompt to finish starting. A read bound
+    /// there would cut a request the server was still honouring.
+    ///
     /// # Errors
     ///
     /// [`ClientError::Address`] when `address` is not an absolute `http` or
     /// `https` URL — a bare host and port is refused rather than guessed at,
     /// because guessing the scheme is guessing whether the credential travels
-    /// in the clear.
+    /// in the clear. [`ClientError::Transport`] when the HTTP client itself
+    /// cannot be built, which is a TLS backend that would not initialize.
     pub fn new(address: &str, credentials: Option<Credentials>) -> Result<Self, ClientError> {
         let parsed = reqwest::Url::parse(address).map_err(|error| ClientError::Address {
             address: address.to_owned(),
@@ -372,7 +402,16 @@ impl Client {
         // the way the router spells it.
         let address = address.trim_end_matches('/').to_owned();
 
-        Ok(Self { http: reqwest::Client::new(), base: address.clone(), address, credentials })
+        let build = |builder: reqwest::ClientBuilder| {
+            builder
+                .connect_timeout(TCP_CONNECT_DEADLINE)
+                .build()
+                .map_err(|source| ClientError::Transport { address: address.clone(), source })
+        };
+        let http = build(reqwest::Client::builder().read_timeout(READ_DEADLINE))?;
+        let patient = build(reqwest::Client::builder())?;
+
+        Ok(Self { http, patient, base: address.clone(), address, credentials })
     }
 
     /// A client bound to the session socket at `path` (**D505**).
@@ -415,7 +454,7 @@ impl Client {
         let http = reqwest::Client::builder()
             .unix_socket(path)
             .connect_timeout(SOCKET_CONNECT_DEADLINE)
-            .read_timeout(SOCKET_READ_DEADLINE)
+            .read_timeout(READ_DEADLINE)
             .build()
             .map_err(|error| ClientError::SocketPath {
                 path: shown.clone(),
@@ -423,6 +462,9 @@ impl Client {
             })?;
 
         Ok(Self {
+            // Every socket route answers from what the server already holds,
+            // so one read-bounded client serves them all.
+            patient: http.clone(),
             http,
             address: format!("{SOCKET_SCHEME}{shown}"),
             base: SOCKET_URL.to_owned(),
@@ -583,9 +625,11 @@ impl Client {
         Ok(Events::new(self.address.clone(), bytes, frames))
     }
 
-    /// A request with the credential attached, when there is one.
+    /// A request with the credential attached, when there is one, on the
+    /// client whose bounds fit its method (see [`Client::new`]).
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let builder = self.http.request(method, format!("{}{path}", self.base));
+        let http = if method == reqwest::Method::GET { &self.http } else { &self.patient };
+        let builder = http.request(method, format!("{}{path}", self.base));
 
         match &self.credentials {
             Some(credentials) => {
