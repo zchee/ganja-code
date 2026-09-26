@@ -108,6 +108,14 @@
       matchPackageNames: ['ratatui', 'ratatui-textarea'],
       groupName: 'ratatui family',
     },
+    // The TypeSafe SDK is code on the credential path, pinned exactly in the
+    // root manifest (D569): each new version is read at its tag before it is
+    // taken, so it comes as a PR of its own and never inside the weekly batch.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['typesafe-sdk-rust'],
+      groupName: null,
+    },
     {
       matchManagers: ['github-actions'],
       groupName: 'github actions',

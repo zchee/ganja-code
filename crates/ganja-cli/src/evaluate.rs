@@ -23,9 +23,9 @@
 //! |---|---|
 //! | 0 | answered |
 //! | 2 | clap's own parse failure, and **only** that |
-//! | 3 | not configured: no key, a refused base URL, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule |
+//! | 3 | not configured: no key, a key the TypeSafe client will not send, a refused base URL, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule |
 //! | 4 | the vendor refused: 401, 403, 422, any other 4xx |
-//! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport, too large, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout |
+//! | 5 | unavailable: 429, 529, 5xx, 3xx, timeout, transport (a refusal whose body broke off mid-read among it), too large, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout |
 //! | 64 | this command's own argument error (`EX_USAGE`), `--model` included |
 //!
 //! Three more things answer **5**, written down here rather than left to be
@@ -54,6 +54,12 @@
 //! arm of [`typesafe::Request::checked`] hard-codes 64. `code_for` is
 //! consulted only for the client and the exchange, neither of which can
 //! raise either error.
+//!
+//! One configuration row *is* decided by `code_for`: `RefusedKey`, which
+//! only building the client raises, because the SDK is what refuses a key it
+//! will not send. The client is built straight after `from_env`, before any
+//! argument or stdin is read, so this 3 wins over a 64 exactly as the other
+//! configuration refusals do.
 //!
 //! Its `RefusedBase | RefusedModel` and `InvalidRequest` arms are therefore
 //! **unreachable**, and kept deliberately: they are totality for a
@@ -187,6 +193,14 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
         // its variable.
         Err(error) => return failed(NOT_CONFIGURED, &error.to_string()),
     };
+    // Built before anything is read too, for the same reason: building the
+    // client is where the SDK refuses a key it will not send, and that is
+    // configuration, so it answers 3 before a file or stdin is touched and
+    // before a usage error could answer 64 in its place.
+    let client = match typesafe::Client::new(settings) {
+        Ok(client) => client,
+        Err(error) => return failed(code_for(&error), &error.to_string()),
+    };
 
     let questions = match read_argument(&args.questions, Source::Argument) {
         Ok(text) => match serde_json::from_str::<BTreeMap<String, Question>>(&text) {
@@ -209,7 +223,7 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
         Err(why) => return failed(USAGE, &format!("--state {why}")),
     };
 
-    let model = args.model.unwrap_or_else(|| settings.model().to_owned());
+    let model = args.model.unwrap_or_else(|| client.settings().model().to_owned());
     // Named here rather than by prefixing the refusal below, because
     // `Request::checked` refuses the *whole* request and most of its reasons
     // have nothing to do with this flag — telling somebody to fix `--model`
@@ -230,10 +244,6 @@ pub async fn evaluate(args: EvaluateArgs) -> ExitCode {
         Err(error) => return failed(USAGE, &error.to_string()),
     };
 
-    let client = match typesafe::Client::new(settings) {
-        Ok(client) => client,
-        Err(error) => return failed(code_for(&error), &error.to_string()),
-    };
     // One attempt, under the client's own ten-second deadline. The token is
     // fresh and nothing cancels it: a command has no turn to be abandoned
     // from, and a signal ends the process rather than the request.
@@ -397,7 +407,12 @@ fn model_refusal(model: &str) -> Option<typesafe::Error> {
 /// about its own request.
 fn code_for(error: &typesafe::Error) -> u8 {
     match error {
-        typesafe::Error::RefusedBase | typesafe::Error::RefusedModel => NOT_CONFIGURED,
+        // `RefusedKey` is the one configuration arm this function is the
+        // call site for: the client is built straight after `from_env`, and
+        // building it is where the SDK refuses a key.
+        typesafe::Error::RefusedBase
+        | typesafe::Error::RefusedModel
+        | typesafe::Error::RefusedKey => NOT_CONFIGURED,
         typesafe::Error::InvalidRequest(_) => USAGE,
         typesafe::Error::Rejected { .. } | typesafe::Error::Invalid { .. } => REFUSED,
         typesafe::Error::Unavailable { .. }

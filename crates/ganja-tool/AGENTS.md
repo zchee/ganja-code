@@ -55,7 +55,7 @@ A subagent gets the lent registry, which has no `task`, `send_message` or `task_
 | `src/socket.rs` | Session socket paths under `/tmp/ganja-<uid>/`, `vet_directory`, `vet_address`. |
 | `src/registry.rs` | The session-name record beside a lead's socket; `vet_name`, `same_name`. |
 | `src/permission_text.rs` | `REJECTED`, `DENIED_PREFIX`, `HOOK_REFUSED_PREFIX`, `is_refusal`. |
-| `src/typesafe.rs` | The TypeSafe client shared by `evaluate`, `ganja evaluate` and the engine's judge. |
+| `src/typesafe.rs` | The TypeSafe client shared by `evaluate`, `ganja evaluate` and the engine's judge. The exchange is `typesafe-sdk-rust`'s (D569): from crates.io, pinned `=0.2.0` so a new version is a reviewed manifest edit, with every default feature off and the opt-in `sonic` off too. It encodes the body, applies the 10 s deadline and the 1 MiB response cap, decodes the answers and classifies failures. This file keeps ganja's policy: the base-URL and model-id rules, the question schema and limits, the 422 reduction, the frame of every sentence the model reads (a transport or malformed failure carries the SDK's fixed clause for its kind inside it), and the one place the SDK is configured (`Client::new`). The bytes go through this crate's `reqwest` client (`Transport`: system proxy, no redirects). One attempt (`RetryPolicy::none()`). The vendor receives `User-Agent: ganja-code/<version> typesafe-sdk-rust/<version>` and `X-TypeSafe-SDK`, never `X-TypeSafe-Runtime`. |
 | `src/job.rs`, `src/team.rs` | The `Jobs` and `Postbox` traits the engine implements. |
 | `src/frontmatter.rs` | `SKILL.md` frontmatter parsing. |
 | `src/*.txt` | Tool descriptions. |
@@ -85,7 +85,8 @@ GANJA_LIVE_TEST=1 cargo test -p ganja-tool --test evaluate_live -- --ignored --n
 
 - `socket.rs` fixes the socket path as literal `/tmp/ganja-<uid>/<hex>.sock`, never `temp_dir()`, because macOS's temp path can overflow `sun_path`. `ganja-serve`, the engine and `ganja sessions --live` all read it from here.
 - `permission_text::is_refusal` is the only list of refusal sentences. Wires (cursor) use it to tell a refused call from a failed one, so a new refusal sentence is added there.
-- `evaluate` is not offered at all when `TYPESAFE_API_KEY` is unset or blank or `TYPESAFE_BASE_URL` is not https or loopback: `EvaluateTool::configured()` returns `None` (pinned by `tests/evaluate_keys.rs`).
+- `evaluate` is not offered at all when `TYPESAFE_API_KEY` is unset or blank or `TYPESAFE_BASE_URL` is not https or loopback: `EvaluateTool::configured()` returns `None` (pinned by `tests/evaluate_keys.rs`). The same holds for a base URL carrying userinfo, a query or a fragment, a host an HTTP request cannot carry or more than 2,048 bytes once parsed, and for a key the SDK will not send (blank once U+001C to U+001F are trimmed too, or holding whitespace, a control character or anything outside ASCII): `Error::RefusedKey`, whose sentence names `TYPESAFE_API_KEY`, and which `ganja evaluate` answers with exit 3 before it reads any argument (pinned by `tests/evaluate_refused_key.rs`).
+- Behaviours the SDK decides and `typesafe.rs` accepts: an answer of a `type` it does not model is skipped, and `typesafe.rs` reads it back out of the raw body as `Answer::Other`, from raw text, so nothing the SDK passed over unread can fail there. An answer of a known type whose payload does not decode fails the whole response as `Malformed`. A 401, 403 or 404 whose body breaks off mid-read loses its status and is `Transport`: exit 5 rather than 4, and the judge counts it as unanswered, so a truncated 401 or 404 does not switch the judge off and a truncated 403 advances the breaker. An answer nested deeper than the SDK's 16 levels fails the response as `Malformed`. A failure below HTTP reaches the model as the SDK's fixed sentence for its kind, never as the transport's error chain.
 - `websearch` is always registered and refuses without `EXA_API_KEY` or `PARALLEL_API_KEY`, naming the variables, before any request (`GANJA_WEBSEARCH_PROVIDER` picks the service; pinned by `tests/websearch_keys.rs`).
 - `read` and `grep` refuse ganja's credential store; the store path arrives in `ToolCtx`, and the comparison is by file identity.
 - `question` is not in `ASK_BY_DEFAULT`; `ganja run` refuses it with a rule instead. `ASK_BY_DEFAULT` also names `apply_patch` and `shell`, upstream ids no tool here registers; they stay on purpose.
@@ -98,10 +99,11 @@ GANJA_LIVE_TEST=1 cargo test -p ganja-tool --test evaluate_live -- --ignored --n
 
 Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[path = "…"] mod tests;` (for example `src/read.rs` and `src/read_tests.rs`). Put a new test there unless it mutates process-wide state.
 
-`tests/` holds five binaries with one test each. Four mutate the environment, and `evaluate_log` and `evaluate_refusal` also install the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
+`tests/` holds six binaries with one test each. Five mutate the environment, and `evaluate_log`, `evaluate_refusal` and `evaluate_refused_key` also install the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
 
 - `evaluate_keys.rs`, `evaluate_log.rs`: the `TYPESAFE_*` variables, against no endpoint or a loopback one.
 - `evaluate_refusal.rs`: which variable the warning names when `EvaluateTool::configured()` refuses the `TYPESAFE_*` settings.
+- `evaluate_refused_key.rs`: a key the TypeSafe client will not send leaves the tool unoffered, and the warning names the variable and none of the key.
 - `websearch_keys.rs`: `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER`.
 - `evaluate_live.rs`: `#[ignore]` and inert without `GANJA_LIVE_TEST=1`; it sends one request to `https://api.typesafe.ai`.
 

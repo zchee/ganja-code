@@ -236,3 +236,105 @@ committed segment and state vectors, the questions' sha256),
 `crates/ganja-tui/src/app_tests.rs` (the first socket pass)
 Commit: 912b6a2 (W1), 9e7acf5 (W2), f29117b (W3), 41e34eb (W3b), c686771
 (W4), f74032f (W3c); W5: this commit
+
+## D569 — the TypeSafe exchange is `typesafe-sdk-rust`'s, and ganja keeps the policy (2026-09-24)
+
+Crates: ganja-tool, ganja-cli, ganja-core (tests only)
+Amends: D564 (the client under both TypeSafe surfaces, and under D567's judge)
+
+**The SDK owns the exchange.** `crates/ganja-tool/src/typesafe.rs` sends
+through `typesafe-sdk-rust`, from crates.io (bead `ganja-code-5hb9`). The SDK
+encodes the request, applies the per-attempt deadline (10 s) and the
+response cap (1 MiB), decodes the answers and classifies each failure.
+`Client::new` is the one place it is configured. Every setting is passed
+explicitly, so the SDK reads no environment variable.
+
+Every default feature is off:
+- `hyper`: the SDK's own transport, which has no proxy support;
+- `macros`: unused;
+- `tracing`: it would log the endpoint and bodies.
+
+The opt-in `sonic` stays off too, so the JSON codec is serde_json.
+
+The bytes travel through ganja's own `reqwest` client, handed over as a
+`tower_service::Service`. It keeps the system proxy and refuses redirects.
+`deny.toml` still admits no git source.
+
+**Pinned exactly (`=0.2.0`).** The SDK is code on the credential path, so
+every new version is read before it is taken. A bump is a manifest edit, and
+the re-read covers `transport/mod.rs`, `config.rs`, `constants.rs`,
+`client.rs` and `error.rs` at the new tag. Renovate proposes it as a PR of
+its own, never batched.
+
+**Ganja keeps the policy:**
+- the base-URL rule (https, or http to a parsed loopback host; a host an
+  HTTP request can carry; no userinfo, query or fragment; at most 2,048
+  bytes once parsed) and the model-id rule;
+- the typed question schema and its limits (1 to 50 questions, the id
+  grammar, 256 KiB over state and questions together);
+- the 422 reduction that drops the request echo;
+- the frame of every sentence the model reads. A transport or malformed
+  failure carries the SDK's fixed clause for its kind inside that frame.
+
+The consent disclosure's byte count is measured before sending, over the
+members the SDK writes and in its order. A loopback test holds it equal to
+the bytes the vendor receives.
+
+**What the vendor is told.** `User-Agent: ganja-code/<version>
+typesafe-sdk-rust/<version>`, ganja first. `X-TypeSafe-SDK` names the SDK.
+`X-TypeSafe-Runtime` (operating system and CPU architecture) is not sent.
+The other headers are `Authorization` (bearer), `Accept`, `Content-Type`,
+`Content-Length` and `Host`, and nothing else. One attempt:
+`RetryPolicy::none()`, because one consent is one transmission.
+
+**Failures.**
+- Every 401 and 403 whose body is read is `Rejected` (exit 4 under `ganja
+  evaluate`), whatever `detail.error_type` says. The SDK's own
+  authentication class is a 401, or a 403 naming `authentication_error`;
+  every other 401 and 403 reaches the same answer through the status table.
+- 3xx, 429 and 5xx are `Unavailable`, and a 422 is `Invalid`, as before.
+- A key the SDK will not send is `RefusedKey`: blank once whitespace and the
+  separators U+001C to U+001F are trimmed, or holding whitespace, a control
+  character or anything outside ASCII. That is configuration: exit 3,
+  decided before any argument is read, and `evaluate` is not offered and no
+  judge is built. The sentence is ganja's and names `TYPESAFE_API_KEY`.
+- A failure below HTTP reaches the model as the SDK's fixed sentence for its
+  kind, never as the transport's error chain, which can hold text a server
+  chose.
+
+**What the SDK decides and ganja accepts:**
+- The request members go out as `state`, `model`, `questions`.
+- An answer of a known type whose payload does not decode fails the whole
+  response as `Malformed`, naming the field. So does an answer nested
+  deeper than the SDK's 16 levels.
+- An answer of a type the SDK does not model is skipped. `typesafe.rs` reads
+  it back out of the raw body as `Answer::Other`: whole where serde_json can
+  hold it, and by its type where it cannot (a number beyond `f64`, a lone
+  surrogate).
+- A 401, 403 or 404 whose body breaks off mid-read loses its status. It is
+  `Transport`, exit 5 rather than 4, and the judge counts it as unanswered:
+  - a truncated 401 or 404 does not switch the judge off;
+  - a truncated 403 advances the breaker. It is the one 403 that does, and
+    this amends Dv-4 for a body that never arrived.
+- The SDK's serde_json features, `float_roundtrip` and `raw_value`, unify
+  into the workspace's serde_json. Floats parse exactly, at about twice the
+  cost per float, and the one bulk float parse is the models.dev catalog.
+
+Pinned by: `crates/ganja-tool/src/typesafe_tests.rs`:
+`the_headers_the_vendor_receives_are_exactly_these`,
+`the_disclosed_byte_count_is_the_byte_count_the_vendor_receives`,
+`every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names`,
+`a_refusal_whose_body_breaks_off_loses_its_status_and_is_a_transport_failure`,
+`an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back`,
+`a_transport_failure_never_carries_the_url_it_failed_against`,
+`a_key_the_sdk_will_not_send_is_configuration_and_is_never_repeated`. Also:
+- `crates/ganja-tool/tests/evaluate_refused_key.rs`;
+- `crates/ganja-cli/tests/evaluate.rs`
+  (`a_key_the_client_will_not_send_is_not_configured`);
+- `crates/ganja-core/tests/typesafe_base_url.rs`;
+- `crates/ganja-core/src/judge_tests.rs`:
+  - `a_key_the_client_will_not_send_builds_no_judge`;
+  - `the_disclosure_names_the_sources_the_host_alone_and_an_unscreened_webfetch`,
+    whose base now carries its token in the path, since userinfo is refused.
+
+Commit: this commit

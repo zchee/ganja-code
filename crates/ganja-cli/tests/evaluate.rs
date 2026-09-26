@@ -328,6 +328,36 @@ fn a_base_url_in_the_clear_is_not_configured() {
     assert!(!run.stderr.contains("example.com"), "the value is not echoed: {}", run.stderr);
 }
 
+/// **D569.** A key the TypeSafe client will not put in a header — here one
+/// holding a space — is configuration: exit 3, the row no key is on. The SDK
+/// refuses it when the client is built, so nothing is sent, and the refusal
+/// names the variable without repeating any of the key. The client is built
+/// before any argument is read, so the 3 wins over the 64 that questions
+/// nobody could send would otherwise earn, as every configuration refusal
+/// does.
+#[test]
+fn a_key_the_client_will_not_send_is_not_configured() {
+    let endpoint = serve(200, ANSWERED);
+    let homes = Homes::new();
+    let key = "sk-typesafe suite key";
+    let unusable = "not a JSON object of questions".to_owned();
+
+    for (what, asked) in [("usable questions", questions()), ("unusable questions", unusable)] {
+        let run = ran(ganja(&homes, Some(endpoint.base()))
+            .env("TYPESAFE_API_KEY", key)
+            .args(["evaluate", "--questions", &asked])
+            .write_stdin("a sentence"));
+
+        assert_eq!(run.code, 3, "{what}: stderr:\n{}", run.stderr);
+        assert!(run.stdout.is_empty(), "{what}: a hook reads stdout; got {:?}", run.stdout);
+        assert!(run.stderr.contains("TYPESAFE_API_KEY"), "{what}: named: {}", run.stderr);
+        for fragment in ["sk-typesafe", "suite"] {
+            assert!(!run.stderr.contains(fragment), "{what}: not echoed: {}", run.stderr);
+        }
+    }
+    assert_eq!(endpoint.count(), 0, "nothing was sent");
+}
+
 /// **Criterion 7.** A 422 is the vendor refusing the questions: exit 4, and
 /// what it said about which field survives to stderr.
 #[test]

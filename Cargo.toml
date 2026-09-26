@@ -166,6 +166,11 @@ grep-searcher = "0.1.17"
 # webfetch's markdown format is a real HTML→markdown conversion (upstream
 # uses turndown); before this the markdown answer was tag-stripped text.
 htmd = "0.5.5"
+# The request and response types of the TypeSafe SDK's transport seam: the
+# `evaluate` client hands the SDK its own reqwest client, and the adapter
+# between the two speaks `http::Request`/`http::Response`. Already in the lock
+# beneath hyper and reqwest.
+http = "1.5.0"
 # `Retry-After` can be an IMF-fixdate; the exact-purpose parser for it,
 # zero-dependency and already in the lock through hyper. The one form it may
 # not share with the hand parser it replaces — a leap-second `:60` — is
@@ -328,6 +333,14 @@ schemars = "1.2.2"
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
+# No features of its own. The TypeSafe SDK compiles serde_json with
+# `float_roundtrip` and `raw_value`, and cargo unifies both into this one
+# build for every crate here. `raw_value` costs nothing unless used.
+# `float_roundtrip` parses every float exactly, where the default is
+# best-effort, at about twice the cost of parsing a float. The one bulk float
+# parse in ganja is the models.dev catalog (`ganja-provider`'s `catalog.rs`,
+# a document of several megabytes whose costs and limits are `f64`), read at
+# startup and on refresh; nothing per turn or per token parses floats in bulk.
 serde_json = "1.0.151"
 # PKCE's S256 method is literally SHA-256 of the verifier, and the provider
 # checks it — a login is refused if the digest disagrees. The digest rustls
@@ -396,9 +409,31 @@ toml = { version = "1.1.6", features = ["preserve_order"] }
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
 toml_edit = { version = "0.25.14", features = ["serde"] }
+# The trait the TypeSafe SDK takes a custom transport through: `Service`
+# alone, without the rest of `tower`. Already in the lock beneath hyper-util
+# and reqwest.
+tower-service = "0.3.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The TypeSafe System One client behind `evaluate`, `ganja evaluate` and the
+# judge (D569): it encodes the request, applies the deadline and the response
+# cap, decodes the answers and classifies the failures. From crates.io, so
+# `deny.toml` admits no git source for it. Every default feature is off:
+# `hyper` is the SDK's own transport, which has no proxy support, and ganja
+# hands it its reqwest client instead; `macros` is the `QuestionSet` derive,
+# unused here; `tracing` would log the endpoint at INFO and bodies at TRACE,
+# where ganja's own debug line logs neither — turning it on would need
+# `log_endpoint_host(false)` in `Client::new` and a cap on the
+# `typesafe_sdk` target in `install_logging`, both. `sonic` stays off too, so
+# the SDK's JSON codec is serde_json, with no SIMD or `unsafe` parser.
+# Pinned exactly: the SDK holds the key and builds the `Authorization` header,
+# so every version of it is new code on the credential path, and each one gets
+# a security re-read at its tag (`transport/mod.rs`, `config.rs`,
+# `constants.rs`, `client.rs`, `error.rs`) before a bump.
+# `.github/renovate.json5` proposes it as a PR of its own, never inside the
+# weekly batch.
+typesafe-sdk-rust = { version = "=0.2.0", default-features = false }
 # Already in the tree via `reqwest`, which re-exports only `Url`; the provider
 # endpoint check needs `Host` to compare a host as a host rather than as text.
 url = "2.5.8"
