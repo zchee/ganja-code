@@ -424,3 +424,27 @@ Also:
   (`every_401_and_403_is_exit_four_with_the_same_sentence_whatever_it_names`).
 
 Commit: this commit
+
+## D572 — the pane test reads the lead's log instead of holding the lead (2026-09-28)
+
+Crates: ganja-cli
+Amends: the frozen `ganja-cli-tests.md` row for `teammate_pane.rs` (P25,
+AC-11), which says a `SIGSTOP` hold makes the vanishing-message assertion
+race-free.
+
+The hold never held. The lead is its pane's own process, and the tmux
+server sends `SIGCONT` to a pane's process as soon as a `SIGSTOP` or
+`SIGTSTP` lands, so the assertion raced the lead's one-second inbox
+pass, which reads, logs and prunes the frame; on a slow runner the pass
+won and the wait ran out. The test now sends no signal. It waits for
+the line the lead's pass logs on reading the member's report, in a log
+that is only appended to, and then, as before, for the inbox to hold no
+idle notification. A reworded log line fails the wait by name. No test
+stops a pane process any more, and the `Tmux::pane_pid` helper is gone.
+
+D571 is assigned to a plan that has not landed.
+
+Pinned by: `crates/ganja-cli/tests/teammate_pane.rs`
+(`a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved`)
+
+Commit: 7e8ce4c (the test); this commit (the entry)
