@@ -86,7 +86,7 @@ dist build                                  # local archive under target/distrib
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY` | Credentials; they outrank the stored `auth.json`. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Endpoint overrides; https or loopback only. |
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER` | `websearch` credentials and which service (`exa` or `parallel`). Without a key the search is refused, not sent. |
-| `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool and, when a trusted tier lists `[evaluate] screen`, the judge that marks screened tool results (experimental, D567). Without the key the tool is not registered and no judge is built. |
+| `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool and, when a trusted tier lists `[evaluate] screen`, the judge that marks screened tool results (experimental, D567). Without the key the tool is not registered and no judge is built. A base URL that is not https or loopback, carries userinfo, a query or a fragment, has a host an HTTP request cannot carry or is over 2,048 bytes once parsed, and a key the `typesafe-sdk-rust` client will not send (D569) are refused the same way; `ganja evaluate` exits 3 on each. |
 | `EDITOR` | What `/editor` opens; default `vi`. |
 | `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS` | Test opt-ins and paths; see Gates. |
 

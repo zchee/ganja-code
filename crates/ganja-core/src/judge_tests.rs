@@ -74,12 +74,39 @@ fn the_sentence_and_the_model_are_the_ruled_ones() {
     assert_eq!(Tuning::SHIPPED.deadline, Duration::from_secs(8));
 }
 
+/// A key the TypeSafe client will not send builds no judge (D569): the
+/// SDK refuses it when the client is built, which is configuration, and a
+/// judge with no client has nothing to screen with. The control beside it,
+/// the same settings with a usable key, builds one.
+#[test]
+fn a_key_the_client_will_not_send_builds_no_judge() {
+    let screen = || Screen { webfetch: true, websearch: false, mcp: BTreeSet::new() };
+    let settings = |key: &str| {
+        Settings::from_parts(key.to_owned(), "https://typesafe.example", MODEL.to_owned())
+            .expect("the base and the model are usable; the key is not inspected here")
+    };
+
+    assert!(
+        Judge::from_settings(Some(settings("sk-judge refused key")), screen(), Tuning::SHIPPED)
+            .is_none(),
+        "a key holding a space builds no judge"
+    );
+    assert!(
+        Judge::from_settings(Some(settings("sk-judge-unit-key")), screen(), Tuning::SHIPPED)
+            .is_some(),
+        "the same settings with a usable key build one"
+    );
+}
+
 /// The launch line names each source as `[evaluate] screen` spells it and the
-/// host alone — never a credential or a port the base URL carries — and adds
-/// the `allow_private` clause only when it is true of a screened `webfetch`.
+/// host alone — never the port or the path a base URL carries, where a
+/// gateway puts a token — and adds the `allow_private` clause only when it is
+/// true of a screened `webfetch`. A base carrying userinfo never gets this
+/// far: it is refused before there are settings to build a judge from
+/// (D569).
 #[test]
 fn the_disclosure_names_the_sources_the_host_alone_and_an_unscreened_webfetch() {
-    let base = "https://reader:hunter2@typesafe.example:8443/v1";
+    let base = "https://typesafe.example:8443/gateway-tok3n/v1";
     let mcp = |names: &[&str]| names.iter().map(|&name| name.to_owned()).collect::<BTreeSet<_>>();
     let tests: [(&str, Screen, bool, &str); 4] = [
         (
@@ -113,14 +140,14 @@ fn the_disclosure_names_the_sources_the_host_alone_and_an_unscreened_webfetch() 
 
     for (name, screen, allow_private, expected) in tests {
         let settings = Settings::from_parts("sk-judge-unit-key".to_owned(), base, MODEL.to_owned())
-            .expect("an https base with userinfo and a port is accepted");
+            .expect("an https base with a port and a path is accepted");
         let judge = Judge::from_settings(Some(settings), screen, Tuning::SHIPPED)
             .unwrap_or_else(|| panic!("{name}: a screen naming a source builds a judge"));
 
         let line = judge.disclosure(allow_private);
 
         assert_eq!(line, expected, "{name}");
-        for leaked in ["reader", "hunter2", "8443", "/v1", "https"] {
+        for leaked in ["gateway", "tok3n", "8443", "/v1", "https"] {
             assert!(!line.contains(leaked), "{name}: the line carries {leaked:?}: {line}");
         }
     }

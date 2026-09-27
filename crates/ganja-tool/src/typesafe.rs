@@ -17,6 +17,24 @@
 //! through [`Request::checked`], so neither can send something the other
 //! would have refused.
 //!
+//! # What the SDK does and what stays here
+//!
+//! The exchange itself is the SDK's (`typesafe-sdk-rust` from crates.io,
+//! **D569**): it encodes the body, applies the deadline and the response size
+//! cap, decodes the answers and classifies each failure. What stays here is
+//! ganja's policy over it — which base URLs and model ids are acceptable, the
+//! question schema and limits a model is shown, the consent disclosure's
+//! numbers, how a 422 is reduced to a sentence, and what each failure tells
+//! the model to do next.
+//!
+//! The bytes travel through ganja's own `reqwest` client, handed to the SDK
+//! through its custom-transport seam (`Transport`).
+//!
+//! The vendor is told who is asking in `User-Agent`, ganja's product token
+//! first and the SDK's last, and `X-TypeSafe-SDK` names the SDK. The
+//! operating system and CPU architecture the SDK would send in
+//! `X-TypeSafe-Runtime` are not sent.
+//!
 //! # What this module refuses, and why
 //!
 //! - **A base URL that would put the key on the wire in the clear.**
@@ -25,25 +43,31 @@
 //!   reachable_in_the_clear` applies to a provider base URL, mirrored rather
 //!   than imported because this crate's internal dependency set is exactly
 //!   `ganja-permission`. `crates/ganja-core/tests/typesafe_base_url.rs`
-//!   holds the two equal, from the one crate that can see both. The refused
-//!   URL is never echoed: configuration is allowed to carry credentials in
-//!   its userinfo.
-//! - **Redirects.** The client is built with [`reqwest::redirect::Policy::
-//!   none`], so a 3xx is a failure naming its status rather than a body to
-//!   parse. A request here carries an API key in a header; `webfetch`, which
-//!   carries none, follows redirects on purpose.
-//! - **A second attempt.** One consent is one transmission. The tree's retry
-//!   budget lives in the provider; a 429 costs the judgement and the model is
-//!   told to continue without it.
+//!   holds the two equal, from the one crate that can see both. A base
+//!   carrying userinfo, a query or a fragment, a host an HTTP request cannot
+//!   carry, or more than [`MAX_BASE`] bytes is refused as well. The refused
+//!   URL is never echoed: it may be carrying a credential.
+//! - **Redirects.** The `reqwest` client is built with
+//!   [`reqwest::redirect::Policy::none`], so a 3xx is a failure naming its
+//!   status rather than a body to parse. A request here carries an API key in
+//!   a header; `webfetch`, which carries none, follows redirects on purpose.
+//! - **A second attempt.** One consent is one transmission, so the SDK's
+//!   retry policy is [`RetryPolicy::none`]. The tree's retry budget lives in
+//!   the provider; a 429 costs the judgement and the model is told to
+//!   continue without it.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt as _;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
+use typesafe_sdk::{ErrorKind, PreparedQuestions, Questions, RawQuestion, RetryPolicy};
 use url::{Host, Url};
 
 use crate::ToolError;
@@ -69,9 +93,6 @@ pub const DEFAULT_MODEL: &str = "jev-latest";
 /// The other selectable alias. Named here because both surfaces advertise it
 /// by name and a model that is never told an alias exists cannot ask for it.
 pub const PREVIEW_MODEL: &str = "jev-preview";
-
-/// The endpoint path, joined onto the base.
-const PATH: &str = "v1/systemone";
 
 /// How long one exchange may take, the vendor SDK's `DEFAULT_TIMEOUT`.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
@@ -106,11 +127,15 @@ const MAX_RESPONSE: usize = 1024 * 1024;
 /// Most of a vendor error body that reaches a message.
 const MAX_DETAIL: usize = 2 * 1024;
 
-/// Most of an error body that is read at all, before it is clamped.
-const MAX_ERROR_BODY: usize = 64 * 1024;
-
-/// What a refusal says when the vendor's body could not be read at all.
-const UNREADABLE: &str = "(the response body could not be read)";
+/// Longest base URL, in bytes as [`Settings::base_from`] hands it on.
+///
+/// Ganja's own limit: a base URL longer than this is no endpoint anybody
+/// configured. It also keeps the base inside what an HTTP request can carry:
+/// the SDK appends its endpoint path, and an HTTP URI is at most 65,534 bytes,
+/// a bound this module applies where it is a configuration refusal. Measured
+/// after parsing, because that is the text the SDK receives, and parsing can
+/// lengthen what was written (a percent-encoded byte takes three).
+pub const MAX_BASE: usize = 2 * 1024;
 
 /// What a refusal says when the vendor's body held nothing a reader could
 /// turn into a sentence. A fixed sentence rather than the body itself: every
@@ -119,12 +144,13 @@ const UNREADABLE: &str = "(the response body could not be read)";
 /// [`detail_of`] exists to strip.
 const UNEXPLAINED: &str = "(TypeSafe gave no reason this build could read)";
 
-/// What this client is, told to the vendor.
+/// What this client calls itself to the vendor: the product token the SDK
+/// puts in front of its own in `User-Agent`.
 ///
 /// A literal rather than `ganja-provider`'s `GANJA_USER_AGENT`, for
 /// `websearch`'s reason: this crate names `ganja-permission` and nothing else
 /// of ours, and one product name is not worth an edge in that graph.
-const USER_AGENT: &str = concat!("ganja-code/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT_PRODUCT: &str = concat!("ganja-code/", env!("CARGO_PKG_VERSION"));
 
 /// Everything one call needs that is not the call: where to send it, what to
 /// send it as, and the credential that pays for it.
@@ -135,11 +161,16 @@ const USER_AGENT: &str = concat!("ganja-code/", env!("CARGO_PKG_VERSION"));
 /// different request from the one `run` would send.
 #[derive(Clone)]
 pub struct Settings {
-    /// The API key. Held as a secret so it is wiped on drop and cannot reach
-    /// a `Debug` rendering; exposed at exactly one line, in [`Client::send`].
+    /// The API key. Held as a secret so this copy is wiped on drop and cannot
+    /// reach a `Debug` rendering; exposed at exactly one line, in
+    /// [`Client::new`], where it is handed to the SDK. The SDK keeps it as a
+    /// sensitive `Authorization` header value (never printed, never
+    /// HPACK-indexed) for the client's lifetime, and that copy is **not**
+    /// zeroed on drop.
     key: SecretString,
-    /// The endpoint, already joined and already checked.
-    endpoint: Url,
+    /// The base URL, already checked by [`Settings::base_from`]. The SDK
+    /// joins the endpoint path onto it, keeping any path prefix.
+    base: Url,
     /// The model id a request names when it names none of its own.
     model: String,
     /// The deadline over one whole exchange. A field rather than a constant
@@ -158,10 +189,12 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// [`Error::RefusedBase`] when [`BASE_ENV`] is set to something that
-    /// would put the key on the wire in the clear. A missing [`KEY_ENV`] is
+    /// [`Error::RefusedBase`] when [`BASE_ENV`] is set to a base
+    /// [`Settings::base_from`] refuses; [`Error::RefusedModel`] when
+    /// [`MODEL_ENV`] is not a usable model id. A missing [`KEY_ENV`] is
     /// `Ok(None)` and not an error: not being configured is the ordinary
-    /// case.
+    /// case. A key the SDK will not send is found when the client is built
+    /// ([`Error::RefusedKey`]).
     pub fn from_env() -> Result<Option<Self>, Error> {
         let read = |name| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
 
@@ -178,7 +211,7 @@ impl Settings {
             return Err(Error::RefusedModel);
         }
 
-        Ok(Some(Self::new(key, base, model)?))
+        Ok(Some(Self::new(key, base, model)))
     }
 
     /// Settings assembled from values a caller already holds, refused on the
@@ -205,25 +238,15 @@ impl Settings {
             return Err(Error::RefusedModel);
         }
 
-        Self::new(key, base, model)
+        Ok(Self::new(key, base, model))
     }
 
     /// Settings assembled from values rather than from the environment.
     ///
     /// `base` has already passed [`Settings::base_from`], which is the only
     /// way to make one.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::RefusedBase`] where the endpoint path will not join onto
-    /// `base`. No URL [`Settings::base_from`] accepts can reach this — every
-    /// `https` and `http` URL can be a base — but the alternative spelling
-    /// would quietly POST to the base path itself, which is a request nobody
-    /// asked for sent to a URL nobody named.
-    pub(crate) fn new(key: String, base: Url, model: String) -> Result<Self, Error> {
-        let endpoint = base.join(PATH).map_err(|_unprintable| Error::RefusedBase)?;
-
-        Ok(Self { key: SecretString::from(key), endpoint, model, timeout: TIMEOUT })
+    pub(crate) fn new(key: String, base: Url, model: String) -> Self {
+        Self { key: SecretString::from(key), base, model, timeout: TIMEOUT }
     }
 
     /// The same settings under a different deadline.
@@ -253,21 +276,35 @@ impl Settings {
     /// match, `http://localhost.evil.com` beats a starts-with — and all three
     /// are ordinary hosts belonging to whoever registered them.
     ///
-    /// A trailing slash is added where the path lacks one, so that joining
-    /// the endpoint path onto a base carrying a prefix keeps the prefix.
+    /// A path prefix is kept: the SDK joins the endpoint path onto it.
     ///
     /// A query or a fragment is **refused** rather than carried. Joining the
-    /// endpoint path drops both silently, so a base that carried one would
-    /// send a request the person who configured it did not describe — and a
-    /// gateway is exactly where a token gets put in a query string.
+    /// endpoint path would drop both, so a base that carried one would send a
+    /// request the person who configured it did not describe — and a gateway
+    /// is exactly where a token gets put in a query string.
+    ///
+    /// Userinfo is refused too, and for the same reason: nothing would send
+    /// it as the person who wrote it meant, since the key already travels as
+    /// the bearer token. The SDK refuses all three when the client is built;
+    /// refusing them here keeps that a configuration refusal, decided where
+    /// the other base-URL rules are, rather than a client that fails to build.
+    ///
+    /// So is a base an HTTP request cannot carry: one whose host holds a
+    /// character `url` admits and the HTTP client's URI parser does not (`{`,
+    /// `}`, `"` or a backtick, which an unexpanded template such as
+    /// `https://{{host}}` leaves behind). The SDK refuses such a base when the
+    /// client is built, too, and a refusal there would be reported against
+    /// the key. A base longer than [`MAX_BASE`] bytes once parsed is refused
+    /// as well, by ganja's own limit.
     ///
     /// # Errors
     ///
-    /// [`Error::RefusedBase`] when `text` is not a URL, carries a query or a
-    /// fragment, or is one this module will not put a credential on. The
-    /// value is never echoed.
+    /// [`Error::RefusedBase`] when `text` is not a URL, carries userinfo, a
+    /// query or a fragment, has a host an HTTP request cannot carry, is longer
+    /// than [`MAX_BASE`] bytes once parsed, or is one this module will not put
+    /// a credential on. The value is never echoed.
     pub fn base_from(text: &str) -> Result<Url, Error> {
-        let mut parsed = Url::parse(text).map_err(|_unprintable| Error::RefusedBase)?;
+        let parsed = Url::parse(text).map_err(|_unprintable| Error::RefusedBase)?;
 
         if !reachable_in_the_clear(&parsed) {
             return Err(Error::RefusedBase);
@@ -275,9 +312,12 @@ impl Settings {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(Error::RefusedBase);
         }
-        if !parsed.path().ends_with('/') {
-            let joined = format!("{}/", parsed.path());
-            parsed.set_path(&joined);
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(Error::RefusedBase);
+        }
+        let handed = parsed.as_str();
+        if handed.len() > MAX_BASE || handed.parse::<http::Uri>().is_err() {
+            return Err(Error::RefusedBase);
         }
 
         Ok(parsed)
@@ -286,7 +326,7 @@ impl Settings {
     /// The host a request would be sent to, for the consent disclosure.
     #[must_use]
     pub fn host(&self) -> &str {
-        self.endpoint.host_str().unwrap_or_default()
+        self.base.host_str().unwrap_or_default()
     }
 
     /// The model a request names when it names none of its own.
@@ -296,10 +336,9 @@ impl Settings {
     }
 }
 
-/// Written by hand, and this is not decoration. The endpoint is a parsed
-/// base URL, and a base URL is allowed to carry a credential in its userinfo
-/// — so a derived `Debug` would put one in any message that formats these
-/// settings. The host is what a reader needs and all they get.
+/// Written by hand, and this is not decoration. A derived `Debug` would print
+/// the key's wrapper and the whole base URL, whose path a gateway may use to
+/// carry a token. The host is what a reader needs and all they get.
 impl std::fmt::Debug for Settings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -317,9 +356,10 @@ impl std::fmt::Debug for Settings {
 /// The mirror of `ganja_provider::provider::reachable_in_the_clear`, held to
 /// it by `crates/ganja-core/tests/typesafe_base_url.rs` over one shared
 /// table, in both directions, from the one crate that can see both. Copied
-/// rather than shared because this crate may not name that crate. The query
-/// and fragment clause below is the one place the copy is deliberately
-/// stricter, and that test says so rather than sharing the table with it.
+/// rather than shared because this crate may not name that crate. The
+/// userinfo, query and fragment clauses of [`Settings::base_from`] are where
+/// the TypeSafe side is deliberately stricter, and that test says so rather
+/// than sharing the table with them.
 fn reachable_in_the_clear(url: &Url) -> bool {
     // `Url` has already done the parsing that makes this safe: whatever sits
     // before an `@` is userinfo and never reaches `host()`, and a host that
@@ -346,11 +386,15 @@ fn reachable_in_the_clear(url: &Url) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The configured base URL would put the key on the wire in the clear.
-    /// The URL is deliberately absent from this message.
+    /// The configured base URL would put the key on the wire in the clear or
+    /// send a request nobody described, or it cannot be sent: its host is one
+    /// an HTTP request cannot carry, or it is longer than [`MAX_BASE`] bytes
+    /// once parsed. The URL is deliberately absent from this message.
     #[error(
-        "{BASE_ENV} must be https, or http to loopback; anything else puts the API key on the \
-         wire in the clear"
+        "{BASE_ENV} must be https, or http to loopback, with a host an HTTP request can carry, \
+         no userinfo, query or fragment, and at most {MAX_BASE} bytes once parsed; anything \
+         else puts the API key on the wire in the clear, sends a request nobody described, or \
+         cannot be sent"
     )]
     RefusedBase,
     /// The configured default model is not a usable id. The value is
@@ -361,6 +405,24 @@ pub enum Error {
          digits, `_`, `.` or `-`"
     )]
     RefusedModel,
+    /// The SDK refused the key when the client was built, so there is no
+    /// client and nothing was sent.
+    ///
+    /// Configuration, like the two above, and named by its variable the way
+    /// they are. The SDK refuses a key that is blank once it has trimmed it —
+    /// its trim takes the separators U+001C to U+001F as well as whitespace,
+    /// which [`Settings::from_env`]'s blank rule does not — and one holding
+    /// whitespace, a control character or anything outside ASCII. It is the
+    /// only setting the SDK can refuse here: every other one has passed this
+    /// module's own rules or is a constant. The sentence is this module's
+    /// own, because the SDK's is written for callers of its builder, and it
+    /// never repeats the key.
+    #[error(
+        "{KEY_ENV} holds no key the TypeSafe client will send: it is blank once whitespace and \
+         the separators U+001C to U+001F are trimmed, or it holds whitespace, a control \
+         character or a character outside ASCII"
+    )]
+    RefusedKey,
     /// The request did not pass [`Request::checked`], so nothing was sent.
     #[error("{0}")]
     InvalidRequest(String),
@@ -398,7 +460,15 @@ pub enum Error {
     /// The answer was larger than this client will hold.
     #[error("the TypeSafe response exceeds the {} KiB limit", MAX_RESPONSE / 1024)]
     TooLarge,
-    /// The exchange failed below HTTP: no client, no connection, a reset.
+    /// The exchange failed below HTTP: no HTTP client, no connection, a
+    /// reset — including a reset in the middle of a refusal's body, which
+    /// the SDK reports as a broken connection without the status it came
+    /// with.
+    ///
+    /// The text of a failed exchange is the SDK's fixed sentence for the
+    /// kind of failure, never the transport's error chain: that chain can
+    /// hold text a server or a proxy chose, and this string reaches the
+    /// model.
     #[error("the request to TypeSafe did not complete: {0}")]
     Transport(String),
     /// A 2xx whose body is not an answer this build can read.
@@ -423,7 +493,9 @@ impl From<Error> for ToolError {
             // Two sentences, because the two cases have different remedies
             // and a model that reads "check your API key" for a 404 will go
             // and tell the user something false.
-            Error::RefusedBase | Error::RefusedModel => Self::Failed(format!("{error}")),
+            Error::RefusedBase | Error::RefusedModel | Error::RefusedKey => {
+                Self::Failed(format!("{error}"))
+            }
             Error::Rejected { status } if matches!(status, 401 | 403) => Self::Failed(format!(
                 "TypeSafe refused the credential (HTTP {status}); check that {KEY_ENV} holds a \
                  valid key. This was rejected, so do not retry — continue without this \
@@ -565,15 +637,21 @@ impl Question {
     }
 }
 
-/// One evaluation, already validated and already serialized.
+/// One evaluation, already validated, with its questions already prepared.
 ///
-/// The body is built once, in [`Request::checked`], and both the size limit
-/// and the consent disclosure read that one number — so what the dialog says
-/// would be sent is the byte count of what is sent.
+/// The SDK encodes the body when it sends it, so the length is measured once
+/// here, in [`Request::checked`], over the body the SDK will write — the same
+/// members in the same order — and both the size limit and the consent
+/// disclosure read that one number. A test holds it to the bytes the vendor
+/// receives.
 #[derive(Clone)]
 pub struct Request {
-    /// Exactly the bytes the POST carries.
-    body: Vec<u8>,
+    /// The content to judge, handed to the SDK as it is.
+    content: State,
+    /// The questions, validated and serialized once by the SDK.
+    prepared: PreparedQuestions,
+    /// How many bytes the POST carries.
+    body_len: usize,
     /// The model id this request names.
     model: String,
     /// How many questions it asks.
@@ -589,7 +667,7 @@ impl std::fmt::Debug for Request {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Request")
-            .field("bytes", &self.body.len())
+            .field("bytes", &self.body_len)
             .field("questions", &self.questions)
             .field("model", &self.model)
             .finish_non_exhaustive()
@@ -696,19 +774,28 @@ impl Request {
         }
 
         let kind = StateKind::of(&state);
-        let wire = Wire { state: &state, questions: &questions, model: &model };
-        let body = serde_json::to_vec(&wire)
-            .map_err(|error| Error::InvalidRequest(format!("the request is not JSON: {error}")))?;
+        let wire = Wire { state: &state, model: &model, questions: &questions };
+        let body_len = serde_json::to_vec(&wire)
+            .map_err(|error| Error::InvalidRequest(format!("the request is not JSON: {error}")))?
+            .len();
 
-        if body.len() > MAX_BODY {
+        if body_len > MAX_BODY {
             return refuse(format!(
-                "the request body is {} bytes; the limit over state and questions together is \
-                 {MAX_BODY} bytes. Send less state, or shorter instructions.",
-                body.len()
+                "the request body is {body_len} bytes; the limit over state and questions \
+                 together is {MAX_BODY} bytes. Send less state, or shorter instructions."
             ));
         }
 
-        Ok(Self { body, model, questions: questions.len(), state: kind })
+        let prepared = prepare(&questions)?;
+
+        Ok(Self {
+            content: state,
+            prepared,
+            body_len,
+            model,
+            questions: questions.len(),
+            state: kind,
+        })
     }
 
     /// How many bytes this request would put on the wire.
@@ -717,7 +804,7 @@ impl Request {
     /// there is only one of them.
     #[must_use]
     pub fn body_len(&self) -> usize {
-        self.body.len()
+        self.body_len
     }
 
     /// The model id this request names.
@@ -739,16 +826,53 @@ impl Request {
     }
 }
 
-/// The request body's field order, fixed here so the wire shape is one
-/// decision rather than a consequence of [`Request`]'s field order.
+/// The body the SDK writes, member for member and in its order, so that its
+/// serialized length is the length of what is sent. Only ever measured: the
+/// SDK does the sending.
 #[derive(Serialize)]
 struct Wire<'request> {
     /// The content to judge.
     state: &'request State,
-    /// What to judge about it.
-    questions: &'request BTreeMap<String, Question>,
     /// Which model judges.
     model: &'request str,
+    /// What to judge about it.
+    questions: &'request BTreeMap<String, Question>,
+}
+
+/// `questions` as the SDK's prepared set.
+///
+/// Each question goes over as a [`RawQuestion`] carrying exactly the members
+/// ganja's own schema serializes, in the same order, so the wire shape of a
+/// question is the one the schema the model is shown describes — the SDK's
+/// typed builders would drop an undescribed option's `null` and an empty
+/// `criteria`, and [`Wire`] could no longer measure the body.
+///
+/// # Errors
+///
+/// [`Error::InvalidRequest`] with the SDK's reason. Nothing [`Request::checked`]
+/// has already accepted is refused by the SDK's own checks, so this is a
+/// guard rather than a path.
+fn prepare(questions: &BTreeMap<String, Question>) -> Result<PreparedQuestions, Error> {
+    let raw = questions.iter().fold(Questions::new(), |set, (id, question)| {
+        let asked = match question {
+            Question::Noul { instructions, criteria } => {
+                let noul = RawQuestion::new("noul").field("instructions", instructions);
+                match criteria {
+                    Some(criteria) => noul.field("criteria", criteria),
+                    None => noul,
+                }
+            }
+            Question::Choice { instructions, criteria } => RawQuestion::new("choice")
+                .field("instructions", instructions)
+                .field("criteria", criteria),
+            Question::Score { instructions, criteria } => RawQuestion::new("score")
+                .field("instructions", instructions)
+                .field("criteria", criteria),
+        };
+        set.raw(id.as_str(), asked)
+    });
+
+    raw.prepare().map_err(|error| Error::InvalidRequest(error.to_string()))
 }
 
 /// Whether `model` is a usable model id.
@@ -770,10 +894,16 @@ fn is_id(id: &str) -> bool {
 
 /// One answer, under the id its question was asked by.
 ///
-/// Parsed tolerantly: a `type` this build does not know becomes
-/// [`Answer::Other`] rather than failing the whole response, because the
-/// vendor's own migration notes show answer shapes being renamed between
-/// versions and one unknown answer must not cost the others.
+/// Decoded by the SDK and converted here. A `type` this build does not know
+/// becomes [`Answer::Other`] rather than failing the whole response, because
+/// the vendor's own migration notes show answer shapes being renamed between
+/// versions and one unknown answer must not cost the others. A `type` it does
+/// know whose payload does not decode fails the response as
+/// [`Error::Malformed`]: that is the SDK's rule, and a payload that
+/// contradicts its own `type` is not one to guess at.
+///
+/// `Deserialize` is for the JSON form `ganja evaluate --format json` prints,
+/// so a caller can read that document back.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
@@ -854,16 +984,22 @@ pub struct Client {
     settings: Settings,
     /// Built once: a client per call would discard the connection pool and
     /// re-verify TLS on every judgement.
-    http: reqwest::Client,
+    sdk: typesafe_sdk::Client<Transport>,
 }
 
 impl Client {
     /// A client over `settings`.
     ///
+    /// The SDK is given every setting explicitly — key, base, model — so it
+    /// reads none of the environment itself: what [`Settings`] describes to
+    /// the consent disclosure is what the client sends.
+    ///
     /// # Errors
     ///
-    /// [`Error::Transport`] when no HTTP client can be built, which in
-    /// practice means the TLS backend failed to initialize.
+    /// [`Error::RefusedKey`] when the SDK refuses the key, which is
+    /// configuration. [`Error::Transport`] when no HTTP client can be built,
+    /// which in practice means the TLS backend failed to initialize. No
+    /// message repeats the key or the URL.
     pub fn new(settings: Settings) -> Result<Self, Error> {
         let http = reqwest::Client::builder()
             // A request here carries the API key in a header, so a redirect
@@ -876,8 +1012,34 @@ impl Client {
             .map_err(|error| {
                 Error::Transport(format!("no HTTP client: {}", error.without_url()))
             })?;
+        // Every setting the SDK is given is given here, and only here. This
+        // builder is also the one place the client's identification is
+        // decided, and `the_headers_the_vendor_receives_are_exactly_these`
+        // is what holds it.
+        let sdk = typesafe_sdk::ClientBuilder::new()
+            // The one line the key is exposed at.
+            .api_key(settings.key.expose_secret())
+            .base_url(settings.base.as_str())
+            .default_model(settings.model.as_str())
+            .timeout(settings.timeout)
+            .max_response_bytes(MAX_RESPONSE)
+            // One consent is one transmission.
+            .retry(RetryPolicy::none())
+            .user_agent_product(USER_AGENT_PRODUCT)
+            // The operating system and CPU architecture are nobody's
+            // business at the vendor.
+            .send_runtime_header(false)
+            .build_with_service(Transport(http))
+            .map_err(|error| match error.kind() {
+                // Every other setting handed over above has passed this
+                // module's own rules — the base URL's include the HTTP
+                // client's own parse and `MAX_BASE` — or is a constant, so a
+                // configuration refusal here is the key.
+                ErrorKind::Config => Error::RefusedKey,
+                _ => Error::Transport(summary(&error)),
+            })?;
 
-        Ok(Self { settings, http })
+        Ok(Self { settings, sdk })
     }
 
     /// What this client was configured with.
@@ -894,9 +1056,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Any [`Error`] but [`Error::InvalidRequest`] and
-    /// [`Error::RefusedBase`], both of which are decided before a [`Request`]
-    /// exists.
+    /// Any [`Error`] but [`Error::RefusedBase`], [`Error::RefusedModel`] and
+    /// [`Error::RefusedKey`], which are decided before a client exists.
     pub async fn evaluate(
         &self,
         request: &Request,
@@ -913,16 +1074,20 @@ impl Client {
         }
 
         let started = Instant::now();
-        let (status, answered) = tokio::select! {
-            sent = tokio::time::timeout(self.settings.timeout, self.send(request)) => {
-                sent.unwrap_or(Err(Error::Timeout))
-            }
+        let sent = self
+            .sdk
+            .system_one(&request.content, &request.prepared)
+            .model(request.model.as_str())
+            .send();
+        let answered = tokio::select! {
+            answered = sent => answered.map_err(failure),
             () = cancel.cancelled() => Err(Error::Cancelled),
         }?;
+        let status = answered.meta().status().as_u16();
+        let answered = converted(&answered);
 
         // Never the key, never the state, never a URL: a base URL is
-        // configuration and configuration may carry a credential in its
-        // userinfo.
+        // configuration, and a gateway may carry a token in its path.
         tracing::debug!(
             status,
             latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -932,51 +1097,199 @@ impl Client {
 
         Ok(answered)
     }
+}
 
-    /// One request, from the first byte out to the parsed answer, and the
-    /// status it came back with.
-    async fn send(&self, request: &Request) -> Result<(u16, Response), Error> {
-        let sent = self
-            .http
-            .post(self.settings.endpoint.clone())
-            // The one line the key is exposed at.
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", self.settings.key.expose_secret()),
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .body(request.body.clone())
-            .send()
-            .await
-            // `without_url` before anything reads this. reqwest's `Display`
-            // appends `for url (<url>)`, userinfo and all, and this string is
-            // model-facing — the same reason `ganja-provider`'s auth flows
-            // strip it (`auth/grok.rs`, `auth/device.rs`, `auth/cursor.rs`,
-            // `auth/mcp_oauth.rs`).
-            .map_err(|error| Error::Transport(error.without_url().to_string()))?;
+/// The SDK's response as ganja's [`Response`].
+///
+/// The SDK skips an answer whose `type` it does not model and keeps the bytes
+/// it received. Such an answer still becomes [`Answer::Other`] here, read
+/// back out of those bytes by [`raw_answers`], so the model is told it asked
+/// something this build cannot read rather than finding the id missing. That
+/// second read is of a body the SDK already held under the response cap;
+/// guessing from counts whether one was skipped would miss the vendor
+/// answering under an id nobody asked.
+fn converted(answered: &typesafe_sdk::SystemOneResponse) -> Response {
+    let mut answers = BTreeMap::new();
+    for (id, answer) in answered.answers().iter() {
+        let Some(answer) = known(answer) else {
+            continue;
+        };
+        // The first of a repeated id, as the SDK's own lookups return. Where
+        // the SDK skipped every answer under an id, the loop below takes the
+        // last of them, the one `raw_answers` keeps.
+        answers.entry(id.to_owned()).or_insert(answer);
+    }
+    for (id, raw) in raw_answers(answered.meta().raw_body()) {
+        answers.entry(id).or_insert_with(|| other(raw));
+    }
 
-        // The status first. A body read out of a 401 is an error page, and
-        // handing the caller a parse failure for a rejected credential would
-        // be the one answer it cannot act on.
-        let status = sent.status().as_u16();
-        if !sent.status().is_success() {
-            // An error body that will not read is a fact, not an empty
-            // string: rendered as one, a 422 would reach the model as
-            // "(HTTP 422): ." and read like a bug in ganja.
-            let said = match collect(sent, MAX_ERROR_BODY).await {
-                Ok(body) => String::from_utf8_lossy(&body).into_owned(),
-                Err(_unreadable) => UNREADABLE.to_owned(),
-            };
+    let usage = answered.usage();
+    Response {
+        model: answered.model().to_owned(),
+        answers,
+        usage: Usage {
+            input_tokens: usage.input_tokens().unwrap_or_default(),
+            output_tokens: usage.output_tokens().unwrap_or_default(),
+        },
+    }
+}
 
-            return Err(refusal(status, &said));
+/// One of the SDK's answers as ganja's, or [`None`] for a kind a later SDK
+/// adds and this build does not map.
+fn known(answer: &typesafe_sdk::Answer) -> Option<Answer> {
+    Some(match answer {
+        typesafe_sdk::Answer::Noul(noul) => Answer::Noul { noul: noul.noul() },
+        typesafe_sdk::Answer::Choice(choice) => Answer::Choice {
+            choice: choice.choice().to_owned(),
+            probabilities: choice
+                .probabilities()
+                .map(|(option, probability)| (option.to_owned(), probability))
+                .collect(),
+            confidence: choice.confidence(),
+        },
+        typesafe_sdk::Answer::Score(score) => Answer::Score {
+            score: score.score(),
+            legend: score
+                .legend()
+                .map(|(level, described)| {
+                    let text = described
+                        .as_text()
+                        .or_else(|| described.as_json().map(typesafe_sdk::RawJson::as_str))
+                        .unwrap_or_default();
+                    (level.to_string(), text.to_owned())
+                })
+                .collect(),
+            probabilities: score
+                .probabilities()
+                .map(|(level, probability)| (level.to_string(), probability))
+                .collect(),
+            confidence: score.confidence(),
+        },
+        _ => return None,
+    })
+}
+
+/// Every answer in `body`, each as the raw text it arrived as.
+///
+/// Read as leniently as the SDK read it, so that a body the SDK decoded
+/// cannot fail here: the same serde_json, over bytes the SDK already found
+/// to be UTF-8 and at most 16 levels deep. Every member is captured as text,
+/// never evaluated, because the SDK passes over an answer it skips without
+/// evaluating its numbers or escapes. The top level is read as a map, so a
+/// repeated `answers` member resolves as the SDK resolves it, to the last
+/// one. A body with no `answers` at all, which the SDK accepts as no
+/// answers, is the empty map.
+fn raw_answers(body: &[u8]) -> BTreeMap<String, &RawValue> {
+    let members = serde_json::from_slice::<BTreeMap<String, &RawValue>>(body).unwrap_or_default();
+
+    members
+        .get("answers")
+        .and_then(|answers| serde_json::from_str(answers.get()).ok())
+        .unwrap_or_default()
+}
+
+/// One skipped answer as [`Answer::Other`]: whole where serde_json can hold
+/// it as a value, and by its `type` alone where it cannot.
+///
+/// The text can hold what a value cannot: a number beyond an `f64`'s range,
+/// or a lone surrogate escaped in a string, both of which the SDK passed
+/// over unread. Such an answer still reaches the model, named by its type.
+fn other(raw: &RawValue) -> Answer {
+    /// An answer's `type` and nothing else, which reads whatever the other
+    /// members hold.
+    #[derive(Deserialize)]
+    struct Kind {
+        /// The answer's type.
+        #[serde(rename = "type")]
+        kind: Option<String>,
+    }
+
+    Answer::Other(serde_json::from_str(raw.get()).unwrap_or_else(|_unholdable| {
+        let kind = serde_json::from_str::<Kind>(raw.get()).ok().and_then(|named| named.kind);
+
+        serde_json::json!({ "type": kind })
+    }))
+}
+
+/// The SDK's failure as ganja's.
+///
+/// Every sentence that reaches the model is built here or in [`refusal`].
+/// None is taken from the SDK's `Display` of an API or validation error,
+/// which names the endpoint URL, or of a connection error, which carries the
+/// transport's error chain.
+fn failure(error: typesafe_sdk::Error) -> Error {
+    match error.kind() {
+        // The credential, as the SDK recognises it: a 401, or a 403 whose
+        // `detail.error_type` is `authentication_error`. `refusal` makes
+        // every other 401 and 403 a rejection too, so a 403 the vendor sends
+        // for another reason, `permission_denied` among them, is exactly the
+        // same rejection (D569).
+        ErrorKind::Api(refused)
+            if matches!(refused.status().as_u16(), 401 | 403) && refused.is_authentication() =>
+        {
+            Error::Rejected { status: refused.status().as_u16() }
         }
+        ErrorKind::Api(refused) => {
+            refusal(refused.status().as_u16(), &String::from_utf8_lossy(refused.body()))
+        }
+        ErrorKind::Timeout { .. } => Error::Timeout,
+        ErrorKind::ResponseTooLarge { .. } => Error::TooLarge,
+        // The SDK's message names the field that failed and quotes no value;
+        // with no field to name, its fixed sentence for the kind.
+        ErrorKind::ResponseValidation(invalid) if !invalid.field_path().is_empty() => {
+            Error::Malformed(invalid.message().trim_end_matches('.').to_owned())
+        }
+        ErrorKind::ResponseValidation(_) => Error::Malformed(summary(&error)),
+        ErrorKind::InvalidRequest => Error::InvalidRequest(error.to_string()),
+        // `Connection`, and whatever a later SDK adds. A refusal whose body
+        // broke off mid-read is `Connection` too: the SDK does not keep the
+        // status of a response whose body it could not read.
+        _ => Error::Transport(summary(&error)),
+    }
+}
 
-        let body = collect(sent, MAX_RESPONSE).await?;
-        let answered =
-            serde_json::from_slice(&body).map_err(|error| Error::Malformed(error.to_string()))?;
+/// The SDK's fixed sentence for the kind of `error`, which holds no server
+/// or transport text, without the full stop the sentence around it
+/// supplies.
+fn summary(error: &typesafe_sdk::Error) -> String {
+    error.summary().trim_end_matches('.').to_owned()
+}
 
-        Ok((status, answered))
+/// Ganja's `reqwest` client as the SDK's transport.
+///
+/// The SDK's own transport has no proxy support, and `reqwest` here is built
+/// with the system proxy settings every other HTTP client in the tree
+/// honours; it also keeps redirects off. The SDK still owns the per-attempt
+/// deadline and the response size cap over whatever this answers.
+#[derive(Clone)]
+struct Transport(reqwest::Client);
+
+impl tower_service::Service<http::Request<typesafe_sdk::Body>> for Transport {
+    type Response = http::Response<reqwest::Body>;
+    type Error = reqwest::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<typesafe_sdk::Body>) -> Self::Future {
+        let client = self.0.clone();
+
+        Box::pin(async move {
+            // `without_url` before the SDK reads either error. reqwest's
+            // `Display` appends `for url (<url>)`, and the SDK builds its
+            // connection error's message and source from this error; the
+            // model reads neither, but a debug rendering of the source would.
+            let request = reqwest::Request::try_from(request.map(reqwest::Body::wrap))
+                .map_err(reqwest::Error::without_url)?;
+
+            client
+                .execute(request)
+                .await
+                .map(http::Response::from)
+                .map_err(reqwest::Error::without_url)
+        })
     }
 }
 
@@ -1092,32 +1405,6 @@ fn clamp(text: &str, limit: usize) -> String {
     }
 
     format!("{}…", &text[..end])
-}
-
-/// Reads a response body, refusing one too big to be worth holding.
-///
-/// The declared length is checked first, so an oversized answer costs nothing
-/// to refuse, and the body is measured as it streams, so one that lies about
-/// its length — or declares none at all — is refused at the same boundary
-/// rather than after it has been buffered whole.
-async fn collect(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Error> {
-    if response.content_length().is_some_and(|length| length > limit as u64) {
-        return Err(Error::TooLarge);
-    }
-
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| Error::Transport(error.without_url().to_string()))?;
-
-        if body.len() + chunk.len() > limit {
-            return Err(Error::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    Ok(body)
 }
 
 // `pub(crate)` for one item inside it: the loopback fixture, which

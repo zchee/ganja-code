@@ -13,14 +13,22 @@
 //! quietly become the stricter one. An unparseable row is not a reason to
 //! abort: it is a row both sides must refuse, which is a claim worth making.
 //!
-//! The TypeSafe side is deliberately stricter in exactly one respect, and
-//! that is why the query and fragment rows sit **outside** the shared table:
-//! joining the endpoint path onto a base drops a query and a fragment
-//! silently, and a gateway URL is where somebody puts a token in a query
-//! string. The provider has no such join and so has no such rule.
+//! The TypeSafe side is deliberately stricter in one respect — a base must be
+//! something the endpoint path can be joined onto as written — and that one
+//! respect has three spellings, which is why the userinfo, query and fragment
+//! rows sit **outside** the shared table: joining the endpoint path onto a
+//! base drops a query and a fragment, a gateway URL is where somebody puts a
+//! token in a query string, and the TypeSafe SDK refuses all three when its
+//! client is built. The provider has no such join and so has no such rule.
+//!
+//! It is stricter in a second respect: a base's host must be one the HTTP
+//! client's URI parser accepts, so that the refusal is the base's rather than
+//! one reported against the key once the TypeSafe client is built; and, by
+//! ganja's own limit, a base is at most `MAX_BASE` bytes once parsed. Those
+//! rows sit outside the table too.
 
 use ganja_core::provider::reachable_in_the_clear;
-use ganja_core::tool::typesafe::Settings;
+use ganja_core::tool::typesafe::{Error, MAX_BASE, Settings};
 use url::Url;
 
 /// Every shape either side has an opinion about, including the three
@@ -75,11 +83,17 @@ fn the_typesafe_base_url_check_is_the_provider_check_in_another_crate() {
 }
 
 /// The one place the copy is stricter, stated rather than left to be
-/// discovered: a base carrying a query or a fragment is refused here and
-/// accepted there, because only this side joins a path onto it.
+/// discovered: a base carrying userinfo, a query or a fragment is refused here
+/// and accepted there, because only this side joins a path onto it and hands
+/// it to an SDK that refuses all three.
 #[test]
-fn a_base_carrying_a_query_or_a_fragment_is_refused_only_on_the_typesafe_side() {
-    for carried in ["https://eu.example/?token=secret", "https://eu.example/#tail"] {
+fn a_base_carrying_userinfo_a_query_or_a_fragment_is_refused_only_on_the_typesafe_side() {
+    for carried in [
+        "https://eu.example/?token=secret",
+        "https://eu.example/#tail",
+        "https://tok:pw@eu.example",
+        "http://user@127.0.0.1:1",
+    ] {
         let url = Url::parse(carried).expect("these are URLs");
 
         assert!(reachable_in_the_clear(&url), "{carried} is fine for a provider base");
@@ -87,6 +101,43 @@ fn a_base_carrying_a_query_or_a_fragment_is_refused_only_on_the_typesafe_side() 
             Settings::base_from(carried).is_err(),
             "{carried} is refused here, because the join would drop what it carries"
         );
+    }
+}
+
+/// The second respect: a host `url` parses and an HTTP request cannot carry,
+/// and a base past `MAX_BASE`, are refused here as the base; a provider base,
+/// checked only for the clear, is not. The same characters in a path are
+/// percent-encoded, and a base of exactly `MAX_BASE` bytes is inside the
+/// bound, so both sides accept those.
+#[test]
+fn a_base_an_http_request_cannot_carry_is_refused_only_on_the_typesafe_side() {
+    let head = "https://eu.example/";
+    let too_long = format!("{head}{}", "a".repeat(MAX_BASE + 1 - head.len()));
+    for uncarried in [
+        "https://{{host}}/v1",
+        "https://${host}",
+        "https://a\"b.example",
+        "https://a`b.example",
+        too_long.as_str(),
+    ] {
+        let url = Url::parse(uncarried).expect("url parses each of these");
+
+        assert!(reachable_in_the_clear(&url), "{uncarried} is fine for a provider base");
+        assert_eq!(
+            Settings::base_from(uncarried),
+            Err(Error::RefusedBase),
+            "{uncarried} is refused here, as the base"
+        );
+    }
+
+    let longest = format!("{head}{}", "a".repeat(MAX_BASE - head.len()));
+    for carried in
+        ["https://eu.example/{{prefix}}/v1", "https://eu.example/a\"b`c", longest.as_str()]
+    {
+        let url = Url::parse(carried).expect("these are URLs");
+
+        assert!(reachable_in_the_clear(&url), "{carried} is fine for a provider base");
+        assert!(Settings::base_from(carried).is_ok(), "{carried} is accepted here too");
     }
 }
 

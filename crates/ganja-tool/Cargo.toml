@@ -38,6 +38,11 @@ jiff.workspace = true
 # way upstream's turndown call is, rather than the tag-stripped text that stood
 # in for one until the crate landed.
 htmd.workspace = true
+# The TypeSafe SDK takes a custom transport as a `tower_service::Service` over
+# `http` requests; this and `tower-service` below are what the adapter handing
+# it `reqwest` is written in, and `Settings::base_from` refuses a base URL
+# `http::Uri` does not parse.
+http.workspace = true
 # `webfetch`'s text format walks the parse tree htmd hands back rather than
 # htmd's rendering of it: that rendering markdown-escapes every text node and
 # offers no way not to, which in a plain-text answer is a backslash the page
@@ -59,17 +64,22 @@ nucleo-matcher.workspace = true
 # mojibake its decoding twin already had.
 percent-encoding.workspace = true
 # `webfetch` is the one tool that reaches the network; the workspace
-# declaration pins rustls so no build here reaches for OpenSSL.
+# declaration pins rustls so no build here reaches for OpenSSL. The TypeSafe
+# client sends through it too, so its requests keep the system proxy.
 reqwest.workspace = true
 # Tool argument schemas, generated from the argument structs themselves so the
 # schema a model sees cannot drift from what the tool parses.
 schemars.workspace = true
 # The TypeSafe API key is held in a `SecretString` so it is wiped on drop and
 # cannot reach a `Debug` rendering; the `evaluate` client exposes it at
-# exactly one line, where the `Authorization` header is built.
+# exactly one line, where it is handed to the TypeSafe SDK.
 secrecy.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `raw_value`: the TypeSafe client reads answers the SDK skipped back out of
+# the response as the raw text they arrived in, so no number or escape the
+# SDK never evaluated is evaluated here. The SDK's own serde_json turns the
+# feature on already; it is named because this crate's code uses it.
+serde_json = { workspace = true, features = ["raw_value"] }
 # `edit` reports what it changed as a unified patch, which a frontend renders
 # instead of the two whole files.
 similar.workspace = true
@@ -79,6 +89,10 @@ tracing.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
+tower-service.workspace = true
+# The TypeSafe client under `evaluate` and the judge: encoding, the
+# exchange's deadline and size cap, decoding and failure classification.
+typesafe-sdk-rust.workspace = true
 # The TypeSafe base URL is refused on a *parsed* host rather than on text —
 # `http://127.0.0.1.evil.com` is a domain somebody else registered — which
 # needs `Host`, the one type reqwest's `Url` re-export leaves out.

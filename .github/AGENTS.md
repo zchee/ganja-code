@@ -49,7 +49,7 @@ For `GANJA_OPENCODE_DIR`, check out `anomalyco/opencode` at tag `v1.18.22` and r
 - New files use `.yaml`. `ISSUE_TEMPLATE/idea.yml` keeps `.yml`; GitHub accepts either for issue forms.
 - The depgate version appears twice in `ci.yaml`: `--rev v0.1.1` in the install step and `v0.1.1` in the cache key. Bump both together.
 - Dependency rules live in the root `depgate.toml`, each with its reason in a comment; edit a rule there, not in `ci.yaml`.
-- Renovate's own cargo is pinned by `constraints.rust` (`1.98.0`) in `renovate.json5`; bump it by hand when a dependency's MSRV passes it. Lockstep groups: `html5ever family`, `ripgrep internals`, `ratatui family`.
+- Renovate's own cargo is pinned by `constraints.rust` (`1.98.0`) in `renovate.json5`; bump it by hand when a dependency's MSRV passes it. Lockstep groups: `html5ever family`, `ripgrep internals`, `ratatui family`. `typesafe-sdk-rust` has a rule of its own (`groupName: null`): it is pinned exactly and code on the credential path, so each version is its own PR and gets a security re-read at its tag (D569).
 
 ## Gotchas
 

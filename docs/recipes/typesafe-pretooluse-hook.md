@@ -44,9 +44,10 @@ travels this way. Everything else in the table does, including the absolute path
 of your project and any content the model put in the command line.
 
 It goes to `https://api.typesafe.ai` unless `TYPESAFE_BASE_URL` names another
-host, which must be `https` or a loopback `http`. The questions file travels in
-the same request body. Together they are capped at 256 KiB; a larger body is
-refused locally and never sent.
+base URL, which must be `https` or a loopback `http`, with a host an HTTP
+request can carry, no userinfo, query or fragment, and at most 2,048 bytes once
+parsed. The questions file travels in the same request body. Together they
+are capped at 256 KiB; a larger body is refused locally and never sent.
 
 Three environment variables configure the client, and the hook's process
 inherits ganja's own environment, so they must be exported where `ganja` runs —
@@ -96,9 +97,9 @@ they are the codes you will see when you run it by hand:
 |---|---|---|
 | 0 | Answered; the answers are on stdout. | Stdout is read. |
 | 2 | clap's parse failure. Never ganja's own choice. | **Blocks the call** (`hook.rs:744`); stderr becomes the refusal the model reads. |
-| 3 | Not configured: no key, a refused `TYPESAFE_BASE_URL`, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule. | Non-blocking notice. |
+| 3 | Not configured: no key, a key the TypeSafe client will not send, a refused `TYPESAFE_BASE_URL`, or a `TYPESAFE_DEFAULT_MODEL` outside the id rule. | Non-blocking notice. |
 | 4 | The vendor refused: 401, 403, 422, any other 4xx. | Non-blocking notice. |
-| 5 | Unavailable: 429, 529, 5xx, 3xx, timeout, transport, oversized, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout. | Non-blocking notice. |
+| 5 | Unavailable: 429, 529, 5xx, 3xx, timeout, transport (a refusal whose body broke off mid-read among it), oversized, malformed; a cancelled exchange; an error arm this build does not know; a failed write to stdout. | Non-blocking notice. |
 | 64 | A bad argument of ganja's own (`EX_USAGE`), `--model` included. | Non-blocking notice. |
 
 `ganja evaluate`'s own module documentation carries this same table, and the

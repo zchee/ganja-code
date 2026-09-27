@@ -29,10 +29,7 @@ const RENDERED: &str = "dept: choice=technical p=0.85 confidence=0.82 (billing 0
 fn tool(endpoint: &Endpoint) -> EvaluateTool {
     let base = Settings::base_from(endpoint.base()).expect("a loopback base is accepted");
 
-    EvaluateTool::against(
-        Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
-            .expect("a checked base joins the endpoint path"),
-    )
+    EvaluateTool::against(Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned()))
 }
 
 fn ctx() -> ToolCtx {

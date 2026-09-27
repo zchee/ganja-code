@@ -5,8 +5,8 @@ use fixture::{Endpoint, Reply, answer, canned, redirect};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Answer, Client, DEFAULT_MODEL, Error, Instructions, MAX_BODY, MAX_QUESTIONS, NoulCriteria,
-    PREVIEW_MODEL, Question, Request, Settings, State, Usage,
+    Answer, Client, DEFAULT_MODEL, Error, Instructions, MAX_BASE, MAX_BODY, MAX_QUESTIONS,
+    NoulCriteria, PREVIEW_MODEL, Question, Request, Settings, State, Usage,
 };
 use crate::ToolError;
 
@@ -238,11 +238,17 @@ fn client(endpoint: &Endpoint) -> Client {
 fn within(endpoint: &Endpoint, deadline: Duration) -> Client {
     let base = Settings::base_from(endpoint.base()).expect("a loopback base is accepted");
 
-    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
-        .expect("a checked base joins the endpoint path")
-        .within(deadline);
+    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned()).within(deadline);
 
     Client::new(settings).expect("an HTTP client builds")
+}
+
+/// An https base of exactly `len` bytes, padded in its path with a letter
+/// that parsing leaves as written.
+fn padded_base(len: usize) -> String {
+    const HEAD: &str = "https://eu.example/";
+
+    format!("{HEAD}{}", "a".repeat(len - HEAD.len()))
 }
 
 /// What one evaluation against `reply` answered, and what the endpoint saw.
@@ -286,22 +292,13 @@ async fn one_evaluation_posts_the_endpoint_path_the_bearer_key_and_exactly_this_
         "the key travels as a bearer token: {head}"
     );
     assert!(
-        head.lines().any(|line| {
-            line.eq_ignore_ascii_case(&format!(
-                "user-agent: ganja-code/{}",
-                env!("CARGO_PKG_VERSION")
-            ))
-        }),
-        "ganja names itself: {head}"
-    );
-    assert!(
         head.lines().any(|line| line.eq_ignore_ascii_case("content-type: application/json")),
         "the body is declared as JSON: {head}"
     );
     assert_eq!(
         body,
         format!(
-            r#"{{"state":"{STATE}","questions":{{"dept":{{"type":"choice","instructions":"Which team should handle this?","criteria":{{"billing":"payments","technical":null}}}},"frustration":{{"type":"score","instructions":"How frustrated is the customer?","criteria":["calm","angry"]}},"urgent":{{"type":"noul","instructions":"Does this convey urgency?","criteria":{{"true":"time-sensitive"}}}}}},"model":"{DEFAULT_MODEL}"}}"#
+            r#"{{"state":"{STATE}","model":"{DEFAULT_MODEL}","questions":{{"dept":{{"type":"choice","instructions":"Which team should handle this?","criteria":{{"billing":"payments","technical":null}}}},"frustration":{{"type":"score","instructions":"How frustrated is the customer?","criteria":["calm","angry"]}},"urgent":{{"type":"noul","instructions":"Does this convey urgency?","criteria":{{"true":"time-sensitive"}}}}}}}}"#
         )
     );
     assert_eq!(answered.model, "jev-1.13.0");
@@ -309,6 +306,111 @@ async fn one_evaluation_posts_the_endpoint_path_the_bearer_key_and_exactly_this_
     assert_eq!(answered.answers.len(), 3);
     assert_eq!(answered.answers["urgent"], Answer::Noul { noul: 0.92 });
     assert_eq!(endpoint.count(), 1);
+}
+
+#[tokio::test]
+async fn the_headers_the_vendor_receives_are_exactly_these() {
+    // The identification posture, asserted on the bytes the loopback vendor
+    // received rather than on the builder calls: `User-Agent` names ganja
+    // first and the SDK last, `X-TypeSafe-SDK` names the SDK alone, and
+    // `X-TypeSafe-Runtime`, which would name the operating system and the
+    // CPU architecture, is not sent. Every header name is listed, so one the
+    // transport or the SDK starts adding shows up here too.
+    let (answered, endpoint) =
+        evaluate(answer(ANSWERED), &request(one_question(), DEFAULT_MODEL)).await;
+    answered.expect("the canned answer parses");
+    let seen = endpoint.first();
+    let (head, _body) = seen.split_once("\r\n\r\n").expect("the request has a body");
+    let headers: BTreeMap<String, String> = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
+
+    assert_eq!(
+        headers.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "accept",
+            "authorization",
+            "content-length",
+            "content-type",
+            "host",
+            "user-agent",
+            "x-typesafe-sdk",
+        ],
+        "every header the vendor receives, and no x-typesafe-runtime: {head}"
+    );
+    // One line per name: the map above would fold a header sent twice.
+    assert_eq!(head.lines().skip(1).count(), headers.len(), "no header is sent twice: {head}");
+    assert_eq!(headers["authorization"], format!("Bearer {KEY}"));
+    assert_eq!(headers["accept"], "application/json");
+    assert_eq!(headers["content-type"], "application/json");
+
+    let sdk = &headers["x-typesafe-sdk"];
+    assert!(sdk.starts_with("typesafe-sdk-rust/"), "the SDK names itself: {head}");
+    assert_eq!(
+        headers["user-agent"],
+        format!("ganja-code/{} {sdk}", env!("CARGO_PKG_VERSION")),
+        "ganja's product first, the SDK's last: {head}"
+    );
+    for platform in [std::env::consts::OS, std::env::consts::ARCH] {
+        assert!(!head.contains(platform), "the platform is not named ({platform}): {head}");
+    }
+}
+
+#[tokio::test]
+async fn the_disclosed_byte_count_is_the_byte_count_the_vendor_receives() {
+    // The SDK encodes the body when it sends it; the number the consent
+    // dialog quotes and the cap is checked against is measured beforehand,
+    // with a different encoder. Every shape here is one where two JSON
+    // encoders could plausibly disagree: escapes, control characters, the
+    // two Unicode line separators, non-ASCII text, integers at the edges,
+    // and floats that are written in exponent form.
+    let states = [
+        State::Text(STATE.to_owned()),
+        State::Text(
+            "quote \" backslash \\ slash / tab \t nl \n cr \r bell \u{7} del \u{7f}".to_owned(),
+        ),
+        State::Text("line\u{2028}para\u{2029} 日本語 🦀 é".to_owned()),
+        State::Object(BTreeMap::from([
+            ("floats".to_owned(), serde_json::json!([0.1, 1e-7, 1.5e300, -0.0, 123_456.789, 2.0])),
+            ("ints".to_owned(), serde_json::json!([0, -1, u64::MAX, i64::MIN])),
+            ("nested".to_owned(), serde_json::json!({"a": [null, true, false, {"b": "c"}]})),
+        ])),
+        State::Array(vec![serde_json::json!("x"), serde_json::json!(3.25), serde_json::json!({})]),
+    ];
+    let questions = {
+        let mut asked = three_questions();
+        asked.insert(
+            "shaped".to_owned(),
+            Question::Noul {
+                instructions: Instructions::Object(BTreeMap::from([(
+                    "ask".to_owned(),
+                    serde_json::json!("Is it \"urgent\"?\n"),
+                )])),
+                criteria: Some(NoulCriteria { yes: None, no: None }),
+            },
+        );
+        asked
+    };
+
+    for state in states {
+        let asked = Request::checked(state.clone(), questions.clone(), DEFAULT_MODEL.to_owned())
+            .expect("every fixture state is within every limit");
+        let (answered, endpoint) = evaluate(answer(ANSWERED), &asked).await;
+        answered.expect("the canned answer parses");
+        let seen = endpoint.first();
+        let (_head, body) = seen.split_once("\r\n\r\n").expect("the request has a body");
+
+        assert_eq!(
+            asked.body_len(),
+            body.len(),
+            "the disclosure says {} bytes, the vendor got {} for {state:?}:\n{body}",
+            asked.body_len(),
+            body.len()
+        );
+    }
 }
 
 #[tokio::test]
@@ -320,6 +422,66 @@ async fn an_answer_type_this_build_does_not_know_is_kept_whole_rather_than_faili
 
     assert_eq!(answered.answers["urgent"].kind(), "quanta");
     assert!(matches!(answered.answers["urgent"], Answer::Other(_)));
+}
+
+#[tokio::test]
+async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
+    // The SDK passes over an answer of a type it does not model without
+    // evaluating it, so it accepts bodies a whole-value parse would refuse.
+    // Each one here but the last is such a body, and in each the skipped
+    // answer still reaches the model: whole where a value can hold it, by its
+    // type where not.
+    let usage = r#""usage":{"input_tokens":1,"output_tokens":0}"#;
+    let cases = [
+        (
+            "a number beyond an f64",
+            format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"urgent":{{"type":"quanta","quanta":[1e400]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
+            ),
+            serde_json::json!({"type": "quanta"}),
+        ),
+        (
+            "a lone surrogate",
+            format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"urgent":{{"type":"quanta","note":"\ud800"}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
+            ),
+            serde_json::json!({"type": "quanta"}),
+        ),
+        (
+            // The SDK keeps the last of a repeated `answers` member; a serde
+            // derive refuses the repetition outright.
+            "a repeated answers member",
+            format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"stale":{{"type":"noul","noul":0.9}}}},"answers":{{"urgent":{{"type":"quanta","quanta":[0.1]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
+            ),
+            serde_json::json!({"type": "quanta", "quanta": [0.1]}),
+        ),
+        (
+            // One id answered twice, both of a type the SDK skips. The
+            // answers hold one per id, and the raw read keeps the last.
+            "one id answered twice, both skipped",
+            format!(
+                r#"{{"model":"jev-1.13.0","answers":{{"urgent":{{"type":"quanta","quanta":[0.1]}},"urgent":{{"type":"quanta","quanta":[0.2]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
+            ),
+            serde_json::json!({"type": "quanta", "quanta": [0.2]}),
+        ),
+    ];
+
+    for (what, body, kept) in cases {
+        let (answered, _endpoint) =
+            evaluate(answer(&body), &request(one_question(), DEFAULT_MODEL)).await;
+        let answered =
+            answered.unwrap_or_else(|error| panic!("{what}: the SDK decodes it: {error}"));
+
+        assert_eq!(
+            answered.answers,
+            BTreeMap::from([
+                ("tail".to_owned(), Answer::Noul { noul: 0.3 }),
+                ("urgent".to_owned(), Answer::Other(kept)),
+            ]),
+            "{what}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -349,6 +511,65 @@ async fn a_refused_credential_is_not_retried_and_tells_the_model_not_to_either()
         } else {
             assert!(message.contains(super::KEY_ENV), "a {status} names the credential: {message}");
         }
+    }
+}
+
+#[tokio::test]
+async fn every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names() {
+    // The SDK tells a 403 for a request without a key
+    // (`authentication_error`) from a 403 for a key that lacks a permission
+    // (`permission_denied`). This client keeps both, and every other 401 and
+    // 403, a rejection: the judge reads a 401 as "switch off" and a 403 as
+    // "skip this segment", and which 403s belong with the 401 is not decided
+    // here.
+    for (status, body) in [
+        (401_u16, r#"{"detail":{"error_type":"authentication_error","message":"Bad key."}}"#),
+        (401, ""),
+        (403, r#"{"detail":{"error_type":"authentication_error","message":"No key."}}"#),
+        (403, r#"{"detail":{"error_type":"permission_denied","message":"Not allowed."}}"#),
+        (403, r#"{"detail":"Forbidden"}"#),
+        (403, ""),
+    ] {
+        let (answered, endpoint) =
+            evaluate(canned(status, body), &request(one_question(), DEFAULT_MODEL)).await;
+
+        assert_eq!(answered.unwrap_err(), Error::Rejected { status }, "HTTP {status} {body:?}");
+        assert_eq!(endpoint.count(), 1, "HTTP {status} {body:?} was not retried");
+    }
+
+    // The SDK counts `authentication_error` as a credential failure under any
+    // status. That does not widen what a rejection is: a 5xx naming it is
+    // still a vendor that might answer later.
+    let (answered, _endpoint) = evaluate(
+        canned(500, r#"{"detail":{"error_type":"authentication_error"}}"#),
+        &request(one_question(), DEFAULT_MODEL),
+    )
+    .await;
+    assert_eq!(answered.unwrap_err(), Error::Unavailable { status: 500 });
+}
+
+#[tokio::test]
+async fn a_refusal_whose_body_breaks_off_loses_its_status_and_is_a_transport_failure() {
+    // Accepted from the SDK rather than decided here: a response whose body
+    // cannot be read is a broken connection to it, whatever status line came
+    // first. So a 401 or a 422 cut off mid-body is `Transport` (exit 5,
+    // "unavailable"), not `Rejected` or `Invalid` (exit 4, "refused").
+    for status in [401_u16, 422] {
+        let cut_short = Reply::Canned(
+            format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\
+                 connection: close\r\n\r\n{{\"detail\":"
+            )
+            .into_bytes(),
+        );
+        let (answered, endpoint) =
+            evaluate(cut_short, &request(one_question(), DEFAULT_MODEL)).await;
+
+        let Err(Error::Transport(said)) = &answered else {
+            panic!("HTTP {status} with a body cut short is a transport failure: {answered:?}");
+        };
+        assert!(!said.contains(&status.to_string()), "the status is lost: {said}");
+        assert_eq!(endpoint.count(), 1, "HTTP {status} was not retried");
     }
 }
 
@@ -539,6 +760,11 @@ fn a_base_url_is_accepted_only_where_the_key_would_not_travel_in_the_clear() {
         "http://127.0.0.1.evil.com",
         "http://127.0.0.1@evil.com",
         "http://localhost.evil.com",
+        // Userinfo, on a base that is otherwise fine: the key travels as the
+        // bearer token, so nothing would send these as their author meant.
+        "https://tok:pw@eu.example",
+        "https://tok@eu.example",
+        "http://user:pw@127.0.0.1:1",
     ] {
         assert_eq!(
             Settings::base_from(refused).unwrap_err(),
@@ -558,9 +784,40 @@ fn a_base_url_is_accepted_only_where_the_key_would_not_travel_in_the_clear() {
             "{carried} must be refused"
         );
     }
-    for accepted in
-        ["http://127.0.0.1:1", "http://[::1]:1", "http://localhost:1", "https://eu.example"]
-    {
+    // A host an HTTP request cannot carry, and a base past `MAX_BASE`. `url`
+    // admits these characters in a host and the HTTP client does not; an
+    // unexpanded template is where they come from. The length is measured
+    // once parsed: a `{` in a path is percent-encoded to three bytes, so the
+    // last row is inside `MAX_BASE` as written and past it as handed on.
+    let too_long = padded_base(MAX_BASE + 1);
+    let too_long_once_parsed = format!("https://eu.example/{}", "{".repeat(MAX_BASE / 3));
+    assert!(too_long_once_parsed.len() <= MAX_BASE, "the last row is inside the bound as written");
+    for uncarried in [
+        "https://{{host}}/v1",
+        "https://${host}",
+        "https://a\"b.example",
+        "https://a`b.example",
+        too_long.as_str(),
+        too_long_once_parsed.as_str(),
+    ] {
+        assert_eq!(
+            Settings::base_from(uncarried).unwrap_err(),
+            Error::RefusedBase,
+            "{uncarried} must be refused"
+        );
+    }
+    let longest = padded_base(MAX_BASE);
+    for accepted in [
+        "http://127.0.0.1:1",
+        "http://[::1]:1",
+        "http://localhost:1",
+        "https://eu.example",
+        // The characters refused in a host are percent-encoded in a path, and
+        // a base of exactly `MAX_BASE` bytes is inside the bound.
+        "https://eu.example/{{prefix}}/v1",
+        "https://eu.example/a\"b`c",
+        longest.as_str(),
+    ] {
         assert!(Settings::base_from(accepted).is_ok(), "{accepted} must be accepted");
     }
     assert!(
@@ -569,14 +826,31 @@ fn a_base_url_is_accepted_only_where_the_key_would_not_travel_in_the_clear() {
     );
 }
 
-#[test]
-fn a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined() {
-    let base = Settings::base_from("https://eu.example/typesafe").expect("https is accepted");
-    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
-        .expect("a checked base joins the endpoint path");
+#[tokio::test]
+async fn a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined() {
+    let endpoint = fixture::serve(answer(ANSWERED)).await;
 
-    assert_eq!(settings.endpoint.as_str(), "https://eu.example/typesafe/v1/systemone");
-    assert_eq!(settings.host(), "eu.example");
+    for prefixed in
+        [format!("{}/typesafe", endpoint.base()), format!("{}/typesafe/", endpoint.base())]
+    {
+        let base = Settings::base_from(&prefixed).expect("loopback is accepted");
+        let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned());
+        assert_eq!(settings.host(), "127.0.0.1");
+
+        Client::new(settings)
+            .expect("an HTTP client builds")
+            .evaluate(&request(one_question(), DEFAULT_MODEL), &CancellationToken::new())
+            .await
+            .expect("the canned answer parses");
+    }
+
+    for seen in endpoint.requests() {
+        assert!(
+            seen.starts_with("POST /typesafe/v1/systemone HTTP/1.1\r\n"),
+            "the prefix is kept, with one slash before the endpoint path: {seen}"
+        );
+    }
+    assert_eq!(endpoint.count(), 2);
 }
 
 /// **D567.** The public door refuses what [`Settings::from_env`] refuses, on
@@ -590,6 +864,7 @@ fn settings_from_parts_refuse_a_cleartext_base_and_an_unusable_model_and_accept_
         ("http://example.com", "jev-1.13.0", Error::RefusedBase, "plain http off loopback"),
         ("http://127.0.0.1.evil.com", "jev-1.13.0", Error::RefusedBase, "a domain, not loopback"),
         ("https://eu.example/?token=t", "jev-1.13.0", Error::RefusedBase, "a query to drop"),
+        ("https://tok@eu.example", "jev-1.13.0", Error::RefusedBase, "userinfo the SDK refuses"),
         ("not a url", "jev-1.13.0", Error::RefusedBase, "no URL at all"),
         ("https://api.typesafe.ai", "jev latest", Error::RefusedModel, "a space"),
         ("https://api.typesafe.ai", "", Error::RefusedModel, "an empty id"),
@@ -609,19 +884,60 @@ fn settings_from_parts_refuse_a_cleartext_base_and_an_unusable_model_and_accept_
         assert_eq!(refusal, expected, "{what}: {base} / {model:?}");
     }
 
+    // The base as the SDK is handed it. The SDK joins the endpoint path onto
+    // it, and `a_base_url_carrying_a_path_prefix_keeps_it_when_the_endpoint_is_joined`
+    // holds that join to the request line the vendor receives.
     let accepted = [
-        ("http://127.0.0.1:8080", "127.0.0.1", "http://127.0.0.1:8080/v1/systemone"),
-        ("http://[::1]:1", "[::1]", "http://[::1]:1/v1/systemone"),
-        ("http://localhost:1", "localhost", "http://localhost:1/v1/systemone"),
-        ("https://eu.example/typesafe", "eu.example", "https://eu.example/typesafe/v1/systemone"),
+        ("http://127.0.0.1:8080", "127.0.0.1", "http://127.0.0.1:8080/"),
+        ("http://[::1]:1", "[::1]", "http://[::1]:1/"),
+        ("http://localhost:1", "localhost", "http://localhost:1/"),
+        ("https://eu.example/typesafe", "eu.example", "https://eu.example/typesafe"),
+        // What a host may not hold, a path holds percent-encoded.
+        ("https://eu.example/{{prefix}}", "eu.example", "https://eu.example/%7B%7Bprefix%7D%7D"),
     ];
-    for (base, host, endpoint) in accepted {
+    for (base, host, handed) in accepted {
         let settings = Settings::from_parts(KEY.to_owned(), base, "jev-1.13.0".to_owned())
             .unwrap_or_else(|refusal| panic!("{base} is accepted: {refusal}"));
 
         assert_eq!(settings.host(), host, "{base}");
-        assert_eq!(settings.endpoint.as_str(), endpoint, "{base}: the path joins onto the base");
+        assert_eq!(settings.base.as_str(), handed, "{base}: the base is carried as checked");
         assert_eq!(settings.model(), "jev-1.13.0", "{base}: the model is carried as given");
+    }
+}
+
+/// A base URL an HTTP request cannot carry is refused where the other
+/// base-URL rules are, so the sentence a person reads names
+/// [`super::BASE_ENV`], not the key. [`Client::new`] never answers
+/// `RefusedBase`: it is where the key is judged, and a base that reached it
+/// would be reported against the key.
+#[test]
+fn a_base_an_http_request_cannot_carry_is_refused_as_the_base_and_never_as_the_key() {
+    let too_long = padded_base(MAX_BASE + 1);
+    for base in ["https://{{host}}/v1", too_long.as_str()] {
+        let refused = Settings::from_parts(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
+            .and_then(Client::new)
+            .err()
+            .unwrap_or_else(|| panic!("{base} builds no client"));
+
+        assert_eq!(refused, Error::RefusedBase, "{base} is the base's refusal, not the key's");
+        let said = refused.to_string();
+        assert!(said.contains(super::BASE_ENV), "the base's variable is named: {said}");
+        assert!(!said.contains(super::KEY_ENV), "the key is not blamed: {said}");
+    }
+
+    // And no more than that is refused: the same characters in a path, and a
+    // base of exactly `MAX_BASE` bytes, each build a client.
+    let longest = padded_base(MAX_BASE);
+    for base in [
+        "https://eu.example/{{prefix}}/v1",
+        "https://eu.example/${prefix}",
+        "https://eu.example/a\"b`c",
+        longest.as_str(),
+    ] {
+        let built = Settings::from_parts(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
+            .and_then(Client::new);
+
+        assert!(built.is_ok(), "{base} builds a client: {:?}", built.err());
     }
 }
 
@@ -735,62 +1051,131 @@ async fn the_model_a_call_names_is_what_travels_and_an_alias_passes_through_unto
     assert!(endpoint.first().contains(r#""model":"jev-1.13.0""#));
 }
 
-#[test]
-fn a_known_answer_type_whose_payload_is_wrong_falls_through_rather_than_failing_the_call() {
-    // The tolerance the module doc claims, settled rather than assumed: a
-    // `type` this build knows but a payload it cannot read must not cost the
-    // other answers in the same response. Serde's untagged fallback variant
-    // does fall through here, so no hand-written `Deserialize` is needed —
-    // and this test is what keeps that true.
-    for renamed in [r#"{"type":"noul"}"#, r#"{"type":"score","value":1.6}"#] {
-        let answer: Answer =
-            serde_json::from_str(renamed).expect("a known tag with a bad payload still decodes");
-
-        assert!(matches!(answer, Answer::Other(_)), "{renamed} became {answer:?}");
-    }
-
-    // And the whole response survives one of them, beside an answer that is
-    // perfectly readable.
+#[tokio::test]
+async fn a_known_answer_type_whose_payload_is_wrong_fails_the_response_and_names_the_field() {
+    // The SDK's rule: an answer that names a `type` this build knows and then
+    // contradicts it is not a shape to guess at, so the whole response is
+    // malformed — and the model is told to carry on without the judgement
+    // rather than handed half of one. What differs from an unknown `type` is
+    // that nothing here is new: it is the vendor's own shape, broken.
     let body = r#"{"model":"jev-1.13.0","answers":{"a":{"type":"noul"},"b":{"type":"noul","noul":0.4}},"usage":{"input_tokens":3,"output_tokens":1}}"#;
-    let answered: super::Response =
-        serde_json::from_str(body).expect("one bad answer is not fatal");
+    let asked = request(
+        BTreeMap::from([
+            (
+                "a".to_owned(),
+                Question::Noul {
+                    instructions: Instructions::Text("A?".to_owned()),
+                    criteria: None,
+                },
+            ),
+            (
+                "b".to_owned(),
+                Question::Noul {
+                    instructions: Instructions::Text("B?".to_owned()),
+                    criteria: None,
+                },
+            ),
+        ]),
+        DEFAULT_MODEL,
+    );
+    let (answered, endpoint) = evaluate(answer(body), &asked).await;
 
-    assert!(matches!(answered.answers["a"], Answer::Other(_)));
-    assert_eq!(answered.answers["b"], Answer::Noul { noul: 0.4 });
+    let Err(Error::Malformed(why)) = answered else {
+        panic!("a known type with a broken payload fails the response: {answered:?}");
+    };
+    assert_eq!(why.matches("answers.a").count(), 1, "the field is named, once: {why}");
+    assert!(!why.contains(endpoint.base()), "and the endpoint is not: {why}");
+    assert!(
+        ToolError::from(Error::Malformed(why))
+            .to_string()
+            .contains("continue without this judgement"),
+        "the model is told to carry on"
+    );
 }
 
 #[tokio::test]
 async fn a_transport_failure_never_carries_the_url_it_failed_against() {
-    // reqwest's `Display` appends `for url (<url>)` — userinfo included — and
-    // this string is model-facing, so the URL is stripped before anything
-    // reads it. A base whose port nothing listens on is the cheapest way to
-    // make the client fail below HTTP.
+    // What the model reads of a failure below HTTP is one fixed sentence: no
+    // URL (a gateway may carry a token in its path), and none of the
+    // transport's error chain, which can hold text a server or a proxy chose
+    // — a certificate's names, an HTTP/2 GOAWAY's debug data. Two failures:
+    // a port nothing listens on, and a TLS handshake answered in plain HTTP,
+    // whose chain is rustls's own words.
     let dead = fixture::serve(answer(ANSWERED)).await;
-    let port = dead.base().rsplit(':').next().expect("the base names a port").to_owned();
+    let closed = dead.base().rsplit(':').next().expect("the base names a port").to_owned();
     drop(dead);
 
-    let base = Settings::base_from(&format!("http://tok:pw@127.0.0.1:{port}"))
-        .expect("loopback with userinfo is a legitimate base");
-    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
-        .expect("a checked base joins the endpoint path")
-        .within(Duration::from_secs(2));
-    let failed = Client::new(settings)
-        .expect("an HTTP client builds")
-        .evaluate(&request(one_question(), DEFAULT_MODEL), &CancellationToken::new())
-        .await
-        .unwrap_err();
+    let plaintext = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback binds");
+    let speaking = plaintext.local_addr().expect("a bound socket has an address").port();
+    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
 
-    let Error::Transport(message) = &failed else {
-        panic!("a closed port fails below HTTP, not above it: {failed:?}");
-    };
-    let read_by_the_model = ToolError::from(failed.clone()).to_string();
+        while let Ok((mut socket, _)) = plaintext.accept().await {
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+        }
+    }));
 
-    for said in [message.as_str(), read_by_the_model.as_str()] {
-        assert!(!said.contains("tok"), "no userinfo: {said}");
-        assert!(!said.contains("pw"), "no userinfo: {said}");
-        assert!(!said.contains('@'), "no userinfo: {said}");
-        assert!(!said.contains("127.0.0.1"), "no host: {said}");
-        assert!(!said.contains(&port), "no port: {said}");
+    for (scheme, port) in [("http", closed), ("https", speaking.to_string())] {
+        let base = Settings::base_from(&format!("{scheme}://127.0.0.1:{port}/gateway-tok3n"))
+            .expect("loopback is a legitimate base");
+        let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
+            .within(Duration::from_secs(2));
+        let failed = Client::new(settings)
+            .expect("an HTTP client builds")
+            .evaluate(&request(one_question(), DEFAULT_MODEL), &CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        let Error::Transport(message) = &failed else {
+            panic!("{scheme}: the failure is below HTTP, not above it: {failed:?}");
+        };
+        assert_eq!(message, "The connection to the API failed", "{scheme}: the fixed sentence");
+
+        let read_by_the_model = ToolError::from(failed.clone()).to_string();
+        for said in [message.as_str(), read_by_the_model.as_str()] {
+            assert!(!said.contains("tok3n"), "{scheme}: no path: {said}");
+            assert!(!said.contains("127.0.0.1"), "{scheme}: no host: {said}");
+            assert!(!said.contains(&port), "{scheme}: no port: {said}");
+        }
+    }
+}
+
+#[test]
+fn a_key_the_sdk_will_not_send_is_configuration_and_is_never_repeated() {
+    // The SDK refuses a key it cannot put in a header as given: blank once
+    // trimmed — and its trim takes U+001C to U+001F, which the environment's
+    // blank rule here does not — or holding whitespace, a control character
+    // or anything outside ASCII. That is the key being wrong, not TypeSafe
+    // being unavailable, so it is `RefusedKey` — exit 3 under `ganja
+    // evaluate` — and nothing is built to send with. The sentence is ganja's
+    // and names the variable: the SDK's own tells a caller of its builder to
+    // "pass api_key", which nobody configuring ganja can do.
+    for (key, fragments) in [
+        ("sk-typesafe with-a-space", &["sk-typesafe", "with-a-space"][..]),
+        ("sk-typesafe-ünïcode", &["sk-typesafe", "ünïcode"][..]),
+        ("sk-typesafe\u{7}bell", &["sk-typesafe", "bell"][..]),
+        ("\u{1c}", &["\u{1c}"][..]),
+        ("\u{1f}\u{1c}", &["\u{1f}"][..]),
+    ] {
+        let base = Settings::base_from("https://eu.example").expect("https is accepted");
+        let refused = Client::new(Settings::new(key.to_owned(), base, DEFAULT_MODEL.to_owned()))
+            .err()
+            .unwrap_or_else(|| panic!("{key:?} is refused"));
+
+        assert_eq!(refused, Error::RefusedKey, "{key:?} is configuration, not a transport failure");
+
+        let said = refused.to_string();
+        let read_by_the_model = ToolError::from(refused).to_string();
+        for sentence in [said.as_str(), read_by_the_model.as_str()] {
+            assert!(sentence.contains(super::KEY_ENV), "the variable is named: {sentence}");
+            assert!(!sentence.contains("api_key"), "no SDK builder wording: {sentence}");
+            for fragment in fragments {
+                assert!(
+                    !sentence.contains(fragment),
+                    "no part of the key ({fragment:?}): {sentence}"
+                );
+            }
+        }
     }
 }
 
@@ -803,12 +1188,11 @@ fn neither_the_body_nor_the_endpoint_can_reach_a_debug_rendering() {
     assert!(rendered.contains(&format!("bytes: {}", asked.body_len())));
     assert!(rendered.contains("questions: 3"));
 
-    let base = Settings::base_from("https://tok:pw@eu.example").expect("https is accepted");
-    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned())
-        .expect("a checked base joins the endpoint path");
+    let base = Settings::base_from("https://eu.example/gateway-tok3n").expect("https is accepted");
+    let settings = Settings::new(KEY.to_owned(), base, DEFAULT_MODEL.to_owned());
     let rendered = format!("{settings:?}");
 
-    assert!(!rendered.contains("tok"), "no userinfo in Debug: {rendered}");
+    assert!(!rendered.contains("tok3n"), "no path in Debug: {rendered}");
     assert!(!rendered.contains(KEY), "no key in Debug: {rendered}");
     assert!(rendered.contains("eu.example"), "the host is what a reader gets: {rendered}");
 }
