@@ -27,6 +27,12 @@ futures.workspace = true
 # Error taxonomy in the crate's own vocabulary, matching the workspace's
 # thiserror-enum convention.
 thiserror.workspace = true
+# The event stream's per-read bound. reqwest's own read bound counts from the
+# last bytes it delivered, so a caller busy elsewhere between two reads came
+# back to a stream already given up on; a timer started at each read counts
+# only the server's silence. Already in the graph under reqwest: an edge, not
+# a new crate.
+tokio.workspace = true
 
 [dev-dependencies]
 # Tests stand up a real loopback server to speak the wire against.

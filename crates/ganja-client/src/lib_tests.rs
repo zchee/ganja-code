@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 
-use super::{Client, ClientError, Credentials};
+use super::{Bounds, Client, ClientError, Credentials};
 
 /// Nothing may render a password — the canary every credential-carrying
 /// type in this workspace is held to.
@@ -28,6 +28,51 @@ fn an_address_without_a_scheme_is_refused_rather_than_guessed_at() {
     // and says which.
     let error = Client::new("ftp://example.invalid", None).expect_err("not a scheme we speak");
     assert!(error.to_string().contains("ftp"), "{error}");
+}
+
+/// Every error names the address, so an address may not carry a credential:
+/// `reqwest` would send its user name and password as one, and every
+/// transport failure after that would print them. Refused at construction,
+/// and the refusal itself — like the one for an address that does not parse
+/// — repeats the address without them.
+#[test]
+fn an_address_carrying_a_password_is_refused_without_repeating_it() {
+    for address in [
+        "http://ganja:hunter2@127.0.0.1:4096",
+        "https://:hunter2@example.invalid/",
+        "http://ganja@127.0.0.1:4096",
+        // Does not parse (the port is out of range), so no URL type says
+        // which part is the password; it is still not repeated.
+        "http://ganja:hunter2@127.0.0.1:99999",
+    ] {
+        let error = Client::new(address, None).expect_err("a credential in an address is refused");
+        assert!(matches!(error, ClientError::Address { .. }), "{address}: {error:?}");
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains("hunter2"), "a password reached an error: {rendered}");
+            assert!(!rendered.contains("ganja@"), "and so did the user name: {rendered}");
+        }
+    }
+
+    let said =
+        Client::new("http://ganja:hunter2@127.0.0.1:4096", None).expect_err("refused").to_string();
+    assert!(said.contains("http://127.0.0.1:4096"), "the refusal still names the server: {said}");
+    assert!(said.contains("GANJA_SERVER_PASSWORD"), "and says where a credential goes: {said}");
+}
+
+/// The wire tests run under shorter bounds, so the ones an attached run gets
+/// are pinned here: ten seconds to connect, and thirty — three of serve's
+/// heartbeats — for one read.
+#[test]
+fn a_client_for_an_address_waits_ten_seconds_to_connect_and_thirty_for_a_read() {
+    let expected = Bounds {
+        connect: std::time::Duration::from_secs(10),
+        read: std::time::Duration::from_secs(30),
+    };
+
+    assert_eq!(super::READ_DEADLINE, expected.read);
+    assert_eq!(Bounds::default(), expected);
+    let client = Client::new("http://127.0.0.1:4096", None).expect("a loopback address is usable");
+    assert_eq!(client.bounds, expected);
 }
 
 #[test]

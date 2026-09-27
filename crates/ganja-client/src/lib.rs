@@ -74,7 +74,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Held as plain text rather than in a `SecretString`: this crate's dependency
 /// list is load-bearing (CI asserts the internal half, and the external half
-/// is five crates on purpose), and the credential lives for one process's
+/// is six crates on purpose), and the credential lives for one process's
 /// lifetime. What is *not* left to chance is rendering — [`Debug`] is written
 /// by hand here and in [`Client`] so no formatter can put a password in a log
 /// line.
@@ -137,7 +137,8 @@ pub enum ClientError {
         reason: String,
     },
     /// Nothing answered, the connection failed part-way through, or the
-    /// server stayed silent past one of the client's bounds.
+    /// server stayed silent past the connect bound or a read's bound — every
+    /// silence but the event stream's, which is [`ClientError::Silent`].
     #[error("failed to reach the ganja server at {address}")]
     Transport {
         /// The server that was being reached.
@@ -145,6 +146,20 @@ pub enum ClientError {
         /// What the transport said.
         #[source]
         source: reqwest::Error,
+    },
+    /// `GET /event` said nothing — no head, no event, no heartbeat — for a
+    /// whole read bound ([`Bounds::read`]) while it was being read. Its own
+    /// variant because no transport failed: the connection may be whole, and
+    /// the bound is this client's, kept per read by [`Events`].
+    #[error(
+        "the ganja server at {address} said nothing on GET {EVENT_PATH} for {bound:?}; \
+         gave up on the event stream"
+    )]
+    Silent {
+        /// The server that went silent.
+        address: String,
+        /// How long one read waited.
+        bound: std::time::Duration,
     },
     /// The server has a password and this client did not present it, or
     /// presented the wrong one.
@@ -309,17 +324,45 @@ const TCP_CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 
 /// How long a client waits between bytes of an answer before it gives the
 /// peer up: on a socket for every call, and over TCP for every `GET` — the
-/// reads and the event stream (see [`Client::new`] for why not the `POST`
-/// routes).
+/// reads, and each read of the event stream (see [`Client::new`] for why not
+/// the `POST` routes). [`Bounds::default`]'s read bound.
 ///
 /// A per-read bound rather than a whole-request one, deliberately: `GET
 /// /event`'s body is endless by design, and a total deadline would end a
 /// healthy stream. Serve writes a heartbeat frame on that stream every ten
 /// seconds whatever else it carries — while a turn streams and while a session
 /// waits minutes on a person's dialog alike — so a live stream is never
-/// silent for this long, and only a peer that missed three heartbeats is cut.
-/// `ganja-cli/tests/frames.rs` pins serve's heartbeat inside this bound.
+/// silent for this long while it is read, and only a peer that missed three
+/// heartbeats is cut. `ganja-cli/tests/frames.rs` pins serve's heartbeat
+/// inside this bound.
 pub const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The event stream's route, which [`ClientError::Silent`] names.
+const EVENT_PATH: &str = "/event";
+
+/// How long a TCP [`Client`] waits on a server before it gives the server
+/// up, each bound a named error rather than a wait with no end.
+///
+/// [`Client::new`] takes [`Bounds::default`]: ten seconds to connect and
+/// [`READ_DEADLINE`] to read. [`Client::with_bounds`] takes others, and the
+/// read bound then carries [`READ_DEADLINE`]'s one rule: it must stay well
+/// above the server's heartbeat on the event stream (serve's is ten seconds),
+/// because a stream carries nothing else while a session waits on a person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// How long a connect may take, TLS handshake included.
+    pub connect: std::time::Duration,
+    /// How long a `GET` waits for the next bytes of its answer, and one read
+    /// of the event stream for its next frame, counted from when that read
+    /// starts.
+    pub read: std::time::Duration,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self { connect: TCP_CONNECT_DEADLINE, read: READ_DEADLINE }
+    }
+}
 
 /// The most of any answer this client reads into memory, in bytes — a
 /// refusal's envelope included. Every route here answers a bounded document;
@@ -344,11 +387,15 @@ const SOCKET_SCHEME: &str = "uds:";
 /// socket-bound one, whose requests need an `http://` base the socket does
 /// not have and whose errors should name the socket, not the label.
 pub struct Client {
-    /// Every `GET`: the reads and the event stream.
+    /// Every `GET` but the event stream: the reads, under `reqwest`'s own
+    /// read bound.
     http: reqwest::Client,
-    /// Every `POST`. The same client as `http` on a socket; over TCP, one
-    /// without [`READ_DEADLINE`] — see [`Client::new`].
+    /// Every `POST`, and the event stream. The same client as `http` on a
+    /// socket; over TCP, one without a read bound — see [`Client::new`] and
+    /// [`Client::events`].
     patient: reqwest::Client,
+    /// What this client was built with; [`Events`] keeps the read bound.
+    bounds: Bounds,
     address: String,
     base: String,
     credentials: Option<Credentials>,
@@ -368,34 +415,58 @@ impl Client {
     /// A client for the server at `address`, presenting `credentials` when the
     /// server has a password.
     ///
-    /// Bounded in time as far as that is safe over TCP, and every bound it
-    /// hits is a [`ClientError::Transport`] naming the address rather than a
-    /// wait with no end: a connect that has not completed inside ten seconds,
-    /// and a `GET` — a read, or the event stream — whose answer stays silent
-    /// past [`READ_DEADLINE`]. The `POST` routes are bounded at the connect
-    /// only, because their handlers may wait on the engine before they
-    /// answer: a prompt runs the session's `UserPromptSubmit` hooks, each
+    /// Bounded in time as far as that is safe over TCP ([`Bounds::default`]),
+    /// and every bound it hits is an error naming the address rather than a
+    /// wait with no end: a connect that has not completed inside ten seconds
+    /// and a read `GET` whose answer stays silent past [`READ_DEADLINE`] are
+    /// [`ClientError::Transport`]; the event stream silent that long while it
+    /// is read is [`ClientError::Silent`]. The `POST` routes are bounded at
+    /// the connect only, because their handlers may wait on the engine before
+    /// they answer: a prompt runs the session's `UserPromptSubmit` hooks, each
     /// under a minute of its own by default, and a new session or a reply
     /// waits for another client's prompt to finish starting. A read bound
     /// there would cut a request the server was still honouring.
+    ///
+    /// These bound a silent server, not a stalled engine: an engine that
+    /// stops after accepting a prompt leaves serve heartbeating the stream,
+    /// and a caller reading it waits as long as the server lives.
     ///
     /// # Errors
     ///
     /// [`ClientError::Address`] when `address` is not an absolute `http` or
     /// `https` URL — a bare host and port is refused rather than guessed at,
     /// because guessing the scheme is guessing whether the credential travels
-    /// in the clear. [`ClientError::Transport`] when the HTTP client itself
-    /// cannot be built, which is a TLS backend that would not initialize.
+    /// in the clear — or when it carries a user name or password, which
+    /// `reqwest` would send as a credential and every error would repeat.
+    /// [`ClientError::Transport`] when the HTTP client itself cannot be
+    /// built, which is a TLS backend that would not initialize.
     pub fn new(address: &str, credentials: Option<Credentials>) -> Result<Self, ClientError> {
-        let parsed = reqwest::Url::parse(address).map_err(|error| ClientError::Address {
-            address: address.to_owned(),
-            reason: error.to_string(),
-        })?;
+        Self::with_bounds(address, credentials, Bounds::default())
+    }
+
+    /// [`Client::new`], waiting on the server as long as `bounds` says
+    /// rather than [`Bounds::default`]'s.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::new`].
+    pub fn with_bounds(
+        address: &str,
+        credentials: Option<Credentials>,
+        bounds: Bounds,
+    ) -> Result<Self, ClientError> {
+        let refused =
+            |reason: String| ClientError::Address { address: without_userinfo(address), reason };
+        let parsed = reqwest::Url::parse(address).map_err(|error| refused(error.to_string()))?;
         if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(ClientError::Address {
-                address: address.to_owned(),
-                reason: format!("{} is not a scheme this client speaks", parsed.scheme()),
-            });
+            return Err(refused(format!("{} is not a scheme this client speaks", parsed.scheme())));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(refused(
+                "it carries a user name or password; a credential goes in GANJA_SERVER_PASSWORD \
+                 (and GANJA_SERVER_USERNAME), never in an address every error repeats"
+                    .to_owned(),
+            ));
         }
 
         // Trailing slashes are stripped so every route below can be written
@@ -404,14 +475,14 @@ impl Client {
 
         let build = |builder: reqwest::ClientBuilder| {
             builder
-                .connect_timeout(TCP_CONNECT_DEADLINE)
+                .connect_timeout(bounds.connect)
                 .build()
                 .map_err(|source| ClientError::Transport { address: address.clone(), source })
         };
-        let http = build(reqwest::Client::builder().read_timeout(READ_DEADLINE))?;
+        let http = build(reqwest::Client::builder().read_timeout(bounds.read))?;
         let patient = build(reqwest::Client::builder())?;
 
-        Ok(Self { http, patient, base: address.clone(), address, credentials })
+        Ok(Self { http, patient, bounds, base: address.clone(), address, credentials })
     }
 
     /// A client bound to the session socket at `path` (**D505**).
@@ -451,10 +522,11 @@ impl Client {
                 reason: "it carries a NUL byte".to_owned(),
             });
         }
+        let bounds = Bounds { connect: SOCKET_CONNECT_DEADLINE, read: READ_DEADLINE };
         let http = reqwest::Client::builder()
             .unix_socket(path)
-            .connect_timeout(SOCKET_CONNECT_DEADLINE)
-            .read_timeout(READ_DEADLINE)
+            .connect_timeout(bounds.connect)
+            .read_timeout(bounds.read)
             .build()
             .map_err(|error| ClientError::SocketPath {
                 path: shown.clone(),
@@ -466,6 +538,7 @@ impl Client {
             // so one read-bounded client serves them all.
             patient: http.clone(),
             http,
+            bounds,
             address: format!("{SOCKET_SCHEME}{shown}"),
             base: SOCKET_URL.to_owned(),
             credentials: None,
@@ -580,19 +653,36 @@ impl Client {
     /// Heartbeats are swallowed; they say the connection is alive and nothing
     /// about the conversation.
     ///
+    /// Opened on the client with no read bound of its own, because
+    /// `reqwest`'s counts from the last bytes it delivered: a caller busy
+    /// elsewhere between two reads — an attached run waiting on its prompt's
+    /// acceptance, or on a slow stdout — would come back to a stream already
+    /// given up on, though serve had heartbeated all along. The bound is kept
+    /// here and in [`Events`] instead, one per read and counted from when that
+    /// read starts, so only the server's silence while somebody listens is
+    /// counted. The head, and a refusal's body, answer inside one bound.
+    ///
     /// # Errors
     ///
     /// As [`Client::health`], plus [`ClientError::Skew`] when the stream opens
-    /// with anything but `connected`.
+    /// with anything but `connected`, and [`ClientError::Silent`] when the
+    /// head or the `connected` frame does not come within a read bound.
     pub async fn events(&self) -> Result<Events, ClientError> {
-        let path = "/event";
-        let response = self
-            .request(reqwest::Method::GET, path)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .send()
-            .await
-            .map_err(|source| self.transport(source))?;
-        let response = self.checked("GET", path, response).await?;
+        let path = EVENT_PATH;
+        let bound = self.bounds.read;
+        let silent = || ClientError::Silent { address: self.address.clone(), bound };
+        let response = tokio::time::timeout(bound, async {
+            let response = self
+                .request_on(&self.patient, reqwest::Method::GET, path)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await
+                .map_err(|source| self.transport(source))?;
+
+            self.checked("GET", path, response).await
+        })
+        .await
+        .map_err(|_| silent())??;
 
         let mut bytes = response.bytes_stream().boxed();
         let mut frames = sse::Frames::new();
@@ -611,7 +701,7 @@ impl Client {
                 });
             }
 
-            match bytes.next().await {
+            match tokio::time::timeout(bound, bytes.next()).await.map_err(|_| silent())? {
                 Some(Ok(chunk)) => frames.push(chunk.as_ref()),
                 Some(Err(source)) => return Err(self.transport(source)),
                 None => {
@@ -622,13 +712,24 @@ impl Client {
             }
         }
 
-        Ok(Events::new(self.address.clone(), bytes, frames))
+        Ok(Events::new(self.address.clone(), bound, bytes, frames))
     }
 
-    /// A request with the credential attached, when there is one, on the
-    /// client whose bounds fit its method (see [`Client::new`]).
+    /// A request on the client whose bounds fit its method (see
+    /// [`Client::new`]).
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let http = if method == reqwest::Method::GET { &self.http } else { &self.patient };
+
+        self.request_on(http, method, path)
+    }
+
+    /// A request on `http`, with the credential attached when there is one.
+    fn request_on(
+        &self,
+        http: &reqwest::Client,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
         let builder = http.request(method, format!("{}{path}", self.base));
 
         match &self.credentials {
@@ -740,7 +841,10 @@ impl Client {
 ///
 /// Ends when the server's stream ends, and ends with
 /// [`ClientError::Evicted`] when this subscriber was the one dropped — the
-/// distinction the whole `evicted` frame exists to preserve.
+/// distinction the whole `evicted` frame exists to preserve. Ends with
+/// [`ClientError::Silent`] when one read waits a whole [`Bounds::read`] for
+/// its next bytes; the time a caller spends elsewhere between reads is not
+/// counted, and what serve sent meanwhile is waiting when it reads again.
 pub struct Events {
     inner: BoxStream<'static, Result<Event, ClientError>>,
 }
@@ -754,12 +858,12 @@ impl std::fmt::Debug for Events {
 }
 
 impl Events {
-    fn new<S, B>(address: String, bytes: S, frames: sse::Frames) -> Self
+    fn new<S, B>(address: String, bound: std::time::Duration, bytes: S, frames: sse::Frames) -> Self
     where
         S: Stream<Item = reqwest::Result<B>> + Send + 'static,
         B: AsRef<[u8]>,
     {
-        let state = Reading { address, bytes: Box::pin(bytes), frames, done: false };
+        let state = Reading { address, bound, bytes: Box::pin(bytes), frames, done: false };
 
         Self {
             inner: futures::stream::unfold(state, |mut state| async move {
@@ -791,16 +895,28 @@ impl Events {
                         }
                     }
 
-                    match state.bytes.next().await {
-                        Some(Ok(chunk)) => state.frames.push(chunk.as_ref()),
-                        Some(Err(source)) => {
+                    // A fresh bound per read, started here: `timeout` polls
+                    // the body before its timer, so bytes that arrived while
+                    // nobody read are taken, never timed out on.
+                    match tokio::time::timeout(state.bound, state.bytes.next()).await {
+                        Ok(Some(Ok(chunk))) => state.frames.push(chunk.as_ref()),
+                        Ok(Some(Err(source))) => {
                             state.done = true;
                             let error =
                                 ClientError::Transport { address: state.address.clone(), source };
 
                             return Some((Err(error), state));
                         }
-                        None => return None,
+                        Ok(None) => return None,
+                        Err(_) => {
+                            state.done = true;
+                            let error = ClientError::Silent {
+                                address: state.address.clone(),
+                                bound: state.bound,
+                            };
+
+                            return Some((Err(error), state));
+                        }
                     }
                 }
             })
@@ -809,13 +925,28 @@ impl Events {
     }
 }
 
-/// What [`Events`] carries between polls: the bytes still arriving, and the
-/// frame that may be half-read.
+/// What [`Events`] carries between polls: the bytes still arriving, the
+/// frame that may be half-read, and how long one read may wait.
 struct Reading<S> {
     address: String,
+    bound: std::time::Duration,
     bytes: std::pin::Pin<Box<S>>,
     frames: sse::Frames,
     done: bool,
+}
+
+/// `address` as an error may repeat it: whatever precedes an `@` in its
+/// authority — a user name, a password — dropped. Done on the text, because
+/// an address that failed to parse has no URL to ask which part is which.
+fn without_userinfo(address: &str) -> String {
+    let start = address.find("://").map_or(0, |scheme| scheme + 3);
+    let rest = &address[start..];
+    let authority = rest.find(['/', '?', '#']).map_or(rest, |end| &rest[..end]);
+
+    match authority.rfind('@') {
+        Some(at) => format!("{}{}", &address[..start], &rest[at + 1..]),
+        None => address.to_owned(),
+    }
 }
 
 impl Stream for Events {
