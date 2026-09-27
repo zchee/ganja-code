@@ -307,7 +307,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.3.0", default-features = false, features = [
+rmcp = { version = "3.4.1", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",

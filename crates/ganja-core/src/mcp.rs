@@ -127,7 +127,7 @@ use async_trait::async_trait;
 use futures::future;
 use ganja_provider::auth::RefreshOauth as _;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock,
     Implementation, PaginatedRequestParams, ResourceContents,
 };
 use rmcp::service::{NotificationContext, RunningService};
@@ -1108,8 +1108,8 @@ struct Handler {
 }
 
 impl ClientHandler for Handler {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::new(
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
         )

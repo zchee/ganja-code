@@ -33,7 +33,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::stream::BoxStream;
 use ganja_core::permission::Permissions;
@@ -910,6 +910,90 @@ async fn a_remote_server_is_reached_over_streamable_http() {
     engine.shutdown_mcp().await;
 }
 
+/// A remote answer that is not a JSON-RPC message fails that one call at
+/// once, and the server stays connected.
+///
+/// A client that takes such a body as accepted waits for an answer that never
+/// comes: the call sits out its whole timeout and then fails as one the server
+/// never answered. The test catches that wait twice, by how long the turn takes
+/// and by the timeout's own message.
+#[tokio::test]
+async fn a_remote_answer_that_is_not_json_rpc_fails_the_call_without_waiting_out_its_timeout() {
+    // The entry's timeout and the bound on the turn, so the two cannot drift
+    // apart. Short, so a run that regressed to the wait says so in seconds;
+    // still far beyond a loopback round trip.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    let address = streamable_http(Arc::default()).await;
+
+    let config: Config = serde_json::from_value(json!({
+        "mcp": {
+            "hub": {
+                "type": "remote",
+                "url": format!("http://{address}/mcp"),
+                "timeout": TIMEOUT.as_millis(),
+            }
+        }
+    }))
+    .expect("the fixture config is a config");
+
+    let (provider, _requests) =
+        ScriptedProvider::new(vec![tool_call("mcp__hub__garbled", json!({})), says("it failed")]);
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let started = Instant::now();
+    let seen = turn(&engine, &mut events, "call it", PermissionReply::Once).await;
+    let took = started.elapsed();
+    let error = errored(&tool_part(&seen, "mcp__hub__garbled"));
+    assert!(
+        took < TIMEOUT,
+        "the turn took {took:?}, no less than the call's whole {TIMEOUT:?} timeout: {error}"
+    );
+    assert!(
+        !error.contains("did not answer within"),
+        "the call waited out its timeout instead of failing on the answer: {error}"
+    );
+    assert_eq!(
+        engine.mcp_status().get("hub"),
+        Some(&McpStatus::Connected),
+        "one unreadable answer took the server down"
+    );
+
+    engine.shutdown_mcp().await;
+}
+
+/// A server's cancel notification naming a call ganja made leaves that call to
+/// the answer the server sends after it.
+///
+/// In the protocol versions ganja negotiates, a party may cancel only a request
+/// it issued itself: the specification's cancellation rules name requests
+/// "previously issued in the same direction". A client that fails its own call
+/// on such a notification lets a server cancel what it never issued; `rmcp`
+/// routes a cancel by who issued the request, and this one names nothing the
+/// server issued.
+#[tokio::test]
+async fn a_servers_cancel_for_a_call_ganja_made_does_not_fail_the_call() {
+    let address = streamable_http(Arc::default()).await;
+
+    let config: Config = serde_json::from_value(json!({
+        "mcp": { "hub": { "type": "remote", "url": format!("http://{address}/mcp") } }
+    }))
+    .expect("the fixture config is a config");
+
+    let (provider, _requests) = ScriptedProvider::new(vec![
+        tool_call("mcp__hub__retracted", json!({})),
+        says("it answered"),
+    ]);
+    let engine = engine_with(provider, &config).await;
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let seen = turn(&engine, &mut events, "call it", PermissionReply::Once).await;
+    assert_eq!(completed(&tool_part(&seen, "mcp__hub__retracted")), "answered anyway");
+
+    engine.shutdown_mcp().await;
+}
+
 /// A loopback endpoint speaking streamable HTTP, returning its address.
 async fn streamable_http(headers: Arc<Mutex<Vec<String>>>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port is available");
@@ -957,14 +1041,11 @@ async fn streamable_http(headers: Arc<Mutex<Vec<String>>>) -> SocketAddr {
 
                     let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                     let response = match answer(&request) {
-                        Some(answer) => {
-                            let body = answer.to_string();
-                            format!(
-                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                                 content-length: {}\r\n\r\n{body}",
-                                body.len()
-                            )
-                        }
+                        Some((content_type, body)) => format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+                             content-length: {}\r\n\r\n{body}",
+                            body.len()
+                        ),
                         // A notification is acknowledged and nothing more.
                         None => "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n".to_owned(),
                     };
@@ -999,9 +1080,14 @@ fn whole(buffer: &[u8]) -> Option<(String, String)> {
     Some((head.to_owned(), rest[..length].to_owned()))
 }
 
-/// What the loopback endpoint answers one JSON-RPC request with, or [`None`]
-/// for a notification.
-fn answer(request: &Value) -> Option<Value> {
+/// What the loopback endpoint answers one JSON-RPC request with — the
+/// response's content type and body — or [`None`] for a notification.
+///
+/// `ping` answers the way a server should. The other two answer a call the way
+/// a server that gets the protocol wrong would: `garbled` with a JSON body that
+/// is no JSON-RPC message, `retracted` with an event stream that cancels the
+/// call it is answering and then answers it.
+fn answer(request: &Value) -> Option<(&'static str, String)> {
     let id = request.get("id")?.clone();
     let method = request.get("method")?.as_str()?;
 
@@ -1012,24 +1098,57 @@ fn answer(request: &Value) -> Option<Value> {
             "serverInfo": { "name": "hub", "version": "0.0.0" },
         }),
         "tools/list" => json!({
-            "tools": [{
-                "name": "ping",
-                "description": "Answers over HTTP.",
-                "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } },
-            }],
+            "tools": [
+                {
+                    "name": "ping",
+                    "description": "Answers over HTTP.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "text": { "type": "string" } },
+                    },
+                },
+                {
+                    "name": "garbled",
+                    "description": "Answers with JSON that is no JSON-RPC message.",
+                    "inputSchema": { "type": "object" },
+                },
+                {
+                    "name": "retracted",
+                    "description": "Cancels the call it is answering, then answers it.",
+                    "inputSchema": { "type": "object" },
+                },
+            ],
         }),
-        "tools/call" => {
-            let text = request
-                .pointer("/params/arguments/text")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+        "tools/call" => match request.pointer("/params/name").and_then(Value::as_str) {
+            Some("garbled") => {
+                return Some(("application/json", json!({ "answer": "none" }).to_string()));
+            }
+            Some("retracted") => {
+                let cancel = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": { "requestId": id, "reason": "retracted" },
+                });
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "content": [{ "type": "text", "text": "answered anyway" }] },
+                });
+                return Some(("text/event-stream", format!("data: {cancel}\n\ndata: {reply}\n\n")));
+            }
+            _ => {
+                let text = request
+                    .pointer("/params/arguments/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
 
-            json!({ "content": [{ "type": "text", "text": format!("pong: {text}") }] })
-        }
+                json!({ "content": [{ "type": "text", "text": format!("pong: {text}") }] })
+            }
+        },
         _ => json!({}),
     };
 
-    Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+    Some(("application/json", json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()))
 }
 
 /// The golden differential compares what it was written to compare.
