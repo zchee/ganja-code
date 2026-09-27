@@ -31,9 +31,8 @@
 //!    the launch line was typed into the idle shell and `exec`'d.
 //! 3. The member took the seeded task as its first turn: the fake reply is
 //!    on the pane's own screen, and the `idle_notification` it wrote reached
-//!    the lead — seen present in the lead's inbox while the lead is held
-//!    still, then seen gone once the lead is let go and its pass has read
-//!    it.
+//!    the lead — the lead's log holds the line its inbox pass writes on
+//!    reading it, and the lead's inbox no longer holds the frame.
 //! 4. `/teammate shutdown w1` — the lead asks, the member approves and leaves, the
 //!    lead reads the approval: the pane is gone from tmux and `w1` from the
 //!    team file, with nothing here having killed anything.
@@ -113,8 +112,9 @@ fn lead_inbox(homes: &Homes) -> Option<PathBuf> {
 
 /// Every frame the lead's inbox holds right now. An inbox that is not there
 /// yet reads as empty (`mailbox::read` swallows `ENOENT`, §2.5), which is
-/// why no negative below stands on its own: each is preceded by seeing the
-/// frame *present*.
+/// why no negative below stands on its own: each follows a fact that proves
+/// the frame was there — the lead's log line for the idle notification, the
+/// retired record for the approval.
 fn lead_holds(inbox: &Path) -> Vec<Frame> {
     mailbox::read(inbox)
         .expect("the lead's inbox reads")
@@ -124,44 +124,31 @@ fn lead_holds(inbox: &Path) -> Vec<Frame> {
         .collect()
 }
 
-/// Sends `signal` to `pid` through the system's own `kill`, so the test needs
-/// no `libc` of its own for two lines of job control.
-fn signal(pid: &str, signal: &str) {
-    let status =
-        Command::new("kill").args([&format!("-{signal}"), pid]).status().expect("kill runs");
-    assert!(status.success(), "kill -{signal} {pid} failed: {status}");
-}
-
-/// A process held still (`SIGSTOP`), let go again however the test ends.
+/// What the lead's inbox pass traces for each `idle_notification` it reads —
+/// pinned to `ganja_core::teammate::lead_inbox`'s handler for that frame,
+/// which writes it with the sender as its `teammate` field.
 ///
-/// The release has to be a [`Drop`] rather than a line at the end of the
-/// bracket: every `wait_for` between the two signals panics on a timeout, and a
-/// trailing `kill -CONT` would then never run. A **stopped** process does not
-/// act on the `SIGHUP` a `kill-server` sends it either, so the lead, its pane's
-/// `ganja` and the tmux server would all outlive the run — a failing test
-/// leaving three processes behind, which is how a suite starts wedging the
-/// machine it runs on.
-struct Held {
-    pid: String,
-}
+/// Repeated here rather than shared: the product keeps it as a literal. A
+/// reworded line cannot pass unnoticed, because the wait on it is a positive
+/// one — it times out naming this text and quoting the tail of the log it searched.
+const IDLE_REPORTED: &str = "a teammate reported itself available";
 
-impl Held {
-    /// Stops `pid` now, and answers with what will let it go.
-    fn stop(pid: &str) -> Self {
-        signal(pid, "STOP");
+/// Whether the lead's log holds [`IDLE_REPORTED`] for [`MEMBER`]: both on one
+/// line, the field spelled as the log's formatter writes a string
+/// (`teammate="w1"`).
+///
+/// The log and not the inbox, because the log is only appended to. The lead's
+/// pass reads, logs and prunes a frame within about a second of its arrival, and
+/// nothing can hold the lead still in between: the lead is its pane's own
+/// process, and tmux sends `SIGCONT` to a pane's process as soon as a stop
+/// signal lands (`SIGTTIN` and `SIGTTOU` aside). So the line is the one
+/// witness of the frame's arrival that a test can read at any time after.
+fn logged_idle(homes: &Homes) -> bool {
+    let teammate = format!("teammate={MEMBER:?}");
 
-        Self { pid: pid.to_owned() }
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        // Deliberately not [`signal`]: that one asserts, and a `Drop` that
-        // panics while the test is already panicking aborts the process and
-        // takes the failure message with it. A `kill` that did not land is
-        // nothing this can do anything about anyway.
-        let _ = Command::new("kill").args(["-CONT", &self.pid]).status();
-    }
+    pane_lead::log_text(&pane_lead::log_dir(homes))
+        .lines()
+        .any(|line| line.contains(IDLE_REPORTED) && line.contains(&teammate))
 }
 
 /// **D520.** `teammates.shell` names the idle shell a pane holds until its
@@ -287,27 +274,24 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
 
     // 3. The member is a teammate: the seed became its first turn (the fake
     // reply is on its own screen), and the idle_notification it wrote reached
-    // the lead — seen **arriving**, then seen **read**. The lead's pass prunes
-    // a frame within a second of its arrival, so a poll racing that pass would
-    // miss it now and then; instead the lead is held still (SIGSTOP) while the
-    // member finishes, the frame is asserted present in the lead's inbox with
-    // no lead running to take it, and only then is the lead let go (SIGCONT)
-    // and asserted to have read it — the frame gone from an inbox that held
-    // it. Two facts in sequence, neither of them a race.
-    let lead_pid = tmux.pane_pid(&lead);
-    let held = Held::stop(&lead_pid);
+    // the lead — seen **read**, then seen **pruned**. The frame in the inbox
+    // is no witness to its own arrival: the lead's pass reads and prunes it
+    // within a second, so a poll for it races that pass. The pass's log line
+    // is the witness instead ([`logged_idle`] says why only the log can be),
+    // and the wait on it fails naming the line it looked for, with the log it
+    // searched quoted beneath. Only after that line is the inbox asserted
+    // free of the frame, and waited for rather than read at once: the pass
+    // logs as it reads and prunes afterwards, in a write of its own.
     tmux.wait_for("the member's seeded turn", &pane, || {
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
+    tmux.wait_for(
+        &format!("the lead's log to hold {IDLE_REPORTED:?} with teammate={MEMBER:?} on one line"),
+        &lead,
+        || logged_idle(&homes).then_some(()),
+    );
     let lead_inbox = lead_inbox(&homes).expect("the team exists by now");
-    tmux.wait_for("the idle notification to reach the lead's inbox", &lead, || {
-        lead_holds(&lead_inbox)
-            .iter()
-            .any(|frame| matches!(frame, Frame::IdleNotification(_)))
-            .then_some(())
-    });
-    drop(held);
-    tmux.wait_for("the lead to read the idle notification", &lead, || {
+    tmux.wait_for("the lead to prune the idle notification it read", &lead, || {
         (!lead_holds(&lead_inbox).iter().any(|frame| matches!(frame, Frame::IdleNotification(_))))
             .then_some(())
     });

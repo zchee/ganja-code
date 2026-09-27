@@ -680,11 +680,6 @@ impl Tmux {
         (left, top)
     }
 
-    /// The pid of the pane's process — for the lead's pane, the lead.
-    pub fn pane_pid(&self, pane: &str) -> String {
-        self.server.run(&["display-message", "-p", "-t", pane, "#{pane_pid}"]).trim().to_owned()
-    }
-
     /// The name of the process in `pane`'s foreground, as tmux sees it.
     pub fn current_command(&self, pane: &str) -> String {
         self.server
