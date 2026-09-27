@@ -347,7 +347,7 @@ serde_json = "1.0.151"
 # back as its first answer, as the SDK's lookups do, where a serde map keeps
 # the last. Without default features it builds nothing but serde_core, which
 # serde already brings; the default `macros` would add a proc-macro stack.
-serde_with = { version = "3.18.0", default-features = false, features = ["alloc"] }
+serde_with = { version = "3.24.0", default-features = false, features = ["alloc"] }
 # PKCE's S256 method is literally SHA-256 of the verifier, and the provider
 # checks it — a login is refused if the digest disagrees. The digest rustls
 # already carries reaches this workspace only transitively, and depending on
