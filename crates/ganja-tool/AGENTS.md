@@ -99,7 +99,7 @@ GANJA_LIVE_TEST=1 cargo test -p ganja-tool --test evaluate_live -- --ignored --n
 
 Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[path = "…"] mod tests;` (for example `src/read.rs` and `src/read_tests.rs`). Put a new test there unless it mutates process-wide state.
 
-`tests/` holds six binaries with one test each. Five mutate the environment, and `evaluate_log`, `evaluate_refusal` and `evaluate_refused_key` also install the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
+`tests/` holds six binaries with one test each. Five mutate the environment, and `evaluate_log`, `evaluate_refusal` and `evaluate_refused_key` also install the process-wide tracing subscriber, writing to the one `Capture` in `tests/support/mod.rs` (a module each declares, not a binary); the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
 
 - `evaluate_keys.rs`, `evaluate_log.rs`: the `TYPESAFE_*` variables, against no endpoint or a loopback one.
 - `evaluate_refusal.rs`: which variable the warning names when `EvaluateTool::configured()` refuses the `TYPESAFE_*` settings, and that a refused base URL's warning lists every rule rather than naming one.

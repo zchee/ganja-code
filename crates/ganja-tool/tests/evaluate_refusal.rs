@@ -21,7 +21,7 @@
 //! path here opens a socket at all, since a refused setting is decided
 //! before a client exists.
 
-use std::sync::{Arc, Mutex};
+mod support;
 
 use ganja_tool::evaluate::EvaluateTool;
 use ganja_tool::typesafe::Error;
@@ -40,7 +40,7 @@ const REFUSED_BASES: &[(&str, &str)] = &[
 
 #[test]
 fn a_refused_setting_is_warned_about_by_the_variable_that_was_refused() {
-    let capture = Capture::default();
+    let capture = support::Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_ansi(false)
@@ -114,38 +114,5 @@ fn a_refused_setting_is_warned_about_by_the_variable_that_was_refused() {
                 "the refused URL is never echoed — it may carry a credential ({part}): {warned}"
             );
         }
-    }
-}
-
-/// A `tracing` writer this test reads back, `evaluate_log.rs`'s shape.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    /// What has been logged since the last call, leaving the capture empty.
-    fn take(&self) -> String {
-        let taken = std::mem::take(&mut *self.0.lock().expect("the log is never poisoned"));
-
-        String::from_utf8_lossy(&taken).into_owned()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
     }
 }

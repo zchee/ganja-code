@@ -13,7 +13,7 @@
 //! and the warning is read back through the process's **global** subscriber.
 //! No path here opens a socket: the key is refused before a client exists.
 
-use std::sync::{Arc, Mutex};
+mod support;
 
 use ganja_tool::evaluate::EvaluateTool;
 
@@ -22,7 +22,7 @@ const REFUSED_KEY: &str = "sk-refused-key never-sent";
 
 #[test]
 fn a_key_the_client_will_not_send_offers_no_tool_and_says_which_variable() {
-    let capture = Capture::default();
+    let capture = support::Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_ansi(false)
@@ -48,38 +48,5 @@ fn a_key_the_client_will_not_send_offers_no_tool_and_says_which_variable() {
     assert!(warned.contains("TYPESAFE_API_KEY"), "the variable is named: {warned}");
     for fragment in ["sk-refused-key", "never-sent"] {
         assert!(!warned.contains(fragment), "no part of the key ({fragment}): {warned}");
-    }
-}
-
-/// A `tracing` writer this test reads back, `evaluate_log.rs`'s shape.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    /// What has been logged since the last call, leaving the capture empty.
-    fn take(&self) -> String {
-        let taken = std::mem::take(&mut *self.0.lock().expect("the log is never poisoned"));
-
-        String::from_utf8_lossy(&taken).into_owned()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
     }
 }

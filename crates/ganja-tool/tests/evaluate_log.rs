@@ -22,10 +22,12 @@
 //! client underneath it, because the environment is what this binary exists
 //! to be allowed to touch.
 
+mod support;
+
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ganja_tool::evaluate::EvaluateTool;
 use ganja_tool::{Credentials, FileTimes, ToolCtx};
@@ -43,7 +45,7 @@ const ANSWERED: &str = r#"{"model":"jev-1.13.0","answers":{"urgent":{"type":"nou
 
 #[tokio::test]
 async fn nothing_an_evaluate_call_logs_carries_the_key_or_the_state() {
-    let capture = Capture::default();
+    let capture = support::Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_ansi(false)
@@ -77,7 +79,7 @@ async fn nothing_an_evaluate_call_logs_carries_the_key_or_the_state() {
 
     assert_eq!(answered.title, "1 answer(s) · jev-1.13.0 · 312 input tokens");
 
-    let logged = capture.logged();
+    let logged = capture.take();
 
     // The positive control first. Without it the two assertions below hold
     // for a client that logs nothing at all, and the leak check would be
@@ -142,38 +144,4 @@ fn serve() -> String {
     });
 
     base
-}
-
-/// A `tracing` writer this test reads back.
-///
-/// `ganja-testkit`'s `LogCapture` is the same shape, and unreachable: no
-/// shipped binary links that crate and `ganja-tool` does not depend on it.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    /// What has been logged so far.
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
 }
