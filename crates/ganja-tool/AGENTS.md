@@ -102,7 +102,7 @@ Unit tests are sibling `<module>_tests.rs` files attached with `#[cfg(test)] #[p
 `tests/` holds six binaries with one test each. Five mutate the environment, and `evaluate_log`, `evaluate_refusal` and `evaluate_refused_key` also install the process-wide tracing subscriber; the `// SAFETY:` comment on each `set_var` relies on the binary holding one test, so do not add a second.
 
 - `evaluate_keys.rs`, `evaluate_log.rs`: the `TYPESAFE_*` variables, against no endpoint or a loopback one.
-- `evaluate_refusal.rs`: which variable the warning names when `EvaluateTool::configured()` refuses the `TYPESAFE_*` settings.
+- `evaluate_refusal.rs`: which variable the warning names when `EvaluateTool::configured()` refuses the `TYPESAFE_*` settings, and that a refused base URL's warning lists every rule rather than naming one.
 - `evaluate_refused_key.rs`: a key the TypeSafe client will not send leaves the tool unoffered, and the warning names the variable and none of the key.
 - `websearch_keys.rs`: `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER`.
 - `evaluate_live.rs`: `#[ignore]` and inert without `GANJA_LIVE_TEST=1`; it sends one request to `https://api.typesafe.ai`.

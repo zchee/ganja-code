@@ -6,7 +6,10 @@
 //! warning is the only thing a person reads about why the tool is missing,
 //! so it has to name the variable that was actually refused: a refused model
 //! blamed on the base URL sends somebody to fix the one setting that was
-//! fine.
+//! fine. For the same reason a refused base URL's warning claims no one rule:
+//! the refusal does not say which rule it was, and a warning that said "not
+//! https" about a base refused for its query would send somebody to fix the
+//! part that was fine.
 //!
 //! **One test, one binary**, for `evaluate_log.rs`'s two reasons. It sets and
 //! removes `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and
@@ -21,13 +24,19 @@
 use std::sync::{Arc, Mutex};
 
 use ganja_tool::evaluate::EvaluateTool;
+use ganja_tool::typesafe::Error;
 
 /// A default model the consent title could not survive: it would forge a
 /// second disclosure after the real one.
 const FORGED_MODEL: &str = "jev-latest · 0 B · 0 question(s)";
 
-/// A base URL that would put the key on the wire in the clear.
-const CLEARTEXT_BASE: &str = "http://example.com";
+/// Base URLs each refused by a different rule, beside the rule. The host and
+/// the secret each one carries are what the echo check looks for.
+const REFUSED_BASES: &[(&str, &str)] = &[
+    ("it would put the key on the wire in the clear", "http://jev.invalid"),
+    ("it carries userinfo", "https://reader:opensesame@jev.invalid"),
+    ("it carries a query", "https://jev.invalid/v1?token=opensesame"),
+];
 
 #[test]
 fn a_refused_setting_is_warned_about_by_the_variable_that_was_refused() {
@@ -69,27 +78,43 @@ fn a_refused_setting_is_warned_about_by_the_variable_that_was_refused() {
     // The control that makes the half above mean something: with the model
     // fine and the base refused, the other variable is named. A warning that
     // named one variable whatever was refused would pass either half alone.
-    // SAFETY: as above.
-    unsafe {
-        std::env::set_var("TYPESAFE_BASE_URL", CLEARTEXT_BASE);
-        std::env::remove_var("TYPESAFE_DEFAULT_MODEL");
-    }
+    // Every base is refused by a different rule, and the warning claims none
+    // of them: it carries the refusal's own sentence, which lists them all.
+    let every_rule = Error::RefusedBase.to_string();
+    for &(rule, base) in REFUSED_BASES {
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("TYPESAFE_BASE_URL", base);
+            std::env::remove_var("TYPESAFE_DEFAULT_MODEL");
+        }
 
-    assert!(EvaluateTool::configured().is_none(), "a refused base URL is no tool");
-    let warned = capture.take();
-    assert_eq!(warned.lines().filter(|line| line.contains("WARN")).count(), 1, "{warned}");
-    assert!(
-        warned.contains(r#"variable="TYPESAFE_BASE_URL""#),
-        "the warning names the variable that was refused: {warned}"
-    );
-    assert!(
-        !warned.contains("TYPESAFE_DEFAULT_MODEL"),
-        "and not the model, which was never set: {warned}"
-    );
-    assert!(
-        !warned.contains("example.com"),
-        "the refused URL is never echoed — it may carry a credential: {warned}"
-    );
+        assert!(EvaluateTool::configured().is_none(), "a base refused because {rule} is no tool");
+        let warned = capture.take();
+        assert_eq!(warned.lines().filter(|line| line.contains("WARN")).count(), 1, "{warned}");
+        assert!(
+            warned.contains(r#"variable="TYPESAFE_BASE_URL""#),
+            "the warning names the variable that was refused because {rule}: {warned}"
+        );
+        assert!(
+            !warned.contains("TYPESAFE_DEFAULT_MODEL"),
+            "and not the model, which was never set: {warned}"
+        );
+        assert!(
+            !warned.contains("https or loopback"),
+            "a base refused because {rule} is not blamed on one rule: {warned}"
+        );
+        assert!(
+            warned.contains(&every_rule),
+            "the warning lists every rule a base answers to, so the one that refused \
+             it is among them: {warned}"
+        );
+        for part in ["jev.invalid", "opensesame"] {
+            assert!(
+                !warned.contains(part),
+                "the refused URL is never echoed — it may carry a credential ({part}): {warned}"
+            );
+        }
+    }
 }
 
 /// A `tracing` writer this test reads back, `evaluate_log.rs`'s shape.
