@@ -7,7 +7,15 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A pull request's runs share one group, keyed on its number, so a newer
+  # run of the same PR cancels the older one whether the PR is merged or
+  # not. `github.ref` does not work as that key: once a PR is merged, a
+  # `pull_request` run for it carries the base branch as its ref, lands in
+  # main's group and can cancel main's push run. A push has no PR number
+  # and is keyed on its commit, so every push to main has a group of its
+  # own: nothing cancels it and nothing queues behind it. The price is
+  # that several merges in a row each spend a full run.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
