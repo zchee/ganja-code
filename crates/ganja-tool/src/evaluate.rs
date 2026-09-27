@@ -112,9 +112,12 @@ impl EvaluateTool {
     /// its userinfo, and a model id was refused for what it could forge. The
     /// variable is read off the error variant, because a warning that blamed
     /// the base URL for a refused model would send a person to fix the one
-    /// variable that was fine. Each call builds a fresh client, so a
-    /// `/plugin` reload re-reads the (unchanged) environment and may warn
-    /// again; that is accepted.
+    /// variable that was fine. A refused base URL's warning carries the
+    /// error's own sentence, which lists every rule a base answers to: the
+    /// error does not say which rule refused it, and a warning that named one
+    /// would send a person to fix a rule the value may have passed. Each call
+    /// builds a fresh client, so a `/plugin` reload re-reads the (unchanged)
+    /// environment and may warn again; that is accepted.
     #[must_use]
     pub fn configured() -> Option<Arc<dyn Tool>> {
         let settings = match Settings::from_env() {
@@ -123,7 +126,8 @@ impl EvaluateTool {
             Err(typesafe::Error::RefusedBase) => {
                 tracing::warn!(
                     variable = typesafe::BASE_ENV,
-                    "the TypeSafe base URL is not https or loopback; `evaluate` is not offered"
+                    error = %typesafe::Error::RefusedBase,
+                    "the TypeSafe base URL was refused; `evaluate` is not offered"
                 );
 
                 return None;

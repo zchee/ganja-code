@@ -330,7 +330,8 @@ impl Judge {
             Err(Error::RefusedBase) => {
                 tracing::warn!(
                     variable = crate::tool::typesafe::BASE_ENV,
-                    "the TypeSafe base URL is not https or loopback; screening is off"
+                    error = %Error::RefusedBase,
+                    "the TypeSafe base URL was refused; screening is off"
                 );
 
                 return None;
