@@ -64,6 +64,18 @@ async fn health_answers_what_the_server_says_it_is() {
     assert_eq!(stub.only_request().path, "/global/health");
 }
 
+/// A server behind a proxy that mounts it under a path is attached to by
+/// that path, and every route is spelled after it rather than in its place.
+#[tokio::test]
+async fn an_address_with_a_path_reaches_each_route_under_that_path() {
+    let stub = Stub::always(Reply::ok(HEALTHY)).await;
+    let client = Client::new(&format!("{}/behind/a/proxy/", stub.address()), None)
+        .expect("an address with a path is usable");
+
+    client.health().await.expect("health answers under the path");
+    assert_eq!(stub.only_request().path, "/behind/a/proxy/global/health");
+}
+
 #[tokio::test]
 async fn creating_a_session_posts_and_answers_the_id_the_server_minted() {
     let stub = Stub::always(Reply::ok(r#"{"id":"ses_minted_over_there"}"#)).await;

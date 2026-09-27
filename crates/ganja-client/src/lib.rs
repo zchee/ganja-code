@@ -110,10 +110,10 @@ pub enum ClientError {
         .address.as_deref().unwrap_or("the address given")
     )]
     Address {
-        /// What was given, as the URL parser read it with any user name and
-        /// password cleared. [`None`] when it did not parse as a URL with a
-        /// host: nothing then says which part of the text is a password, so
-        /// none of it is repeated.
+        /// What was given, as the URL parser read it with any user name,
+        /// password, query and fragment cleared. [`None`] when it did not
+        /// parse as a URL with a host: nothing then says which part of the
+        /// text is a password, so none of it is repeated.
         address: Option<String>,
         /// Why it cannot be used.
         reason: String,
@@ -471,6 +471,13 @@ impl Client {
     /// because guessing the scheme is guessing whether the credential travels
     /// in the clear — or when it carries a user name or password, which
     /// `reqwest` would send as a credential and every error would repeat.
+    /// Also when it carries a query or a fragment, a control character
+    /// anywhere, or a space at either end or before a trailing slash (the
+    /// slashes are dropped from the text kept): every route and every error
+    /// is spelled from that text, so a query or a fragment would stand in
+    /// front of each route and no request would reach one, and the URL
+    /// parser does not read the others as written, so the text routes and
+    /// errors are spelled from would differ from the address it read.
     /// [`ClientError::Transport`] when the HTTP client itself cannot be
     /// built, which is a TLS backend that would not initialize.
     pub fn new(address: &str, credentials: Option<Credentials>) -> Result<Self, ClientError> {
@@ -510,10 +517,31 @@ impl Client {
                  (and GANJA_SERVER_USERNAME), never in an address every error repeats",
             ));
         }
-
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(refused(
+                "it carries a query or a fragment, and every route is spelled after the \
+                 address, so no request would reach its route; give the address without them",
+            ));
+        }
         // Trailing slashes are stripped so every route below can be written
         // the way the router spells it.
         let address = address.trim_end_matches('/').to_owned();
+        // Routes and errors are spelled from this text, and the parser does
+        // not read these as written: it trims a space or any character below
+        // it from either end, drops a tab, LF or CR wherever it is, and
+        // percent-encodes any other control character. The text would differ
+        // from the address it read, and an error could print a raw control
+        // character. Checked after the slashes are stripped, so the text kept
+        // never ends in a space that stood before one. A space inside is
+        // kept: the parser encodes it the same way in the address and in
+        // every route.
+        if address.contains(char::is_control) || address.starts_with(' ') || address.ends_with(' ')
+        {
+            return Err(refused(
+                "it has a control character in it, or a space at either end or before a \
+                 trailing slash; give the address without them",
+            ));
+        }
 
         let build = |builder: reqwest::ClientBuilder| {
             builder
@@ -984,13 +1012,16 @@ struct Reading<S> {
 /// `parsed` as a refusal may repeat it: with its user name and password
 /// cleared through the URL's own setters, never by cutting at an `@` in the
 /// text, where the parser and a reader can disagree about which `@` ends the
-/// credential. [`None`] when the setters refuse, which is a URL with no host:
-/// `user:password@host` parses as a scheme and a path, and nothing in it is
-/// marked as a password.
+/// credential; and with its query and fragment cleared, because a refusal
+/// never repeats what it refused and either may carry a token. [`None`] when
+/// the setters refuse, which is a URL with no host: `user:password@host`
+/// parses as a scheme and a path, and nothing in it is marked as a password.
 fn shown(parsed: &reqwest::Url) -> Option<String> {
     let mut shown = parsed.clone();
     shown.set_username("").ok()?;
     shown.set_password(None).ok()?;
+    shown.set_query(None);
+    shown.set_fragment(None);
 
     Some(shown.into())
 }
