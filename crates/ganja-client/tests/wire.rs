@@ -391,13 +391,21 @@ async fn a_frame_named_outside_the_vocabulary_ends_the_stream_readably() {
 // The bounds: a server that stops answering is a named failure, and only that.
 // ---------------------------------------------------------------------------
 
-/// The bounds these tests drive the client under: a read bound a tenth of
-/// `READ_DEADLINE`, so a test that waits one out costs seconds rather than
-/// half a minute. `Client::new`'s own bounds are pinned in `src/lib_tests.rs`.
+/// The bounds the tests that wait one out drive the client under: a read
+/// bound a tenth of `READ_DEADLINE`, so each costs seconds rather than half
+/// a minute. A loaded runner can only make such a bound end later, which
+/// [`PAST_THE_BOUND`] leaves room for. `Client::new`'s own bounds are pinned
+/// in `src/lib_tests.rs`.
 const QUICK: Bounds = Bounds { connect: Duration::from_secs(10), read: Duration::from_secs(3) };
 
-/// The stub's heartbeat: a third of [`QUICK`]'s read bound, as serve's ten
-/// seconds (its `HEARTBEAT`) are of `READ_DEADLINE`'s thirty.
+/// The bounds a stream kept alive by [`HEARTBEAT`] must outlive: five
+/// heartbeats to a read, where serve's `READ_DEADLINE` holds three of its
+/// own, so a test process stalled for up to four seconds on a loaded runner
+/// still finds a heartbeat inside every read and does not fail a healthy
+/// stream (nextest retries nothing).
+const ROOMY: Bounds = Bounds { connect: Duration::from_secs(10), read: Duration::from_secs(5) };
+
+/// The stub's heartbeat, and the pace of a trickle.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// Longer than [`QUICK`]'s read bound, with room for a loaded runner: a wait
@@ -407,6 +415,24 @@ const PAST_THE_BOUND: Duration = Duration::from_secs(15);
 /// A client for `stub`, under [`QUICK`].
 fn quick(stub: &Stub) -> Client {
     Client::with_bounds(stub.address(), None, QUICK).expect("the stub's address is usable")
+}
+
+/// A client for `stub`, under [`ROOMY`].
+fn roomy(stub: &Stub) -> Client {
+    Client::with_bounds(stub.address(), None, ROOMY).expect("the stub's address is usable")
+}
+
+/// The stream serve opens: `connected`, then `beats` heartbeats a
+/// [`HEARTBEAT`] apart, then `json` as one event, then nothing.
+fn heartbeats_then(beats: usize, json: &str) -> Reply {
+    let heartbeats = std::iter::repeat_with(|| (HEARTBEAT, frame("heartbeat", "{}"))).take(beats);
+
+    Reply::Held {
+        chunks: std::iter::once((Duration::ZERO, frame("connected", "{}")))
+            .chain(heartbeats)
+            .chain([(Duration::ZERO, frame("message", json))])
+            .collect(),
+    }
 }
 
 /// An error and its causes, joined as `anyhow`'s `{:#}` joins them — what
@@ -464,6 +490,26 @@ async fn an_event_stream_the_server_never_opens_is_the_same_named_silence() {
     assert_eq!(stub.only_request().path, "/event");
 }
 
+/// The stream's head and its `connected` frame answer inside one bound
+/// together: serve writes `connected` the moment it has registered the
+/// subscriber, so a server that is there meets the bound at once, and one
+/// that trickles its hello a byte at a time cannot stretch it.
+#[tokio::test]
+async fn an_event_stream_that_trickles_its_hello_is_the_same_named_silence() {
+    let stub = Stub::always(Reply::Trickled {
+        every: HEARTBEAT,
+        reply: Box::new(Reply::Stream { chunks: vec![frame("connected", "{}")] }),
+    })
+    .await;
+
+    let error = tokio::time::timeout(PAST_THE_BOUND, quick(&stub).events())
+        .await
+        .unwrap_or_else(|_| panic!("a hello trickled for {PAST_THE_BOUND:?} was still waited on"))
+        .expect_err("a hello that never finishes is not a stream");
+
+    assert!(matches!(error, ClientError::Silent { .. }), "{error:?}");
+}
+
 /// The same bound on a read that never gets an answer at all: `health` is
 /// the first call everything that attaches makes. Its causes, which `ganja
 /// run` prints, say which route it was and that the bound ended it.
@@ -489,6 +535,28 @@ async fn a_read_the_server_never_answers_is_a_transport_error_instead_of_a_hang(
     assert_eq!(stub.only_request().path, "/global/health");
 }
 
+/// A read's bound holds for its whole answer, not for each gap in it: a
+/// server trickling a byte inside every bound would otherwise hold `health`,
+/// the first call everything that attaches makes, as long as it liked.
+#[tokio::test]
+async fn a_read_the_server_trickles_is_bounded_as_a_whole_not_per_byte() {
+    let stub =
+        Stub::always(Reply::Trickled { every: HEARTBEAT, reply: Box::new(Reply::ok(HEALTHY)) })
+            .await;
+
+    let error = tokio::time::timeout(PAST_THE_BOUND, quick(&stub).health())
+        .await
+        .unwrap_or_else(|_| panic!("a read trickled for {PAST_THE_BOUND:?} was still waited on"))
+        .expect_err("an answer that never finishes is not an answer");
+
+    match &error {
+        ClientError::Transport { source, .. } => {
+            assert!(source.is_timeout(), "the bound ended it: {source:?}");
+        }
+        other => panic!("a transport failure, not {other:?}"),
+    }
+}
+
 /// The bound is per read, not per stream: serve's heartbeat keeps an idle
 /// stream alive however long it idles — a session waiting minutes on a
 /// person's dialog sends nothing else — so a stream open for longer than the
@@ -497,29 +565,19 @@ async fn a_read_the_server_never_answers_is_a_transport_error_instead_of_a_hang(
 #[tokio::test]
 async fn a_stream_that_keeps_heartbeating_outlives_the_read_bound() {
     let (event, json) = started();
-    let heartbeat = || (HEARTBEAT, frame("heartbeat", "{}"));
-    let stub = Stub::always(Reply::Held {
-        chunks: vec![
-            (Duration::ZERO, frame("connected", "{}")),
-            heartbeat(),
-            heartbeat(),
-            heartbeat(),
-            heartbeat(),
-            (Duration::ZERO, frame("message", &json)),
-        ],
-    })
-    .await;
+    // One heartbeat past the bound.
+    let stub = Stub::always(heartbeats_then(6, &json)).await;
 
-    let client = quick(&stub);
+    let client = roomy(&stub);
     let mut events = client.events().await.expect("the stream opens");
     let reading = Instant::now();
-    let read = tokio::time::timeout(HEARTBEAT * 4 + DEADLINE, events.next())
+    let read = tokio::time::timeout(HEARTBEAT * 6 + DEADLINE, events.next())
         .await
         .expect("the event arrives once the heartbeats are through")
         .expect("the stream is still open");
 
     assert_eq!(read.expect("a heartbeat-kept stream is not a stall"), event);
-    assert!(reading.elapsed() > QUICK.read, "and it outlived the bound: {:?}", reading.elapsed());
+    assert!(reading.elapsed() > ROOMY.read, "and it outlived the bound: {:?}", reading.elapsed());
 }
 
 /// A `POST` is not read-bounded: its handler may be running the session's
@@ -549,35 +607,24 @@ async fn a_prompt_the_server_takes_its_time_accepting_is_not_cut_by_the_read_bou
 #[tokio::test]
 async fn a_stream_left_unread_while_a_slow_prompt_is_accepted_still_delivers_what_follows() {
     let (event, json) = started();
-    let accepting = QUICK.read + Duration::from_secs(2);
+    let accepting = ROOMY.read + Duration::from_secs(2);
     let stub = Stub::answering(move |request| {
         if request.path != "/event" {
             return Reply::Late { after: accepting, reply: Box::new(Reply::Accepted) };
         }
-        let heartbeat = || (HEARTBEAT, frame("heartbeat", "{}"));
-        Reply::Held {
-            chunks: vec![
-                (Duration::ZERO, frame("connected", "{}")),
-                heartbeat(),
-                heartbeat(),
-                heartbeat(),
-                heartbeat(),
-                heartbeat(),
-                heartbeat(),
-                (Duration::ZERO, frame("message", &json)),
-            ],
-        }
+        // The event comes a heartbeat after the prompt is accepted.
+        heartbeats_then(8, &json)
     })
     .await;
 
-    let client = quick(&stub);
+    let client = roomy(&stub);
     let mut events = client.events().await.expect("the stream opens");
     let unread = Instant::now();
     tokio::time::timeout(accepting + DEADLINE, client.prompt(&session(), &Prompt::new("hi")))
         .await
         .expect("the prompt is answered once the server gets to it")
         .expect("a slow acceptance is still an acceptance");
-    assert!(unread.elapsed() > QUICK.read, "the stream sat unread past the bound");
+    assert!(unread.elapsed() > ROOMY.read, "the stream sat unread past the bound");
 
     let read = tokio::time::timeout(DEADLINE, events.next())
         .await
