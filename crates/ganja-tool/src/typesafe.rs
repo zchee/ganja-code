@@ -66,6 +66,7 @@ use schemars::JsonSchema;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use serde_with::rust::maps_first_key_wins;
 use tokio_util::sync::CancellationToken;
 use typesafe_sdk::{ErrorKind, PreparedQuestions, Questions, RawQuestion, RetryPolicy};
 use url::{Host, Url};
@@ -1125,9 +1126,10 @@ fn converted(answered: &typesafe_sdk::SystemOneResponse) -> Response {
         let Some(answer) = known(answer) else {
             continue;
         };
-        // The first of a repeated id, as the SDK's own lookups return. Where
-        // the SDK skipped every answer under an id, the loop below takes the
-        // last of them, the one `raw_answers` keeps.
+        // The first of a repeated id, as the SDK's own lookups return. The
+        // SDK holds no answer it skipped, so its first under an id can follow
+        // a skipped one; an id whose every answer it skipped is filled below,
+        // from the first answer `raw_answers` keeps.
         answers.entry(id.to_owned()).or_insert(answer);
     }
     for (id, raw) in raw_answers(answered.meta().raw_body()) {
@@ -1180,22 +1182,26 @@ fn known(answer: &typesafe_sdk::Answer) -> Option<Answer> {
     })
 }
 
-/// Every answer in `body`, each as the raw text it arrived as.
+/// The answers in `body`, one per id, each as the raw text it arrived as.
 ///
 /// Read as leniently as the SDK read it, so that a body the SDK decoded
 /// cannot fail here: the same serde_json, over bytes the SDK already found
 /// to be UTF-8 and at most 16 levels deep. Every member is captured as text,
 /// never evaluated, because the SDK passes over an answer it skips without
-/// evaluating its numbers or escapes. The top level is read as a map, so a
-/// repeated `answers` member resolves as the SDK resolves it, to the last
-/// one. A body with no `answers` at all, which the SDK accepts as no
-/// answers, is the empty map.
+/// evaluating its numbers or escapes. An id answered more than once keeps
+/// its first answer, as the SDK's lookups keep theirs. A repeated `answers`
+/// member is a different case: the top level is read as a plain map, so it
+/// resolves as the SDK resolves it, to the last one. A body with no
+/// `answers` at all, which the SDK accepts as no answers, is the empty map.
 fn raw_answers(body: &[u8]) -> BTreeMap<String, &RawValue> {
     let members = serde_json::from_slice::<BTreeMap<String, &RawValue>>(body).unwrap_or_default();
 
     members
         .get("answers")
-        .and_then(|answers| serde_json::from_str(answers.get()).ok())
+        .and_then(|answers| {
+            maps_first_key_wins::deserialize(&mut serde_json::Deserializer::from_str(answers.get()))
+                .ok()
+        })
         .unwrap_or_default()
 }
 
