@@ -57,7 +57,7 @@ For `GANJA_OPENCODE_DIR`, check out `anomalyco/opencode` at tag `v1.18.22` and r
 - The upstream checkout goes in `upstream/`, which is gitignored and exists only on the runner.
 - The `cargo-depgate` binary comes from `actions/cache@v6` keyed `cargo-depgate-<os>-<arch>-v0.1.1`; a cache hit skips the install.
 - `.config/nextest.toml` sets `retries = 0`, and its `ci` profile terminates a test after 4 minutes and keeps running after a failure; three overrides (`tmux` `live`, two `pty_smoke` drills, `ganja-core` `cancel`) take every test thread.
-- `concurrency` cancels an in-progress run on the same ref when a new one starts.
+- `concurrency` groups a pull request's runs by PR number, merged or not, and a new run cancels the one in progress; each push to main is grouped by its commit, so nothing cancels it.
 - Without `install tmux` the xcode runner has no tmux and every tmux-driving suite hard-fails; the ubuntu apt tmux is older than the 3.7c floor `crates/tmux/tests/inventory.rs` is held to.
 
 ## History
