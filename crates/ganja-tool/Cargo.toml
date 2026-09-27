@@ -80,6 +80,8 @@ serde.workspace = true
 # SDK never evaluated is evaluated here. The SDK's own serde_json turns the
 # feature on already; it is named because this crate's code uses it.
 serde_json = { workspace = true, features = ["raw_value"] }
+# The same read back keeps the first answer of an id the response repeats.
+serde_with.workspace = true
 # `edit` reports what it changed as a unified patch, which a frontend renders
 # instead of the two whole files.
 similar.workspace = true

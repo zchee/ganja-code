@@ -428,9 +428,8 @@ async fn an_answer_type_this_build_does_not_know_is_kept_whole_rather_than_faili
 async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
     // The SDK passes over an answer of a type it does not model without
     // evaluating it, so it accepts bodies a whole-value parse would refuse.
-    // Each one here but the last is such a body, and in each the skipped
-    // answer still reaches the model: whole where a value can hold it, by its
-    // type where not.
+    // Each one here is such a body, and each skipped answer still reaches
+    // the model: whole where a value can hold it, by its type where not.
     let usage = r#""usage":{"input_tokens":1,"output_tokens":0}"#;
     let cases = [
         (
@@ -456,15 +455,6 @@ async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
             ),
             serde_json::json!({"type": "quanta", "quanta": [0.1]}),
         ),
-        (
-            // One id answered twice, both of a type the SDK skips. The
-            // answers hold one per id, and the raw read keeps the last.
-            "one id answered twice, both skipped",
-            format!(
-                r#"{{"model":"jev-1.13.0","answers":{{"urgent":{{"type":"quanta","quanta":[0.1]}},"urgent":{{"type":"quanta","quanta":[0.2]}},"tail":{{"type":"noul","noul":0.3}}}},{usage}}}"#
-            ),
-            serde_json::json!({"type": "quanta", "quanta": [0.2]}),
-        ),
     ];
 
     for (what, body, kept) in cases {
@@ -481,6 +471,51 @@ async fn an_answer_the_sdk_skipped_unread_is_never_lost_to_reading_it_back() {
             ]),
             "{what}"
         );
+    }
+}
+
+#[tokio::test]
+async fn an_id_answered_twice_keeps_its_first_modelled_answer_or_else_its_first_answer() {
+    // The SDK keeps every answer of a type it models, in the order received,
+    // and its lookup by id returns the first of them; an answer of any other
+    // type it skips and holds nowhere. So the first answer under an id is the
+    // one kept, except that a skipped answer never outranks a modelled one
+    // after it, which is the first the SDK's lookup finds.
+    let usage = r#""usage":{"input_tokens":1,"output_tokens":0}"#;
+    let cases = [
+        (
+            "two skipped answers",
+            r#""urgent":{"type":"quanta","quanta":[0.1]},"urgent":{"type":"quanta","quanta":[0.2]}"#,
+            Answer::Other(serde_json::json!({"type": "quanta", "quanta": [0.1]})),
+        ),
+        (
+            "two modelled answers",
+            r#""urgent":{"type":"noul","noul":0.1},"urgent":{"type":"noul","noul":0.2}"#,
+            Answer::Noul { noul: 0.1 },
+        ),
+        (
+            // The first on the wire, and the SDK's lookup returns it.
+            "a modelled answer, then a skipped one",
+            r#""urgent":{"type":"noul","noul":0.1},"urgent":{"type":"quanta","quanta":[0.2]}"#,
+            Answer::Noul { noul: 0.1 },
+        ),
+        (
+            // The second on the wire, but the SDK holds no skipped answer, so
+            // this is the first its lookup finds.
+            "a skipped answer, then a modelled one",
+            r#""urgent":{"type":"quanta","quanta":[0.1]},"urgent":{"type":"noul","noul":0.2}"#,
+            Answer::Noul { noul: 0.2 },
+        ),
+    ];
+
+    for (what, answers, kept) in cases {
+        let body = format!(r#"{{"model":"jev-1.13.0","answers":{{{answers}}},{usage}}}"#);
+        let (answered, _endpoint) =
+            evaluate(answer(&body), &request(one_question(), DEFAULT_MODEL)).await;
+        let answered =
+            answered.unwrap_or_else(|error| panic!("{what}: the SDK decodes it: {error}"));
+
+        assert_eq!(answered.answers, BTreeMap::from([("urgent".to_owned(), kept)]), "{what}");
     }
 }
 
