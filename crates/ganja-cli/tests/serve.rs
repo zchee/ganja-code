@@ -11,8 +11,10 @@
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command as Spawn;
+use std::time::Instant;
 
+use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
 use tempfile::TempDir;
 
@@ -84,19 +86,30 @@ impl Served {
             .env("XDG_DATA_HOME", data.path())
             .env("XDG_CONFIG_HOME", config.path())
             .env("HOME", config.path())
-            .stdin(Stdio::null());
+            // A closed pipe: `run` reads standard input whole when it is not
+            // a terminal, and `assert_cmd` pipes it whether or not it is fed.
+            .write_stdin("");
         for name in served_child::UNINHERITED {
             command.env_remove(name);
         }
-        let output = command.output().expect("the attached run finishes");
+        let started = Instant::now();
+        // Bounded like every other wait in this file: a run that never ends
+        // otherwise holds the suite until nextest's own kill, with nothing
+        // said about which side stopped.
+        let output = command.timeout(DEADLINE).output().expect("the attached run runs");
         // Both sides of the socket, because either can be the one that broke:
         // the client's own diagnostics, and what the server had said by then.
+        // The shape `attach.rs` fails with, for the same reasons.
         assert!(
             output.status.success(),
-            "the attached run exits zero: it exited {}; its standard error:\n{}\n{}",
+            "the attached run exits zero: it exited {} after {:?}; {}\n\
+             its own standard output:\n{}\n\
+             its own standard error:\n{}",
             output.status,
-            String::from_utf8_lossy(&output.stderr),
+            started.elapsed(),
             self.child.state(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
 
         String::from_utf8(output.stdout).expect("the output is text")
@@ -104,7 +117,7 @@ impl Served {
 
     /// Ends the server the way a supervisor would, and answers its stderr.
     fn stop(mut self) -> String {
-        let killed = Command::new("kill")
+        let killed = Spawn::new("kill")
             .args(["-TERM", &self.child.id().to_string()])
             .status()
             .expect("kill runs");

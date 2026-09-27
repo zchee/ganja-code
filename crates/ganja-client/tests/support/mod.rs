@@ -48,6 +48,21 @@ pub enum Reply {
     /// An event stream: the chunks are written in order, and the connection
     /// then closes — which is how a stream ends when nothing evicted it.
     Stream { chunks: Vec<String> },
+    /// An event stream whose chunks are each written after their own pause,
+    /// and which is then held open saying nothing — neither a heartbeat nor
+    /// a close. What a stalled server looks like from the client's side.
+    Held { chunks: Vec<(Duration, String)> },
+    /// The request is read and never answered, and the connection is held
+    /// open: the peer a read bound exists for.
+    Silent,
+    /// `reply`, once `after` has passed — a handler that was busy before it
+    /// answered, not one that stalled.
+    Late { after: Duration, reply: Box<Reply> },
+    /// `reply`'s head at once, then its body one byte at a time with `every`
+    /// before each, and then the connection held open: a peer that is never
+    /// silent for as long as `every` and never finishes. Takes a
+    /// [`Reply::Json`] or a [`Reply::Stream`].
+    Trickled { every: Duration, reply: Box<Reply> },
 }
 
 impl Reply {
@@ -200,28 +215,22 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     };
     received.lock().expect("the request log is never poisoned").push(request.clone());
 
-    match answer(&request) {
+    let mut reply = answer(&request);
+    while let Reply::Late { after, reply: later } = reply {
+        tokio::time::sleep(after).await;
+        reply = *later;
+    }
+
+    match reply {
         Reply::Json { status, body } => {
-            let head = format!(
-                "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                reason(status),
-                body.len()
-            );
-            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(json_head(status, body.len()).as_bytes()).await;
             let _ = socket.write_all(body.as_bytes()).await;
         }
         Reply::Accepted => {
             let _ = socket.write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n").await;
         }
         Reply::Stream { chunks } => {
-            // No content-length and no chunked encoding: the body ends when
-            // the connection does, which is what an SSE response is.
-            let _ = socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                      cache-control: no-cache, no-transform\r\nconnection: close\r\n\r\n",
-                )
-                .await;
+            let _ = socket.write_all(STREAM_HEAD.as_bytes()).await;
             for chunk in chunks {
                 if socket.write_all(chunk.as_bytes()).await.is_err() {
                     return;
@@ -233,9 +242,64 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
+        Reply::Held { chunks } => {
+            let _ = socket.write_all(STREAM_HEAD.as_bytes()).await;
+            for (after, chunk) in chunks {
+                tokio::time::sleep(after).await;
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+                let _ = socket.flush().await;
+            }
+            hold(socket).await;
+            return;
+        }
+        Reply::Silent => {
+            hold(socket).await;
+            return;
+        }
+        Reply::Trickled { every, reply } => {
+            let (head, body) = match *reply {
+                Reply::Json { status, body } => (json_head(status, body.len()), body),
+                Reply::Stream { chunks } => (STREAM_HEAD.to_owned(), chunks.concat()),
+                other => unreachable!("only a head and a body are trickled, not {other:?}"),
+            };
+            let _ = socket.write_all(head.as_bytes()).await;
+            for byte in body.as_bytes() {
+                tokio::time::sleep(every).await;
+                if socket.write_all(std::slice::from_ref(byte)).await.is_err() {
+                    return;
+                }
+                let _ = socket.flush().await;
+            }
+            hold(socket).await;
+            return;
+        }
+        Reply::Late { .. } => unreachable!("a late reply is unwrapped before it is answered"),
     }
 
     let _ = socket.shutdown().await;
+}
+
+/// The head of an event stream as serve writes it. No content-length and
+/// no chunked encoding: the body ends when the connection does, which is
+/// what an SSE response is.
+const STREAM_HEAD: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                           cache-control: no-cache, no-transform\r\nconnection: close\r\n\r\n";
+
+/// The head of a JSON answer of `length` bytes carrying `status`.
+fn json_head(status: u16, length: usize) -> String {
+    format!(
+        "HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n",
+        reason(status)
+    )
+}
+
+/// Keeps `socket` open and says nothing on it, until the peer leaves or the
+/// test's runtime ends — never a close the client could read as an answer.
+async fn hold<S: AsyncRead + Unpin>(mut socket: S) {
+    let mut chunk = [0u8; 1024];
+    while matches!(socket.read(&mut chunk).await, Ok(read) if read > 0) {}
 }
 
 /// The request head plus its body, or [`None`] when the peer left first.

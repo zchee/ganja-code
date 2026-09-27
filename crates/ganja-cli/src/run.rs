@@ -808,8 +808,10 @@ async fn drive_attached(
     let mut err = stderr.lock();
     let mut reporter = Reporter::new(run.format, session.as_str().to_owned(), &mut out, &mut err);
 
+    // With its causes: a transport error's own line names only the address,
+    // and which route failed, and that a bound ended it, sit beneath it.
     if let Err(error) = started {
-        reporter.failed(&error.to_string());
+        reporter.failed(&format!("{:#}", anyhow::Error::from(error)));
 
         return reporter.finish();
     }
@@ -817,11 +819,11 @@ async fn drive_attached(
     while let Some(event) = events.next().await {
         let event = match event {
             Ok(event) => event,
-            // An eviction or a wire this build cannot read ends the stream;
-            // reporting it as a failed turn is honest, because a transcript
-            // that stopped early is exactly what the caller has.
+            // An eviction, a silent server or a wire this build cannot read
+            // ends the stream; reporting it as a failed turn is honest,
+            // because a transcript that stopped early is what the caller has.
             Err(error) => {
-                reporter.failed(&error.to_string());
+                reporter.failed(&format!("{:#}", anyhow::Error::from(error)));
                 break;
             }
         };
