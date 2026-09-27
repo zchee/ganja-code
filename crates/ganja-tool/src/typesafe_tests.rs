@@ -493,10 +493,14 @@ async fn a_refused_credential_is_not_retried_and_tells_the_model_not_to_either()
         )
         .await;
 
-        assert_eq!(answered.unwrap_err(), Error::Rejected { status });
+        let error = answered.unwrap_err();
+        let Error::Rejected { status: rejected, .. } = error else {
+            panic!("HTTP {status} is a rejection: {error:?}");
+        };
+        assert_eq!(rejected, status);
         assert_eq!(endpoint.count(), 1, "HTTP {status} was not retried");
 
-        let ToolError::Failed(message) = ToolError::from(Error::Rejected { status }) else {
+        let ToolError::Failed(message) = ToolError::from(error) else {
             panic!("a rejection is a failure the model reads");
         };
         assert!(message.contains("do not retry"), "the model is told not to retry: {message}");
@@ -519,9 +523,10 @@ async fn every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names()
     // The SDK tells a 403 for a request without a key
     // (`authentication_error`) from a 403 for a key that lacks a permission
     // (`permission_denied`). This client keeps both, and every other 401 and
-    // 403, a rejection: the judge reads a 401 as "switch off" and a 403 as
-    // "skip this segment", and which 403s belong with the 401 is not decided
-    // here.
+    // 403, a rejection, and says only which of them named the credential
+    // (`credential`, pinned by
+    // `a_rejection_says_whether_the_vendor_named_the_credential`); what the
+    // judge does with a 403 that did is decided there.
     for (status, body) in [
         (401_u16, r#"{"detail":{"error_type":"authentication_error","message":"Bad key."}}"#),
         (401, ""),
@@ -533,7 +538,10 @@ async fn every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names()
         let (answered, endpoint) =
             evaluate(canned(status, body), &request(one_question(), DEFAULT_MODEL)).await;
 
-        assert_eq!(answered.unwrap_err(), Error::Rejected { status }, "HTTP {status} {body:?}");
+        let Err(Error::Rejected { status: rejected, .. }) = answered else {
+            panic!("HTTP {status} {body:?} is a rejection: {answered:?}");
+        };
+        assert_eq!(rejected, status, "HTTP {status} {body:?}");
         assert_eq!(endpoint.count(), 1, "HTTP {status} {body:?} was not retried");
     }
 
@@ -546,6 +554,80 @@ async fn every_401_and_403_is_a_rejection_whatever_error_type_the_vendor_names()
     )
     .await;
     assert_eq!(answered.unwrap_err(), Error::Unavailable { status: 500 });
+}
+
+/// A rejection says whether the vendor named the credential — a 401, or a 403
+/// whose `detail.error_type` is `authentication_error` — and nothing else
+/// about it changes: the `Display` sentence and the sentence the model reads
+/// are the same bytes whichever way the flag is set.
+#[tokio::test]
+async fn a_rejection_says_whether_the_vendor_named_the_credential() {
+    let tests: [(&str, u16, &str, bool); 7] = [
+        (
+            "a 401 naming the credential",
+            401,
+            r#"{"detail":{"error_type":"authentication_error","message":"Bad key."}}"#,
+            true,
+        ),
+        ("a 401 with no body", 401, "", true),
+        (
+            "a 403 naming the credential",
+            403,
+            r#"{"detail":{"error_type":"authentication_error","message":"No key."}}"#,
+            true,
+        ),
+        (
+            "a 403 naming a missing permission",
+            403,
+            r#"{"detail":{"error_type":"permission_denied","message":"Not allowed."}}"#,
+            false,
+        ),
+        ("a 403 with no body", 403, "", false),
+        ("a 403 whose detail is a bare string", 403, r#"{"detail":"Forbidden"}"#, false),
+        (
+            "a 404 whose body names the credential",
+            404,
+            r#"{"detail":{"error_type":"authentication_error"}}"#,
+            false,
+        ),
+    ];
+    let credential_sentence = |status: u16| {
+        format!(
+            "TypeSafe refused the credential (HTTP {status}); check that TYPESAFE_API_KEY holds a \
+             valid key. This was rejected, so do not retry — continue without this judgement."
+        )
+    };
+    let request_sentence = |status: u16| {
+        format!(
+            "TypeSafe refused the request itself (HTTP {status}), not the credential; check that \
+             TYPESAFE_BASE_URL names the right endpoint and that the questions are shaped as the \
+             tool's schema describes. This was rejected, so do not retry — continue without this \
+             judgement."
+        )
+    };
+
+    for (name, status, body, credential) in tests {
+        let (answered, endpoint) =
+            evaluate(canned(status, body), &request(one_question(), DEFAULT_MODEL)).await;
+
+        let error = answered.expect_err(name);
+        assert_eq!(error, Error::Rejected { status, credential }, "{name}");
+        assert_eq!(endpoint.count(), 1, "{name}: one attempt");
+        assert_eq!(error.to_string(), format!("TypeSafe refused the request with HTTP {status}"));
+        let model_reads = if matches!(status, 401 | 403) {
+            credential_sentence(status)
+        } else {
+            request_sentence(status)
+        };
+        for flag in [true, false] {
+            let flagged = Error::Rejected { status, credential: flag };
+            assert_eq!(flagged.to_string(), error.to_string(), "{name}: Display, flag {flag}");
+            let ToolError::Failed(message) = ToolError::from(flagged) else {
+                panic!("{name}: a rejection is a failure the model reads");
+            };
+            assert_eq!(message, model_reads, "{name}: the model's sentence, flag {flag}");
+        }
+    }
 }
 
 #[tokio::test]

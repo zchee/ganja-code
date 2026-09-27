@@ -28,16 +28,31 @@
 //! metadata does not say whether it was clamped is not sent at all — the
 //! rule a `webfetch` result without `private_allowed` follows.
 //!
+//! Besides the segments, a 403 that names the credential can send one
+//! confirmation (**D570**): a state built from constants alone, the same
+//! bytes every time, with the same questions and [`MODEL`]. Nothing of any
+//! result, tool, session, working directory or time is in it.
+//!
 //! # Outcomes
 //!
 //! Every segment ends in one class and every result in one class, decided
 //! first-match-wins: cancelled, off, unsent, answered, failed, refused,
-//! skipped. Only an HTTP 401 or 404
-//! turns the judge off, and content can cause neither; a 403 is the vendor
-//! refusing that segment's text and is recorded, never counted against the
-//! vendor; a result nobody answered advances a breaker that, after
-//! [`Tuning::failures`] such results in a row, pauses screening for
-//! [`Tuning::cooldown`] and then admits exactly one probe.
+//! skipped. An HTTP 401 or 404 turns the judge off at once, and content can
+//! cause neither. A 403 that names the credential — the vendor's documented
+//! answer to a missing or refused key, which nothing establishes a segment's
+//! text cannot draw — turns it off only when the one confirmation it sends is
+//! refused as a credential failure too. Content alone therefore cannot turn
+//! the judge off: the decision for a 403 is taken on a request that carries
+//! no content. At most one confirmation is in flight in the process, and
+//! segments that meet such a 403 meanwhile take its outcome; a confirmation
+//! that is answered settles the key for the process, and at most
+//! [`CONFIRMATIONS`] are sent. Every other 403, and a 403 whose confirmation
+//! did not turn the judge off — the deadline catching it while it is being
+//! confirmed included — is the vendor refusing that segment's text and is
+//! recorded, never counted against the vendor. A result nobody answered
+//! advances a breaker that, after [`Tuning::failures`] such results in a row,
+//! pauses screening for [`Tuning::cooldown`] and then admits exactly one
+//! probe.
 //!
 //! # Never screened
 //!
@@ -98,6 +113,24 @@ const PER_RESULT: usize = 4;
 /// lead and every `task` child sharing the one judge. The measurement saw no
 /// HTTP 429 at eight.
 const IN_FLIGHT: usize = 8;
+
+/// The most confirmation requests one process sends (D570).
+///
+/// A confirmation that settles nothing — a timeout, a 5xx, a 403 that does
+/// not name the credential — leaves a later 403 naming the credential free
+/// to ask again, and this bounds how often: a vendor that neither accepts
+/// nor refuses the key gets three fixed requests from a process, never one
+/// per refused segment. After the third, such a 403 is a plain refusal.
+pub const CONFIRMATIONS: u32 = 3;
+
+/// The text a confirmation's state carries: a sentence written for the
+/// purpose, the same bytes on every confirmation this build sends.
+const CONFIRMATION_TEXT: &str =
+    "This is a fixed sentence that carries no content from any tool result.";
+
+/// The tool a confirmation's state names: no tool any result comes from, so
+/// that no result's tool name — which an MCP server chooses — is in it.
+const CONFIRMATION_TOOL: &str = "ganja";
 
 /// What the model reads after a result that fired.
 pub const SENTENCE: &str = "[ganja evaluate] Part of this result reads as instructions addressed \
@@ -187,7 +220,14 @@ pub struct Judge {
     /// The process-wide cap on requests in flight. FIFO, so a result waiting
     /// for a permit is served before one that asked later.
     in_flight: Semaphore,
-    /// Set once, by a 401 or a 404, and never cleared.
+    /// The one request a 403 naming the credential is confirmed with, built
+    /// once from constants: nothing of any result, tool, session or time.
+    confirmation: Request,
+    /// What confirmations have established, behind the door one passes at a
+    /// time.
+    confirmations: Confirmations,
+    /// Set once — by a 401 or a 404, or by a confirmation refused as a
+    /// credential failure — and never cleared.
     off: AtomicBool,
     /// Whether the vendor is answering at all.
     breaker: Breaker,
@@ -229,7 +269,7 @@ impl Judge {
         if screen == Screen::default() {
             return None;
         }
-        let questions = match serde_json::from_str(QUESTIONS) {
+        let questions: BTreeMap<String, Question> = match serde_json::from_str(QUESTIONS) {
             Ok(questions) => questions,
             Err(error) => {
                 tracing::warn!(%error, "the screening questions do not parse; screening is off");
@@ -245,6 +285,20 @@ impl Judge {
                 return None;
             }
         };
+        // The same questions and the same model as every screening request,
+        // so that it needs exactly the permission they need.
+        let confirmation = match Request::checked(
+            state(CONFIRMATION_TOOL, CONFIRMATION_TEXT),
+            questions.clone(),
+            MODEL.to_owned(),
+        ) {
+            Ok(confirmation) => confirmation,
+            Err(error) => {
+                tracing::warn!(%error, "the confirmation request does not build; screening is off");
+
+                return None;
+            }
+        };
 
         Some(Arc::new(Self {
             client,
@@ -253,6 +307,8 @@ impl Judge {
             tuning,
             questions,
             in_flight: Semaphore::new(IN_FLIGHT),
+            confirmation,
+            confirmations: Confirmations::new(),
             off: AtomicBool::new(false),
             refused: AtomicU32::new(0),
             degraded: AtomicU32::new(0),
@@ -448,6 +504,10 @@ impl Judge {
         let sent = total.min(chunk::S_MAX);
         let mut outcomes: Vec<Option<Seg>> = (0..sent).map(|_| None).collect();
         let issued: Vec<AtomicBool> = (0..sent).map(|_| AtomicBool::new(false)).collect();
+        // Set when a segment's 403 named the credential and it went to be
+        // confirmed: from then on it waits at the door or on the
+        // confirmation, and the vendor has already refused its text.
+        let asked: Vec<AtomicBool> = (0..sent).map(|_| AtomicBool::new(false)).collect();
 
         let mut requests = Vec::with_capacity(sent);
         for (index, segment) in cut.iter().take(sent).enumerate() {
@@ -466,6 +526,7 @@ impl Judge {
 
         let deadline = tokio::time::Instant::now() + self.tuning.deadline;
         let issued_flags = &issued;
+        let asked_flags = &asked;
         let fan = futures::stream::iter(requests)
             .map(|(index, request)| async move {
                 let permit = tokio::select! {
@@ -485,14 +546,27 @@ impl Judge {
                     return (index, Seg::NotIssued);
                 }
                 issued_flags[index].store(true, Ordering::Release);
-                let seg = classify(self.client.evaluate(&request, cancel).await);
-                // Here, while this segment still holds its permit, and not
-                // when `collect` reads the outcome: the permit is released
-                // when this future returns, and a segment of another result
-                // waiting for it must find the judge already off.
-                if let Seg::Off(status) = seg {
-                    self.switch_off(status);
-                }
+                // Both switch-offs happen here, while this segment holds its
+                // permit, and not when `collect` reads the outcome:
+                // the permit is released when this future returns, and a
+                // segment of another result waiting for it must find the
+                // judge already off.
+                let seg = match self.client.evaluate(&request, cancel).await {
+                    // Whether this is about the key rather than this
+                    // segment's text is decided on a request carrying no
+                    // text, before anything turns off.
+                    Err(Error::Rejected { status: 403, credential: true }) => {
+                        asked_flags[index].store(true, Ordering::Release);
+                        self.confirm(cancel).await
+                    }
+                    answered => {
+                        let seg = classify(answered);
+                        if let Seg::Off(status) = seg {
+                            self.switch_off(status, false);
+                        }
+                        seg
+                    }
+                };
 
                 (index, seg)
             })
@@ -510,7 +584,7 @@ impl Judge {
                     }
                 };
                 outcomes[index] = Some(seg);
-                // A 401 or 404 ends the judge for the process, and a cancel
+                // A switch-off ends the judge for the process, and a cancel
                 // ends the turn: what is still in flight is dropped.
                 if stop {
                     break;
@@ -521,9 +595,14 @@ impl Judge {
 
         let outcomes: Vec<Seg> = outcomes
             .into_iter()
-            .zip(&issued)
-            .map(|(outcome, issued)| match outcome {
+            .zip(issued.iter().zip(&asked))
+            .map(|(outcome, (issued, asked))| match outcome {
                 Some(outcome) => outcome,
+                // Refused, and caught by the deadline or a stop while its 403
+                // was being confirmed: the vendor answered it, so it is a
+                // refusal like any other and is never counted against the
+                // vendor. The confirmation settled nothing.
+                None if asked.load(Ordering::Acquire) => Seg::Refused,
                 // Handed to the client and still unanswered when the deadline
                 // or a stop dropped it. `issued` is set just before the
                 // hand-over, so a request dropped before its first byte left
@@ -543,13 +622,87 @@ impl Judge {
         }
     }
 
+    /// What a segment answered with a 403 naming the credential comes to.
+    ///
+    /// Such a 403 is what the vendor documents for a missing or refused key,
+    /// and nothing establishes that a segment's text cannot draw one. So the
+    /// judge asks once more with [`Judge::confirmation`], which carries no
+    /// text of any result, and only a confirmation refused as a credential
+    /// failure turns it off; a confirmation that is answered settles the key
+    /// for the process, and anything else settles nothing.
+    ///
+    /// Runs inside the segment's own future, which holds its in-flight
+    /// permit, under the result's deadline and the turn's `cancel`. At most
+    /// one confirmation is in flight in the process: a segment that meets
+    /// such a 403 while one is waits at the door for it and takes its
+    /// outcome, rather than sending its own.
+    async fn confirm(&self, cancel: &CancellationToken) -> Seg {
+        let seen = self.confirmations.ended.load(Ordering::Acquire);
+        let mut ledger = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Seg::Cancelled,
+            ledger = self.confirmations.door.lock() => ledger,
+        };
+        // One ended while this segment waited: it was in flight when this
+        // segment's 403 came back, so its outcome is this segment's too.
+        if self.confirmations.ended.load(Ordering::Acquire) != seen {
+            return match ledger.last {
+                Outcome::Refused => Seg::Off(403),
+                Outcome::Accepted | Outcome::Unsettled => Seg::Refused,
+            };
+        }
+        // A judge already off when this 403 came back makes it a plain
+        // refusal, not an off result: the result keeps the marker any other
+        // of its segments earned. So do a settled key and a spent cap.
+        if self.off.load(Ordering::Acquire)
+            || ledger.last == Outcome::Accepted
+            || ledger.sent >= CONFIRMATIONS
+        {
+            return Seg::Refused;
+        }
+        if cancel.is_cancelled() {
+            return Seg::Cancelled;
+        }
+
+        ledger.sent += 1;
+        let mut in_flight = InFlight {
+            ledger: &mut ledger,
+            ended: &self.confirmations.ended,
+            outcome: Outcome::Unsettled,
+        };
+        let answered = self.client.evaluate(&self.confirmation, cancel).await;
+        // Its scores are discarded: it asks about the key, not about text.
+        let (outcome, seg) = match answered {
+            Ok(_) => (Outcome::Accepted, Seg::Refused),
+            Err(Error::Rejected { credential: true, .. }) => (Outcome::Refused, Seg::Off(403)),
+            Err(Error::Cancelled) => (Outcome::Unsettled, Seg::Cancelled),
+            Err(_) => (Outcome::Unsettled, Seg::Refused),
+        };
+        in_flight.outcome = outcome;
+        tracing::debug!(?outcome, "the confirmation of a 403 naming the credential ended");
+        // Before `in_flight` records the end and the door opens, so that a
+        // segment waiting there finds the judge already off.
+        if outcome == Outcome::Refused {
+            self.switch_off(403, true);
+        }
+
+        seg
+    }
+
     /// Turns the judge off for the rest of the process, logging once however
-    /// many segments say so.
-    fn switch_off(&self, status: u16) {
+    /// many segments say so. `confirmed` is whether a confirmation carrying
+    /// no content was refused the same way as the segment's 403.
+    fn switch_off(&self, status: u16, confirmed: bool) {
         if self.off.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
-        if status == 404 {
+        if confirmed {
+            tracing::warn!(
+                status,
+                "TypeSafe refused the credential, and refused it again on a confirmation \
+                 carrying no content; screening is off for the rest of this process"
+            );
+        } else if status == 404 {
             tracing::warn!(
                 "TypeSafe answered HTTP 404: model `{MODEL}` or endpoint not found; screening is \
                  off for the rest of this process"
@@ -647,16 +800,24 @@ fn millis(duration: Duration) -> u64 {
 enum Seg {
     /// A usable answer from [`MODEL`].
     Answered(Scores),
-    /// HTTP 401 or 404: the judge turns off.
+    /// HTTP 401 or 404, or a 403 naming the credential whose confirmation
+    /// was refused as a credential failure: the judge turns off. Never
+    /// decided on this segment's text alone: the confirmation that decides a
+    /// 403 carries none of it.
     Off(u16),
-    /// HTTP 403: the vendor refused this segment's text.
+    /// HTTP 403: the vendor refused this segment's text. A 403 that does not
+    /// name the credential, or one that does when its confirmation was
+    /// answered or settled nothing, when [`CONFIRMATIONS`] were already sent,
+    /// when the judge was already off, or when the deadline or a stop caught
+    /// it while it was being confirmed.
     Refused,
     /// HTTP 422, any other 4xx, or a request that could not be built: an
     /// answer about this body, not about the vendor.
     Skipped,
     /// Nothing usable came back in time: 3xx, 429, 5xx, a timeout, a
     /// transport failure, an unreadable or unusable 2xx, the deadline while
-    /// the request was in flight.
+    /// the request was in flight. Never a segment whose 403 was being
+    /// confirmed: the vendor answered that one.
     Unanswered,
     /// A usable 2xx from a model other than [`MODEL`]: unanswered, and
     /// counted.
@@ -730,12 +891,15 @@ fn fires(instructs_reader: f64, addresses_agent: f64, requests_action: f64) -> b
 }
 
 /// Which class one exchange's result is.
+///
+/// A 403 naming the credential never reaches here from the fan-out: it is
+/// confirmed first ([`Judge::confirm`]).
 fn classify(result: Result<Response, Error>) -> Seg {
     match result {
         Ok(response) if response.model != MODEL => Seg::Mismatch,
         Ok(response) => Scores::of(response).map_or(Seg::Unanswered, Seg::Answered),
-        Err(Error::Rejected { status: status @ (401 | 404) }) => Seg::Off(status),
-        Err(Error::Rejected { status: 403 }) => Seg::Refused,
+        Err(Error::Rejected { status: status @ (401 | 404), .. }) => Seg::Off(status),
+        Err(Error::Rejected { status: 403, .. }) => Seg::Refused,
         Err(Error::Invalid { .. } | Error::Rejected { .. } | Error::InvalidRequest(_)) => {
             Seg::Skipped
         }
@@ -752,7 +916,8 @@ fn classify(result: Result<Response, Error>) -> Seg {
 enum Class {
     /// Any segment was cancelled: the turn is ending.
     Cancelled,
-    /// Any segment answered 401 or 404: the judge is off.
+    /// Any segment turned the judge off: a 401 or a 404, or a 403 naming the
+    /// credential whose confirmation was refused as a credential failure.
     Off,
     /// No request left the machine.
     Unsent,
@@ -893,6 +1058,74 @@ impl Verdict {
             },
             "answers": answers,
         })
+    }
+}
+
+/// What the judge knows about its key after 403s that named it, and the door
+/// that keeps one confirmation in flight at a time.
+struct Confirmations {
+    /// Held for as long as a confirmation is in flight. A segment that meets
+    /// a 403 naming the credential waits here, holding its permit; tokio's
+    /// lock is FIFO, so it is served in the order the 403s came back.
+    door: tokio::sync::Mutex<Ledger>,
+    /// How many confirmations have ended, however each ended. A segment
+    /// reads it before it waits at the door: finding it moved once through
+    /// means one ended while it waited.
+    ended: AtomicU64,
+}
+
+impl Confirmations {
+    fn new() -> Self {
+        Self {
+            door: tokio::sync::Mutex::new(Ledger { sent: 0, last: Outcome::Unsettled }),
+            ended: AtomicU64::new(0),
+        }
+    }
+}
+
+/// What the confirmations sent so far came to, read and written behind
+/// [`Confirmations::door`].
+struct Ledger {
+    /// Handed to the client, never more than [`CONFIRMATIONS`].
+    sent: u32,
+    /// What the last one to end came to; [`Outcome::Unsettled`] before any.
+    /// Once [`Outcome::Accepted`] or [`Outcome::Refused`], it never changes:
+    /// no confirmation is sent after either.
+    last: Outcome,
+}
+
+/// What one confirmation came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    /// A 401, or a 403 naming the credential: the key is refused, and the
+    /// judge is off.
+    Refused,
+    /// A 2xx the client read: the key is accepted, every later 403 is a
+    /// refusal of its segment's text, and no confirmation is sent again.
+    Accepted,
+    /// Anything else — a timeout, a transport failure, 3xx, 404, 422, 429,
+    /// 5xx, another 4xx, a 403 that does not name the credential, a cancel,
+    /// or the future dropped in flight: nothing is settled.
+    Unsettled,
+}
+
+/// A confirmation in flight. Dropped, however the future sending it ends —
+/// finished, or dropped by the deadline or a stop — it records the outcome,
+/// [`Outcome::Unsettled`] unless one was set, and counts the end, before the
+/// door it borrows from opens.
+struct InFlight<'a> {
+    /// The ledger behind the door this confirmation holds.
+    ledger: &'a mut Ledger,
+    /// [`Confirmations::ended`].
+    ended: &'a AtomicU64,
+    /// What it came to, once known.
+    outcome: Outcome,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.ledger.last = self.outcome;
+        self.ended.fetch_add(1, Ordering::AcqRel);
     }
 }
 

@@ -103,6 +103,9 @@ pub enum Reply {
     Held(Box<Reply>),
     /// Nothing, ever.
     Never,
+    /// The connection closed after the request was read, with no answer: a
+    /// transport failure.
+    Hangup,
 }
 
 /// One request the double received.
@@ -302,6 +305,10 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
         let response = respond(reply, &state).await;
         state.open.fetch_sub(1, Ordering::SeqCst);
 
+        // A hang-up: the stream is dropped unanswered.
+        let Some(response) = response else {
+            return;
+        };
         if stream.write_all(&response).await.is_err() {
             return;
         }
@@ -309,8 +316,9 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
     }
 }
 
-/// The bytes one reply puts on the wire, after whatever wait it asks for.
-async fn respond(reply: Reply, state: &State) -> Vec<u8> {
+/// The bytes one reply puts on the wire, after whatever wait it asks for, or
+/// [`None`] when it hangs up instead.
+async fn respond(reply: Reply, state: &State) -> Option<Vec<u8>> {
     let mut reply = reply;
     loop {
         reply = match reply {
@@ -324,13 +332,18 @@ async fn respond(reply: Reply, state: &State) -> Vec<u8> {
                 *inner
             }
             Reply::Never => std::future::pending().await,
-            Reply::Answer { fire } => return http(200, &answer("jev-1.13.0", fire)),
-            Reply::Served { model, fire } => return http(200, &answer(&model, fire)),
-            Reply::Status(status) => return http(status, r#"{"detail":"refused by the double"}"#),
-            Reply::Raw { status, body } => return http(status, &body),
+            Reply::Hangup => return None,
+            Reply::Answer { fire } => return Some(http(200, &answer("jev-1.13.0", fire))),
+            Reply::Served { model, fire } => return Some(http(200, &answer(&model, fire))),
+            Reply::Status(status) => {
+                return Some(http(status, r#"{"detail":"refused by the double"}"#));
+            }
+            Reply::Raw { status, body } => return Some(http(status, &body)),
             Reply::TooLarge => {
-                return b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2000000\r\n\r\n"
-                    .to_vec();
+                return Some(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2000000\r\n\r\n"
+                        .to_vec(),
+                );
             }
         };
     }

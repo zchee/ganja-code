@@ -338,3 +338,89 @@ Pinned by: `crates/ganja-tool/src/typesafe_tests.rs`:
     whose base now carries its token in the path, since userinfo is refused.
 
 Commit: this commit
+
+## D570 — the judge confirms a 403 naming the credential before it turns off (2026-09-27)
+
+Crates: ganja-core, ganja-tool
+Amends: D567 ("Outcomes" for a 403, and "What content can do"); D569
+("Failures", first item: which responses are `Rejected` is unchanged, and
+a rejection says whether it named the credential)
+
+**The client.** `Error::Rejected` carries `credential`: true for a 401, and
+for a 403 whose `detail.error_type` is `authentication_error`; false for
+every other rejection, a 403 naming `permission_denied` or carrying no body
+among them. Every other reader matches `Rejected { status, .. }`: the
+sentence the `evaluate` tool gives the model, the `Display` sentence, and
+`ganja evaluate`'s exit 4 and stderr line are the same bytes whichever way
+it is set.
+
+**The confirmation.** A 403 naming the credential is what the vendor
+documents for a request without a usable key; whether a segment's text can
+draw one is not established, so the judge does not let one decide alone.
+When a screening request gets one, the judge sends one confirmation before
+it decides. Its state is built from constants only (`{"content", "tool"}`,
+the same bytes on every confirmation a build sends), with the same three
+questions and the same model as a screening request, so it needs the same
+permission. Nothing of any result, segment, tool name, session, working
+directory or time is in it, and its scores are discarded. It is sent inside
+the asking segment's own future, while that segment holds its in-flight
+permit, under the result's deadline and the turn's cancel.
+
+**Outcomes.**
+- Refused as a credential failure (a 401, or a 403 naming the credential):
+  the judge turns off for the process by the path a 401 takes, with one
+  `warn!` saying the credential was refused and refused again on a
+  confirmation carrying no content. The asking result is `off`.
+- A 2xx the client reads: the key is confirmed for the process. The asking
+  segment is refused (recorded, never counted against the vendor, never
+  advancing the breaker), and every later 403 naming the credential is a
+  plain refusal with no confirmation.
+- Anything else settles nothing, and a later 403 naming the credential may
+  ask again. After a timeout, a transport failure, a reply over the size
+  cap, 3xx, 404, 422, 429, 5xx, another 4xx, a 403 not naming the
+  credential or an unreadable 2xx, the asking segment is refused. So is a
+  segment the result's deadline or a stop catches while its 403 is being
+  confirmed, whether it sent the confirmation or waits for one: the vendor
+  answered it, so the breaker does not move. After a cancel it is
+  cancelled, as every segment of a cancelled turn is. A 404 on the
+  confirmation does not turn the judge off; only a screening request's 404
+  does.
+- One process sends at most `CONFIRMATIONS` (3); after that, a 403 naming
+  the credential is a plain refusal.
+- At most one is in flight in the process. A segment of any result that
+  meets a 403 naming the credential while one is in flight waits for it,
+  holding its permit, and takes its outcome instead of sending its own. No
+  segment is issued after the judge is off.
+- A 403 naming the credential that comes back to a judge already off is a
+  plain refusal with no confirmation, so its result keeps the marker any
+  other of its segments earned.
+
+**Unchanged.** A 401 or 404 on a screening request turns the judge off at
+once, with no confirmation; a 403 that does not name the credential is a
+refusal with no confirmation; the breaker, the 52-segment cap, the deadline
+and the launch disclosure line; no config key and no schema change.
+
+**What content can do** (amends D567's paragraph of that name). Content alone
+cannot turn the judge off: content can cause neither a 401 nor a 404, and
+the decision for a 403 is taken on a request that carries no content. Each
+403 naming the credential costs at most one confirmation, none once one has
+been answered, and at most three in a process.
+
+Pinned by: `crates/ganja-core/tests/judge_confirm.rs`:
+`a_credential_403_whose_confirmation_is_refused_too_turns_the_judge_off`,
+`an_answered_confirmation_keeps_the_judge_on_and_is_never_sent_twice`,
+`a_403_that_does_not_name_the_credential_is_refused_with_no_confirmation`,
+`a_401_or_404_on_a_screening_request_turns_the_judge_off_with_no_confirmation`,
+`a_confirmation_that_settles_nothing_leaves_the_judge_on`,
+`the_deadline_catching_a_confirmation_and_its_waiter_refuses_both`,
+`after_three_unsettled_confirmations_no_more_are_sent`,
+`the_confirmation_is_the_same_bytes_whichever_result_asked_and_carries_none_of_it`,
+`segments_that_meet_the_403_together_send_one_confirmation`,
+`a_credential_403_meeting_a_judge_already_off_keeps_the_results_marker`.
+Also:
+- `crates/ganja-tool/src/typesafe_tests.rs`
+  (`a_rejection_says_whether_the_vendor_named_the_credential`);
+- `crates/ganja-cli/tests/evaluate.rs`
+  (`every_401_and_403_is_exit_four_with_the_same_sentence_whatever_it_names`).
+
+Commit: this commit

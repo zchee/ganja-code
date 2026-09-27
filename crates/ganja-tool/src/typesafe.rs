@@ -434,10 +434,21 @@ pub enum Error {
     /// timeout and a 425 too early could both survive a later attempt — and
     /// they are treated as refusals anyway, because this client deliberately
     /// has no second attempt to give them. One consent is one transmission.
+    ///
+    /// Every surface that reads a 401 and a 403 as one refusal matches
+    /// `Rejected { status, .. }` and never reads `credential`, so the
+    /// sentence the model reads and `ganja evaluate`'s exit code are the
+    /// same whichever way it is set.
     #[error("TypeSafe refused the request with HTTP {status}")]
     Rejected {
         /// The status that came back.
         status: u16,
+        /// Whether the vendor named the credential as the reason: a 401, or
+        /// a 403 whose `detail.error_type` is `authentication_error`. False
+        /// for every other refusal, a 403 naming `permission_denied` or
+        /// carrying no body among them. The engine's judge reads it to
+        /// decide which 403s it confirms before it turns off.
+        credential: bool,
     },
     /// HTTP 422: the body failed the vendor's own validation, and `detail`
     /// is what it said about which field.
@@ -496,12 +507,12 @@ impl From<Error> for ToolError {
             Error::RefusedBase | Error::RefusedModel | Error::RefusedKey => {
                 Self::Failed(format!("{error}"))
             }
-            Error::Rejected { status } if matches!(status, 401 | 403) => Self::Failed(format!(
+            Error::Rejected { status, .. } if matches!(status, 401 | 403) => Self::Failed(format!(
                 "TypeSafe refused the credential (HTTP {status}); check that {KEY_ENV} holds a \
                  valid key. This was rejected, so do not retry — continue without this \
                  judgement."
             )),
-            Error::Rejected { status } => Self::Failed(format!(
+            Error::Rejected { status, .. } => Self::Failed(format!(
                 "TypeSafe refused the request itself (HTTP {status}), not the credential; check \
                  that {BASE_ENV} names the right endpoint and that the questions are shaped as \
                  the tool's schema describes. This was rejected, so do not retry — continue \
@@ -1222,12 +1233,12 @@ fn failure(error: typesafe_sdk::Error) -> Error {
         // The credential, as the SDK recognises it: a 401, or a 403 whose
         // `detail.error_type` is `authentication_error`. `refusal` makes
         // every other 401 and 403 a rejection too, so a 403 the vendor sends
-        // for another reason, `permission_denied` among them, is exactly the
-        // same rejection (D569).
+        // for another reason, `permission_denied` among them, is the same
+        // rejection (D569) with `credential` false (D570).
         ErrorKind::Api(refused)
             if matches!(refused.status().as_u16(), 401 | 403) && refused.is_authentication() =>
         {
-            Error::Rejected { status: refused.status().as_u16() }
+            Error::Rejected { status: refused.status().as_u16(), credential: true }
         }
         ErrorKind::Api(refused) => {
             refusal(refused.status().as_u16(), &String::from_utf8_lossy(refused.body()))
@@ -1302,7 +1313,7 @@ fn refusal(status: u16, body: &str) -> Error {
         300..=399 => Error::Unavailable { status },
         422 => Error::Invalid { detail: detail_of(body) },
         429 => Error::Unavailable { status },
-        400..=499 => Error::Rejected { status },
+        400..=499 => Error::Rejected { status, credential: false },
         _ => Error::Unavailable { status },
     }
 }

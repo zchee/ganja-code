@@ -390,6 +390,52 @@ fn a_refused_credential_is_a_refusal() {
     assert_eq!(endpoint.count(), 1, "one attempt, even for a refusal");
 }
 
+/// **D570.** Whether the vendor named the credential changes nothing a hook
+/// or a person sees: every 401 and 403 below is exit 4 with the same one-line
+/// refusal on stderr, which names the status alone.
+#[test]
+fn every_401_and_403_is_exit_four_with_the_same_sentence_whatever_it_names() {
+    let tests: [(&str, u16, &str); 5] = [
+        (
+            "a 401 naming the credential",
+            401,
+            r#"{"detail":{"error_type":"authentication_error","message":"Bad key."}}"#,
+        ),
+        ("a 401 with no body", 401, ""),
+        (
+            "a 403 naming the credential",
+            403,
+            r#"{"detail":{"error_type":"authentication_error","message":"No key."}}"#,
+        ),
+        (
+            "a 403 naming a missing permission",
+            403,
+            r#"{"detail":{"error_type":"permission_denied","message":"Not allowed."}}"#,
+        ),
+        ("a 403 with no body", 403, ""),
+    ];
+
+    for (name, status, body) in tests {
+        let endpoint = serve(status, body);
+        let homes = Homes::new();
+
+        let run = ran(ganja(&homes, Some(endpoint.base()))
+            .args(["evaluate", "--questions", &questions()])
+            .write_stdin("a sentence"));
+
+        assert_eq!(run.code, 4, "{name}: stderr:\n{}", run.stderr);
+        assert!(run.stdout.is_empty(), "{name}: {}", run.stdout);
+        let refusals: Vec<&str> =
+            run.stderr.lines().filter(|line| line.starts_with("ganja evaluate:")).collect();
+        assert_eq!(
+            refusals,
+            [format!("ganja evaluate: TypeSafe refused the request with HTTP {status}").as_str()],
+            "{name}"
+        );
+        assert_eq!(endpoint.count(), 1, "{name}: one attempt");
+    }
+}
+
 /// **Criterion 7.** A 529 is exit 5 — and exactly one attempt, because the
 /// row that most invites a retry is the one this client does not give.
 #[test]
