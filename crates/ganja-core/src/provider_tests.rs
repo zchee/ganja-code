@@ -298,7 +298,7 @@ async fn the_wire_listing_answers_none_where_the_catalog_is_the_source_of_truth(
 /// crate-local test rather than an integration one: the id is the whole
 /// question, so there is no store to redirect and no environment to hold.
 ///
-/// The six and their order are the wire's (`responses::SEAT_ROSTER`), and are
+/// The seven and their order are the wire's (`responses::SEAT_ROSTER`), and are
 /// pinned there rather than here — what this asserts is that the seam reaches
 /// them at all, and that a row the catalog cannot name is still labelled.
 #[tokio::test]

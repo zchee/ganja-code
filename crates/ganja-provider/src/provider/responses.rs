@@ -326,14 +326,17 @@ const BETA: &str = "responses=experimental";
 /// it makes [`unsupported`]'s sentence — which is this list, joined — name
 /// models nobody can run.
 ///
-/// The two that stay are not redundant even though [`generation`] reads both
-/// numbers. `gpt-6-astra` carries no `N.M` after `gpt-`, so the rule below
-/// answers [`None`] and `serves` would refuse the newest model the seat offers.
-/// `gpt-5.5` clears [`NEWER_THAN`] on its own, and is spelled anyway because
-/// this list is also the refusal sentence's roster and because it is
-/// [`SUBSCRIPTION_DEFAULT`]: a default the rule alone admits is one line away
-/// from a floor bump refusing it silently.
-const ALLOWED_MODELS: [&str; 2] = ["gpt-5.5", "gpt-6-astra"];
+/// The three here are not redundant even though [`generation`] reads one of
+/// them. `gpt-6-astra` and `gpt-6-luna` (which joined on 2026-10-02) carry no
+/// `N.M` after `gpt-`, so the rule below answers [`None`] and `serves` would
+/// refuse two models the seat offers. `gpt-5.5` clears [`NEWER_THAN`] on its
+/// own, and is spelled anyway because this list is also the refusal sentence's
+/// roster and because it is [`SUBSCRIPTION_DEFAULT`]: a default the rule alone
+/// admits is one line away from a floor bump refusing it silently.
+///
+/// `gpt-6.1-sol` is deliberately not here, like the `gpt-5.6-*` rows: it reads
+/// as 6.1 and clears [`NEWER_THAN`] by rule.
+const ALLOWED_MODELS: [&str; 3] = ["gpt-5.5", "gpt-6-astra", "gpt-6-luna"];
 
 /// The models a ChatGPT seat is **offered**, in the order to offer them
 /// (**D476**, `seat-roster-pinned`).
@@ -341,12 +344,15 @@ const ALLOWED_MODELS: [&str; 2] = ["gpt-5.5", "gpt-6-astra"];
 /// A roster a listing derives from the catalog drifts with the catalog. This is
 /// the owner's own pin instead — these ids, this order, decided once and
 /// answered from the binary (`gpt-6-astra` joined on 2026-09-07, first because
-/// it is the newest generation the seat offers).
+/// it was the newest generation the seat offered; `gpt-6.1-sol` and
+/// `gpt-6-luna` joined on 2026-10-02, the first ahead of it for the same
+/// reason and the second directly behind, so the three `gpt-6` ids lead in the
+/// order the vendor's own catalog ranks them).
 ///
 /// **Offered is not servable, and the split is the whole point.** A session
 /// that names a model explicitly still takes its turn if `serves` admits it;
 /// what this narrows is only what a listing *volunteers*, which is why
-/// [`SUBSCRIPTION_DEFAULT`] being second rather than first is not a
+/// [`SUBSCRIPTION_DEFAULT`] being fourth rather than first is not a
 /// contradiction — what a seat defaults to and what it offers to browse are two
 /// decisions.
 ///
@@ -361,10 +367,18 @@ const ALLOWED_MODELS: [&str; 2] = ["gpt-5.5", "gpt-6-astra"];
 ///
 /// Every id here has to satisfy `serves`: an offer this backend would then
 /// refuse is a lie the listing tells, and the test in `responses_tests.rs`
-/// is what keeps it honest — which is why `gpt-6-astra` is also in
-/// `ALLOWED_MODELS`, the only route `serves` has to an id with no `N.M`.
-pub const SEAT_ROSTER: [&str; 5] =
-    ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+/// is what keeps it honest — which is why `gpt-6-astra` and `gpt-6-luna` are
+/// also in `ALLOWED_MODELS`, the only route `serves` has to an id with no
+/// `N.M`.
+pub const SEAT_ROSTER: [&str; 7] = [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+];
 
 /// What a subscription session asks for when nothing named a model.
 ///

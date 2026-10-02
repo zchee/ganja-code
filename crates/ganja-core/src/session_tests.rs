@@ -1761,10 +1761,12 @@ fn the_prompt_budget_is_what_the_trigger_and_the_fit_guard_divide() {
         assert_eq!(budget - super::SUMMARY_OUTPUT_TOKENS, 917_904, "{id}'s fit guard");
     }
 
-    // The four rows D565 capped are untouched: their published cap is held to
-    // the same ceiling as their window, so `min` hands back what they already
-    // ran on.
-    for id in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+    // The six rows under the D565 ceiling are untouched: their published cap
+    // is held to the same ceiling as their window, so `min` hands back the
+    // ceiling.
+    for id in
+        ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    {
         let budget = super::context_window(&provider, id).expect("the snapshot sizes it");
 
         assert_eq!(budget, 872_000, "{id} keeps the D565 ceiling");

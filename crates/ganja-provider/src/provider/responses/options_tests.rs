@@ -121,6 +121,10 @@ fn only_a_model_the_table_names_gets_a_tier_of_its_own() {
     assert_eq!(fast_tier("gpt-5.6-sol"), "ultrafast");
     assert_eq!(fast_tier("gpt-5.5"), DEFAULT_FAST_TIER);
     assert_eq!(fast_tier("gpt-6-astra"), DEFAULT_FAST_TIER);
+    // Neither publishes an `ultrafast` mode: their `fast` is `priority`
+    // (models.dev, 2026-10-02).
+    assert_eq!(fast_tier("gpt-6.1-sol"), DEFAULT_FAST_TIER);
+    assert_eq!(fast_tier("gpt-6-luna"), DEFAULT_FAST_TIER);
     assert_eq!(fast_tier("a-model-that-does-not-exist"), DEFAULT_FAST_TIER);
 }
 

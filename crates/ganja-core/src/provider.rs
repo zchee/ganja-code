@@ -203,9 +203,9 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 ///   a second staleness to reason about (deviation:
 ///   `cursor-model-listing-uncached-at-the-seam`).
 /// - **`chatgpt`**, the ChatGPT seat, whose offering is
-///   [`responses::SEAT_ROSTER`]'s pinned six (**D476**). No network, no catalog
+///   [`responses::SEAT_ROSTER`]'s pinned seven (**D476**). No network, no catalog
 ///   read and — since **D555** — no credential read decides membership: the
-///   list is compile-time and the id is the whole question, so the six come
+///   list is compile-time and the id is the whole question, so the seven come
 ///   back logged out exactly as they do logged in. `openai` is the platform,
 ///   which is the catalog's to describe, and answers [`None`] whatever is
 ///   stored beside it.
@@ -267,7 +267,7 @@ async fn claude_code_models() -> Result<WireModels, ProviderError> {
     })
 }
 
-/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned six, named by
+/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned seven, named by
 /// the catalog where it happens to know them.
 ///
 /// The lookup is provider-scoped so a same-named row of another vendor cannot

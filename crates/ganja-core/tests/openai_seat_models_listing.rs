@@ -29,8 +29,15 @@ use ganja_core::{catalog, provider};
 /// imported from the constant: a test that read the same array it is checking
 /// would pass however that array was reordered, and the order is half of what
 /// was pinned.
-const OFFERED: [&str; 5] =
-    ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const OFFERED: [&str; 7] = [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+];
 
 #[tokio::test]
 async fn the_seat_lists_the_pinned_roster_and_no_stored_credential_moves_either_id() {

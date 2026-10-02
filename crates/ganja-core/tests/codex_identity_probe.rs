@@ -1,11 +1,12 @@
 //! What the ChatGPT codex backend is told ganja is, and what it serves back.
 //!
-//! This is the instrument W2 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`
-//! calls for: the baseline recording that gates the rename in W3. The point of
-//! taking it *before* anything changes is that a roster measured after a change
-//! proves nothing without the roster measured before it — a cohort demotion
-//! looks exactly like a vendor-side rollout unless there is a recording to diff
-//! against.
+//! This is the instrument behind **D521**'s row for the codex backend: it took
+//! the baseline recording under the borrowed name, before this build told the
+//! seat its own, and the recording taken after that rename was compared against
+//! it. The point of taking it *before* anything changes is that a roster
+//! measured after a change proves nothing without the roster measured before it
+//! — a cohort demotion looks exactly like a vendor-side rollout unless there is
+//! a recording to diff against.
 //!
 //! # Running it
 //!
@@ -151,7 +152,7 @@ const FIXTURE: &str =
 /// a judgement about what a model felt like saying.
 const PROMPT: &str = "Reply with exactly: pong";
 
-/// The headers this plan is about, in the order the recording lists them.
+/// The identity headers, in the order the recording lists them.
 ///
 /// Values are written down verbatim because each is a constant this build
 /// chose: they are the measurement, not something measured about a person.
@@ -165,11 +166,13 @@ const CREDENTIAL: [&str; 2] = ["authorization", "chatgpt-account-id"];
 /// Roster models no *parameter* probe has taken a turn on.
 ///
 /// The ladder below reaches every offered model, so this is not about
-/// reachability: it is about the seat-parameter probe of 2026-09-16
-/// (`.omc/research/2026-09-16-chatgpt-seat-param-probe.md`), which measured
-/// `gpt-5.5`, `gpt-5.6-sol` and `gpt-6-astra` and nothing else. The recording
-/// holds no call to these ids, so nothing here is asserted about them.
-const UNMEASURED: [&str; 2] = ["gpt-5.6-terra", "gpt-5.6-luna"];
+/// reachability: it is about the seat-parameter probe of 2026-09-16 that
+/// **D563** is specified by, which measured `gpt-5.5`, `gpt-5.6-sol` and
+/// `gpt-6-astra` and nothing else. The recording holds no call to these ids, so
+/// nothing here is asserted about them.
+/// `gpt-6.1-sol` and `gpt-6-luna` joined the roster on 2026-10-02, after that
+/// probe ran.
+const UNMEASURED: [&str; 4] = ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 /// How much of a token's head the leak check searches for on its own.
 ///
@@ -596,9 +599,9 @@ async fn a_chatgpt_seat_records_the_identity_it_presents_and_the_models_it_is_se
 
 /// The recording, in the order it is always in.
 ///
-/// Blocks are delimited so that the acceptance artifact W3 diffs — the ladder —
-/// can be compared on its own, without the provenance header's own volatility
-/// counting as a difference.
+/// Blocks are delimited so that the block the rename's before-and-after
+/// comparison reads — the ladder — can be compared on its own, without the
+/// provenance header's own volatility counting as a difference.
 fn render(
     bearer: &Redacted,
     account: Option<&Redacted>,
@@ -614,10 +617,11 @@ fn render(
         "\
 # What the ChatGPT codex backend is told ganja is, and what it serves back.
 #
-# The baseline W3 of .omc/plans/2026-08-25-ganja-code-identity-headers.md diffs
-# against: a roster measured after the rename proves nothing without the roster
-# measured before it. Recorded by `tests/codex_identity_probe.rs`, whose module
-# doc holds the command, the gate and the three things this cannot measure.
+# A roster measured after a change proves nothing without the roster measured
+# before it. The baseline D521's identity rename was checked against is commit
+# 5d5a52a's copy of this file, taken under the borrowed name.
+# Recorded by `tests/codex_identity_probe.rs`, whose module doc holds the
+# command, the gate and the three things this cannot measure.
 #
 # Build: ganja-code {version}
 # Note:  {note}
@@ -718,9 +722,9 @@ fn render(
 /// Presence rather than length, and the difference belongs at this seam alone:
 /// [`Redacted`]'s own `Debug` renders the length so that an empty value can be
 /// told from an absent one wherever it is printed, but a token's length changes
-/// every time it is renewed — and this block is one of the two W3 diffs, where a
-/// number that moves on its own is noise standing between a reader and the line
-/// that actually changed.
+/// every time it is renewed — and this block is one of the two the rename's
+/// before-and-after comparison reads, where a number that moves on its own is
+/// noise standing between a reader and the line that actually changed.
 fn shape(value: Option<&Redacted>) -> &'static str {
     match value {
         None => "<not sent>",
@@ -731,10 +735,10 @@ fn shape(value: Option<&Redacted>) -> &'static str {
 
 /// One row, whatever the vendor put line breaks through.
 ///
-/// The ladder is one row per model and is the block W3 diffs; a refusal body
-/// that arrived with newlines in it would split its own row and turn a one-line
-/// difference into a shapeless one. Carriage returns go with them, so a body
-/// written for a wire cannot leave a stray one mid-row.
+/// The ladder is one row per model and is the block the rename's comparison
+/// reads; a refusal body that arrived with newlines in it would split its own
+/// row and turn a one-line difference into a shapeless one. Carriage returns go
+/// with them, so a body written for a wire cannot leave a stray one mid-row.
 fn flattened(body: &str) -> String {
     body.replace(['\n', '\r'], " ")
 }
