@@ -28,7 +28,7 @@
 //! 1. **The id must be outstanding.** This session's registry holds at most
 //!    200 ids (v2's own number, §"Receipts and sender UX"), evicted
 //!    oldest-first, cleared by `NewSession`. The id is the whole
-//!    capability: a v7 [`PeerMessageId`](ganja_protocol::PeerMessageId) minted by this sender and posted
+//!    capability: a v7 [`PeerMessageId`] minted by this sender and posted
 //!    to exactly one address, so a process that knows it either is that
 //!    address or was forwarded to by it. A receipt for an unknown id is
 //!    dropped without an answer.
@@ -96,7 +96,7 @@
 //! applies an inbound `POST /peer/receipt`; [`Receipts::clear_sent`](crate::teammate::receipts::Receipts::clear_sent) is
 //! `NewSession`'s own door.
 //!
-//! **Receiver side (N3).** [`Receipts::associate`](crate::teammate::receipts::Receipts::associate) pairs the [`HeldId`](ganja_protocol::HeldId) a
+//! **Receiver side (N3).** [`Receipts::associate`](crate::teammate::receipts::Receipts::associate) pairs the [`HeldId`] a
 //! socket-door hold now returns
 //! (`crate::teammate::inbound::SocketAdmission::Held`) with the message's
 //! own id and vetted `reply_to`, at admission time. The association lives
@@ -112,7 +112,7 @@
 //!
 //! A settled receipt becomes an `Event::PeerReceipt` (the frontend's
 //! notice) and, batched at the next prompt intake, one `<peer_receipt>`-
-//! tagged [`Part::text`](crate::protocol::Part::text) from [`rendered`](crate::teammate::receipts::rendered) —
+//! tagged [`Part::text`](crate::protocol::Part::text) from [`rendered`] —
 //! D529's own vehicle (`session.rs`'s `user_message` seam), reused rather
 //! than reinvented. Unlike a peer's own words this is ganja's own sentence
 //! about ganja's own send, so nothing here is display-only: the model must

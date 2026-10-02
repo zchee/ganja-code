@@ -16,7 +16,7 @@
 //! # What a pane changes, and what it does not
 //!
 //! What does **not** change is the whole of **D508**: the CLI runs at the same
-//! pinned floors — [`TuiDriver::tui_argv`](crate::shim_tui::TuiDriver::tui_argv) is each driver's own spelling of
+//! pinned floors — [`TuiDriver::tui_argv`] is each driver's own spelling of
 //! them, floors only, never a prompt and never an identity flag — and the
 //! spawn raises the same always-ask `teammate_foreign` gate. A pane does not
 //! widen what a person consented to; it changes who answers the CLI's *own*
@@ -35,9 +35,9 @@
 //! member — the pane still renders them for the person watching it, and the
 //! mailbox now carries them too. The spawn dialog and the `/teammate` ring say
 //! so, in the sentence that used to say the opposite:
-//! [`pane_line`](crate::shim_tui::pane_line) is that
-//! sentence, per CLI, read by both through [`TeammateBackend::surface_line`](ganja_core::teammate::TeammateBackend::surface_line)
-//! and [`spawn_lines`](crate::shim_tui::spawn_lines) — beside
+//! [`pane_line`] is that
+//! sentence, per CLI, read by both through [`TeammateBackend::surface_line`]
+//! and [`spawn_lines`] — beside
 //! [`posture_line`](ganja_core::teammate::posture_line)'s bound, which a pane does not move and which stays
 //! pinned to the probe that measured it.
 //!
@@ -65,14 +65,14 @@
 //! the sender**, never a blind redelivery: the text may be sitting
 //! pasted-but-unsubmitted in the composer, so pasting it again unseen is the
 //! one thing forbidden (the lead's rulings 8(a) and 8(b)), and under
-//! [`Delivery::FireAndForget`](ganja_core::teammate::Delivery::FireAndForget) the sender is told rather than left to assume it
+//! [`Delivery::FireAndForget`] the sender is told rather than left to assume it
 //! landed.
 //!
 //! # Readiness is a poll with a ceiling, never a gate
 //!
-//! After the launch line the pane is captured every [`READY_POLL`](crate::shim_tui::READY_POLL) for up to
-//! [`READY_WAIT`](crate::shim_tui::READY_WAIT), looking for the driver's own composer marker. Seeing it is
-//! the ordinary case — held for [`READY_SETTLE`](crate::shim_tui::READY_SETTLE) before the first paste, because
+//! After the launch line the pane is captured every [`READY_POLL`] for up to
+//! [`READY_WAIT`], looking for the driver's own composer marker. Seeing it is
+//! the ordinary case — held for [`READY_SETTLE`] before the first paste, because
 //! a composer that has just drawn drops an Enter (codex, measured in the W5
 //! walkthrough). The marker counted is the **composer's** and never the pane
 //! shell's: since **D520** the shell in the pane is the person's own, and a
@@ -83,12 +83,12 @@
 //! a marker counts only on a row **below** the launch line's own, or, on a
 //! screen that row is gone from, only once `#{pane_current_command}` no
 //! longer answers what it did before the line was typed
-//! ([`composer_shown`](crate::shim_tui::composer_shown), which owns both
+//! ([`composer_shown`], which owns both
 //! doors and what the line's own head, [`tmux::LAUNCH_HEAD`] since **D554**,
 //! does to them). The
 //! one way a launch line hands the pane back to a shell that would prompt
 //! again, a failed `exec`, is closed by the line's own `|| exit`
-//! ([`LAUNCH_TAIL`](crate::shim_tui::LAUNCH_TAIL)), which turns it
+//! ([`LAUNCH_TAIL`]), which turns it
 //! into the death below. **Not** seeing it is a ring note and a proceed, never a
 //! spawn failure: a first spawn in an untrusted directory shows a trust
 //! dialog before the composer, a logged-out CLI shows a login screen, and a
@@ -108,7 +108,7 @@
 //! lead reads.
 //!
 //! Those last words are the pane's trailing **block** rather than its last
-//! line ([`last_words`](crate::shim_tui::last_words), bead `ocz2`), because a
+//! line ([`last_words`], bead `ocz2`), because a
 //! vendor's refusal is routinely two lines and the last of them points at the
 //! first: grok's own says *"see the warning above for the cause"*, so a quote
 //! that stopped at the last line carried the pointer and dropped the cause,
@@ -145,19 +145,19 @@
 //!
 //! A pane whose process ends **after** readiness — the CLI quit on its own,
 //! crashed, or a person closed the pane — is noticed by the member's own loop
-//! ([`LIVENESS_POLL`](crate::liveness::LIVENESS_POLL)), not only by the next paste that would have failed
+//! ([`LIVENESS_POLL`]), not only by the next paste that would have failed
 //! into it: the pane's last words are read while the corpse is still on screen,
 //! the messages still in that member's inbox are answered to their senders
 //! rather than left unread, the corpse is closed through the same dead-only
 //! door, the lead's model is told in prose, and the registry is handed an
-//! [`Exited`](ganja_core::teammate::Exited) the lead's next pass retires the member on — the record out of
+//! [`Exited`] the lead's next pass retires the member on — the record out of
 //! the team file, the row off the roster. The spawn-window death stays what
 //! it was, a refusal carrying the CLI's last words; this is the other half,
 //! for a member that was live and then was not.
 //!
 //! # Where the vendor's spelling lives
 //!
-//! [`TuiDriver`](crate::shim_tui::TuiDriver) is a companion trait over the three driver types of the
+//! [`TuiDriver`] is a companion trait over the three driver types of the
 //! sibling modules, defined and implemented **here** and delegating to the
 //! inherent `tui_argv()` / `READY_MARKER` those modules shipped (the lead's
 //! ruling 3): a local trait over sibling types reopens no driver file and

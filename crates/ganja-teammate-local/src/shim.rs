@@ -11,15 +11,15 @@
 //!
 //! A CLI is driven in whichever shape its own non-interactive door has:
 //!
-//! - [`Shape::Resident`](crate::shim::Shape::Resident) — one child for the member's whole life, one NDJSON
+//! - [`Shape::Resident`] — one child for the member's whole life, one NDJSON
 //!   line per turn on its stdin, read until the line that says the turn is
 //!   over.
-//! - [`Shape::PerMessage`](crate::shim::Shape::PerMessage) — one child per inbox message, argv composed fresh
+//! - [`Shape::PerMessage`] — one child per inbox message, argv composed fresh
 //!   for a first turn or a resume, stdout read to the end.
 //!
 //! Both are bounded by **one** per-turn deadline mechanism, and that asymmetry
 //! against every other teammate shape is deliberate (**D509**). Every other
-//! `Duration` on this path is an unwind budget — [`SETTLE`](ganja_core::teammate::SETTLE), `CANCELLED`,
+//! `Duration` on this path is an unwind budget — [`SETTLE`], `CANCELLED`,
 //! `RECORD_WAIT` — and no native teammate's *turn* has a wall-clock bound at
 //! all. A foreign child earns one because it is the only shape whose progress
 //! ganja cannot observe: an in-process teammate streams events into this
@@ -37,8 +37,8 @@
 //! through `ganja_testkit::backends`, and `teammates.shim_turn_timeout` moves
 //! its number and nothing a spawn reaches.
 //!
-//! The *value* is per CLI ([`default_turn_timeout`](crate::shim::default_turn_timeout)) and one curated config
-//! key moves all three ([`TIMEOUT_KEY`](crate::shim::TIMEOUT_KEY)). The key is resolved once, at
+//! The *value* is per CLI ([`default_turn_timeout`]) and one curated config
+//! key moves all three ([`TIMEOUT_KEY`]). The key is resolved once, at
 //! [`ganja_core::teammate::TeammateRegistry`] construction, and read off the
 //! registry here — which is why nothing in this file names a `Config` type at
 //! all, and why a test can drive the whole shim core without building one.
@@ -48,16 +48,16 @@
 //! The posture each CLI launches under is D508(a)'s as **D560** amended it —
 //! write-capable in the working tree — pinned on **every** turn rather than
 //! only the first, and the escalation door is not built. Until
-//! 2026-08-22 a `refuse_bypass` stood here refusing a [`SpawnSpec`](ganja_core::teammate::SpawnSpec) carrying
+//! 2026-08-22 a `refuse_bypass` stood here refusing a [`SpawnSpec`] carrying
 //! `bypass` by name for every shim backend, because a silent downgrade to the
 //! conservative posture would have been a worse lie than a refusal; **D513**
 //! retired the bypass axis itself, so there is no such spec left to refuse and
 //! the pinned posture is the only one a spawn can ask for.
 //!
 //! The child's environment is **enumerated** rather than inherited
-//! ([`environment`](crate::shim::environment)), and one clause of that enumeration is a class rule
+//! ([`environment`]), and one clause of that enumeration is a class rule
 //! rather than a list: **no `GROK_*` variable travels but
-//! [`GROK_HOME`](crate::shim::GROK_HOME)**. That vendor has at least three
+//! [`GROK_HOME`]**. That vendor has at least three
 //! environment doors onto its own posture, and inheriting a person's
 //! `GROK_SANDBOX=off` would silently undo the pinned profile. Enumeration
 //! already excludes all three; the class rule is what keeps the fourth one
@@ -67,18 +67,18 @@
 //! than a prefix of its own, so the class still closes over everything nobody
 //! has measured. No ganja credential variable is ever in the set either.
 //!
-//! Prompt text never appears in a child's argv ([`Prompt`](crate::shim::Prompt)): argv is for flags
+//! Prompt text never appears in a child's argv ([`Prompt`]): argv is for flags
 //! only, because argv is world-readable through `ps` and a teammate's task is
 //! documented as a place a credential lands in cleartext.
 //!
 //! # The frame table is total by construction
 //!
-//! [`ShimRunner`](crate::shim::ShimRunner) mirrors [`ganja_core::teammate::runner`]'s loop shape but adds one
+//! [`ShimRunner`] mirrors [`ganja_core::teammate::runner`]'s loop shape but adds one
 //! guard that loop does not have, and the reason is what the two loops deliver
 //! into: an in-process teammate reading odd JSON is a model reading odd JSON,
 //! while a shim pasting the same text into a foreign agent's prompt is ganja's
 //! internals leaving the building. So the rule is structural rather than
-//! enumerated — [`Frame`](ganja_protocol::team::Frame) is `#[serde(tag = "type")]`, so every frame this
+//! enumerated — [`Frame`] is `#[serde(tag = "type")]`, so every frame this
 //! build has and every frame any future build mints carries a `type` key:
 //!
 //! > **Any inbox message whose text parses as a JSON object bearing a `type`

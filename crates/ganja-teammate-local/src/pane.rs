@@ -14,7 +14,7 @@
 //! ([`ganja_core::teammate::TeammateRegistry`]'s `spawn`): the inbox is made and
 //! the prompt written into it *before* this runs, the member record is written
 //! *after* this returns with the pane's identity in hand, and a record that
-//! cannot be written has the registry call [`Spawned::kill`](ganja_core::teammate::Spawned::kill) on what this made
+//! cannot be written has the registry call [`Spawned::kill`] on what this made
 //! — which is §4.1's failure-cleanup closure in the shape a backend that hands
 //! back a live member needs. What is this backend's own is the surface and
 //! the launch, in §4.1's own order: one `split-window` carrying the working
@@ -62,7 +62,7 @@
 //! team — and reading none of the lead's messages. The earlier draft's rule of
 //! "no environment prefix at all" is therefore a functional bug, and the rule
 //! that replaces it is **no secrets, not no environment**: the launch carries
-//! exactly the names in [`CARRIED_ENV`](crate::pane::CARRIED_ENV) — where this build keeps its own
+//! exactly the names in [`CARRIED_ENV`] — where this build keeps its own
 //! directories — through tmux's own `-e`, and nothing else. It is a **closed
 //! list of names**, never a filter over the parent's environment, so every
 //! credential-bearing variable (`*_API_KEY`, `GANJA_SERVER_PASSWORD`, an
@@ -78,7 +78,7 @@
 //!
 //! Until 2026-08-28 nothing here watched anything: `alive()` answered [`true`]
 //! forever, `start` handed the registry no task, and both pane backends threw
-//! their [`Lent`](ganja_core::teammate::Lent) away. So a pane a person closed
+//! their [`Lent`] away. So a pane a person closed
 //! — or `tmux kill-pane`, which is how the W2 live check found it — left a
 //! teammate on the lead's roster and in the team file until the *next* lead
 //! started, since [`crate::reaper`] is a cold-start sweep of a **previous**
@@ -87,10 +87,10 @@
 //! a `/teammate shutdown` aimed at it only queued a request nobody was left to
 //! read.
 //!
-//! So [`PaneMember`](crate::pane::PaneMember) now runs the poll the shim TUI
+//! So [`PaneMember`] now runs the poll the shim TUI
 //! members already ran ([`crate::liveness`], one cadence and one listing rule
 //! for every shape that holds a pane) and, when the pane stops being its own,
-//! posts an [`Exited`](ganja_core::teammate::Exited) on the channel the
+//! posts an [`Exited`] on the channel the
 //! registry lent it. Retirement then rides the path that already existed:
 //! [`TeammateRegistry::take_exited`](ganja_core::teammate::TeammateRegistry::take_exited)
 //! → `LeadInbox::retire_exited` → the same
@@ -111,7 +111,7 @@
 //! that door. And `alive()` is a
 //! **flag**, not a listing: it is asked on every `/teammate` render and in every
 //! roster count, so the subprocess belongs on the two-second timer and the
-//! answer belongs in an [`AtomicBool`](std::sync::atomic::AtomicBool) the
+//! answer belongs in an [`AtomicBool`] the
 //! timer flips.
 //!
 //! # What the launch line carries, and what it does *not*
@@ -123,7 +123,7 @@
 //! asks forward to the lead, the one posture a spawn has. Until 2026-08-22 the
 //! line also carried `--auto` when the spawn had asked for bypass; **D513**
 //! retired that axis, so a pane's own `--auto` is now only ever a person's to
-//! type (**D479**) and never a lead's to compose. Not `--model`: a [`SpawnSpec`](ganja_core::teammate::SpawnSpec) holds
+//! type (**D479**) and never a lead's to compose. Not `--model`: a [`SpawnSpec`] holds
 //! the bare model id the lead's turn is asking, and the flag wants
 //! `provider/model`, so a line composed here would be a guess about the
 //! provider. Not `--agent`: the agent types a `task` call names (`general`,

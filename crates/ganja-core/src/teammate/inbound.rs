@@ -15,9 +15,9 @@
 //! and awaits nothing. Everything the engine must do with a decision —
 //! the mailbox write a release asks for, the inbox prune a deny asks for,
 //! the timer a parity hold's deadline asks for, the event publication —
-//! leaves this module as **data**: a returned [`Settlement`](crate::teammate::inbound::Settlement), a
-//! [`SocketAdmission`](crate::teammate::inbound::SocketAdmission)/[`MailboxAdmission`](crate::teammate::inbound::MailboxAdmission), a deadline on a record, and the
-//! ordered [`HoldTransition`](crate::teammate::inbound::HoldTransition) queue the engine drains into its own fanout.
+//! leaves this module as **data**: a returned [`Settlement`], a
+//! [`SocketAdmission`]/[`MailboxAdmission`], a deadline on a record, and the
+//! ordered [`HoldTransition`] queue the engine drains into its own fanout.
 //! Admission decides what the model *hears*; permission decides what the
 //! model *does* — the two engines stay separate, and a peer message that has
 //! been admitted still crosses every permission dialog its requests raise
@@ -29,7 +29,7 @@
 //! before the matrix is consulted — [`ResolvedInbound::decide`](crate::teammate::inbound::ResolvedInbound::decide)'s first
 //! branch, so `self_sent` can never override it (v2 §"Explicit values",
 //! evidence 680146-680160; v2 §"Cross-pass reconciliation" verdict 7,
-//! evidence 620535-620560). Unset, [`decide_unset`](crate::teammate::inbound::decide_unset) carries the full parity
+//! evidence 620535-620560). Unset, [`decide_unset`] carries the full parity
 //! matrix (v2 §"The parity matrix, and when it actually applies", evidence
 //! 620535-620617) under `honor_sender_mode = true`, and the collapsed
 //! two-row path under `false`: prompting receiver → accept, bypass receiver
@@ -101,7 +101,7 @@
 //! flag and needs none: the socket exists only for a lead session, so
 //! "feature off" is structural, and the `NoTeam` refusal at the top of the
 //! engine's deliver arm plays the fail-closed role — which is why
-//! [`RefuseCause`](crate::teammate::inbound::RefuseCause) here carries no kill-switch variant. Two divergences:
+//! [`RefuseCause`] here carries no kill-switch variant. Two divergences:
 //! `NoTeam` answers a visible `404` where CC's kill-switch refuse is silent
 //! (the socket's very existence already signals a lead session, and
 //! fabricating an accept for a session that can never deliver would be a lie
@@ -124,7 +124,7 @@
 //! accept performs a mailbox write, a refuse does not — and is named rather
 //! than papered over: CC's paths differ in work done too, and equalizing
 //! timing against a same-uid observer is not a boundary this transport can
-//! hold. [`SocketAdmission::Silent`](crate::teammate::inbound::SocketAdmission::Silent) is that contract spelled as a type.
+//! hold. [`SocketAdmission::Silent`] is that contract spelled as a type.
 //!
 //! # The hold buffer: volatile by design, and the one-door asymmetry
 //!
@@ -203,13 +203,13 @@
 //! gone with the process. A crash provides no settlement at all — the same
 //! split applies.
 //!
-//! Every settlement is a first-settler-wins transition keyed by [`HeldId`](ganja_protocol::HeldId)
+//! Every settlement is a first-settler-wins transition keyed by [`HeldId`]
 //! under one mutex: later settlers find the id gone — or claimed — and
 //! no-op, and a settle naming an id nobody holds is ignored. Two orderings
 //! are pinned against fallible IO:
 //!
 //! - **H2** — a mailbox-door drop prunes **first** and unindexes only after
-//!   the prune succeeds ([`Settlement::PruneFirst`](crate::teammate::inbound::Settlement::PruneFirst), completed by
+//!   the prune succeeds ([`Settlement::PruneFirst`], completed by
 //!   [`Inbound::pruned`](crate::teammate::inbound::Inbound::pruned) or abandoned by [`Inbound::prune_failed`](crate::teammate::inbound::Inbound::prune_failed)): a
 //!   failed prune leaves the identity indexed and the record held —
 //!   fail-closed re-hold, retryable — where the inverse order would leave a
@@ -229,16 +229,16 @@
 //! After policy accepts and before the write — `accept` is necessary but not
 //! sufficient (v2 §"Post-policy queue admission" preamble) —
 //! [`PeerGuard::admit`](crate::teammate::inbound::PeerGuard::admit) runs. Since **D534** (N1, D1) it also runs
-//! ahead of a *parity-cause* hold ([`HoldCause::ModeMismatch`](ganja_protocol::HoldCause::ModeMismatch), [`HoldCause::NoModeAsserted`](ganja_protocol::HoldCause::NoModeAsserted)) —
+//! ahead of a *parity-cause* hold ([`HoldCause::ModeMismatch`], [`HoldCause::NoModeAsserted`]) —
 //! never an explicit or `mode_unknown` one, which this landing routes no
-//! new traffic onto — using the same [`Origin`](crate::teammate::inbound::Origin) the accept path would have
+//! new traffic onto — using the same [`Origin`] the accept path would have
 //! built, so a would-be hold a same-uid writer floods is bucket-limited,
 //! deduplicated and hop-checked exactly like an accept, and a guard-dropped
 //! would-be hold answers byte-identically to one. `PeerGuard::admit` itself
 //! is unchanged by any of this: what moved is where it is *called from*,
 //! never what it does. `admit` returns exactly four reasons
-//! ([`Dropped::HopRunaway`](crate::teammate::inbound::Dropped::HopRunaway), [`Dropped::HopLoop`](crate::teammate::inbound::Dropped::HopLoop), [`Dropped::Duplicate`](crate::teammate::inbound::Dropped::Duplicate),
-//! [`Dropped::RateLimited`](crate::teammate::inbound::Dropped::RateLimited)); the 50-message queue cap is a **separate
+//! ([`Dropped::HopRunaway`], [`Dropped::HopLoop`], [`Dropped::Duplicate`],
+//! [`Dropped::RateLimited`]); the 50-message queue cap is a **separate
 //! enqueue-time test**, not an `admit` reason (v2 §"Cross-pass
 //! reconciliation" verdict 5, evidence 415499), kept in a visibly separate
 //! function so the distinction survives refactoring. Three eligibility
@@ -254,7 +254,7 @@
 //!
 //! The hop checks were real logic over an empty chain until **D532**: ganja's
 //! wire now carries a real `hop_chain` and `own_marker` at the socket door
-//! (`admit_socket`'s [`Origin`](crate::teammate::inbound::Origin)), so both checks are live in production —
+//! (`admit_socket`'s [`Origin`]), so both checks are live in production —
 //! the mailbox door still passes `&[]`/`None`, stated rather than defaulted,
 //! since a demoted writer's entry crossed no socket and carries no chain at
 //! all. Two readings are **ganja-inferred and marked so** (M5): v2 pins the
@@ -283,7 +283,7 @@
 //! jitter — every peer's POST, on a route whose latency is another
 //! process's observable. What a stalled drain delays is event visibility,
 //! never a decision. Body-bearing fields ride
-//! [`RedactedText`](ganja_protocol::RedactedText) (M4), whose `Debug` prints a size and never the text,
+//! [`RedactedText`] (M4), whose `Debug` prints a size and never the text,
 //! and this module's tracing is the caller's to write from the typed
 //! reasons, identities and ids these types carry — never bodies.
 //!

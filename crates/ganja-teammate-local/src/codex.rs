@@ -14,7 +14,7 @@
 //!
 //! # Why one child per message
 //!
-//! `codex exec` takes one prompt and ends, so [`Shape::PerMessage`](crate::shim::Shape::PerMessage) is not a
+//! `codex exec` takes one prompt and ends, so [`Shape::PerMessage`] is not a
 //! choice between two doors — it is the only door that vendor has
 //! non-interactively. Continuity therefore rides `codex exec resume <id>`
 //! rather than a live process, and the id comes from the stream itself: the
@@ -83,7 +83,7 @@
 //!
 //! # What is never composed
 //!
-//! [`NEVER_COMPOSED`](crate::codex::NEVER_COMPOSED) is the single source, iterated by the test rather than
+//! [`NEVER_COMPOSED`] is the single source, iterated by the test rather than
 //! copied into it, and it is asserted absent from **both** argvs. One entry is
 //! a value rather than a flag — `danger-full-access`, the one `-s` value wider
 //! than the floor — because a posture is escaped as easily by a value as by a
@@ -93,7 +93,7 @@
 //!
 //! `-c/--config` is the one flag here that is composed *and* dangerous: it can
 //! set any key the config file can. So the rule over it is narrower than
-//! presence — the only overrides on either argv are [`PINNED_KEYS`](crate::codex::PINNED_KEYS), each as
+//! presence — the only overrides on either argv are [`PINNED_KEYS`], each as
 //! **one argv token including its quotes**. The quotes are load-bearing rather
 //! than cosmetic: `-c`'s own help says the value portion "is parsed as TOML; if
 //! it fails to parse as TOML, the raw string is used as a literal", so

@@ -70,18 +70,18 @@
 //! # Two decisions, not one
 //!
 //! Killing a pane and dropping a record are separate questions, and this module
-//! answers them separately (the four [`Fate`](crate::reaper::Fate)s):
+//! answers them separately (the four [`Fate`]s):
 //!
 //! - the pane is this teammate's → it is an orphan of a dead lead: **killed**,
-//!   and its record goes with it ([`Fate::Reaped`](crate::reaper::Fate::Reaped));
+//!   and its record goes with it ([`Fate::Reaped`]);
 //! - no pane wears that id → nothing to kill, and the record names a teammate
-//!   that is gone: **dropped** ([`Fate::Vanished`](crate::reaper::Fate::Vanished));
+//!   that is gone: **dropped** ([`Fate::Vanished`]);
 //! - a pane wears the id but is not this teammate's → **never killed**; the
 //!   record is still dropped, because the teammate it named is not running
-//!   anywhere ([`Fate::Recycled`](crate::reaper::Fate::Recycled));
+//!   anywhere ([`Fate::Recycled`]);
 //! - the question could not be answered — tmux refused, or the pane's process
 //!   could not be looked at → **nothing happens at all**
-//!   ([`Fate::Undecided`](crate::reaper::Fate::Undecided)). A record
+//!   ([`Fate::Undecided`]). A record
 //!   whose pane cannot be examined is not a record known to be stale.
 //!
 //! A sweep that finds nothing writes nothing and says nothing.
@@ -114,7 +114,7 @@
 //! which is the one that can meet a team file older than the process reading
 //! it. A document with no `leadSessionId` at all is not a document this build
 //! guesses about: the field is required, so serde refuses it, the read fails,
-//! and the sweep answers an empty [`Swept`](crate::reaper::Swept) —
+//! and the sweep answers an empty [`Swept`] —
 //! nothing killed, nothing dropped.
 //!
 //! One case is left, and it is stated rather than mitigated: two processes
@@ -143,7 +143,7 @@
 //!
 //! The co-tenant case above leaves a smaller one of the same shape, and it is a
 //! deliberate trade rather than an oversight. A live co-tenant lead's pane is
-//! read as [`Fate::Recycled`](crate::reaper::Fate::Recycled) — *not
+//! read as [`Fate::Recycled`] — *not
 //! this teammate*, correctly, so it is never
 //! killed — and a `Recycled` verdict still drops the record, because the
 //! ordinary reason for one is a stale row over somebody else's window. So A's

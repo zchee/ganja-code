@@ -18,7 +18,7 @@
 //! something untrue about their own session, and self-hosting a detached tmux
 //! server to conjure one is a non-goal of this landing. [`Server::current`](crate::tmux::Server::current) is
 //! that rule as a value: it reads the variable at the moment a spawn asks, and
-//! its refusal is [`REFUSED_NO_TMUX`](crate::tmux::REFUSED_NO_TMUX), the sentence AC-16 asserts.
+//! its refusal is [`REFUSED_NO_TMUX`], the sentence AC-16 asserts.
 //!
 //! # A pane is identified by a pair, and the second half is its first process
 //!
@@ -32,7 +32,7 @@
 //! its rule: what tmux does report beside the id, at the split and in every
 //! listing, is `#{pane_pid}` — the pid of the process it forked into the pane,
 //! fixed for the pane's life — so **birth is `pane_pid`**, and D506's reaper
-//! contract "(pane_id, birth)" reads that pair. [`PANE_FORMAT`](crate::tmux::PANE_FORMAT)
+//! contract "(pane_id, birth)" reads that pair. [`PANE_FORMAT`]
 //! spells it, [`Server::split`](crate::tmux::Server::split) reads both halves off one `-P -F` answer,
 //! [`Server::panes`](crate::tmux::Server::panes) reads the same pair off every live pane, and
 //! [`Server::kill`](crate::tmux::Server::kill) ends a pane only when *both* halves match what was
@@ -87,14 +87,14 @@
 //! leaves such a pane out rather than refusing the whole listing, because a
 //! pane with no process has no pair a recorded pane could match — but it
 //! leaves it out on **tmux's own word**, `#{pane_dead}` asked in the same
-//! listing ([`LIVENESS_FORMAT`](crate::tmux::LIVENESS_FORMAT)),
+//! listing ([`LIVENESS_FORMAT`]),
 //! never inferred from the missing pid. The distinction is what keeps a
 //! running orphan alive: a pane the listing cannot see is one
 //! [`Server::kill`](crate::tmux::Server::kill) answers
-//! [`Killed::AlreadyGone`](crate::tmux::Killed::AlreadyGone) for
+//! [`Killed::AlreadyGone`] for
 //! and [`crate::reaper`] reads as vanished, deleting its record —
 //! so a pane that lists pidless without tmux calling it dead stays loud
-//! ([`TmuxError::Unreadable`](crate::tmux::TmuxError::Unreadable))
+//! ([`TmuxError::Unreadable`])
 //! rather than quietly invisible. What a dead pane means for an
 //! identity-checked kill is on `Killed::AlreadyGone`, and
 //! [`Server::close_dead`](crate::tmux::Server::close_dead) is the

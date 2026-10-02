@@ -37,16 +37,16 @@
 //! directory is unique by construction. It is already an id prefix a person
 //! can resume by, and already the filename inside the address, which is why
 //! the **fully unambiguous spelling of any candidate is its `uds:` address**
-//! ([`address_of`](crate::teammate::identity::address_of)) — a spelling `send_message`'s `to` accepts today, so
+//! ([`address_of`]) — a spelling `send_message`'s `to` accepts today, so
 //! disambiguation needed no new grammar.
 //!
 //! # The pin guard, and what it does not do
 //!
-//! [`Identity`](crate::teammate::identity::Identity) records, per conversation, which session identity a name
+//! [`Identity`] records, per conversation, which session identity a name
 //! resolved to **for a delivery the arm accepted** — [`Identity::pin`](crate::teammate::identity::Identity::pin), which
 //! the deliver arm calls and nothing else does. Every later resolution of
 //! that name checks the pin first, and a unique live holder whose id differs
-//! from it is [`Resolution::Moved`](crate::teammate::identity::Resolution::Moved): delivery halts rather than following the
+//! from it is [`Resolution::Moved`]: delivery halts rather than following the
 //! name to its new claimant (v2 §"Resolution precedence and the pin guard",
 //! evidence 619672-620120 — the local-impersonation shape, collapsed onto
 //! ganja's one live tier, so the guard is cross-identity rebinding
@@ -71,10 +71,10 @@
 //!
 //! # The reminder, and the one thing it never says
 //!
-//! [`reminder`](crate::teammate::identity::reminder) is the single rendering function behind every `@`-mention
+//! [`reminder`] is the single rendering function behind every `@`-mention
 //! block, the byte-identity discipline **D491** already uses for `$skill`
 //! expansion: one function, and tests that compare against it. Its arms are
-//! [`Mentioned`](crate::teammate::identity::Mentioned)'s, and each says the same two things in its own words —
+//! [`Mentioned`]'s, and each says the same two things in its own words —
 //! what the token turned out to name, honestly labelled, and that
 //! **mentioning it sent nothing**. A live-session name is labelled
 //! self-chosen and unverified, a roster name lead-assigned (v2 §"What
@@ -139,9 +139,9 @@
 //! 623321-623461). The reads are a handful of small files at human cadence
 //! (a send, a prompt), and they are **blocking**: a caller doing this inside
 //! a turn wraps it the way `ganja-team`'s synchronous mailbox writes are
-//! wrapped. An unreadable listing is [`Resolution::ListingFailed`](crate::teammate::identity::Resolution::ListingFailed) — an
+//! wrapped. An unreadable listing is [`Resolution::ListingFailed`] — an
 //! incomplete search refuses rather than guesses, on both doors, which is
-//! why the composition here is [`registry::list`](ganja_tool::registry::list) with [`registry::is_live`](ganja_tool::registry::is_live)
+//! why the composition here is [`registry::list`] with [`registry::is_live`]
 //! directly rather than `registry::holders`: that scan feeds a notice and may
 //! skip a holder it cannot judge, where a resolver that skipped one would
 //! deliver wrong.
