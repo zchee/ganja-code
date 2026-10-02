@@ -781,10 +781,23 @@ fn the_openai_listing_is_the_catalogs_table_whatever_is_stored_beside_it() {
                 // not, which is what tells the two listings apart.
                 .and(predicate::str::contains("gpt-5.4"))
                 // The three gpt-6 rows, each beside the window its row states
-                // rather than the 1,050,000 models.dev publishes for it.
-                .and(predicate::str::is_match(r"gpt-6-astra\s+872\.0k\s").expect("a pattern"))
-                .and(predicate::str::is_match(r"gpt-6\.1-sol\s+872\.0k\s").expect("a pattern"))
-                .and(predicate::str::is_match(r"gpt-6-luna\s+872\.0k\s").expect("a pattern")),
+                // rather than the 1,050,000 models.dev publishes for it. Each
+                // pattern is held to one row: anchored at the provider column
+                // so a longer id ending in the same letters cannot satisfy it,
+                // and spaced with `[ \t]` because `\s` also matches the newline
+                // and would pair an id with the next row's window.
+                .and(
+                    predicate::str::is_match(r"(?m)^openai[ \t]+gpt-6-astra[ \t]+872\.0k[ \t]")
+                        .expect("a pattern"),
+                )
+                .and(
+                    predicate::str::is_match(r"(?m)^openai[ \t]+gpt-6\.1-sol[ \t]+872\.0k[ \t]")
+                        .expect("a pattern"),
+                )
+                .and(
+                    predicate::str::is_match(r"(?m)^openai[ \t]+gpt-6-luna[ \t]+872\.0k[ \t]")
+                        .expect("a pattern"),
+                ),
         );
 }
 

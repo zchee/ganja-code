@@ -958,9 +958,15 @@ fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
 ///
 /// A test that loops over the table loses its assertion together with the
 /// entry it was meant to catch: delete a row's ceiling and the loop stops
-/// asking about that row, so it stays green. Each ceiling test below asserts
-/// this list at a literal 872,000 first, and only then that the table caps
-/// exactly these six, so a row added to one and not the other fails too.
+/// asking about that row, so it stays green. Three tests below assert this
+/// list at a literal 872,000 first, and only then that the table caps exactly
+/// these six, so a row added to one and not the other fails too:
+/// `both_ids_that_reach_a_capped_row_answer_with_the_ceilings_number`,
+/// `a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling` and
+/// `a_capped_rows_prompt_cap_is_held_to_the_same_ceiling_the_window_is`.
+/// `the_snapshot_literals_carry_the_ceiling_and_nothing_else_moved` is not one
+/// of them: it still picks its rows by the table, and leans on those three to
+/// notice an entry that went missing.
 const CAPPED: [&str; 6] =
     ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
@@ -974,8 +980,8 @@ const CAPPED: [&str; 6] =
 /// itself is held by
 /// `a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling` and
 /// `a_capped_rows_prompt_cap_is_held_to_the_same_ceiling_the_window_is`,
-/// whose rows arrive above the ceiling. What this does hold is the half of
-/// **D565** those cannot reach:
+/// whose published window or prompt cap arrives above the ceiling. What this
+/// does hold is the half of **D565** those cannot reach:
 /// `chatgpt` has no ceiling entry and must never need one, because it reads
 /// `openai`'s rows through `ROW_ALIASES` (**D555**). A ceiling keyed by the id
 /// a session was started under rather than by the id whose rows answer would
