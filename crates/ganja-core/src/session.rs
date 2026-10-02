@@ -2274,14 +2274,13 @@ async fn request_title(
     let mut events = match title_stream(provider, &chosen, first_user.clone()).await {
         Ok(events) => events,
         // A refusal from `stream` is a turn that never started, so asking again
-        // costs one round trip and can spend nothing else. It is load-bearing
-        // rather than belt-and-braces: a ChatGPT seat serves four model ids
-        // (`responses.rs`'s `ALLOWED_MODELS`) and the openai catalog's cheapest
-        // chat-capable row is none of them, so the capability filter alone
-        // would still leave every subscription session titled by the fallback.
-        // It is also the whole of what checks a configured `small_model`: that
-        // key is taken at its word and asked for, and a wire that will not
-        // serve it lands exactly here.
+        // costs one round trip and can spend nothing else. It is the whole of
+        // what checks a configured `small_model`, and it catches a catalog
+        // pick the wire refuses: a platform key's cheapest row is not always
+        // one its account can run. A configured `small_model` is taken at its
+        // word and asked for, and a wire that will not serve it lands here.
+        // A ChatGPT seat's rows are not `openai`'s under `title_model`'s
+        // filter, so the seat titles with its own model.
         // The session's own model is the one candidate already validated by
         // construction — the turn that just earned this title ran on it — and
         // the guard keeps a provider that refused *that* from being asked

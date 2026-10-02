@@ -746,7 +746,9 @@ fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
         predicate::str::contains("chatgpt models, pinned to what a ChatGPT subscription is")
             .and(predicate::str::contains("--refresh does not apply"))
             .and(predicate::str::contains("live from the wire").not())
+            .and(predicate::str::contains("gpt-6.1-sol"))
             .and(predicate::str::contains("gpt-6-astra"))
+            .and(predicate::str::contains("gpt-6-luna"))
             .and(predicate::str::contains("gpt-5.5"))
             .and(predicate::str::contains("gpt-5.6-sol"))
             .and(predicate::str::contains("gpt-5.6-terra"))
@@ -777,7 +779,12 @@ fn the_openai_listing_is_the_catalogs_table_whatever_is_stored_beside_it() {
                 .and(predicate::str::contains("pinned to what a ChatGPT subscription is").not())
                 // A row this build's table carries and the seat's roster does
                 // not, which is what tells the two listings apart.
-                .and(predicate::str::contains("gpt-5.4")),
+                .and(predicate::str::contains("gpt-5.4"))
+                // The three gpt-6 rows, each beside the window its row states
+                // rather than the 1,050,000 models.dev publishes for it.
+                .and(predicate::str::is_match(r"gpt-6-astra\s+872\.0k\s").expect("a pattern"))
+                .and(predicate::str::is_match(r"gpt-6\.1-sol\s+872\.0k\s").expect("a pattern"))
+                .and(predicate::str::is_match(r"gpt-6-luna\s+872\.0k\s").expect("a pattern")),
         );
 }
 

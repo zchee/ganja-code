@@ -911,23 +911,25 @@ fn the_snapshot_stands_alone() {
 /// window its backend will actually accept.
 ///
 /// The roster and this table drifted apart once already: four of the five ids
-/// `responses::SEAT_ROSTER` offers had no row here, so a first run with no cache
-/// had no window for the model it was about to ask. Asserted against the
-/// compiled-in tier alone — no environment, no cache, nothing fetched — because
-/// that is the tier the failure happened on.
+/// `responses::SEAT_ROSTER` then offered had no row here, so a first run with
+/// no cache had no window for the model it was about to ask. Asserted against
+/// the compiled-in tier alone — no environment, no cache, nothing fetched —
+/// because that is the tier the failure happened on.
 ///
 /// The windows are spelled out one id at a time rather than asserted to be one
-/// number, which is what this test said until **D565**: four of these five are
+/// number, which is what this test said until **D565**: six of these seven are
 /// held to the vendor's own `max_context_window` and `gpt-5.5` is not, so "the
 /// seat's million-token models" had stopped being true of the roster. Pinning
-/// the roster's membership here as well is what makes a sixth id somebody's
+/// the roster's membership here as well is what makes an eighth id somebody's
 /// deliberate decision about its window rather than a row that silently
 /// inherits whatever a catalog publishes.
 #[test]
 fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
     let snapshot = snapshot();
     let expected = [
+        ("gpt-6.1-sol", 872_000),
         ("gpt-6-astra", 872_000),
+        ("gpt-6-luna", 872_000),
         ("gpt-5.5", 1_050_000),
         ("gpt-5.6-sol", 872_000),
         ("gpt-5.6-terra", 872_000),
@@ -951,35 +953,57 @@ fn every_model_the_seat_offers_is_sized_by_the_compiled_in_snapshot() {
     }
 }
 
+/// The six rows **D565** caps, written out rather than read from
+/// `WINDOW_CEILINGS`.
+///
+/// A test that loops over the table loses its assertion together with the
+/// entry it was meant to catch: delete a row's ceiling and the loop stops
+/// asking about that row, so it stays green. Each ceiling test below asserts
+/// this list at a literal 872,000 first, and only then that the table caps
+/// exactly these six, so a row added to one and not the other fails too.
+const CAPPED: [&str; 6] =
+    ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+
 /// Both ids that reach these rows answer with the ceiling's own number,
 /// through the lookup a session uses.
 ///
 /// **This pins the `ROW_ALIASES` path and the snapshot literals, not the
-/// clamp.** The shipped table is the snapshot, whose four literals already
-/// carry 872,000 deliberately, so deleting `WINDOW_CEILINGS`'s rows would leave
-/// this test green — the clamp itself is held by the two fetched-payload tests
-/// below. What it does hold is the half of **D565** those cannot reach:
+/// clamp.** The shipped table is the snapshot, whose six literals already
+/// carry 872,000 deliberately, so deleting a `WINDOW_CEILINGS` row leaves this
+/// test's per-row loop green and only its closing table check red. The clamp
+/// itself is held by
+/// `a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling` and
+/// `a_capped_rows_prompt_cap_is_held_to_the_same_ceiling_the_window_is`,
+/// whose rows arrive above the ceiling. What this does hold is the half of
+/// **D565** those cannot reach:
 /// `chatgpt` has no ceiling entry and must never need one, because it reads
 /// `openai`'s rows through `ROW_ALIASES` (**D555**). A ceiling keyed by the id
 /// a session was started under rather than by the id whose rows answer would
 /// size the seat and the platform key differently for one vendor's one model,
 /// and that is what this notices.
 ///
-/// The expected value is read out of the table rather than written again, so a
-/// ceiling that moves moves this assertion with it instead of reddening it.
+/// The expected value is written out, not read from the table: a ceiling that
+/// moves, or a row that loses its entry, has to redden this rather than carry
+/// the assertion along with it.
 #[test]
 fn both_ids_that_reach_a_capped_row_answer_with_the_ceilings_number() {
-    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
-        for asked in [*provider, "chatgpt"] {
+    for id in CAPPED {
+        for asked in ["openai", "chatgpt"] {
             let row = model_for(asked, id)
                 .unwrap_or_else(|| panic!("{asked} serves {id} and the table must size it"));
 
-            assert_eq!(row.context_window, *ceiling, "{asked}/{id}");
+            assert_eq!(row.context_window, 872_000, "{asked}/{id}");
         }
     }
+
+    assert_eq!(
+        super::WINDOW_CEILINGS,
+        CAPPED.map(|id| ("openai", id, 872_000)),
+        "the table caps exactly the six rows written out here"
+    );
 }
 
-/// The ceiling survives a refresh, which is the whole reason it is not four
+/// The ceiling survives a refresh, which is the whole reason it is not six
 /// edited literals.
 ///
 /// A fetched catalog is the tier that answers once anything has been fetched,
@@ -1002,18 +1026,25 @@ fn a_fetched_catalog_cannot_raise_a_row_past_the_vendors_ceiling() {
         r#"{"openai":{"models":{
                 "gpt-6-astra":{"name":"GPT-6 Astra","limit":{"context":1050000,"input":922000,
                     "output":128000},"cost":{"input":10,"output":50}},
+                "gpt-6.1-sol":{"limit":{"context":1050000,"input":922000,"output":128000}},
+                "gpt-6-luna":{"limit":{"context":1050000,"input":922000,"output":128000}},
                 "gpt-5.6-sol":{"limit":{"context":1050000,"input":922000,"output":128000}},
                 "gpt-5.6-terra":{"limit":{"context":1050000,"input":922000,"output":128000}},
                 "gpt-5.6-luna":{"limit":{"context":1050000,"input":922000,"output":128000}}}}}"#,
     )
     .expect("the payload decodes");
 
-    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
-        let row = super::scoped(&catalog, provider, id)
+    for id in CAPPED {
+        let row = super::scoped(&catalog, "openai", id)
             .unwrap_or_else(|| panic!("the payload carries {id}"));
 
-        assert_eq!(row.context_window, *ceiling, "{provider}/{id} as fetched");
+        assert_eq!(row.context_window, 872_000, "openai/{id} as fetched");
     }
+    assert_eq!(
+        super::WINDOW_CEILINGS,
+        CAPPED.map(|id| ("openai", id, 872_000)),
+        "the table caps exactly the six rows this payload publishes above it"
+    );
 
     let astra = super::scoped(&catalog, "openai", "gpt-6-astra").expect("the payload carries it");
     assert_eq!(
@@ -1131,6 +1162,14 @@ fn the_snapshot_literals_carry_the_ceiling_and_nothing_else_moved() {
         Pricing { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: Some(12.5) }
     );
     assert_eq!(
+        priced("gpt-6.1-sol"),
+        Pricing { input: 2.0, output: 10.0, cache_read: 0.1, cache_write: Some(2.5) }
+    );
+    assert_eq!(
+        priced("gpt-6-luna"),
+        Pricing { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: Some(0.125) }
+    );
+    assert_eq!(
         priced("gpt-5.6-sol"),
         Pricing { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: Some(5.0) }
     );
@@ -1144,19 +1183,29 @@ fn the_snapshot_literals_carry_the_ceiling_and_nothing_else_moved() {
     );
 }
 
-/// Pins the row order the comment above the `gpt-5.5` row in `catalog.rs`
-/// explains: nano is the cheapest openai row and the first of its price.
+/// Pins what the comment above the `gpt-6.1-sol` row in `catalog.rs` says:
+/// `gpt-6-luna` is the cheapest openai row and the only one at its price.
+///
+/// The offline title model is a `min_by` over these rows by input price, and a
+/// `min_by` answers the first of several equal minima. While the minimum was a
+/// tie between `gpt-5.4-nano` and `gpt-5.6-luna` at 0.2, the answer hung on
+/// which was written first; a strict minimum is the same answer in any order,
+/// which is what the second assertion holds.
 #[test]
-fn the_cheapest_openai_snapshot_row_is_still_nano() {
+fn the_cheapest_openai_snapshot_row_is_gpt_6_luna_and_nothing_ties_it() {
     let snapshot = snapshot();
-    let cheapest: Vec<&str> = snapshot
-        .models
-        .iter()
-        .filter(|model| model.provider_id == "openai" && model.pricing.input <= 0.2)
+    let openai = || snapshot.models.iter().filter(|model| model.provider_id == "openai");
+
+    let cheapest = openai()
+        .min_by(|a, b| a.pricing.input.total_cmp(&b.pricing.input))
+        .expect("the snapshot carries openai rows");
+    assert_eq!(cheapest.id, "gpt-6-luna");
+
+    let at_that_price: Vec<&str> = openai()
+        .filter(|model| model.pricing.input <= cheapest.pricing.input)
         .map(|model| model.id.as_str())
         .collect();
-
-    assert_eq!(cheapest, ["gpt-5.4-nano", "gpt-5.6-luna"]);
+    assert_eq!(at_that_price, ["gpt-6-luna"], "a tie would make the pick depend on row order");
 }
 
 /// The recording's two served spellings, a row published below a million
@@ -1243,8 +1292,8 @@ fn a_borrowing_provider_is_still_not_cataloged() {
     assert!(model_for("claude-code", "claude-opus-5").is_none());
 }
 
-/// The compiled-in tier states the prompt cap its vendor publishes, for all ten
-/// `openai` rows — seven at 922,000 and three at 272,000 (**D566**).
+/// The compiled-in tier states the prompt cap its vendor publishes, for all
+/// twelve `openai` rows — nine at 922,000 and three at 272,000 (**D566**).
 ///
 /// The snapshot answered `input_limit: None` for every row until D566, which
 /// meant an offline session sized a `gpt-5.5` turn by the whole 1,050,000 —
@@ -1263,6 +1312,8 @@ fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
 
     for id in [
         "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -1306,7 +1357,7 @@ fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
 }
 
 /// A capped row's prompt cap comes out at the ceiling, not at what its vendor
-/// published — so the four D565 rows are sized by 872,000 from either tier.
+/// published — so the six D565 rows are sized by 872,000 from either tier.
 ///
 /// `Catalog::assembled` holds a published `input_limit` under the same ceiling
 /// it holds the window under, and the snapshot now states one, so this is the
@@ -1315,13 +1366,18 @@ fn the_snapshot_states_the_prompt_cap_its_vendor_publishes() {
 fn a_capped_rows_prompt_cap_is_held_to_the_same_ceiling_the_window_is() {
     let snapshot = snapshot();
 
-    for (provider, id, ceiling) in super::WINDOW_CEILINGS {
-        let row = super::scoped(&snapshot, provider, id)
+    for id in CAPPED {
+        let row = super::scoped(&snapshot, "openai", id)
             .unwrap_or_else(|| panic!("the snapshot carries {id}"));
 
-        assert_eq!(row.context_window, *ceiling, "{provider}/{id}");
-        assert_eq!(row.input_limit, Some(*ceiling), "{provider}/{id} as assembled");
+        assert_eq!(row.context_window, 872_000, "openai/{id}");
+        assert_eq!(row.input_limit, Some(872_000), "openai/{id} as assembled");
     }
+    assert_eq!(
+        super::WINDOW_CEILINGS,
+        CAPPED.map(|id| ("openai", id, 872_000)),
+        "the table caps exactly the six rows asserted here"
+    );
 
     // The three rows D565 left uncapped keep the published cap whole.
     for id in ["gpt-5.5", "gpt-5.4", "gpt-5.6"] {

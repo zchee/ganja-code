@@ -169,7 +169,9 @@ const CREDENTIAL: [&str; 2] = ["authorization", "chatgpt-account-id"];
 /// (`.omc/research/2026-09-16-chatgpt-seat-param-probe.md`), which measured
 /// `gpt-5.5`, `gpt-5.6-sol` and `gpt-6-astra` and nothing else. The recording
 /// holds no call to these ids, so nothing here is asserted about them.
-const UNMEASURED: [&str; 2] = ["gpt-5.6-terra", "gpt-5.6-luna"];
+/// `gpt-6.1-sol` and `gpt-6-luna` joined the roster on 2026-10-02, after that
+/// probe ran.
+const UNMEASURED: [&str; 4] = ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 /// How much of a token's head the leak check searches for on its own.
 ///

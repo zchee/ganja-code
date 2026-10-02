@@ -81,7 +81,15 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 
-    for model in ["gpt-6-astra", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+    for model in [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ] {
         assert!(offered.contains(model), "the seat is offered `{model}`:\n{offered}");
     }
     assert!(

@@ -9,7 +9,8 @@
 //! as taken on **2026-08-03** (the `gpt-6-astra` row and `gpt-5.6`'s prices
 //! from the same file on **2026-09-07**; the `gpt-5.5` and `gpt-5.6-{sol,luna,
 //! terra}` rows from <https://models.opencode.ai/api.json>, the fetched tier's
-//! own file, on **2026-09-16**), covering the current generation of
+//! own file, on **2026-09-16**; the `gpt-6.1-sol` and `gpt-6-luna` rows from
+//! models.dev again on **2026-10-02**), covering the current generation of
 //! the two providers this build ships, and it is unconditional — sizing and pricing
 //! work with no network, no cache and no home directory, so a session started
 //! offline is never left without a context window. Upstream's third tier, an
@@ -416,7 +417,10 @@ const SERVED_ROWS: &[(&str, &str)] = &[("claude-code", "anthropic")];
 /// **Where 872,000 comes from, and what it is not.** It is the vendor's own
 /// number, read on **2026-09-18** from the catalog its Codex CLI ships
 /// (`codex-rs/models-manager/models.json`, openai/codex at `66eab8ece4`,
-/// 2026-09-14): each of the four publishes `context_window: 272000` beside
+/// 2026-09-14) for `gpt-6-astra` and the three `gpt-5.6-*` rows, and on
+/// **2026-10-02** from the same file at `b1e72963c3` (2026-09-29) for
+/// `gpt-6.1-sol` and `gpt-6-luna`: each of the six publishes
+/// `context_window: 272000` beside
 /// `max_context_window: 872000`, and that second field is documented in the
 /// same repository's protocol crate
 /// (`codex-rs/protocol/src/openai_models.rs:453-456`) as the "Maximum context
@@ -474,6 +478,8 @@ const SERVED_ROWS: &[(&str, &str)] = &[("claude-code", "anthropic")];
 /// nothing to say about it.
 const WINDOW_CEILINGS: &[(&str, &str, u64)] = &[
     ("openai", "gpt-6-astra", 872_000),
+    ("openai", "gpt-6.1-sol", 872_000),
+    ("openai", "gpt-6-luna", 872_000),
     ("openai", "gpt-5.6-sol", 872_000),
     ("openai", "gpt-5.6-terra", 872_000),
     ("openai", "gpt-5.6-luna", 872_000),
@@ -648,9 +654,9 @@ const SNAPSHOT: &[Row] = &[
     },
     // Taken from models.dev on 2026-09-07 (`openai.models["gpt-6-astra"]`,
     // published 2026-09-04): the base tier's prices — the row also publishes a
-    // context-over-272k tier at double, which this table's flat `Pricing`
-    // cannot carry. The seat offers it (`responses::SEAT_ROSTER`); this row is
-    // what sizes and prices it.
+    // context-over-272k tier (input and cache doubled, output ×1.5), which this
+    // table's flat `Pricing` cannot carry. The seat offers it
+    // (`responses::SEAT_ROSTER`); this row is what sizes and prices it.
     //
     // **The window is not that file's 1,050,000** (**D565**): it is the
     // vendor's own `max_context_window`, and `WINDOW_CEILINGS` holds the same
@@ -665,6 +671,38 @@ const SNAPSHOT: &[Row] = &[
         max_output: 128_000,
         input_limit: Some(922_000),
         pricing: Pricing { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: Some(12.5) },
+    },
+    // The two below are taken from models.dev on 2026-10-02
+    // (`openai.models["gpt-6.1-sol"]`, published 2026-09-29, and
+    // `openai.models["gpt-6-luna"]`, published 2026-09-22): the base tier's
+    // prices again, each row publishing the same context-over-272k tier (input
+    // and cache doubled, output ×1.5) that `Pricing` cannot carry. The seat
+    // offers both (`responses::SEAT_ROSTER`).
+    //
+    // They carry the **D565** ceiling for `gpt-6-astra`'s reason: both publish
+    // 1,050,000, and the vendor's own catalog (openai/codex at `b1e72963c3`,
+    // 2026-09-29) gives each `max_context_window: 872000`.
+    //
+    // `gpt-6-luna`'s 0.1 is the lowest input price of any `openai` row here,
+    // and the only row at that price, so it is the offline title model
+    // wherever it is written: the pick is a `min_by` over this table.
+    Row {
+        id: "gpt-6.1-sol",
+        provider_id: "openai",
+        name: "GPT-6.1 Sol",
+        context_window: 872_000,
+        max_output: 128_000,
+        input_limit: Some(922_000),
+        pricing: Pricing { input: 2.0, output: 10.0, cache_read: 0.1, cache_write: Some(2.5) },
+    },
+    Row {
+        id: "gpt-6-luna",
+        provider_id: "openai",
+        name: "GPT-6 Luna",
+        context_window: 872_000,
+        max_output: 128_000,
+        input_limit: Some(922_000),
+        pricing: Pricing { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: Some(0.125) },
     },
     // Prices re-read from models.dev on 2026-09-07: the vendor cut them
     // (5 / 30 / 0.5 / 6.25 on 2026-08-03) and the same over-272k tier applies.
@@ -719,10 +757,12 @@ const SNAPSHOT: &[Row] = &[
     // nothing offline to size them by, so a seat started with no cache had no
     // context window for its own default.
     //
-    // **They sit after `gpt-5.3-codex` deliberately.** `gpt-5.6-luna`'s input
-    // price ties `gpt-5.4-nano`'s 0.2, and the offline title model is the first
-    // minimum of a `min_by` over this table; ahead of nano these rows would move
-    // it silently.
+    // **Their place after `gpt-5.3-codex` no longer decides anything.**
+    // `gpt-5.6-luna`'s input price ties `gpt-5.4-nano`'s 0.2, and while 0.2 was
+    // the lowest price here the offline title model — the first minimum of a
+    // `min_by` over this table — was whichever of the two was written first.
+    // `gpt-6-luna` at 0.1 is cheaper than both, so the tie is for second place
+    // and the order of these rows moves nothing.
     Row {
         id: "gpt-5.5",
         provider_id: "openai",
