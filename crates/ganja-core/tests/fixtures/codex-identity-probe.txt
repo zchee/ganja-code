@@ -1,12 +1,13 @@
 # What the ChatGPT codex backend is told ganja is, and what it serves back.
 #
-# The baseline W3 of .omc/plans/2026-08-25-ganja-code-identity-headers.md diffs
-# against: a roster measured after the rename proves nothing without the roster
-# measured before it. Recorded by `tests/codex_identity_probe.rs`, whose module
-# doc holds the command, the gate and the three things this cannot measure.
+# A roster measured after a change proves nothing without the roster measured
+# before it. The baseline D521's identity rename was checked against is commit
+# 5d5a52a's copy of this file, taken under the borrowed name.
+# Recorded by `tests/codex_identity_probe.rs`, whose module doc holds the
+# command, the gate and the three things this cannot measure.
 #
 # Build: ganja-code 0.1.0
-# Note:  not recorded; set GANJA_PROBE_NOTE to stamp one
+# Note:  ganja-code gpt-6-models 5672e5b, Darwin arm64, 2026-10-03
 
 == identity headers ==
 # Captured off a loopback socket this process owns. The quartet below is decided
@@ -34,7 +35,7 @@ also sent: accept, content-length, content-type, host
 model asked: gpt-5.5
 outcome: served
 finish: Completed
-usage: input=21 output=27 cache_read=0 reasoning=20
+usage: input=21 output=19 cache_read=0 reasoning=12
 reply: "pong"
 
 == what this build offers a seat ==
@@ -43,8 +44,10 @@ reply: "pong"
 # the ladder below is the measured half.
 notice: pinned to what a ChatGPT subscription is offered; --refresh does not apply
 default: gpt-5.5
-unmeasured: gpt-5.6-terra, gpt-5.6-luna
+unmeasured: gpt-6.1-sol, gpt-6-luna, gpt-5.6-terra, gpt-5.6-luna
+offered: gpt-6.1-sol (GPT-6.1 Sol)
 offered: gpt-6-astra (GPT-6 Astra)
+offered: gpt-6-luna (GPT-6 Luna)
 offered: gpt-5.5 (GPT-5.5)
 offered: gpt-5.6-sol (GPT-5.6 Sol)
 offered: gpt-5.6-terra (GPT-5.6 Terra)
@@ -57,7 +60,9 @@ offered: gpt-5.6-luna (GPT-5.6 Luna)
 # arrives already masked against the presented credential; a longer one
 # is cut on a char boundary and ends in an ellipsis. Line breaks inside
 # one are flattened to spaces, so a row stays a row.
+gpt-6.1-sol: served
 gpt-6-astra: served
+gpt-6-luna: served
 gpt-5.5: see the live turn above
 gpt-5.6-sol: served
 gpt-5.6-terra: served
