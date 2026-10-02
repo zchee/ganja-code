@@ -8,7 +8,7 @@
 //! filter: a direct call to a deferred tool executes, because a tool result
 //! is information and a correct guess is not an error.
 //!
-//! [`Deferral`](crate::deferral::Deferral) is a value in the same spirit as
+//! [`Deferral`] is a value in the same spirit as
 //! `SkillTool`'s roots: the
 //! engine computes which names defer and hands a clone to each turn, and the
 //! only shared state is the insert-only activated set behind an `Arc` — a

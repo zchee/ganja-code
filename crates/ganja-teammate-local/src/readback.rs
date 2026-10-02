@@ -39,7 +39,7 @@
 //!
 //! # What is carried, per CLI
 //!
-//! [`answers_clause`](crate::readback::answers_clause) is the one place that says it, and both preambles are
+//! [`answers_clause`] is the one place that says it, and both preambles are
 //! composed from it, so the sentence a teammate is told and the records its
 //! reader actually yields cannot come apart:
 //!
@@ -47,7 +47,7 @@
 //! |---|---|---|
 //! | codex | `response_item` / `message` / `role: assistant` | **every** message, in arrival order |
 //! | grok | the last `agent_message_chunk` before a `turn_completed` | one answer per finished turn |
-//! | agy | a `PLANNER_RESPONSE` carrying `content` | **every** such record, in order (its headless door mails one per turn — [`Road`](crate::readback::Road)) |
+//! | agy | a `PLANNER_RESPONSE` carrying `content` | **every** such record, in order (its headless door mails one per turn — [`Road`]) |
 //!
 //! Those are each CLI's own shape. grok's matches what its **headless** driver
 //! already mails ([`crate::shim`]), for the reason that module

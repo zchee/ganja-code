@@ -8,7 +8,7 @@
 //! *after* the answer: a shim reads its CLI's last words and answers the mail
 //! left in its inbox, and a pane member has neither to do. So what is shared
 //! is the cadence, the vocabulary and the listing check; the loop each member
-//! runs and what it does with a [`Gone`](crate::liveness::Gone) stay where the
+//! runs and what it does with a [`Gone`] stay where the
 //! differences are.
 //!
 //! Extracted for **D541**, which gave the pane backends the poll the shim

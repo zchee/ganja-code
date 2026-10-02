@@ -8,8 +8,8 @@
 //! # The sequence, and where it differs from the `ganja` pane's
 //!
 //! §4.1's six steps, split between this backend and the registry exactly as
-//! [`crate::pane`]'s are: [`TeammateBackend::spawn`](ganja_core::teammate::TeammateBackend::spawn) makes the
-//! surface, the registry writes the member record, and [`Spawned::launch`](ganja_core::teammate::Spawned::launch)
+//! [`crate::pane`]'s are: [`TeammateBackend::spawn`] makes the
+//! surface, the registry writes the member record, and [`Spawned::launch`]
 //! runs afterwards — which is why the inbox work sits *there* rather than in
 //! `spawn`. That ordering is §4.1's own —
 //! surface (1), member record (2), pane title (3), `ensureInboxDirectory` (4),
@@ -32,7 +32,7 @@
 //!   `claude` reads `$CLAUDE_CONFIG_DIR/teams` (§2.1) and nothing will
 //!   persuade it otherwise, so that is where this backend seeds the inbox —
 //!   *the same `ganja-team` code, a different value*, which is the whole of
-//!   what D-1 buys. [`teams_root`](ganja_core::teammate::teams_root) is
+//!   what D-1 buys. [`teams_root`] is
 //!   that value, and it is public because the lead side needs it too: a lead
 //!   that polls only its own root never sees what a `claude` pane wrote. See
 //!   "the shared inbox" below.
@@ -58,7 +58,7 @@
 //! `$CLAUDE_CONFIG_DIR/teams/<team>/inboxes/<name>.json` and the pane answers
 //! into `…/inboxes/<lead>.json` beside it. Three consequences, all of them
 //! stated rather than hidden — the first two are why
-//! [`teams_root`](ganja_core::teammate::teams_root) is public.
+//! [`teams_root`] is public.
 //!
 //! 1. **The lead has to read that root too.** A lead polling only
 //!    `<ganja config home>/teams` would never see the answer, because the answer
@@ -76,7 +76,7 @@
 //!    and 5 for every other backend and deliberately not for this one
 //!    ([`ganja_core::teammate::TeammateBackend::owns_inbox`]): with the roots
 //!    collapsed, its bare-prompt message landed *ahead* of
-//!    [`preamble`](crate::claude::preamble) in the same file and a real
+//!    [`preamble`] in the same file and a real
 //!    `claude` read the one message that does not name its lead; with the roots
 //!    apart, that copy rotted under the ganja root where nothing reads. So this
 //!    backend writes the teammate's inbox, and it prunes its own write when its
@@ -108,7 +108,7 @@
 //! permission mode is composed here at all. What is deliberately absent is
 //! §4.1's other two optionals:
 //!
-//! - **not `--model`.** A [`SpawnSpec`](ganja_core::teammate::SpawnSpec)'s model is the id ganja's own catalog
+//! - **not `--model`.** A [`SpawnSpec`]'s model is the id ganja's own catalog
 //!   names for whichever provider *this* session selected — `gpt-5`, a
 //!   gateway's slug, the fake provider's recorder id — and `claude --model`
 //!   names a model that account serves. Passing one as the other is a guess,
@@ -135,7 +135,7 @@
 //! A tmux pane inherits the **tmux server's** environment (§10.10), so the
 //! launch carries [`crate::pane::CARRIED_ENV`] — a closed list of
 //! directory names, never a filter over the parent's environment — with
-//! [`CONFIG_DIR_ENV`](crate::claude::CONFIG_DIR_ENV) added, and
+//! [`CONFIG_DIR_ENV`] added, and
 //! nothing else. That one addition is what keeps
 //! the two sides honest: the root this process computed and the root the pane
 //! resolves are the same function of the same one variable, so a lead started
@@ -144,7 +144,7 @@
 //!
 //! # Delivery
 //!
-//! [`Delivery::FireAndForget`](ganja_core::teammate::Delivery::FireAndForget), and not shared with the `ganja` pane: a real
+//! [`Delivery::FireAndForget`], and not shared with the `ganja` pane: a real
 //! `claude` marks a message read when it *reads* it, not when a turn takes it
 //! on (§3.1), so there is no consumption signal to wait for. The lead retires
 //! such a queue entry at write time; without the split a claude peer's message

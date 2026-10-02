@@ -32,7 +32,7 @@
 //!
 //! # The wire
 //!
-//! The only [`Shape::Resident`](crate::shim::Shape::Resident) driver this build ships, and the vendor's own
+//! The only [`Shape::Resident`] driver this build ships, and the vendor's own
 //! flag is what makes it one: *"stream-json reads one NDJSON message per line
 //! from stdin and runs a turn for each; it requires `--output-format
 //! stream-json`"*. One child for the member's whole life, one line per turn.
@@ -91,7 +91,7 @@
 //!
 //! - **`-p`/`--print` takes the prompt as its flag value.** agy parses with
 //!   Go's `flag` package, so `agy -p --input-format stream-json …` parses
-//!   `--input-format` *as the prompt*. [`Driver::argv`](crate::shim::Driver::argv) therefore puts `-p` last
+//!   `--input-format` *as the prompt*. [`Driver::argv`] therefore puts `-p` last
 //!   and gives it an explicit empty value. A test pins the position, because
 //!   the failure it prevents is a turn that answers a question nobody asked.
 //! - **agy runs shell commands with cwd = its own scratch directory**, not the
@@ -105,7 +105,7 @@
 //! Two timeouts bound one turn, and the wrong order wedges it: if agy's own
 //! `--print-timeout` fires first, this side is left reading a pipe that will
 //! never carry a `result`. So the flag is **derived** from the effective
-//! deadline rather than fixed — [`print_timeout`](crate::agy::print_timeout) renders `deadline + 1m` as
+//! deadline rather than fixed — [`print_timeout`] renders `deadline + 1m` as
 //! the Go duration that flag parses — which is what makes
 //! [`TIMEOUT_KEY`](crate::shim::TIMEOUT_KEY) move both numbers
 //! together instead of only one of them.

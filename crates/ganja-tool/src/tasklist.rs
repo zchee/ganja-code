@@ -23,7 +23,7 @@
 //! neither the directory nor the protocol is this layer's vocabulary — this
 //! crate's internal dependency list is asserted to be exactly
 //! `ganja-permission`, so it may not name the crate that owns the format
-//! either. So the keeping is somebody else's, reached through [`TaskList`](crate::tasklist::TaskList),
+//! either. So the keeping is somebody else's, reached through [`TaskList`],
 //! and what stays here is the tool's own half: the arguments, the schemas, the
 //! rendering the model reads, and which call each argument becomes.
 //!
@@ -32,9 +32,9 @@
 //! document is written:
 //!
 //! - a `status` of `deleted` is not a status at all, it is a removal
-//!   ([`TaskList::delete`](crate::tasklist::TaskList::delete)) — the list carries three states and a deleted task
+//!   ([`TaskList::delete`]) — the list carries three states and a deleted task
 //!   is gone rather than tombstoned;
-//! - an `owner` decides between claiming and releasing ([`Owner`](crate::tasklist::Owner)), because a
+//! - an `owner` decides between claiming and releasing ([`Owner`]), because a
 //!   claim is the one operation that can be refused and a release never is;
 //! - a comment's author is **never** an argument. It is bound where the seam
 //!   is built, exactly as [`crate::team::Postbox`]'s sender is and for that

@@ -52,7 +52,7 @@
 //! spawns the vendor's own CLI and hands it `--effort <name>`, so what an
 //! effort has to produce is a name rather than a body fragment. It is also the
 //! one lane whose provider the catalog does not carry, which is what
-//! [`standalone`](crate::effort::standalone) is for.
+//! [`standalone`] is for.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells

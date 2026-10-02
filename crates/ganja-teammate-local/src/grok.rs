@@ -16,7 +16,7 @@
 //! # Why one child per message
 //!
 //! `--prompt-file` is a **single-turn** door — the vendor's own help says so —
-//! so [`Shape::PerMessage`](crate::shim::Shape::PerMessage) is not a
+//! so [`Shape::PerMessage`] is not a
 //! choice between two doors but the only one that surface has. Continuity rides
 //! `--resume <id>`, and the id is not captured from the stream the way codex's
 //! is: this side **chooses** it.
@@ -34,7 +34,7 @@
 //! *"UUID-shaped values always mean IDs"*. A minted v7 can therefore never
 //! resume somebody's session because it happened to share a title.
 //!
-//! **[`Driver::argv`](crate::shim::Driver::argv) mints, and that is this file's one departure from that
+//! **[`Driver::argv`] mints, and that is this file's one departure from that
 //! method's documented purity.** It is deliberate and it is bounded to the
 //! first turn of a member: `argv` is called exactly once per turn, so one call
 //! is one conversation, and two grok teammates spawned together get two ids
@@ -138,7 +138,7 @@
 //! turn with that sentence, which is the honest outcome — the alternative
 //! would be starting with the protections missing. The user un-symlinked the
 //! directory and the same launch line then ran real turns. The carve-out that
-//! spares the symlink is carried now — [`shim::GROK_HOME`] is on this driver's
+//! spares the symlink is carried now — [`crate::shim::GROK_HOME`] is on this driver's
 //! own additions list (bead `ganja-code-q98`) — so a machine that keeps one
 //! exports that name at the resolved target and its teammate starts under the
 //! same pinned profile, which is the shape a live `--sandbox read-only` turn
@@ -192,7 +192,7 @@
 //!
 //! # What `--include-partial-messages` is actually for here
 //!
-//! A [`Shape::PerMessage`](crate::shim::Shape::PerMessage) child's
+//! A [`Shape::PerMessage`] child's
 //! stdout is read to the end, so the deltas
 //! do not reach a reader any earlier than the whole messages do — the
 //! mid-turn granularity the flag exists for is not something this shape can
@@ -204,7 +204,7 @@
 //!
 //! # What travels in the environment
 //!
-//! [`crate::shim::CARRIED`] and this CLI's home ([`shim::GROK_HOME`], on this
+//! [`crate::shim::CARRIED`] and this CLI's home ([`crate::shim::GROK_HOME`], on this
 //! driver's own additions list), and the shortness of that list is the design
 //! rather than an omission: every flag this CLI needs is on the command line,
 //! and **no `GROK_*` variable may ever be carried but `GROK_HOME`** — that

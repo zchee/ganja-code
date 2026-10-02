@@ -8,15 +8,15 @@
 //! the send fails. On 2026-08-22 a user directive extended it to every
 //! backend: the preamble is the **first** message in a teammate's inbox, ahead
 //! of its task, seeded by the registry through
-//! [`TeammateBackend::preamble`] —
+//! [`crate::teammate::TeammateBackend::preamble`] —
 //! or by the backend itself where it owns the inbox — and the method is
 //! required, so a backend that cannot say how its teammate answers cannot be
 //! written at all.
 //!
-//! One frame, several channels. [`frame`](crate::teammate::preamble::frame) is the shape every preamble has:
+//! One frame, several channels. [`frame`] is the shape every preamble has:
 //! name, team, lead, then one paragraph about answering, then the task. That
 //! paragraph is the only thing that differs between backends, and it is each
-//! backend's own: [`native`](crate::teammate::preamble::native) here, for the two surfaces that hold ganja's
+//! backend's own: [`native`] here, for the two surfaces that hold ganja's
 //! `send_message` tool (the in-process teammate and the `ganja` pane);
 //! `ganja_teammate_local::claude::preamble` for a real `claude`'s `SendMessage`;
 //! `ganja_teammate_local::shim_tui::preamble` for a CLI's native TUI in a pane,
