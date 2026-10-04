@@ -206,7 +206,7 @@ jiff = "0.2.35"
 # written in, which is what a translation of `permission` rules needs.
 # Nothing writes this dialect any more, and the `cst` feature left with the
 # last writer — `mcp add` edits TOML through toml_edit now.
-jsonc-parser = "0.33.1"
+jsonc-parser = "0.34.0"
 # Compiles and validates the in-repo config schema against Draft 2020-12, both
 # in the drift test (crates/ganja-core/tests/config_schema.rs) and nowhere
 # else — dev-only. Default features add a `reqwest`-backed resolver for
