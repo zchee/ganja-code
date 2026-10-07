@@ -213,7 +213,7 @@ jsonc-parser = "0.33.1"
 # `$ref`s that live over HTTP or on disk; the schema has neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.58.5", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
 # team task store opens a document it can judge on the descriptor rather
