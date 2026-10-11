@@ -265,7 +265,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # live spike names the dialect, not here.
 buffa = "0.9.2"
 ratatui = "0.30.2"
-ratatui-textarea = { version = "0.9.2", features = [
+ratatui-textarea = { version = "0.9.3", features = [
     # The widget's own match-highlight machinery, ridden by the composer to
     # reverse the `[Image #N]` token under the cursor (2026-08-15) — one
     # regex over the buffer beats a hand-rolled span overlay.
