@@ -99,7 +99,7 @@ anyhow = "1.0.104"
 # ask for a picture instead of answering the same notice an empty clipboard
 # gets (F3, lifting D111's image half). `arboard` does not itself encode PNG —
 # see `png` below for that half.
-arboard = { version = "3.6.1", default-features = false, features = [
+arboard = { version = "3.7.0", default-features = false, features = [
     "image-data",
     # Wayland sessions have no X11 selection to fall back on; this opts the
     # Linux build into speaking wl-clipboard directly.
@@ -142,7 +142,7 @@ backon = { version = "1.6.0", default-features = false, features = [
 # `simd-unsafe` is one of this crate's own defaults; it is named here so that a
 # later `default-features = false` cannot drop the vectorised codec silently.
 base64 = { version = "0.23.1", features = ["simd-unsafe"] }
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -196,7 +196,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 # retires the CLI's silent UTC degradation. Pre-1.0 accepted deliberately;
 # each adopting crate's jiff surface is enumerated in its commit so a future
 # major is a grep-sized migration.
-jiff = "0.2.35"
+jiff = "0.2.38"
 # The JSONC dialect ganja's own config has left, kept for the two readers that
 # still meet a file written in it: `config::legacy`, which is how `ganja config
 # migrate` reads what it converts, and `import.rs`, which reads upstream
@@ -218,7 +218,7 @@ jsonschema = { version = "0.56.0", default-features = false }
 # it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
 # team task store opens a document it can judge on the descriptor rather
 # than on a name somebody may have swapped under it.
-libc = "0.2.189"
+libc = "0.2.191"
 # The LSP wire types the diagnostics client speaks to rust-analyzer and
 # gopls, so requests and notifications are typed instead of hand-built JSON.
 lsp-types = "0.97.0"
@@ -236,7 +236,7 @@ markup5ever_rcdom = "0.38.0"
 nucleo-matcher = "0.3.1"
 # Filesystem events behind the stale-read watcher: a file read this session
 # and then changed outside it is flagged before the next turn trusts it.
-notify = "8.2.0"
+notify = "8.2.1"
 # RFC 3986 percent-coding, already in the tree under `url`: the hand decoder
 # it replaces read high bytes as Latin-1 (`%E2%9C%93` decoded to mojibake),
 # and the hand encoder was one drift away from the same class. The one
@@ -307,7 +307,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.4.1", default-features = false, features = [
+rmcp = { version = "3.7.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -328,8 +328,8 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # verification gate: rustix must pass O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC
 # through unmodified, checked in the vendored source before any code moves,
 # and this declaration is inert if that gate fails.
-rustix = { version = "1.1.4", features = ["fs"] }
-schemars = "1.2.2"
+rustix = { version = "1.1.5", features = ["fs"] }
+schemars = "1.2.3"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
 secrecy = { version = "0.10.3", features = ["serde"] }
@@ -342,7 +342,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # parse in ganja is the models.dev catalog (`ganja-provider`'s `catalog.rs`,
 # a document of several megabytes whose costs and limits are `f64`), read at
 # startup and on refresh; nothing per turn or per token parses floats in bulk.
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 # `rust::maps_first_key_wins`: the TypeSafe client reads a repeated answer id
 # back as its first answer, as the SDK's lookups do, where a serde map keeps
 # the last. Without default features it builds nothing but serde_core, which
@@ -362,7 +362,7 @@ serde_with = { version = "3.24.0", default-features = false, features = ["alloc"
 # architecture because 0.10's aarch64 path uses intrinsics of its own.
 # `default-features = false` drops `alloc` and `oid`: a fixed-size digest over
 # a 43-byte string needs neither.
-sha2 = { version = "0.11.0", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
 # One shell word at a time, for the launch line a pane teammate is typed in
 # with: bare when every byte is safe, quoted when one is not. Chosen over the
 # hand-rolled `'\''` idiom because the idle shell reading that line is the
@@ -377,7 +377,7 @@ sha2 = { version = "0.11.0", default-features = false }
 # widen the refusal set — an observable refusal, which is the failure mode
 # this tree prefers to a line a shell misreads.
 shlex = "2.0.1"
-similar = "3.2.0"
+similar = "3.2.1"
 # Fenced-code highlighting for the markdown renderer. The regex backend is
 # the pure-Rust `fancy-regex` — `default-onig` would put a C library in
 # every build — and the bundled syntax set is the language table.
@@ -385,7 +385,7 @@ syntect = { version = "5.3.0", default-features = false, features = [
     "default-syntaxes",
     "regex-fancy",
 ] }
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = [
     "fs",
     "io-util",
@@ -397,7 +397,7 @@ tokio = { version = "1.53.1", features = [
     "time",
 ] }
 tokio-stream = "0.1.19"
-tokio-util = "0.7.19"
+tokio-util = "0.7.20"
 # The config file's own dialect, replacing JSONC. Order is semantic here —
 # permission rules evaluate last-match-wins, so a reader that handed the loader
 # a sorted map would change which rule decides. The straight-to-struct path
@@ -407,14 +407,14 @@ tokio-util = "0.7.19"
 # The feature is on for the other route — `toml::Table`/`Value` is a `BTreeMap`
 # without it, and anything reaching for one would re-sort exactly the order
 # that pin exists to protect.
-toml = { version = "1.1.6", features = ["preserve_order"] }
+toml = { version = "1.1.8", features = ["preserve_order"] }
 # The same project's format-preserving half, and the reason `ganja mcp add`
 # keeps its contract (D483): editing one `[mcp.<name>]` entry of a file
 # somebody hand-commented has to put the entry back without printing the
 # comments away, which is this crate's whole job. `serde` is on because the
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
-toml_edit = { version = "0.25.14", features = ["serde"] }
+toml_edit = { version = "0.25.17", features = ["serde"] }
 # The trait the TypeSafe SDK takes a custom transport through: `Service`
 # alone, without the rest of `tower`. Already in the lock beneath hyper-util
 # and reqwest.
@@ -457,7 +457,7 @@ unicode-width = "0.2.2"
 # is what puts that context behind the crate's own mutex; with defaults off,
 # the other six UUID versions and their generators stay out. No `serde`
 # feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
-uuid = { version = "1.26.1", default-features = false, features = ["v7", "std"] }
+uuid = { version = "1.29.0", default-features = false, features = ["v7", "std"] }
 # PATH resolution with access(2) semantics: the hand walk answered "somebody
 # could run this" (`mode & 0o111`) where a spawn needs "this process can run
 # it", so a binary exec-only for another owner died at spawn with EACCES
@@ -483,7 +483,7 @@ windows-sys = { version = "0.61.2", features = [
 
 assert_cmd = "2.2.2"
 expectrl = "0.9.0"
-insta = "1.48.0"
+insta = "1.49.0"
 predicates = "3.1.4"
 # Left this group in P25 without moving: `ganja-team`, `ganja-core`,
 # `ganja-cli`, `ganja-tui`, and the dev-only `ganja-testkit` name it under
