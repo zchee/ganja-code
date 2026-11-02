@@ -321,7 +321,7 @@ rmcp = { version = "3.4.1", default-features = false, features = [
 # on (`foreign_keys`, WAL synchronous level) are build-time properties that
 # differ between system libraries, so pinning the library is what pins the
 # semantics.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 # Safe openat/mkdirat wrappers for the anchored file IO in `ganja-tool`'s
 # `anchor.rs` — already in the lock beneath tempfile. Staged here with the
 # rest of the sweep's pins, but the anchor swap proceeds only behind its own
