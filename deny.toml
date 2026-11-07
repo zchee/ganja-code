@@ -32,7 +32,15 @@ feature-depth = 1
 # syntax-set dumps, bundled at compile time — never data an outside party
 # controls. An unmaintained notice on that path is accepted risk, not a
 # vulnerability; this entry leaves when syntect itself moves off bincode.
-ignore = [{ id = "RUSTSEC-2025-0141", reason = "syntect's compiled-in syntax dumps; not attacker-reachable input" }]
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "syntect's compiled-in syntax dumps; not attacker-reachable input" },
+    # RUSTSEC-2026-0441: expectrl 0.9.0 (a ganja-cli dev-dependency) pulls
+    # pin-utils through nix 0.26.4, directly and through ptyprocess 0.5.0.
+    # Neither parent has a release that removes it. This is an unmaintained
+    # notice, not a known vulnerability, and the path exists only in tests.
+    # Remove this entry when expectrl and ptyprocess move off pin-utils.
+    { id = "RUSTSEC-2026-0441", reason = "test-only expectrl/ptyprocess via nix; no parent upgrade removes pin-utils" },
+]
 
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
 [licenses]
