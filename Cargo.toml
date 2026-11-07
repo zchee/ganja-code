@@ -274,7 +274,7 @@ png = "0.18.1"
 # Markdown parsed into block events the chat renderer styles; the default
 # `html` renderer and the example binary's `getopts` stay off — parsing is
 # the only piece the TUI consumes.
-pulldown-cmark = { version = "0.13.4", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 # The cursor wire's protobuf runtime: Anthropic's pure-Rust, Apache-2.0
 # protobuf implementation. Codegen-only (it ships no `#[derive(Message)]` on
 # purpose — the `.proto` stays the source of truth), so ganja's own `.proto`
