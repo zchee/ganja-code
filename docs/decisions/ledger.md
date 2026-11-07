@@ -448,3 +448,66 @@ Pinned by: `crates/ganja-cli/tests/teammate_pane.rs`
 (`a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved`)
 
 Commit: 7e8ce4c (the test); this commit (the entry)
+
+## D573 — the exchange moves to `decision-model-sdk`; D569's policy is unchanged (2026-11-08)
+
+Crates: ganja-tool
+Amends: D569 (the SDK dependency and the identity sent to the vendor)
+
+**The successor crate.** The exchange now goes through `decision-model-sdk`
+from crates.io. The old `typesafe-sdk-rust` crate is no longer served by
+crates.io; the new crate is the same code base's successor. This repairs
+resolution of the dependency, not the policy of either TypeSafe surface or
+the engine's judge.
+
+**The boundary stays.** The SDK is pinned exactly to `=0.1.0`, with
+`default-features = false`: `hyper`, `macros` and `tracing` remain off, as
+does the opt-in `sonic`. With every setting passed explicitly, the SDK
+consults no environment variable. Ganja's `reqwest` transport is still
+handed over as a `tower_service::Service`,
+keeping the system proxy and refusing redirects. The 10 s deadline, 1 MiB
+response cap and `RetryPolicy::none()` remain: one consent is one
+transmission. A new version is still a reviewed manifest edit and its own
+Renovate PR, never part of the weekly batch. D569's pre-bump re-read of
+`transport/`, `config.rs`, `constants.rs`, `client.rs` and `error.rs` also
+covers `redact.rs`, `telemetry.rs` and `request.rs`, because those files
+build headers, report requests and redact credentials.
+
+Ganja keeps D569's policy list: the base-URL and model-id rules; the typed
+question schema and its limits; the 422 reduction that drops the request
+echo; and the frame of every sentence the model reads, with the SDK's fixed
+`Error::summary()` clause inside a transport or malformed failure. D570's
+rejection and confirmation rules are unchanged. The environment variables
+remain D564's `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and
+`TYPESAFE_DEFAULT_MODEL`. The successor SDK supplies no default base URL or
+model; ganja continues to pass its own defaults explicitly.
+
+**What the vendor is told.** The header names stay the same; the SDK product
+changes. The request carries:
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <key>` |
+| `Accept` | `application/json` |
+| `Content-Type` | `application/json` |
+| `User-Agent` | `ganja-code/<version> decision-model-sdk/0.1.0` |
+| `X-TypeSafe-SDK` | `decision-model-sdk/0.1.0` |
+| `Content-Length` | The request body's byte count |
+| `Host` | The endpoint authority |
+
+No other header is sent. `X-TypeSafe-Runtime` remains omitted, so the
+vendor is not told the operating system or CPU architecture. There is no
+`X-TypeSafe-Retry-Count` because there is no retry. Disabling `tracing`
+continues to keep the SDK's endpoint and body events out of the logs.
+The response's request identifier is still read from
+`X-TypeSafe-Request-Id`.
+
+Pinned by: `Cargo.toml`, `.github/renovate.json5`,
+`crates/ganja-tool/src/typesafe.rs` (`Client::new`) and
+`crates/ganja-tool/src/typesafe_tests.rs`
+(`the_headers_the_vendor_receives_are_exactly_these`,
+`the_disclosed_byte_count_is_the_byte_count_the_vendor_receives`,
+`a_transport_failure_never_carries_the_url_it_failed_against`,
+`a_key_the_sdk_will_not_send_is_configuration_and_is_never_repeated`).
+
+Commit: this commit
