@@ -468,7 +468,10 @@ handed over as a `tower_service::Service`,
 keeping the system proxy and refusing redirects. The 10 s deadline, 1 MiB
 response cap and `RetryPolicy::none()` remain: one consent is one
 transmission. A new version is still a reviewed manifest edit and its own
-Renovate PR, never part of the weekly batch.
+Renovate PR, never part of the weekly batch. D569's pre-bump re-read of
+`transport/`, `config.rs`, `constants.rs`, `client.rs` and `error.rs` also
+covers `redact.rs`, `telemetry.rs` and `request.rs`, because those files
+build headers, report requests and redact credentials.
 
 Ganja keeps D569's policy list: the base-URL and model-id rules; the typed
 question schema and its limits; the 422 reduction that drops the request
