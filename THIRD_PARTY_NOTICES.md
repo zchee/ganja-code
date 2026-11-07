@@ -43,8 +43,8 @@ refusal in `crates/ganja-tool/src/typesafe.rs`, and both question texts in
 `docs/recipes/questions.json` are ganja's own, written from the vendor's
 documentation read as a specification — the same rule D497 sets for Claude
 Code's teams reference. One exception, inside ganja's own frame: a transport
-or malformed failure carries the fixed clause `typesafe-sdk-rust` (below)
-gives for its kind.
+or malformed failure carries the fixed clause `decision-model-sdk` (below)
+gives for its kind through `Error::summary()`.
 
 What is taken is **interop facts**, which cannot be spelled any other way and
 are not expression: the endpoint path `/v1/systemone`; the request and response
@@ -53,14 +53,16 @@ primitives `noul`, `choice` and `score` with their `instructions`, `criteria`,
 `probabilities`, `legend` and `confidence`); the status semantics of 401, 403,
 422, 429 and 529; the environment variable names `TYPESAFE_API_KEY`,
 `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`, and the default base URL,
-default model and 10-second timeout those SDK constants document; and the two
+default model and 10-second timeout ganja keeps; and the two
 model aliases `jev-latest` and `jev-preview`.
 
 Documentation read 2026-09-17 and 2026-09-18 against `jev-1.13.0`. No
-TypeSafe code is vendored. Since D569 the exchange goes through
-`typesafe-sdk-rust` (Apache-2.0), a crate from crates.io resolved through
-`Cargo.lock` like any other dependency; ganja's policy over it, and the
-transport it hands the crate, are original Rust over `reqwest`.
+TypeSafe code is vendored. Since D573 the exchange goes through
+`decision-model-sdk` (Apache-2.0), a crate from crates.io resolved through
+`Cargo.lock` like any other dependency. It is a port of
+`typesafe-sdk-python` 0.7.2 for the API first offered by TypeSafe AI and now
+also served by other vendors; ganja's policy over it, and the transport it
+hands the crate, are original Rust over `reqwest`.
 
 
 ## Foreign CLI probe recordings
