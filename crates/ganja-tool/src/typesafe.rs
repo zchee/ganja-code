@@ -19,13 +19,13 @@
 //!
 //! # What the SDK does and what stays here
 //!
-//! The exchange itself is the SDK's (`typesafe-sdk-rust` from crates.io,
-//! **D569**): it encodes the body, applies the deadline and the response size
-//! cap, decodes the answers and classifies each failure. What stays here is
-//! ganja's policy over it — which base URLs and model ids are acceptable, the
-//! question schema and limits a model is shown, the consent disclosure's
-//! numbers, how a 422 is reduced to a sentence, and what each failure tells
-//! the model to do next.
+//! The exchange itself is the SDK's (`decision-model-sdk` from crates.io,
+//! **D569**, **D573**): it encodes the body, applies the deadline and the
+//! response size cap, decodes the answers and classifies each failure. What
+//! stays here is ganja's policy over it — which base URLs and model ids are
+//! acceptable, the question schema and limits a model is shown, the consent
+//! disclosure's numbers, how a 422 is reduced to a sentence, and what each
+//! failure tells the model to do next.
 //!
 //! The bytes travel through ganja's own `reqwest` client, handed to the SDK
 //! through its custom-transport seam (`Transport`).
@@ -62,13 +62,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use decision_model_sdk::{ErrorKind, PreparedQuestions, Questions, RawQuestion, RetryPolicy};
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_with::rust::maps_first_key_wins;
 use tokio_util::sync::CancellationToken;
-use typesafe_sdk::{ErrorKind, PreparedQuestions, Questions, RawQuestion, RetryPolicy};
 use url::{Host, Url};
 
 use crate::ToolError;
@@ -996,7 +996,7 @@ pub struct Client {
     settings: Settings,
     /// Built once: a client per call would discard the connection pool and
     /// re-verify TLS on every judgement.
-    sdk: typesafe_sdk::Client<Transport>,
+    sdk: decision_model_sdk::Client<Transport>,
 }
 
 impl Client {
@@ -1028,7 +1028,7 @@ impl Client {
         // builder is also the one place the client's identification is
         // decided, and `the_headers_the_vendor_receives_are_exactly_these`
         // is what holds it.
-        let sdk = typesafe_sdk::ClientBuilder::new()
+        let sdk = decision_model_sdk::ClientBuilder::new()
             // The one line the key is exposed at.
             .api_key(settings.key.expose_secret())
             .base_url(settings.base.as_str())
@@ -1120,7 +1120,7 @@ impl Client {
 /// second read is of a body the SDK already held under the response cap;
 /// guessing from counts whether one was skipped would miss the vendor
 /// answering under an id nobody asked.
-fn converted(answered: &typesafe_sdk::SystemOneResponse) -> Response {
+fn converted(answered: &decision_model_sdk::SystemOneResponse) -> Response {
     let mut answers = BTreeMap::new();
     for (id, answer) in answered.answers().iter() {
         let Some(answer) = known(answer) else {
@@ -1149,10 +1149,10 @@ fn converted(answered: &typesafe_sdk::SystemOneResponse) -> Response {
 
 /// One of the SDK's answers as ganja's, or [`None`] for a kind a later SDK
 /// adds and this build does not map.
-fn known(answer: &typesafe_sdk::Answer) -> Option<Answer> {
+fn known(answer: &decision_model_sdk::Answer) -> Option<Answer> {
     Some(match answer {
-        typesafe_sdk::Answer::Noul(noul) => Answer::Noul { noul: noul.noul() },
-        typesafe_sdk::Answer::Choice(choice) => Answer::Choice {
+        decision_model_sdk::Answer::Noul(noul) => Answer::Noul { noul: noul.noul() },
+        decision_model_sdk::Answer::Choice(choice) => Answer::Choice {
             choice: choice.choice().to_owned(),
             probabilities: choice
                 .probabilities()
@@ -1160,14 +1160,14 @@ fn known(answer: &typesafe_sdk::Answer) -> Option<Answer> {
                 .collect(),
             confidence: choice.confidence(),
         },
-        typesafe_sdk::Answer::Score(score) => Answer::Score {
+        decision_model_sdk::Answer::Score(score) => Answer::Score {
             score: score.score(),
             legend: score
                 .legend()
                 .map(|(level, described)| {
                     let text = described
                         .as_text()
-                        .or_else(|| described.as_json().map(typesafe_sdk::RawJson::as_str))
+                        .or_else(|| described.as_json().map(decision_model_sdk::RawJson::as_str))
                         .unwrap_or_default();
                     (level.to_string(), text.to_owned())
                 })
@@ -1234,7 +1234,7 @@ fn other(raw: &RawValue) -> Answer {
 /// None is taken from the SDK's `Display` of an API or validation error,
 /// which names the endpoint URL, or of a connection error, which carries the
 /// transport's error chain.
-fn failure(error: typesafe_sdk::Error) -> Error {
+fn failure(error: decision_model_sdk::Error) -> Error {
     match error.kind() {
         // The credential, as the SDK recognises it: a 401, or a 403 whose
         // `detail.error_type` is `authentication_error`. `refusal` makes
@@ -1268,7 +1268,7 @@ fn failure(error: typesafe_sdk::Error) -> Error {
 /// The SDK's fixed sentence for the kind of `error`, which holds no server
 /// or transport text, without the full stop the sentence around it
 /// supplies.
-fn summary(error: &typesafe_sdk::Error) -> String {
+fn summary(error: &decision_model_sdk::Error) -> String {
     error.summary().trim_end_matches('.').to_owned()
 }
 
@@ -1281,7 +1281,7 @@ fn summary(error: &typesafe_sdk::Error) -> String {
 #[derive(Clone)]
 struct Transport(reqwest::Client);
 
-impl tower_service::Service<http::Request<typesafe_sdk::Body>> for Transport {
+impl tower_service::Service<http::Request<decision_model_sdk::Body>> for Transport {
     type Response = http::Response<reqwest::Body>;
     type Error = reqwest::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -1290,7 +1290,7 @@ impl tower_service::Service<http::Request<typesafe_sdk::Body>> for Transport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, request: http::Request<typesafe_sdk::Body>) -> Self::Future {
+    fn call(&mut self, request: http::Request<decision_model_sdk::Body>) -> Self::Future {
         let client = self.0.clone();
 
         Box::pin(async move {

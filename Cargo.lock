@@ -818,6 +818,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "decision-model-sdk"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733caaf0484c8dd08f9c75f5955f4e952812f3696f13bbee703ad0b7f528962f"
+dependencies = [
+ "bytes",
+ "compact_str 0.10.0",
+ "fastrand",
+ "http",
+ "http-body",
+ "http-body-util",
+ "httpdate",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1584,6 +1606,7 @@ name = "ganja-tool"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "decision-model-sdk",
  "etcetera",
  "futures",
  "ganja-permission",
@@ -1614,7 +1637,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
- "typesafe-sdk-rust",
  "url",
  "windows-sys 0.61.2",
 ]
@@ -5040,28 +5062,6 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "typesafe-sdk-rust"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41009bde02aa9f500c300e840edb06bc664040e135070125916964d3333a8b1f"
-dependencies = [
- "bytes",
- "compact_str 0.10.0",
- "fastrand",
- "http",
- "http-body",
- "http-body-util",
- "httpdate",
- "secrecy",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "thiserror 2.0.20",
- "tokio",
- "tower-service",
-]
 
 [[package]]
 name = "ucd-trie"

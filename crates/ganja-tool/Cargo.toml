@@ -14,6 +14,9 @@ publish = false
 [dependencies]
 # Only where dyn-safety demands it: `Tool` lives behind `Arc<dyn _>`.
 async-trait.workspace = true
+# The TypeSafe client under `evaluate` and the judge: encoding, the
+# exchange's deadline and size cap, decoding and failure classification.
+decision-model-sdk.workspace = true
 # Where truncated output spills to, resolved the same way every other store in
 # this workspace resolves its directory.
 etcetera.workspace = true
@@ -92,9 +95,6 @@ tracing.workspace = true
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
 tower-service.workspace = true
-# The TypeSafe client under `evaluate` and the judge: encoding, the
-# exchange's deadline and size cap, decoding and failure classification.
-typesafe-sdk-rust.workspace = true
 # The TypeSafe base URL is refused on a *parsed* host rather than on text —
 # `http://127.0.0.1.evil.com` is a domain somebody else registered — which
 # needs `Host`, the one type reqwest's `Url` re-export leaves out.

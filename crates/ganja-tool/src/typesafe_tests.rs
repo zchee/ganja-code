@@ -348,7 +348,7 @@ async fn the_headers_the_vendor_receives_are_exactly_these() {
     assert_eq!(headers["content-type"], "application/json");
 
     let sdk = &headers["x-typesafe-sdk"];
-    assert!(sdk.starts_with("typesafe-sdk-rust/"), "the SDK names itself: {head}");
+    assert!(sdk.starts_with("decision-model-sdk/"), "the SDK names itself: {head}");
     assert_eq!(
         headers["user-agent"],
         format!("ganja-code/{} {sdk}", env!("CARGO_PKG_VERSION")),
