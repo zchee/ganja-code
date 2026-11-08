@@ -380,8 +380,9 @@ serde_with = { version = "3.24.0", default-features = false, features = ["alloc"
 # which pulls a separate crate last released in 2024, builds hand-written
 # assembly through a C toolchain, and is then never called on that
 # architecture because 0.10's aarch64 path uses intrinsics of its own.
-# `default-features = false` drops `alloc` and `oid`: a fixed-size digest over
-# a 43-byte string needs neither.
+# This edge requests neither `alloc` nor `oid` (a fixed-size digest over a
+# 43-byte string needs neither); rmcp enables both through feature
+# unification in the workspace build anyway.
 sha2 = { version = "0.11.1", default-features = false }
 # One shell word at a time, for the launch line a pane teammate is typed in
 # with: bare when every byte is safe, quoted when one is not. Chosen over the
