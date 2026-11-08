@@ -45,6 +45,30 @@ fn comments_and_trailing_commas_are_part_of_the_dialect() {
     assert_eq!(config.small_model.as_deref(), Some("anthropic/claude-haiku-4.5"));
 }
 
+#[test]
+fn json5_extensions_are_refused_by_both_legacy_readers() {
+    for text in [
+        r#"{"value": .5}"#,
+        r#"{"value": 5.}"#,
+        r#"{"value": Infinity}"#,
+        r#"{"value": -Infinity}"#,
+        r#"{"value": NaN}"#,
+        r#"{"value": "\x41"}"#,
+        r#"{"value": "\v"}"#,
+        "{\"value\": \"line\\\ncontinuation\"}",
+    ] {
+        let options = super::parse_options();
+        assert!(
+            jsonc_parser::parse_to_ast(text, &Default::default(), &options).is_err(),
+            "the migration AST reader accepted {text:?}"
+        );
+        assert!(
+            jsonc_parser::parse_to_serde_value::<serde_json::Value>(text, &options).is_err(),
+            "the legacy serde reader accepted {text:?}"
+        );
+    }
+}
+
 /// The `Option` in the decode is what makes this an empty config rather than a
 /// type error about `null` — the one thing the two formats reach the same
 /// answer by different routes, which is why it is pinned on both sides.

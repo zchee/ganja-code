@@ -47,6 +47,9 @@ pub fn parse_options() -> jsonc_parser::ParseOptions {
         allow_single_quoted_strings: false,
         allow_hexadecimal_numbers: false,
         allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
     }
 }
 
