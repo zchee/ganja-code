@@ -135,15 +135,38 @@ impl CloudMember {
     ) -> Arc<Self> {
         let gate = WorkerGate::new();
         let endpoint = &worker.endpoint;
-        let client = Client::new(
-            &endpoint.base_url,
-            Some(ganja_client::Credentials::new(
-                &endpoint.username,
-                endpoint.password.expose_secret(),
-            )),
-        )
-        .map(|client| client.with_headers(endpoint.headers.clone()))
-        .ok();
+        let trusted = url::Url::parse(&endpoint.base_url).is_ok_and(|url| {
+            let loopback = match url.host() {
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+            (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                // Url normalizes an empty userinfo away, so inspect the authority too.
+                && endpoint.base_url.split_once("://").is_some_and(|(_, rest)| {
+                    rest.split('/').next().is_some_and(|authority| !authority.contains('@'))
+                })
+        }) && !endpoint.headers.contains_key(http::header::AUTHORIZATION)
+            && !endpoint.headers.contains_key(http::header::PROXY_AUTHORIZATION);
+        let client = if trusted {
+            Client::new(
+                &endpoint.base_url,
+                Some(ganja_client::Credentials::new(
+                    &endpoint.username,
+                    endpoint.password.expose_secret(),
+                )),
+            )
+            .map(|client| client.with_headers(endpoint.headers.clone()))
+            .ok()
+        } else {
+            None
+        };
         let events = client.as_ref().map(|client| {
             Arc::new(ClientSource::new(client.clone(), Arc::clone(&gate))) as Arc<dyn EventSource>
         });

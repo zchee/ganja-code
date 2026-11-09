@@ -149,6 +149,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_endpoint(Endpoint {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            headers: Default::default(),
+            username: "ganja".to_owned(),
+            password: secrecy::SecretString::from("test-password"),
+        })
+        .await
+    }
+
+    async fn with_endpoint(endpoint: Endpoint) -> Self {
         let home = tempfile::tempdir().expect("fixture home");
         let name = MemberName::parse("gate-worker").expect("name");
         let lead = MemberName::lead();
@@ -162,12 +172,7 @@ impl Fixture {
             },
             deadline_secs: 5,
         };
-        let provisioner = Arc::new(TestProvisioner::from_endpoint(Endpoint {
-            base_url: "http://127.0.0.1:1".to_owned(),
-            headers: Default::default(),
-            username: "ganja".to_owned(),
-            password: secrecy::SecretString::from("test-password"),
-        }));
+        let provisioner = Arc::new(TestProvisioner::from_endpoint(endpoint));
         let worker = provisioner
             .spawn(&WorkerSpec {
                 name: name.clone(),
@@ -240,6 +245,44 @@ impl Fixture {
 
     fn suspends(&self) -> usize {
         self.provisioner.suspended.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn worker_clients_require_trusted_endpoints_and_separate_auth_headers() {
+    let cases = [
+        ("https://worker.example", None, true),
+        ("http://127.0.0.1:12345", Some("ate-target-actor"), true),
+        ("http://127.12.34.56:80", None, true),
+        ("http://[::1]:12345", None, true),
+        ("http://localhost:12345", None, true),
+        ("http://worker.example", None, false),
+        ("http://192.0.2.1", None, false),
+        ("http://[::2]", None, false),
+        ("https://user@worker.example", None, false),
+        ("https://@worker.example", None, false),
+        ("https://worker.example?route=other", None, false),
+        ("https://worker.example#route", None, false),
+        ("http://127.0.0.1:12345", Some("Authorization"), false),
+        ("http://127.0.0.1:12345", Some("aUtHoRiZaTiOn"), false),
+        ("http://127.0.0.1:12345", Some("Proxy-Authorization"), false),
+    ];
+    for (base_url, header, accepted) in cases {
+        let mut headers = http::HeaderMap::new();
+        if let Some(header) = header {
+            headers.insert(
+                http::HeaderName::from_bytes(header.as_bytes()).expect("header name"),
+                http::HeaderValue::from_static("space/actor"),
+            );
+        }
+        let fixture = Fixture::with_endpoint(Endpoint {
+            base_url: base_url.to_owned(),
+            headers,
+            username: "ganja".to_owned(),
+            password: secrecy::SecretString::from("test-password"),
+        })
+        .await;
+        assert_eq!(fixture.member.client.is_some(), accepted, "{base_url}, {header:?}");
     }
 }
 
