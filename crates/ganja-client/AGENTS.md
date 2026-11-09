@@ -39,7 +39,7 @@ The `frames`, `client_routes`, `attach_resume`, and `attach` tests live in `ganj
 - Every shape this crate cannot read (unknown event `type`, undeclared body field, frame outside `FRAMES`) becomes one `ClientError::Skew`, and a stream that hits one ends. Do not add unknown-variant tolerance (pinned by `tests/wire.rs`).
 - `PendingPermission` and `Health` are declared whole with `deny_unknown_fields`. `SessionRow` is deliberately partial and must not copy `ganja-core`'s `SessionInfo`.
 - Error messages name the address, route or variable that would fix the problem.
-- `Credentials` and `Client` implement `Debug` by hand and never render the password (pinned by `no_rendering_of_a_client_or_its_credential_shows_the_password` in `src/lib_tests.rs`).
+- `Credentials`, `Client`, and `Bootstrap` implement `Debug` by hand; passwords and bootstrap repository URLs are never rendered (pinned by `no_rendering_of_a_client_or_its_credential_shows_the_password` in `src/lib_tests.rs` and `bootstrap_debug_never_prints_repository_userinfo` in `src/bootstrap_tests.rs`).
 
 ## Gotchas
 

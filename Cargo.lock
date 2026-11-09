@@ -1489,6 +1489,7 @@ dependencies = [
  "ganja-core",
  "ganja-protocol",
  "ganja-testkit",
+ "percent-encoding",
  "reqwest",
  "secrecy",
  "serde",
@@ -1499,6 +1500,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
