@@ -689,8 +689,10 @@ struct Recording {
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
     allocated: Option<Arc<tokio::sync::Notify>>,
+    hold_allocation: Option<Arc<tokio::sync::Notify>>,
     hold_launch: Option<Arc<tokio::sync::Notify>>,
     hold_kill: Option<Arc<tokio::sync::Notify>>,
+    publication: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
 }
 
 /// Why a refusing [`Recording`] refuses.
@@ -722,6 +724,9 @@ impl TeammateBackend for Recording {
         if let Some(allocated) = &self.allocated {
             allocated.notify_one();
         }
+        if let Some(hold) = &self.hold_allocation {
+            hold.notified().await;
+        }
         Ok(Arc::new(RecordedPane {
             id: "%7".to_owned(),
             birth: "48213".to_owned(),
@@ -735,6 +740,10 @@ impl TeammateBackend for Recording {
     }
 
     fn delivery(&self) -> Delivery {
+        if let Some(publication) = &self.publication {
+            publication.0.wait();
+            publication.1.wait();
+        }
         Delivery::Acknowledged
     }
 }
@@ -801,6 +810,71 @@ impl Spawned for RecordedPane {
             hold.notified().await;
         }
     }
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_admitted_allocations_to_register_cleanup() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let allocated = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(Recording {
+        allocated: Some(allocated.clone()),
+        hold_allocation: Some(release.clone()),
+        ..Recording::default()
+    });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("late-allocation", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    allocated.notified().await;
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!shutdown.is_finished());
+    release.notify_one();
+    shutdown.await.expect("shutdown completes");
+    assert!(spawn.await.expect("spawn task").is_err());
+    assert_eq!(backend.killed().len(), 1);
+    assert!(registry.members().is_empty());
+    assert!(!reserved(&registry).contains("late-allocation"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_rejects_a_member_held_just_before_publication() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let publication = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+    let backend =
+        Arc::new(Recording { publication: Some(publication.clone()), ..Recording::default() });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("late-member", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    let barrier = publication.clone();
+    tokio::task::spawn_blocking(move || barrier.0.wait()).await.expect("publication reached");
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    tokio::task::spawn_blocking(move || publication.1.wait()).await.expect("publication released");
+    shutdown.await.expect("shutdown completes");
+    assert!(spawn.await.expect("spawn task").is_err(), "closed registry rejects publication");
+    assert_eq!(backend.killed().len(), 1, "the unpublished allocation is killed once");
+    assert!(registry.members().is_empty());
+    assert!(!reserved(&registry).contains("late-member"));
+    assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
 }
 
 #[tokio::test(start_paused = true)]
