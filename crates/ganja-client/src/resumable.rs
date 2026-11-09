@@ -231,7 +231,8 @@ impl Resumable {
     /// A hold returns `None` without making the consumer terminal; release and
     /// poll again to continue. A gap drops the old stream and cursor; the next
     /// poll registers fresh, never splicing the discarded tail into new state.
-    /// Protocol skew, eviction, and explicit HTTP refusal are terminal errors.
+    /// Live eviction reconnects from the last yielded cursor so the server can
+    /// declare a gap. Protocol skew and explicit HTTP refusal are terminal errors.
     pub async fn next(&self) -> Option<Result<Resumed, ClientError>> {
         let mut state = self.state.lock().await;
         loop {
@@ -304,7 +305,12 @@ impl Resumable {
                     state.retry = Duration::ZERO;
                     return Some(Ok(Resumed::Event(Box::new(event))));
                 }
-                Some(Err(ClientError::Transport { .. } | ClientError::Silent { .. })) | None => {
+                Some(Err(
+                    ClientError::Transport { .. }
+                    | ClientError::Silent { .. }
+                    | ClientError::Evicted { .. },
+                ))
+                | None => {
                     state.events = None;
                     state.permit = None;
                     retry(&mut state);

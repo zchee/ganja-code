@@ -327,6 +327,77 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     handle.shutdown().await.expect("the server stops cleanly");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumable_reader_recovers_from_live_journal_overflow_with_one_gap() {
+    let word = "w".repeat(4096);
+    let reply =
+        std::iter::repeat_n(word.as_str(), WORDS_PER_WINDOW * 3).collect::<Vec<_>>().join(" ");
+    let (engine, handle) = served(&reply).await;
+    let client = ganja_client::Client::new(
+        &format!("http://{}", handle.address().tcp().expect("tcp address")),
+        None,
+    )
+    .expect("client");
+    let reader = ganja_client::Resumable::new(client);
+    reader.connect().await.expect("connect").expect("registration");
+    let mut direct = engine.subscribe().await.expect("lossless subscription");
+    engine
+        .send(Command::SendPrompt {
+            text: "overflow the unread journal".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("prompt");
+    tokio::time::timeout(DEADLINE, async {
+        while let Some(event) = direct.next().await {
+            if matches!(event, Event::MessageFinished { .. }) {
+                return;
+            }
+        }
+        panic!("the lossless subscription ended before the turn");
+    })
+    .await
+    .expect("the turn finishes while the network reader is held");
+
+    let gap = tokio::time::timeout(DEADLINE, async {
+        loop {
+            match reader.next().await.expect("reader remains live").expect("resumed item") {
+                ganja_client::Resumed::Event(_) => {}
+                ganja_client::Resumed::Gap { head } => break head,
+            }
+        }
+    })
+    .await
+    .expect("overflow reconnects and declares a gap");
+    assert!(gap.seq() > 0, "the overflow advanced the journal");
+    assert_eq!(reader.cursor().await, None, "the gap discards the old cursor");
+    let fresh = reader.connect().await.expect("fresh connect").expect("registration");
+    assert_eq!(fresh.replay, sse::Replay::Fresh);
+    assert!(fresh.head.seq() >= gap.seq());
+    engine
+        .send(Command::SendPrompt {
+            text: "continue after the gap".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("next prompt");
+    let next = tokio::time::timeout(DEADLINE, reader.next())
+        .await
+        .expect("fresh event arrives")
+        .expect("reader remains live")
+        .expect("fresh event");
+    assert!(matches!(next, ganja_client::Resumed::Event(_)), "one gap then fresh events");
+    assert!(reader.cursor().await.expect("event cursor").seq() > fresh.head.seq());
+    reader.hold().await;
+    handle.shutdown().await.expect("server stops");
+}
+
 /// The declaration itself: four names, and the pin above covers each of them.
 /// A fifth name added here without a server that writes it would leave one of
 /// the two tests above unable to observe it.
