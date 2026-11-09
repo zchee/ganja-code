@@ -76,6 +76,8 @@ struct QuietSource {
     permit: Mutex<Option<Permit>>,
     held: AtomicBool,
     changed: Notify,
+    hold_started: Notify,
+    hold_release: Mutex<Option<Arc<Notify>>>,
 }
 
 #[async_trait]
@@ -99,6 +101,11 @@ impl EventSource for QuietSource {
 
     async fn hold(&self) {
         self.held.store(true, Ordering::SeqCst);
+        self.hold_started.notify_one();
+        let release = self.hold_release.lock().expect("hold release").take();
+        if let Some(release) = release {
+            release.notified().await;
+        }
         self.permit.lock().expect("stream permit").take();
         self.changed.notify_waiters();
     }
@@ -205,6 +212,8 @@ impl Fixture {
             permit: Mutex::new(None),
             held: AtomicBool::new(false),
             changed: Notify::new(),
+            hold_started: Notify::new(),
+            hold_release: Mutex::new(None),
         });
         Arc::get_mut(&mut member).expect("unique member").events = Some(source.clone());
         member.set_phase(Phase::Idle);
@@ -241,6 +250,27 @@ async fn a_healthy_stream_is_actively_ended_before_suspend() {
     assert!(reader.await.expect("reader joined").is_none());
     assert_eq!(fixture.member.gate.state().streams, 0);
     assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Suspended);
+    assert_eq!(fixture.suspends(), 1);
+}
+
+#[tokio::test]
+async fn suspend_waits_for_stream_hold_acknowledgement_with_both_doors_closed() {
+    let fixture = Fixture::new().await;
+    let release = Arc::new(Notify::new());
+    *fixture.source.hold_release.lock().expect("hold release") = Some(release.clone());
+    let member = fixture.member.clone();
+    let quiesce = tokio::spawn(async move { member.quiesce().await });
+    timeout(Duration::from_secs(1), fixture.source.hold_started.notified())
+        .await
+        .expect("hold requested");
+    assert_eq!(fixture.suspends(), 0, "suspend cannot precede hold acknowledgement");
+    let state = fixture.member.gate.state();
+    assert!(!state.stream_open && !state.rest_open);
+    assert_eq!(state.streams, 1, "the established stream still holds its permit");
+    assert!(fixture.source.connect().await.expect("closed admission").is_none());
+    release.notify_one();
+    quiesce.await.expect("quiesce joined");
+    assert_eq!(fixture.member.gate.state().streams, 0);
     assert_eq!(fixture.suspends(), 1);
 }
 
