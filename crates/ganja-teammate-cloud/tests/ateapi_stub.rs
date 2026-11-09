@@ -312,6 +312,26 @@ async fn invalid_and_expired_ateapi_credentials_fail_closed_without_exposing_tok
 }
 
 #[tokio::test]
+async fn selecting_the_command_proxy_warns_once_about_its_unprotected_ports() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("log capture");
+    let fixture = KubeFixture::start("v1", 0).await;
+    let _tunnel = ganja_teammate_cloud::provisioner::substrate::kubectl::KubectlTunnel::connect(
+        fixture.client.clone(),
+        "/operator/kubectl".into(),
+        "/operator/config".into(),
+        None,
+        "api",
+    )
+    .await
+    .expect("command connector");
+    assert_eq!(capture.logged().matches("local ports cannot be token-protected").count(), 1);
+}
+
+#[tokio::test]
 async fn certificate_discovery_uses_stable_or_beta_and_refreshes_after_half_life() {
     for version in ["v1", "v1beta1"] {
         let fixture = KubeFixture::start(version, 0).await;

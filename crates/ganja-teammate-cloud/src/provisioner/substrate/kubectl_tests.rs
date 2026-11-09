@@ -140,12 +140,12 @@ async fn retiring_a_proxy_reaps_its_child_removes_the_entry_and_allows_a_fresh_s
 async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
     const MODE: &str = "GANJA_TEST_PROXY_ENV";
     let Ok(mode) = std::env::var(MODE) else {
-        for mode in ["record", "PATH", "HOME"] {
+        for mode in ["record", "PATH", "HOME", "relative PATH"] {
             let mut child =
                 std::process::Command::new(std::env::current_exe().expect("test executable"));
             child.env_clear()
                 .env(MODE, mode)
-                .env("PATH", "/trusted/plugin/bin")
+                .env("PATH", ".::relative:/trusted/plugin/bin:")
                 .env("HOME", "/trusted/home")
                 .env("GANJA_CLOUD_PASSWORD", "synthetic-password-canary")
                 .env("ANTHROPIC_API_KEY", "synthetic-provider-canary")
@@ -154,7 +154,9 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
                 .env("HTTP_PROXY", "synthetic-proxy-canary")
                 .env("KUBECONFIG", "/ambient/config")
                 .args(["--exact", "provisioner::substrate::kubectl::tests::proxy_child_receives_only_operator_paths_and_plugin_flags", "--nocapture"]);
-            if mode != "record" {
+            if mode == "relative PATH" {
+                child.env("PATH", ".::relative");
+            } else if mode != "record" {
                 child.env_remove(mode);
             }
             let output = child.output().expect("isolated environment fixture");
@@ -165,11 +167,13 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let args = directory.path().join("args");
     let env = directory.path().join("env");
+    let cwd = directory.path().join("cwd");
     let binary = executable(
         directory.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > '{}'\nunset PWD SHLVL _\n/usr/bin/env > '{}'\nprintf 'Proxying 127.0.0.1:12345 -> ganja/worker:80\\n' >&2\nexec /bin/sleep 60",
+            "printf '%s\\n' \"$@\" > '{}'\npwd > '{}'\nunset PWD SHLVL _\n/usr/bin/env > '{}'\nprintf 'Proxying 127.0.0.1:12345 -> ganja/worker:80\\n' >&2\nexec /bin/sleep 60",
             args.display(),
+            cwd.display(),
             env.display(),
         ),
     );
@@ -190,7 +194,7 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
             .await;
     if mode != "record" {
         let Err(error) = result else { panic!("missing {mode} must fail") };
-        assert_eq!(error.operation, mode);
+        assert_eq!(error.operation, if mode == "relative PATH" { "PATH" } else { &mode });
         assert_eq!(error.kind, ProvisionErrorKind::Refused);
         return;
     }
@@ -198,6 +202,7 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
     proxy.cancel.cancel();
     (&mut proxy.task).await.expect("reap fixture");
     let environment = std::fs::read_to_string(env).expect("recorded environment");
+    assert_eq!(std::fs::read_to_string(cwd).expect("recorded working directory").trim(), "/");
     // The shell sets `_`, and macOS injects its encoding variable at exec.
     // Neither comes from the command's explicit environment checked above.
     let mut names = environment

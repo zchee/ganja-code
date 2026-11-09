@@ -53,6 +53,7 @@ impl KubectlTunnel {
         if !executable.is_absolute() || !kubeconfig.is_absolute() {
             return Err(failure("proxy configuration", ProvisionErrorKind::Refused));
         }
+        tracing::warn!("kubectl proxy local ports cannot be token-protected by ganja");
         let trust = serving_trust(&client).await?;
         let channel = control_channel(client, &trust, api_service).await?;
         Ok(Self { channel, executable, kubeconfig, context, proxies: Mutex::new(BTreeMap::new()) })
@@ -143,12 +144,25 @@ fn proxy_command(
 ) -> Result<Command, ProvisionError> {
     let path =
         std::env::var_os("PATH").ok_or_else(|| failure("PATH", ProvisionErrorKind::Refused))?;
+    let directories =
+        std::env::split_paths(&path).filter(|entry| entry.is_absolute()).collect::<Vec<_>>();
+    if directories.is_empty() {
+        return Err(failure("PATH", ProvisionErrorKind::Refused));
+    }
+    let path = std::env::join_paths(directories)
+        .map_err(|_| failure("PATH", ProvisionErrorKind::Refused))?;
     let home =
         std::env::var_os("HOME").ok_or_else(|| failure("HOME", ProvisionErrorKind::Refused))?;
     let mut command = Command::new(executable);
     // Credential and kubectl plugins resolve through the operator's PATH and
     // HOME. Pinning kubectl does not pin these plugins; that trust is accepted.
-    command.env_clear().env("PATH", path).env("HOME", home).env("KUBECONFIG", kubeconfig);
+    // Absolute PATH entries and a neutral cwd keep the project out of discovery.
+    command
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", home)
+        .env("KUBECONFIG", kubeconfig);
     command.args(["ate", "proxy", "actor", &actor.name, "0:80"]);
     command.arg(format!("--atespace={}", actor.atespace));
     let mut config_flag = std::ffi::OsString::from("--kubeconfig=");

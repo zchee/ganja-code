@@ -60,9 +60,11 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   released `kubectl ate proxy actor` child, with `--kubeconfig=...` and optional
   `--context=...` after the plugin name; readiness is its own stderr line,
   never a probe connection, which would wake a suspended actor.
-  The child receives only operator-owned `PATH` and `HOME` plus the explicit
-  settings `KUBECONFIG`: credential and kubectl plugins resolve through those
-  trusted operator paths, so pinning kubectl does not pin plugin resolution.
+  The child receives only absolute entries from operator-owned `PATH`, `HOME`,
+  and the explicit settings `KUBECONFIG`, with `/` as its neutral working
+  directory; credential and kubectl plugins resolve through those trusted
+  paths, so pinning kubectl does not pin plugin resolution. Selecting this
+  mode warns that its local ports cannot be token-protected.
   The shared ingress requires a sensitive process-local token and admits only
   issued, unretired actors in the configured atespace. It consumes the token
   before forwarding one request per connection, bounded by `Content-Length`
