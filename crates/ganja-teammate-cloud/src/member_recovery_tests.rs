@@ -271,6 +271,7 @@ async fn an_owner_reported_revert_invalidates_before_any_explicit_resume() {
     assert_eq!(running.mail().len(), 2);
     assert!(!running.fixture.member.terminal.lock().expect("decisions").is_empty());
     let control = CloudControl(running.fixture.member.clone());
+    running.fixture.provisioner.owner_recover(&running.fixture.worker);
     control.report_external_revert().await;
     assert_eq!(control.phase(), Phase::Suspended);
     assert!(running.source.cursor().await.is_none(), "held checkpoint cursor was invalidated");

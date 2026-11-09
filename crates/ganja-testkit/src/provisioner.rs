@@ -10,8 +10,8 @@ pub use ganja_serve::ServeConfig;
 /// Bootstrap stage used by scripted initializer failures.
 pub use ganja_serve::bootstrap::Stage as BootstrapStage;
 use ganja_teammate_cloud::provisioner::{
-    Endpoint, ProvisionError, ProvisionErrorKind, Provisioner, Resumed, Worker, WorkerHandle,
-    WorkerSpec, WorkerState,
+    Endpoint, ProvisionError, ProvisionErrorKind, Provisioner, Resumed, SuspendOutcome, Worker,
+    WorkerHandle, WorkerSpec, WorkerState,
 };
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -189,15 +189,20 @@ impl Provisioner for FakeProvisioner {
         Ok(Resumed { was_suspended })
     }
 
-    async fn suspend(&self, worker: &Worker) -> Result<(), ProvisionError> {
+    async fn suspend(&self, worker: &Worker) -> Result<SuspendOutcome, ProvisionError> {
         self.before(ProvisionOperation::Suspend, worker.handle.as_str()).await?;
         let mut control = self.control.lock().expect("fake control lock");
         let state = control
             .workers
             .get_mut(worker.handle.as_str())
             .ok_or_else(|| failure(ProvisionOperation::Suspend, ProvisionErrorKind::Gone))?;
+        let outcome = if *state == WorkerState::Suspended {
+            SuspendOutcome::AlreadySuspended
+        } else {
+            SuspendOutcome::Suspended
+        };
         *state = WorkerState::Suspended;
-        Ok(())
+        Ok(outcome)
     }
 
     async fn state(&self, worker: &Worker) -> Result<WorkerState, ProvisionError> {

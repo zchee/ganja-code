@@ -21,7 +21,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::backend::Runtime;
 use crate::gate::{AttemptOutcome, Door, Drain, WorkerGate};
-use crate::provisioner::{Bootstrap, ProvisionErrorKind, Worker, WorkerState};
+use crate::provisioner::{Bootstrap, ProvisionErrorKind, SuspendOutcome, Worker, WorkerState};
 use crate::state::{LaunchFailure, Phase};
 use crate::trace::TraceLog;
 use crate::transport::{ClientSource, EventSource};
@@ -62,6 +62,7 @@ impl CloudControl {
     /// # Errors
     /// Returns a sanitized lifecycle failure, never an endpoint or credential.
     pub async fn resume_for_inspection(&self) -> Result<(), Unsupported> {
+        self.0.inspect_state().await.map_err(|reason| self.0.unsupported(reason))?;
         self.0.resume().await.map_err(|reason| self.0.unsupported(reason))
     }
 
@@ -81,14 +82,9 @@ impl CloudControl {
     /// Invalidates a checkpointed cursor before any request follows an owner-reported revert.
     pub async fn report_external_revert(&self) {
         let _transition = self.0.transition.lock().await;
-        self.0.gate.close();
-        if let Some(events) = &self.0.events {
-            events.invalidate().await;
-        }
-        self.0.terminal.lock().expect("terminal decision lock").clear();
-        self.0.needs_resync.store(true, Ordering::SeqCst);
-        self.0.set_phase(Phase::Suspended);
-        self.0.remember("external revert reported; cursor invalidated".to_owned());
+        self.0
+            .invalidate_history(Phase::Suspended, "external revert reported; cursor invalidated")
+            .await;
     }
 }
 
@@ -115,6 +111,7 @@ pub struct CloudMember {
     trace: Mutex<Option<TraceLog>>,
     epoch: Mutex<Option<String>>,
     needs_resync: AtomicBool,
+    observed_crash: AtomicBool,
 }
 
 impl fmt::Debug for CloudMember {
@@ -175,6 +172,7 @@ impl CloudMember {
             trace: Mutex::new(trace),
             epoch: Mutex::new(None),
             needs_resync: AtomicBool::new(false),
+            observed_crash: AtomicBool::new(false),
         })
     }
 
@@ -306,6 +304,59 @@ impl CloudMember {
         Ok(())
     }
 
+    async fn invalidate_history(&self, phase: Phase, reason: &str) {
+        self.gate.close();
+        if let Some(events) = &self.events {
+            events.invalidate().await;
+        }
+        self.terminal.lock().expect("terminal decision lock").clear();
+        self.needs_resync.store(true, Ordering::SeqCst);
+        self.set_phase(phase);
+        self.remember(reason.to_owned());
+    }
+
+    async fn inspect_state(&self) -> Result<(), &'static str> {
+        let _transition = self.transition.lock().await;
+        let state =
+            timeout(self.runtime.deadlines.launch, self.runtime.provisioner.state(&self.worker))
+                .await
+                .map_err(|_| "worker state lookup timed out")?
+                .map_err(|_| "worker state lookup failed")?;
+        match state {
+            WorkerState::Crashed => {
+                self.observed_crash.store(true, Ordering::SeqCst);
+                self.gate.close();
+                self.events()?.hold().await;
+                self.set_phase(Phase::RecoveryRequired);
+                Err("worker is crashed; inspect after owner recovery")
+            }
+            WorkerState::Gone => {
+                self.terminal_failure(Phase::Gone, "worker is gone").await;
+                Err("worker is gone")
+            }
+            WorkerState::Transitioning => Err("worker state is still transitioning"),
+            WorkerState::Running | WorkerState::Suspended => {
+                let recovered = self.observed_crash.swap(false, Ordering::SeqCst);
+                let changed = (state == WorkerState::Suspended && self.phase() != Phase::Suspended)
+                    || (state == WorkerState::Running && self.phase() == Phase::Suspended);
+                if recovered || changed {
+                    let phase = if state == WorkerState::Suspended {
+                        Phase::Suspended
+                    } else {
+                        Phase::RecoveryRequired
+                    };
+                    self.invalidate_history(
+                        phase,
+                        "external worker transition observed; cursor invalidated",
+                    )
+                    .await;
+                    return Err("worker history changed; resume explicitly after inspection");
+                }
+                Ok(())
+            }
+        }
+    }
+
     async fn resume(&self) -> Result<(), &'static str> {
         let _transition = self.transition.lock().await;
         if !self.alive.load(Ordering::SeqCst) {
@@ -322,8 +373,9 @@ impl CloudMember {
         }
         self.set_phase(Phase::Resuming);
         let result = timeout(self.runtime.deadlines.launch, async {
-            if let Err(error) = self.runtime.provisioner.resume(&self.worker).await {
-                match error.kind {
+            let resumed = match self.runtime.provisioner.resume(&self.worker).await {
+                Ok(resumed) => resumed,
+                Err(error) => match error.kind {
                     ProvisionErrorKind::Crashed => {
                         self.terminal_failure(
                             Phase::Crashed,
@@ -337,7 +389,15 @@ impl CloudMember {
                         return Err("worker is gone");
                     }
                     _ => return Err("worker resume failed"),
-                }
+                },
+            };
+            if resumed.was_suspended && recovering {
+                self.invalidate_history(
+                    Phase::RecoveryRequired,
+                    "unexpected suspended worker resumed; cursor invalidated",
+                )
+                .await;
+                return Err("worker history changed; resume explicitly after inspection");
             }
             let events = self.events()?;
             self.gate.open_stream();
@@ -432,9 +492,16 @@ impl CloudMember {
         )
         .await
         {
-            Ok(Ok(())) => {
+            Ok(Ok(SuspendOutcome::Suspended)) => {
                 self.set_phase(Phase::Suspended);
                 self.remember("suspended".to_owned());
+            }
+            Ok(Ok(SuspendOutcome::AlreadySuspended)) => {
+                self.invalidate_history(
+                    Phase::Suspended,
+                    "worker was already suspended; cursor invalidated",
+                )
+                .await;
             }
             Ok(Err(_)) | Err(_) => {
                 self.reopen();

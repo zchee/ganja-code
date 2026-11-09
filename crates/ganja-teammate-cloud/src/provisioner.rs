@@ -128,6 +128,15 @@ pub struct Resumed {
     pub was_suspended: bool,
 }
 
+/// A confirmed suspension and whether the caller caused the transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuspendOutcome {
+    /// This call changed the worker to suspended.
+    Suspended,
+    /// The worker was suspended before this call.
+    AlreadySuspended,
+}
+
 /// What a provider failure means to the lifecycle caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProvisionErrorKind {
@@ -173,7 +182,7 @@ pub trait Provisioner: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     /// An unconfirmed operation is an error, never a suspended claim.
-    async fn suspend(&self, worker: &Worker) -> Result<(), ProvisionError>;
+    async fn suspend(&self, worker: &Worker) -> Result<SuspendOutcome, ProvisionError>;
 
     /// Reads the authoritative state without waking the worker.
     ///

@@ -40,6 +40,15 @@ async fn creation_returns_suspended_and_delete_accepts_running_workers() {
     assert_eq!(provisioner.current(&worker), WorkerState::Suspended);
     assert!(provisioner.resume(&worker).await.expect("resume").was_suspended);
     assert!(!provisioner.resume(&worker).await.expect("resume again").was_suspended);
+    assert_eq!(
+        provisioner.suspend(&worker).await.expect("suspend"),
+        ganja_teammate_cloud::provisioner::SuspendOutcome::Suspended
+    );
+    assert_eq!(
+        provisioner.suspend(&worker).await.expect("suspend again"),
+        ganja_teammate_cloud::provisioner::SuspendOutcome::AlreadySuspended
+    );
+    provisioner.resume(&worker).await.expect("running before delete");
     provisioner.kill(&worker).await.expect("delete running");
     assert_eq!(provisioner.state(&worker).await.expect("state"), WorkerState::Gone);
     assert!(provisioner.spawn(&spec).await.is_err(), "an old identity must not be reused");

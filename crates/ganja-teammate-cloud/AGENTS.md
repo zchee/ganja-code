@@ -29,6 +29,10 @@ Launch and cleanup have finite independent deadlines. A failed or ambiguous
 mutation is reconciled, never resent blindly. One terminal decision and one mail
 per assistant message id apply across storage reads and the fresh stream.
 
+Owner-reported reverts and contradictory lifecycle observations invalidate the
+held cursor before reconnect. An unannounced revert with no such observation is
+unsupported; snapshot fields and cursor ordering cannot identify one.
+
 ## Code and tests
 
 - `src/provisioner.rs`: lifecycle types and trait.

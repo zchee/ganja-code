@@ -53,10 +53,19 @@ impl Provisioner for TestProvisioner {
         *state = WorkerState::Running;
         Ok(crate::provisioner::Resumed { was_suspended })
     }
-    async fn suspend(&self, _worker: &Worker) -> Result<(), crate::provisioner::ProvisionError> {
+    async fn suspend(
+        &self,
+        _worker: &Worker,
+    ) -> Result<crate::provisioner::SuspendOutcome, crate::provisioner::ProvisionError> {
         self.suspended.fetch_add(1, Ordering::SeqCst);
-        *self.state.lock().expect("state") = WorkerState::Suspended;
-        Ok(())
+        let mut state = self.state.lock().expect("state");
+        let outcome = if *state == WorkerState::Suspended {
+            crate::provisioner::SuspendOutcome::AlreadySuspended
+        } else {
+            crate::provisioner::SuspendOutcome::Suspended
+        };
+        *state = WorkerState::Suspended;
+        Ok(outcome)
     }
     async fn state(
         &self,
@@ -81,6 +90,7 @@ struct QuietSource {
     changed: Notify,
     hold_started: Notify,
     hold_release: Mutex<Option<Arc<Notify>>>,
+    invalidations: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -117,6 +127,7 @@ impl EventSource for QuietSource {
         self.held.store(false, Ordering::SeqCst);
     }
     async fn invalidate(&self) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
         self.hold().await;
     }
     async fn cursor(&self) -> Option<EventId> {
@@ -217,6 +228,7 @@ impl Fixture {
             changed: Notify::new(),
             hold_started: Notify::new(),
             hold_release: Mutex::new(None),
+            invalidations: std::sync::atomic::AtomicUsize::new(0),
         });
         Arc::get_mut(&mut member).expect("unique member").events = Some(source.clone());
         member.set_phase(Phase::Idle);
@@ -229,6 +241,71 @@ impl Fixture {
     fn suspends(&self) -> usize {
         self.provisioner.suspended.load(Ordering::SeqCst)
     }
+}
+
+#[tokio::test]
+async fn an_already_suspended_result_invalidates_history_without_reconnecting() {
+    let fixture = Fixture::new().await;
+    fixture.provisioner.owner_recover(&fixture.worker);
+    fixture.member.quiesce().await;
+    assert_eq!(fixture.member.phase(), Phase::Suspended);
+    assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 1);
+    assert!(fixture.member.needs_resync.load(Ordering::SeqCst));
+    assert!(!fixture.member.gate.state().stream_open);
+    assert!(!fixture.member.gate.state().rest_open);
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Suspended);
+}
+
+#[tokio::test]
+async fn inspection_of_an_external_suspend_invalidates_without_waking_the_worker() {
+    let fixture = Fixture::new().await;
+    fixture.provisioner.owner_recover(&fixture.worker);
+    let control = CloudControl(fixture.member.clone());
+    assert!(control.resume_for_inspection().await.is_err());
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Suspended);
+    assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.member.phase(), Phase::Suspended);
+    assert!(fixture.member.needs_resync.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_crashed_state_followed_by_external_recovery_invalidates_before_reconnect() {
+    let fixture = Fixture::new().await;
+    let control = CloudControl(fixture.member.clone());
+    *fixture.provisioner.state.lock().expect("state") = WorkerState::Crashed;
+    assert!(control.resume_for_inspection().await.is_err());
+    assert!(fixture.member.observed_crash.load(Ordering::SeqCst));
+    assert!(!fixture.member.gate.state().stream_open);
+    *fixture.provisioner.state.lock().expect("state") = WorkerState::Running;
+    assert!(control.resume_for_inspection().await.is_err());
+    assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 1);
+    assert!(fixture.member.needs_resync.load(Ordering::SeqCst));
+    assert!(!fixture.member.observed_crash.load(Ordering::SeqCst));
+    assert_eq!(fixture.member.phase(), Phase::RecoveryRequired);
+}
+
+#[tokio::test]
+async fn an_unexpected_resumed_transition_keeps_uncertainty_and_requires_new_inspection() {
+    let fixture = Fixture::new().await;
+    fixture.member.gate.admit(Door::Rest).expect("open").finish(AttemptOutcome::Uncertain);
+    fixture.member.set_phase(Phase::RecoveryRequired);
+    fixture.provisioner.owner_recover(&fixture.worker);
+    assert!(fixture.member.resume().await.is_err());
+    assert!(fixture.member.needs_resync.load(Ordering::SeqCst));
+    assert!(fixture.member.gate.state().uncertain);
+    assert!(!fixture.member.gate.state().stream_open);
+    assert_eq!(fixture.member.phase(), Phase::RecoveryRequired);
+    assert_eq!(
+        fixture
+            .member
+            .recent
+            .lock()
+            .expect("recent")
+            .iter()
+            .filter(|row| row.contains("unexpected suspended"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
