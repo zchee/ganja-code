@@ -274,7 +274,7 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
     std::fs::create_dir(&config).expect("config directory");
     std::fs::write(config.join("ganja.toml"), "model = \"fake/worker-template-model\"\n")
         .expect("template configuration");
-    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}${GIT_CONFIG_GLOBAL+x}${GIT_SSL_CAINFO+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
+    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
     std::fs::write(&script, serde_json::json!({"turns": [
         {"text": "checking environment", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
         {"text": "worker-template-script-finished"}
@@ -353,6 +353,85 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
             .contains("worker-template-script-finished")
     );
     assert!(data.join("ganja").is_dir(), "template data home was used");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn the_served_workers_tools_keep_the_git_policy_and_ca_paths() {
+    let server = GitServer::start(false).await;
+    let template = tempfile::tempdir().expect("worker template");
+    let gitconfig = template.path().join("gitconfig");
+    let ca = template.path().join("ca.pem");
+    let script = template.path().join("turns.json");
+    std::fs::write(
+        &gitconfig,
+        "[commit]\ngpgsign = false\n[ganja-test]\nmarker = worker-git-policy\n",
+    )
+    .expect("git policy with marker");
+    std::fs::copy(&server.ca, &ca).expect("projected CA bundle");
+    let command = "printf '%s\\n%s\\n' \"$GIT_CONFIG_GLOBAL\" \"$GIT_SSL_CAINFO\" > git-environment.txt; git config --get ganja-test.marker >> git-environment.txt";
+    std::fs::write(&script, serde_json::json!({"turns": [
+        {"text": "checking git policy", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
+        {"text": "git-policy-check-finished"}
+    ]}).to_string()).expect("template script");
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[
+            ("GIT_CONFIG_GLOBAL", gitconfig.to_str().expect("git config path")),
+            ("GIT_SSL_CAINFO", ca.to_str().expect("CA path")),
+            ("GANJA_PROVIDER", "fake"),
+            ("GANJA_FAKE_SCRIPT", script.to_str().expect("script path")),
+        ],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/git-environment".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let health = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(health) = worker.client.health().await {
+                break health;
+            }
+            assert!(worker.is_alive(), "served worker remains alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("served worker health");
+    let mut events = worker.client.events().await.expect("events");
+    worker
+        .client
+        .prompt(&health.session_id, &Prompt::new("check git environment"))
+        .await
+        .expect("prompt");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(
+                events.next().await.expect("stream open").expect("event"),
+                Event::MessageFinished { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("scripted turn finishes");
+    assert_eq!(
+        std::fs::read_to_string(worker.work.join("git-environment.txt")).expect("git tool output"),
+        format!("{}\n{}\nworker-git-policy\n", gitconfig.display(), ca.display()),
+        "the engine's bash tool keeps both paths and git reads the template policy"
+    );
     drop(worker);
     server.close().await;
 }
