@@ -1534,6 +1534,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ganja-teammate-cloud"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ganja-client",
+ "ganja-core",
+ "ganja-protocol",
+ "ganja-team",
+ "ganja-testkit",
+ "http",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "ganja-teammate-local"
 version = "0.1.0"
 dependencies = [
@@ -1564,6 +1585,7 @@ dependencies = [
  "futures",
  "ganja-core",
  "ganja-protocol",
+ "ganja-teammate-cloud",
  "ganja-teammate-local",
  "ganja-tool",
  "schemars",

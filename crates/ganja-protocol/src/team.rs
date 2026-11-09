@@ -1314,6 +1314,8 @@ pub enum MemberBackend {
     Agy,
     /// A headless `grok` child, driven one turn per message (**D508**).
     Grok,
+    /// A hosted worker reached through the resumable engine transport.
+    Cloud,
 }
 
 /// One member of a team, as a reader of the team sees it.

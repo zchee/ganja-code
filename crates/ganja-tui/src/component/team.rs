@@ -169,9 +169,11 @@ const fn shares_the_list(backend: MemberBackend) -> bool {
         MemberBackend::InProcess | MemberBackend::Ganja => true,
         // Claude Code keeps its task list inside its own process, and the
         // three foreign CLIs hold no ganja tools at all.
-        MemberBackend::Claude | MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok => {
-            false
-        }
+        MemberBackend::Claude
+        | MemberBackend::Codex
+        | MemberBackend::Agy
+        | MemberBackend::Grok
+        | MemberBackend::Cloud => false,
     }
 }
 
@@ -990,6 +992,7 @@ fn backend_label(backend: MemberBackend) -> &'static str {
         MemberBackend::Codex => "codex",
         MemberBackend::Agy => "agy",
         MemberBackend::Grok => "grok",
+        MemberBackend::Cloud => "cloud",
     }
 }
 

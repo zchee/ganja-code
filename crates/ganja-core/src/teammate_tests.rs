@@ -16,6 +16,14 @@ use crate::permission::Permissions;
 use crate::provider::FakeProvider;
 use crate::tool::Registry as Tools;
 
+#[test]
+fn cloud_is_a_named_backend_with_no_foreign_cli_posture() {
+    assert_eq!(super::parse_backend("cloud").expect("cloud backend"), MemberBackend::Cloud);
+    assert_eq!(super::backend_name(MemberBackend::Cloud), "cloud");
+    assert!(super::BACKENDS.contains(&"cloud"));
+    assert_eq!(super::posture_line(MemberBackend::Cloud), None);
+}
+
 /// Why [`Never`] refuses.
 pub(crate) const NEVER: &str = "this door spawns nothing";
 

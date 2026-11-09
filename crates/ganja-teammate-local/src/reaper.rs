@@ -325,7 +325,9 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
                 // in-process for a headless one). Written out rather than folded
                 // into a wildcard so that a fifth surface still has to decide
                 // what a pane sweep does with it.
-                Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
+                Surface::Leader | Surface::InProcess | Surface::Cloud | Surface::Shim { .. } => {
+                    None
+                }
             }
         })
         .collect();

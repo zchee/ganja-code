@@ -584,7 +584,7 @@ impl Inbox {
             // `%N`), so the `Shim` arm is unreachable here — but that path
             // belongs to the shim runtime's own teardown, not to this frontend,
             // so nothing routes such a member through here anyway.
-            Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
+            Surface::Leader | Surface::InProcess | Surface::Cloud | Surface::Shim { .. } => None,
         };
         let approved = Frame::ShutdownApproved(ShutdownApproved {
             request_id: request_id.to_owned(),

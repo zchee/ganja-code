@@ -6,7 +6,7 @@ Upstream's TypeScript is the specification, not source to translate: write idiom
 
 ## Workspace map
 
-Fourteen members under `crates/`, each with its own `AGENTS.md`. Dependency direction is one-way and gated by `depgate.toml`; `crates/AGENTS.md` states the graph.
+Fifteen members under `crates/`, each with its own `AGENTS.md`. Dependency direction is one-way and gated by `depgate.toml`; `crates/AGENTS.md` states the graph.
 
 | Crate | Role |
 |---|---|
@@ -17,6 +17,7 @@ Fourteen members under `crates/`, each with its own `AGENTS.md`. Dependency dire
 | `ganja-provider` | Vendor wires, credentials and logins, the model catalog. |
 | `ganja-storage` | The SQLite session store and working-tree snapshots for `/undo` and `/rewind`. |
 | `ganja-core` | The engine: sessions, the agent loop, config, hooks, MCP, LSP, plugins, teammates. No terminal or HTTP-server dependency. |
+| `ganja-teammate-cloud` | Hosted teammate lifecycle and vendor-neutral provisioners. Above the engine; `ganja-serve` never links it. |
 | `ganja-teammate-local` | tmux-pane and foreign-CLI teammate backends. Above the engine; `ganja-serve` never links it. |
 | `ganja-tui` | The ratatui frontend. Every pixel, no engine logic. |
 | `ganja-serve` | The engine over HTTP + SSE, plus the per-session Unix socket. |

@@ -196,7 +196,13 @@ pub fn answers_clause(backend: MemberBackend, road: Road) -> Option<&'static str
          — so put the whole of it in your last message";
 
     match (backend, road) {
-        (MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude, _) => None,
+        (
+            MemberBackend::InProcess
+            | MemberBackend::Ganja
+            | MemberBackend::Claude
+            | MemberBackend::Cloud,
+            _,
+        ) => None,
         (MemberBackend::Codex, _) => Some(EVERY),
         (MemberBackend::Grok, _) | (MemberBackend::Agy, Road::Headless) => Some(FINAL),
         (MemberBackend::Agy, Road::Pane) => Some(EVERY),

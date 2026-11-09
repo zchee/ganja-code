@@ -83,6 +83,9 @@ pub const BACKEND_AGY: &str = "agy";
 /// `backendType` for a member driven as a headless `grok` child.
 pub const BACKEND_GROK: &str = "grok";
 
+/// `backendType` for a hosted worker, with no local tmux pane.
+pub const BACKEND_CLOUD: &str = "cloud";
+
 /// The `tmuxPaneId` a lead's record carries instead of a pane id (§2.2).
 pub const PANE_LEADER: &str = "leader";
 
@@ -116,6 +119,9 @@ pub enum Surface {
     Leader,
     /// A teammate running inside the lead's process.
     InProcess,
+    /// A hosted teammate. It writes the in-process pane sentinel so old readers
+    /// cannot mistake a remote worker identity for a local pane to operate on.
+    Cloud,
     /// A teammate with a pane of its own.
     Pane {
         /// The `%N` tmux gave it.
@@ -221,7 +227,7 @@ impl Surface {
     pub fn tmux_pane_id(&self) -> &str {
         match self {
             Self::Leader => PANE_LEADER,
-            Self::InProcess | Self::Shim { pane: None, .. } => PANE_IN_PROCESS,
+            Self::InProcess | Self::Cloud | Self::Shim { pane: None, .. } => PANE_IN_PROCESS,
             Self::Pane { id } | Self::Shim { pane: Some(id), .. } => id,
         }
     }
@@ -241,6 +247,7 @@ impl Surface {
         match self {
             Self::Leader | Self::InProcess => BACKEND_IN_PROCESS,
             Self::Pane { .. } => BACKEND_TMUX,
+            Self::Cloud => BACKEND_CLOUD,
             Self::Shim { cli, .. } => cli.backend_type(),
         }
     }

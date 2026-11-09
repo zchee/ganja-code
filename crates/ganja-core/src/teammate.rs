@@ -359,7 +359,7 @@ impl Teammate {
 /// lists these six. An alias would have been a second spelling of one surface
 /// living in the grammar forever, where a refusal that names the list teaches
 /// the new word once.
-pub const BACKENDS: [&str; 6] = ["in-process", "ganja", "claude", "codex", "agy", "grok"];
+pub const BACKENDS: [&str; 7] = ["in-process", "ganja", "claude", "codex", "agy", "grok", "cloud"];
 
 /// What a door spawns when nobody named a backend (**D501**, amended by
 /// **Dv-1**).
@@ -564,6 +564,7 @@ pub fn parse_backend(value: &str) -> Result<MemberBackend, UnknownBackend> {
         "codex" => Ok(MemberBackend::Codex),
         "agy" => Ok(MemberBackend::Agy),
         "grok" => Ok(MemberBackend::Grok),
+        "cloud" => Ok(MemberBackend::Cloud),
         other => Err(UnknownBackend { value: other.to_owned() }),
     }
 }
@@ -581,6 +582,7 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
         MemberBackend::Codex => BACKENDS[3],
         MemberBackend::Agy => BACKENDS[4],
         MemberBackend::Grok => BACKENDS[5],
+        MemberBackend::Cloud => BACKENDS[6],
     }
 }
 
@@ -620,7 +622,10 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 #[must_use]
 pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
     match backend {
-        MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => None,
+        MemberBackend::InProcess
+        | MemberBackend::Ganja
+        | MemberBackend::Claude
+        | MemberBackend::Cloud => None,
         MemberBackend::Agy => Some(POSTURE_AGY),
         MemberBackend::Codex => Some(POSTURE_CODEX),
         MemberBackend::Grok => Some(POSTURE_GROK),

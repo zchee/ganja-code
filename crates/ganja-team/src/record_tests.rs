@@ -29,6 +29,30 @@ const TEAMMATE_ORDER: &str = "{\n  \"agentId\": \"demo-worker-1@session-224cbeab
          \"planModeRequired\": false,\n  \"cwd\": \"/w\",\n  \"backendType\": \"tmux\",\n  \
          \"isActive\": true\n}";
 
+#[test]
+fn a_cloud_record_never_looks_like_a_local_pane_to_an_old_reader() {
+    let name = MemberName::parse("cloud-worker").expect("a valid member name");
+    let record = MemberRecord::teammate(
+        &name,
+        &team(),
+        Spawn {
+            agent_type: "general-purpose".to_owned(),
+            model: "fake".to_owned(),
+            color: "blue".to_owned(),
+            prompt: "work".to_owned(),
+            plan_mode_required: false,
+            surface: Surface::Cloud,
+            cwd: "/work".to_owned(),
+        },
+        1,
+    );
+    let bytes = document(&record).expect("cloud record encodes");
+    assert!(bytes.contains("\"backendType\": \"cloud\""), "{bytes}");
+    assert!(bytes.contains("\"tmuxPaneId\": \"in-process\""), "{bytes}");
+    let decoded: MemberRecord = serde_json::from_str(&bytes).expect("old record shape decodes");
+    assert_eq!(decoded.surface(), Surface::InProcess);
+}
+
 fn worker() -> MemberRecord {
     let name = MemberName::parse("demo-worker-1").expect("a valid member name");
 

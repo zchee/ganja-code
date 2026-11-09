@@ -442,7 +442,10 @@ const PANE_GROK: &str = "grok asks you in the pane before a shell command that w
 #[must_use]
 pub fn pane_line(backend: MemberBackend) -> Option<String> {
     let own = match backend {
-        MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => return None,
+        MemberBackend::InProcess
+        | MemberBackend::Ganja
+        | MemberBackend::Claude
+        | MemberBackend::Cloud => return None,
         MemberBackend::Codex => PANE_CODEX,
         MemberBackend::Agy => PANE_AGY,
         MemberBackend::Grok => PANE_GROK,

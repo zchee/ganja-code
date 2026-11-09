@@ -2,7 +2,7 @@
 
 # crates
 
-The fourteen workspace members. The split is architectural: what each crate may depend on is a fact the compiler and `cargo depgate check` verify, not a rule a reviewer remembers.
+The fifteen workspace members. The split is architectural: what each crate may depend on is a fact the compiler and `cargo depgate check` verify, not a rule a reviewer remembers.
 
 ## Graph
 
@@ -14,6 +14,7 @@ ganja-cli ──► ganja-tui ──► ganja-teammate-local ──► ganja-cor
     │             └──────────────────────────────────────┤              └──► ganja-protocol                │
     ├──► ganja-serve ──► ganja-core                      ├──► ganja-storage ──► ganja-permission, ganja-protocol
     └──► ganja-client ──► ganja-protocol                 └──► ganja-team ──► ganja-protocol
+ganja-teammate-cloud ──► ganja-client, ganja-core
 tmux            (sealed leaf: no edge in either direction)
 ganja-testkit   (dev-dependency only; no shipped binary links it)
 ```
@@ -23,7 +24,9 @@ ganja-testkit   (dev-dependency only; no shipped binary links it)
 | deny | `ganja-core` | no `ratatui*`, no `axum*` |
 | deny | `ganja-provider` | no `ratatui*`, `crossterm*`, `arboard*` |
 | deny | `ganja-tui` | no `axum*` |
-| deny | `ganja-serve` | no `ratatui*`, no `ganja-teammate-local` |
+| deny | `ganja-serve` | no `ratatui*`, no `ganja-teammate-local`, no `ganja-teammate-cloud` |
+| deny | `ganja-teammate-cloud` | no `axum*`, no `ratatui*` |
+| internal | `ganja-teammate-cloud` | exactly client, core plus the six beneath core |
 | deny | `ganja-client` | no `axum*` |
 | internal | `ganja-core` | exactly permission, protocol, provider, storage, team, tool |
 | internal | `ganja-provider` | exactly permission, protocol, tool |
