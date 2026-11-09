@@ -1,6 +1,7 @@
 //! The worker listens before assembling an engine. A completed checkout is the
 //! process handoff boundary, so project discovery and snapshots see a real repo.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,6 +36,8 @@ const SERVE_ENVIRONMENT: [&str; 11] = [
 #[derive(Debug, Subcommand)]
 pub(crate) enum Action {
     /// Listen for a bounded checkout request, then replace this process with serve.
+    /// Announces the bound address on stdout, including an OS-selected port when
+    /// port zero is requested; the replacement server keeps that same port.
     Init(InitArgs),
 }
 
@@ -73,6 +76,9 @@ pub(crate) async fn run(action: Action) -> Result<()> {
         .serve(listener)
         .context("failed to serve worker initialization")?;
     let port = handle.address().port();
+    writeln!(std::io::stdout(), "ganja server listening on http://0.0.0.0:{port}")
+        .context("failed to write the address line")?;
+    std::io::stdout().flush().context("failed to flush the address line")?;
     tokio::select! {
         result = handle.handoff() => { result.context("worker initialization failed before handoff")?; }
         result = shutdown_signal() => {
