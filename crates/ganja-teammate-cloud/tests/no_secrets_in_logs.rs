@@ -60,7 +60,9 @@ fn wrapper_formatting_is_redacted() {
 }
 
 /// A Kubernetes control plane whose every credential and failure body is a canary.
-async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::JoinHandle<()>) {
+async fn canary_kubernetes(
+    deny_token: bool,
+) -> (kube::Client, tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicUsize>) {
     use axum::extract::{Request, State};
 
     let ca_key = rcgen::KeyPair::generate().expect("fixture CA key");
@@ -69,7 +71,11 @@ async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::Join
     let ca_pem = ca_params.self_signed(&ca_key).expect("fixture CA").pem();
 
     async fn answer(
-        State((ca_pem, deny_token)): State<(String, bool)>,
+        State((ca_pem, deny_token, denied_reads)): State<(
+            String,
+            bool,
+            Arc<std::sync::atomic::AtomicUsize>,
+        )>,
         request: Request,
     ) -> (http::StatusCode, axum::Json<serde_json::Value>) {
         let path = request.uri().path().to_owned();
@@ -111,13 +117,18 @@ async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::Join
         }
         if path.contains("/podcertificaterequests") {
             if request.method() == http::Method::POST {
-                let mut object: serde_json::Value = serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":"ganja-denied","namespace":"ate-system"}});
-                object["status"] = serde_json::json!({"conditions":[{"type":"Denied","status":"True","message":KEY}]});
+                let bytes = axum::body::to_bytes(request.into_body(), 65536)
+                    .await
+                    .expect("certificate request body");
+                let object: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("certificate request JSON");
                 return (http::StatusCode::CREATED, axum::Json(object));
             }
             if request.method() == http::Method::GET {
+                denied_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let name = path.rsplit('/').next().expect("requested certificate name");
                 return body(
-                    serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":"ganja-denied","namespace":"ate-system"},"status":{"conditions":[{"type":"Denied","status":"True","message":KEY}]}}),
+                    serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":name,"namespace":"ate-system"},"status":{"conditions":[{"type":"Denied","status":"True","message":KEY,"reason":TOKEN}]}}),
                 );
             }
             return body(serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Success"}));
@@ -133,14 +144,19 @@ async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::Join
     let listener =
         tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("fake Kubernetes listener");
     let address = listener.local_addr().expect("fake Kubernetes address");
-    let router = axum::Router::new().fallback(answer).with_state((ca_pem, deny_token));
+    let denied_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let router = axum::Router::new().fallback(answer).with_state((
+        ca_pem,
+        deny_token,
+        Arc::clone(&denied_reads),
+    ));
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve fake Kubernetes");
     });
     let config = kube::Config::new(format!("http://{address}").parse().expect("loopback URI"));
     let client = ganja_teammate_cloud::provisioner::substrate::kube::client_from_config(config)
         .expect("fixture client");
-    (client, server)
+    (client, server, denied_reads)
 }
 
 /// The kube/ateapi half: ganja's formatting and shipped filters redact credentials.
@@ -148,17 +164,27 @@ async fn substrate_credentials_are_redacted() {
     use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
     use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
 
-    let (client, server) = canary_kubernetes(false).await;
+    let (client, server, denied_reads) = canary_kubernetes(false).await;
     let identity = AteapiIdentity::new(client.clone()).await.expect("canary bearer issued");
     let request = identity.authorize(()).await.expect("authorized control request");
     assert_redacted(&format!("{identity:?} {:?}", request.metadata()));
 
     // Denied router issuance carries the key canary in its condition message.
-    let denied = KubeTunnel::connect(client).await.expect_err("denied router identity");
+    let denied = tokio::time::timeout(Duration::from_secs(2), KubeTunnel::connect(client))
+        .await
+        .expect("the denial condition fails immediately")
+        .expect_err("denied router identity");
+    assert_eq!(denied.kind, ProvisionErrorKind::Refused);
+    assert_eq!(denied.operation, "router certificate");
+    assert_eq!(
+        denied_reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the canary-bearing Denied condition was fetched"
+    );
     assert_redacted(&format!("{denied:?} {denied}"));
     server.abort();
 
-    let (client, server) = canary_kubernetes(true).await;
+    let (client, server, _) = canary_kubernetes(true).await;
     let refused = AteapiIdentity::new(client).await.expect_err("denied bearer issuance");
     assert_redacted(&format!("{refused:?} {refused}"));
     server.abort();
