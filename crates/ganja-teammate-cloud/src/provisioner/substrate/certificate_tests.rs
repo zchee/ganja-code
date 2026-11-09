@@ -83,8 +83,8 @@ async fn handshake(server_name: &'static str, correct_trust: bool) -> bool {
 }
 
 #[tokio::test]
-async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+async fn shared_certificate_renewal_preserves_timeout_failure_and_expiry_boundaries() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use axum::Json;
     use axum::body::Bytes;
@@ -102,6 +102,7 @@ async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
         release: Notify,
         creates: AtomicUsize,
         deletes: AtomicUsize,
+        deny: AtomicBool,
     }
     async fn answer(
         State(state): State<Arc<IssuerState>>,
@@ -126,6 +127,9 @@ async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
                 vec![SanType::URI(IDENTITY.try_into().expect("URI"))];
             let certificate = request.signed_by(&state.issuer).expect("issue certificate");
             object["status"] = json!({"conditions":[{"type":"Issued","status":"True"}],"certificateChain":format!("{}{}",certificate.pem(),state.ca)});
+            if state.deny.load(Ordering::SeqCst) {
+                object["status"] = json!({"conditions":[{"type":"Denied","status":"True"}]});
+            }
             *state.object.lock().expect("object") = object.clone();
             return Json(object);
         }
@@ -149,6 +153,7 @@ async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
         release: Notify::new(),
         creates: AtomicUsize::new(0),
         deletes: AtomicUsize::new(0),
+        deny: AtomicBool::new(false),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let address = listener.local_addr().expect("address");
@@ -183,6 +188,71 @@ async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
         .expect("next connection deadline")
         .expect("completed shared certificate");
     assert_eq!(state.creates.load(Ordering::SeqCst), 1);
+    let cached = identity.current.lock().await.as_ref().expect("issued cache").config.clone();
+    state.deny.store(true, Ordering::SeqCst);
+    for expired in [false, true] {
+        // Certificate validity uses wall time, not Tokio's paused timer clock.
+        let expiry =
+            if expired { UNIX_EPOCH } else { SystemTime::now() + Duration::from_secs(3600) };
+        {
+            let mut current = identity.current.lock().await;
+            let current = current.as_mut().expect("cache");
+            current.refresh_at = UNIX_EPOCH;
+            current.expires_at = expiry;
+        }
+        let waiters = [0, 1].map(|_| {
+            let identity = Arc::clone(&identity);
+            tokio::spawn(async move { identity.config().await })
+        });
+        tokio::time::timeout(Duration::from_secs(3), state.entered.notified())
+            .await
+            .expect("renewal pending");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let count = identity
+                    .renewal
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(Shared::strong_count)
+                    .unwrap_or(0);
+                if count >= 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both callers share the pending renewal");
+        assert!(waiters.iter().all(|waiter| !waiter.is_finished()));
+        let expected_creates = if expired { 3 } else { 2 };
+        assert_eq!(state.creates.load(Ordering::SeqCst), expected_creates);
+        state.release.notify_one();
+        for waiter in waiters {
+            let result = waiter.await.expect("renewal waiter");
+            if expired {
+                assert_eq!(
+                    result.expect_err("expired cache must not be returned").kind,
+                    ProvisionErrorKind::Refused
+                );
+            } else {
+                assert!(Arc::ptr_eq(&result.expect("valid fallback"), &cached));
+            }
+        }
+        assert_eq!(identity.current.lock().await.as_ref().expect("cache").expires_at, expiry);
+    }
+    state.deny.store(false, Ordering::SeqCst);
+    let retry = {
+        let identity = Arc::clone(&identity);
+        tokio::spawn(async move { identity.config().await })
+    };
+    tokio::time::timeout(Duration::from_secs(3), state.entered.notified())
+        .await
+        .expect("a fresh renewal follows failure");
+    assert_eq!(state.creates.load(Ordering::SeqCst), 4);
+    state.release.notify_one();
+    let renewed = retry.await.expect("retry task").expect("successful retry");
+    assert!(!Arc::ptr_eq(&renewed, &cached));
     server.abort();
 }
 
