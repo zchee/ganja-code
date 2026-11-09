@@ -59,6 +59,122 @@ fn wrapper_formatting_is_redacted() {
     }
 }
 
+/// A Kubernetes control plane whose every credential and failure body is a canary.
+async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::JoinHandle<()>) {
+    use axum::extract::{Request, State};
+
+    let ca_key = rcgen::KeyPair::generate().expect("fixture CA key");
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_pem = ca_params.self_signed(&ca_key).expect("fixture CA").pem();
+
+    async fn answer(
+        State((ca_pem, deny_token)): State<(String, bool)>,
+        request: Request,
+    ) -> (http::StatusCode, axum::Json<serde_json::Value>) {
+        let path = request.uri().path().to_owned();
+        let body = |value| (http::StatusCode::OK, axum::Json(value));
+        if path == "/apis/certificates.k8s.io/v1" {
+            return body(
+                serde_json::json!({"apiVersion":"v1","kind":"APIResourceList","groupVersion":"certificates.k8s.io/v1","resources":[
+                    {"name":"clustertrustbundles","kind":"ClusterTrustBundle","namespaced":false,"verbs":["list"]},
+                    {"name":"podcertificaterequests","kind":"PodCertificateRequest","namespaced":true,"verbs":["create","get","delete"]}
+                ]}),
+            );
+        }
+        if path == "/api/v1/namespaces/ate-users/serviceaccounts/ganja/token" {
+            if deny_token {
+                return (
+                    http::StatusCode::FORBIDDEN,
+                    axum::Json(
+                        serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":TOKEN}),
+                    ),
+                );
+            }
+            let expiry = jiff::Timestamp::now()
+                .checked_add(std::time::Duration::from_secs(3600))
+                .expect("expiry")
+                .to_string();
+            return (
+                http::StatusCode::CREATED,
+                axum::Json(
+                    serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","metadata":{},"status":{"token":TOKEN,"expirationTimestamp":expiry}}),
+                ),
+            );
+        }
+        if path.ends_with("/clustertrustbundles") {
+            return body(
+                serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"ClusterTrustBundleList","metadata":{},"items":[
+                    {"apiVersion":"certificates.k8s.io/v1","kind":"ClusterTrustBundle","metadata":{"name":"serving"},"spec":{"signerName":"servicedns.podcert.ate.dev/identity","trustBundle":ca_pem}}
+                ]}),
+            );
+        }
+        if path.contains("/podcertificaterequests") {
+            if request.method() == http::Method::POST {
+                let mut object: serde_json::Value = serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":"ganja-denied","namespace":"ate-system"}});
+                object["status"] = serde_json::json!({"conditions":[{"type":"Denied","status":"True","message":KEY}]});
+                return (http::StatusCode::CREATED, axum::Json(object));
+            }
+            if request.method() == http::Method::GET {
+                return body(
+                    serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":"ganja-denied","namespace":"ate-system"},"status":{"conditions":[{"type":"Denied","status":"True","message":KEY}]}}),
+                );
+            }
+            return body(serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Success"}));
+        }
+        (
+            http::StatusCode::NOT_FOUND,
+            axum::Json(
+                serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":KEY}),
+            ),
+        )
+    }
+
+    let listener =
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("fake Kubernetes listener");
+    let address = listener.local_addr().expect("fake Kubernetes address");
+    let router = axum::Router::new().fallback(answer).with_state((ca_pem, deny_token));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve fake Kubernetes");
+    });
+    let config = kube::Config::new(format!("http://{address}").parse().expect("loopback URI"));
+    let client = ganja_teammate_cloud::provisioner::substrate::kube::client_from_config(config)
+        .expect("fixture client");
+    (client, server)
+}
+
+/// The kube/ateapi half: control-plane credentials and bodies stay out of output.
+async fn substrate_credentials_are_redacted() {
+    use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
+    use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
+
+    let (client, server) = canary_kubernetes(false).await;
+    let identity = AteapiIdentity::new(client.clone()).await.expect("canary bearer issued");
+    let request = identity.authorize(()).await.expect("authorized control request");
+    assert_redacted(&format!("{identity:?} {:?}", request.metadata()));
+
+    // Denied router issuance carries the key canary in its condition message.
+    let denied = KubeTunnel::connect(client).await.expect_err("denied router identity");
+    assert_redacted(&format!("{denied:?} {denied}"));
+    server.abort();
+
+    let (client, server) = canary_kubernetes(true).await;
+    let refused = AteapiIdentity::new(client).await.expect_err("denied bearer issuance");
+    assert_redacted(&format!("{refused:?} {refused}"));
+    server.abort();
+
+    let settings = ganja_teammate_cloud::provisioner::substrate::settings::Settings::parse(&format!(
+        "kubeconfig = '/operator/{KEY}'\ntemplate = 'worker'\ngit_credential_uri = 'ate-secret://kubernetes/ganja-cloud/git/token'\n"
+    ))
+    .expect("settings with canary path");
+    assert_redacted(&format!("{settings:?}"));
+    let invalid = ganja_teammate_cloud::provisioner::substrate::settings::Settings::parse(&format!(
+        "kubeconfig = '/operator/config'\ntemplate = 'worker'\ngit_credential_uri = 'ate-secret://kubernetes/ganja-cloud/git/token'\npassword = '{PASSWORD}'\n"
+    ))
+    .expect_err("unknown key refused");
+    assert_redacted(&format!("{invalid:?} {invalid}"));
+}
+
 struct EchoFailure;
 
 impl ganja_serve::bootstrap::Executor for EchoFailure {
@@ -86,12 +202,17 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
         tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
+            // The shipped verbose filter: ganja's own targets at debug and
+            // dependencies at info. kube_client prints remote Status bodies in
+            // its own debug logging, which no ganja filter enables; the pin
+            // holds for what a `--verbose` run can actually write.
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info,ganja=debug"))
             .finish(),
     )
     .expect("one subscriber in this test binary");
     tracing::info!("cloud runtime canary capture is active");
     wrapper_formatting_is_redacted();
+    substrate_credentials_are_redacted().await;
 
     let home = tempfile::tempdir().expect("home");
     let bootstrap = ganja_serve::bootstrap::Service::new(

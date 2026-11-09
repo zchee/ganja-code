@@ -13,7 +13,7 @@ use axum::response::{IntoResponse as _, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use ganja_teammate_cloud::provisioner::ProvisionError;
-use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::ObjectRef;
+use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::*;
 use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
 use ganja_teammate_cloud::provisioner::substrate::tunnel::{ActorProxy, Tunnel, TunnelIo};
 use http::{Method, StatusCode, Uri};
@@ -22,6 +22,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+// The lifecycle fixture shares this binary's fake Kubernetes control plane.
+#[path = "ateapi_stub/lifecycle.rs"]
+mod lifecycle;
 
 const CERT_CANARY: &str = "synthetic-router-certificate-private-key-canary";
 const TOKEN_CANARY: &str = "synthetic-ateapi-bearer-canary";
