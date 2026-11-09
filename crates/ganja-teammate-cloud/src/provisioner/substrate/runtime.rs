@@ -269,10 +269,11 @@ impl SubstrateProvisioner {
                 self.identity.authorize(RevertActorRequest { actor: Some(actor.clone()) }).await?,
             )
             .await;
-        let confirmed = response
-            .ok()
-            .and_then(|response| response.into_inner().actor)
-            .is_some_and(|value| actor_state(&value) == WorkerState::Suspended);
+        let confirmed =
+            response.ok().and_then(|response| response.into_inner().actor).is_some_and(|value| {
+                actor_state(&value) == WorkerState::Suspended
+                    && value.metadata.as_ref().is_some_and(|metadata| metadata.uid == uid)
+            });
         if confirmed
             || self
                 .checked_actor(&actor, &uid)
@@ -473,15 +474,24 @@ impl Provisioner for SubstrateProvisioner {
                 Err(_) => return Err(rpc_error("create", &status, true)),
             },
         };
-        if created.metadata.as_ref().is_none_or(|metadata| {
-            metadata.atespace != actor_ref.atespace
-                || metadata.name != actor_ref.name
-                || metadata.uid.is_empty()
-        }) {
+        let expected_identity = |value: &Actor| {
+            value.metadata.as_ref().is_some_and(|metadata| {
+                metadata.atespace == actor_ref.atespace
+                    && metadata.name == actor_ref.name
+                    && !metadata.uid.is_empty()
+            })
+        };
+        if !expected_identity(&created) {
             created = self
                 .read_actor(&actor_ref)
                 .await
                 .map_err(|_| failure("created identity", ProvisionErrorKind::Ambiguous))?;
+        }
+        if !expected_identity(&created) {
+            // No trustworthy UID was returned; never delete a possibly replaced actor
+            // without its identity precondition. Leave the name for owner reconciliation.
+            tracing::warn!(atespace = %actor_ref.atespace, actor = %actor_ref.name, "created identity unconfirmed");
+            return Err(failure("created identity", ProvisionErrorKind::Ambiguous));
         }
         let uid =
             created.metadata.as_ref().map(|metadata| metadata.uid.clone()).unwrap_or_default();

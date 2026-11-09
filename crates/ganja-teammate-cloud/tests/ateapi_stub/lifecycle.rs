@@ -40,6 +40,9 @@ struct ControlState {
     template_ready: bool,
     deny_policy: bool,
     deny_delete: bool,
+    wrong_created_identity: bool,
+    wrong_read_identity: bool,
+    replace_on_revert: bool,
     held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
@@ -138,13 +141,24 @@ impl Service<http::Request<Body>> for ControlStub {
                         ..Default::default()
                     });
                     state.actors.insert(metadata.name.clone(), actor.clone());
+                    if state.wrong_created_identity {
+                        actor.metadata.as_mut().expect("metadata").name = "unrelated".to_owned();
+                    }
                     Ok(actor)
                 })
             }
             "/substrate.ateapi.v1.Control/GetActor" => {
                 method!(GetActorRequest, Actor, "get", |state, request| {
                     let name = request.actor.expect("actor reference").name;
-                    state.actors.get(&name).cloned().ok_or_else(|| Status::not_found(ERROR_CANARY))
+                    let mut actor = state
+                        .actors
+                        .get(&name)
+                        .cloned()
+                        .ok_or_else(|| Status::not_found(ERROR_CANARY))?;
+                    if state.wrong_read_identity {
+                        actor.metadata.as_mut().expect("metadata").name = "unrelated".to_owned();
+                    }
+                    Ok(actor)
                 })
             }
             "/substrate.ateapi.v1.Control/ResumeActor" => {
@@ -256,6 +270,10 @@ impl Service<http::Request<Body>> for ControlStub {
                         .actors
                         .get_mut(&request.actor.expect("actor reference").name)
                         .ok_or_else(|| Status::not_found(ERROR_CANARY))?;
+                    if state.replace_on_revert {
+                        actor.metadata.as_mut().expect("metadata").uid =
+                            uuid::Uuid::now_v7().to_string();
+                    }
                     let status = actor.status.as_mut().expect("status");
                     status.state = ActorState::Suspended.into();
                     status.crash = None;
@@ -527,6 +545,33 @@ async fn crashed_reverted_gone_and_unconfirmed_delete_states_remain_distinct() {
     control.state.lock().expect("state lock").deny_delete = false;
     provisioner.kill(&worker).await.expect("confirmed delete");
     assert_eq!(provisioner.state(&worker).await.expect("gone state"), WorkerState::Gone);
+}
+
+#[tokio::test]
+async fn creation_reconciles_identity_but_never_returns_an_unrelated_worker() {
+    let (_kube, control, provisioner) = fixture().await;
+    control.state.lock().expect("state lock").wrong_created_identity = true;
+    let worker = provisioner.spawn(&spec()).await.expect("reconcile malformed create reply");
+    assert!(!worker.handle.as_str().contains("unrelated"));
+    provisioner.kill(&worker).await.expect("cleanup");
+    control.state.lock().expect("state lock").wrong_read_identity = true;
+    let error = provisioner.spawn(&spec()).await.expect_err("reject mismatched reconciliation");
+    assert_eq!(error.kind, ProvisionErrorKind::Ambiguous);
+    assert!(control.state.lock().expect("state lock").policies.is_empty());
+}
+
+#[tokio::test]
+async fn a_replaced_actor_cannot_confirm_revert_or_be_deleted_by_an_old_handle() {
+    let (_kube, control, provisioner) = fixture().await;
+    let worker = provisioner.spawn(&spec()).await.expect("spawn");
+    control.state.lock().expect("state lock").replace_on_revert = true;
+    assert_eq!(
+        provisioner.revert(&worker).await.expect_err("replacement is not recovery").kind,
+        ProvisionErrorKind::Ambiguous
+    );
+    assert_eq!(provisioner.state(&worker).await.expect("old identity gone"), WorkerState::Gone);
+    assert!(provisioner.kill(&worker).await.is_err());
+    assert_eq!(control.state.lock().expect("state lock").actors.len(), 1);
 }
 
 #[tokio::test]
