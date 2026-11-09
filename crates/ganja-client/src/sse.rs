@@ -14,7 +14,7 @@
 //! than being discovered by a client that silently ignores a frame.
 //!
 //! The framing itself is the subset of server-sent events serve writes: one
-//! `event:` line, one or more `data:` lines, a blank line. Anything else on
+//! `id:` line, one `event:` line, one or more `data:` lines, a blank line. Anything else on
 //! this stream is a server this build does not understand, which is
 //! [`ClientError::Skew`] and not a shrug.
 
@@ -22,6 +22,96 @@ use ganja_protocol::Event;
 use serde::{Deserialize, Serialize};
 
 use crate::ClientError;
+
+/// A journal position, scoped to one server process incarnation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EventId {
+    epoch: String,
+    seq: u64,
+}
+
+impl EventId {
+    /// The server incarnation component.
+    #[must_use]
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// The sequence within the incarnation.
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+impl std::fmt::Display for EventId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}-{}", self.epoch, self.seq)
+    }
+}
+
+impl std::str::FromStr for EventId {
+    type Err = ClientError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let malformed = || ClientError::Skew { detail: "a malformed event id".to_owned() };
+        let (epoch, seq) = value.rsplit_once('-').ok_or_else(malformed)?;
+        if epoch.len() != 36
+            || !epoch.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                }
+            })
+            || epoch.as_bytes().get(14) != Some(&b'7')
+            || !epoch
+                .as_bytes()
+                .get(19)
+                .is_some_and(|byte| matches!(byte, b'8' | b'9' | b'a' | b'b'))
+            || seq.is_empty()
+            || !seq.bytes().all(|byte| byte.is_ascii_digit())
+            || (seq.len() > 1 && seq.starts_with('0'))
+        {
+            return Err(malformed());
+        }
+        Ok(Self { epoch: epoch.to_owned(), seq: seq.parse().map_err(|_| malformed())? })
+    }
+}
+
+impl Serialize for EventId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for EventId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// How the server registered this subscription.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Replay {
+    /// No cursor was supplied; messages begin after the head.
+    Fresh,
+    /// The supplied cursor is retained; later messages are replayed.
+    From,
+    /// The supplied cursor is unavailable; state must be read afresh.
+    Gap,
+}
+
+/// The registration acknowledgement, including its journal head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Connected {
+    /// The journal head when the subscription registered.
+    pub head: EventId,
+    /// Whether this stream is fresh, replayed, or requires recovery.
+    pub replay: Replay,
+}
 
 /// The frame that opens every stream, before anything the engine emits.
 ///
@@ -67,13 +157,13 @@ pub struct EvictedNotice {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
     /// [`CONNECTED`].
-    Connected,
+    Connected(EventId, Connected),
     /// [`MESSAGE`], carrying the event it framed.
-    Message(Box<Event>),
+    Message(EventId, Box<Event>),
     /// [`HEARTBEAT`].
-    Heartbeat,
+    Heartbeat(EventId),
     /// [`EVICTED`], carrying the notice that says why.
-    Evicted(EvictedNotice),
+    Evicted(EventId, EvictedNotice),
 }
 
 impl Frame {
@@ -84,22 +174,35 @@ impl Frame {
     /// [`ClientError::Skew`] for a name outside [`FRAMES`], and for a payload
     /// that does not parse — including an [`Event`] whose `type` this build
     /// has no variant for, which is exactly what a newer server sends.
-    fn parse(name: &str, data: &str) -> Result<Self, ClientError> {
+    /// The cursor carried by this frame; control frames never advance it.
+    #[must_use]
+    pub fn id(&self) -> &EventId {
+        match self {
+            Self::Connected(id, _)
+            | Self::Message(id, _)
+            | Self::Heartbeat(id)
+            | Self::Evicted(id, _) => id,
+        }
+    }
+
+    fn parse(name: &str, data: &str, id: EventId) -> Result<Self, ClientError> {
         match name {
-            CONNECTED => Ok(Self::Connected),
-            HEARTBEAT => Ok(Self::Heartbeat),
+            CONNECTED => serde_json::from_str::<Connected>(data)
+                .map(|connected| Self::Connected(id, connected))
+                .map_err(|error| ClientError::Skew {
+                    detail: format!("a connected frame does not parse: {error}"),
+                }),
+            HEARTBEAT => Ok(Self::Heartbeat(id)),
             MESSAGE => serde_json::from_str::<Event>(data)
-                .map(|event| Self::Message(Box::new(event)))
+                .map(|event| Self::Message(id, Box::new(event)))
                 .map_err(|error| ClientError::Skew {
                     detail: format!("an event frame does not parse: {error}"),
                 }),
-            EVICTED => {
-                serde_json::from_str::<EvictedNotice>(data).map(Self::Evicted).map_err(|error| {
-                    ClientError::Skew {
-                        detail: format!("an evicted frame does not parse: {error}"),
-                    }
-                })
-            }
+            EVICTED => serde_json::from_str::<EvictedNotice>(data)
+                .map(|notice| Self::Evicted(id, notice))
+                .map_err(|error| ClientError::Skew {
+                    detail: format!("an evicted frame does not parse: {error}"),
+                }),
             other => Err(ClientError::Skew {
                 detail: format!(
                     "a frame named {other:?} is none of the {} this build knows",
@@ -148,9 +251,17 @@ impl Frames {
         // this a reader of the format rather than of one writer's habits.
         let mut name = MESSAGE.to_owned();
         let mut data = String::new();
+        let mut id = None;
         for line in text.lines() {
             let line = line.strip_suffix('\r').unwrap_or(line);
-            if let Some(rest) = line.strip_prefix("event: ") {
+            if let Some(rest) = line.strip_prefix("id:") {
+                if id.is_some() {
+                    return Some(Err(ClientError::Skew {
+                        detail: "an event frame repeats its id".to_owned(),
+                    }));
+                }
+                id = Some(rest.strip_prefix(' ').unwrap_or(rest).parse::<EventId>());
+            } else if let Some(rest) = line.strip_prefix("event: ") {
                 name = rest.to_owned();
             } else if let Some(rest) = line.strip_prefix("data: ") {
                 if !data.is_empty() {
@@ -160,7 +271,12 @@ impl Frames {
             }
         }
 
-        Some(Frame::parse(&name, &data))
+        Some(
+            id.unwrap_or_else(|| {
+                Err(ClientError::Skew { detail: "an event frame has no id".to_owned() })
+            })
+            .and_then(|id| Frame::parse(&name, &data, id)),
+        )
     }
 }
 

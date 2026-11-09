@@ -35,6 +35,7 @@ pub struct Recorded {
     pub path: String,
     pub authorization: Option<String>,
     pub accept: Option<String>,
+    pub headers: std::collections::BTreeMap<String, String>,
     pub body: String,
 }
 
@@ -326,11 +327,13 @@ async fn read_request<S: AsyncRead + Unpin>(socket: &mut S) -> Option<Recorded> 
     let mut authorization = None;
     let mut accept = None;
     let mut length = 0usize;
+    let mut headers = std::collections::BTreeMap::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let value = value.trim();
+        headers.insert(name.to_ascii_lowercase(), value.to_owned());
         match name.to_ascii_lowercase().as_str() {
             "authorization" => authorization = Some(value.to_owned()),
             "accept" => accept = Some(value.to_owned()),
@@ -354,6 +357,7 @@ async fn read_request<S: AsyncRead + Unpin>(socket: &mut S) -> Option<Recorded> 
         path,
         authorization,
         accept,
+        headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
@@ -374,6 +378,19 @@ fn reason(status: u16) -> &'static str {
 }
 
 /// One SSE frame, spelled the way `ganja-serve` writes it.
+pub const EPOCH: &str = "01998ad0-0000-7000-8000-00000000d505";
+
+/// One SSE frame with a valid default cursor.
 pub fn frame(name: &str, data: &str) -> String {
-    format!("event: {name}\ndata: {data}\n\n")
+    let data = if name == "connected" && data == "{}" {
+        format!(r#"{{"head":"{EPOCH}-0","replay":"fresh"}}"#)
+    } else {
+        data.to_owned()
+    };
+    frame_at(name, &data, 0)
+}
+
+/// One SSE frame at a known journal position.
+pub fn frame_at(name: &str, data: &str, seq: u64) -> String {
+    format!("id: {EPOCH}-{seq}\nevent: {name}\ndata: {data}\n\n")
 }
