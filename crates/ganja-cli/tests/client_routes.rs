@@ -9,7 +9,7 @@ use ganja_core::Engine;
 use ganja_core::provider::fake::FakeProvider;
 use ganja_core::tool::Registry;
 use ganja_permission::Permissions;
-use ganja_protocol::{Event, Part};
+use ganja_protocol::{Event, PartBody, ToolState};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn typed_routes_read_the_real_abort_shell_messages_and_bootstrap_shapes() {
@@ -20,9 +20,10 @@ async fn typed_routes_read_the_real_abort_shell_messages_and_bootstrap_shapes() 
         "canned",
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
-        storage,
+        storage.clone(),
     ));
     let mut config = ganja_serve::ServeConfig::in_directory(directory.path().to_path_buf());
+    config.storage = Some(storage);
     config.listen = ganja_serve::Listen::Tcp { hostname: "127.0.0.1".to_owned(), port: Some(0) };
     let handle = ganja_serve::serve(engine, config).await.expect("server starts");
     let client =
@@ -48,11 +49,11 @@ async fn typed_routes_read_the_real_abort_shell_messages_and_bootstrap_shapes() 
     .expect("shell finishes");
     let messages = client.messages(&session).await.expect("stored transcript");
     assert!(
-        messages
-            .iter()
-            .flat_map(|message| &message.parts)
-            .filter_map(Part::as_text)
-            .any(|text| text.contains("client-route-shell"))
+        messages.iter().flat_map(|message| &message.parts).any(|part| {
+            matches!(&part.body, PartBody::Tool { state: ToolState::Completed { output, .. }, .. }
+                if output.contains("client-route-shell"))
+        }),
+        "the stored shell result must preserve its output: {messages:#?}"
     );
     handle.shutdown().await.expect("server stops");
 }

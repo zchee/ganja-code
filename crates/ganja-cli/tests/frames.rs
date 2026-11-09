@@ -315,8 +315,8 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     };
     assert_eq!(notice.kind, sse::EVICTED, "the payload names itself too");
     assert!(
-        notice.message.contains("fell behind"),
-        "the notice carries the engine's own account: {notice:?}"
+        notice.message.contains("journal history overflow"),
+        "the notice names the lost replay history: {notice:?}"
     );
     assert_eq!(
         reader.names.iter().filter(|name| *name == sse::EVICTED).count(),
