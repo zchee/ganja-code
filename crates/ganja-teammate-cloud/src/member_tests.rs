@@ -249,21 +249,122 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn same_named_members_in_different_teams_keep_independent_controls() {
-    let first = Fixture::new().await;
+async fn identical_disk_paths_do_not_alias_live_registry_controls() {
+    let mut first = Fixture::new().await;
     let mut second = Fixture::new().await;
-    Arc::get_mut(&mut second.member).expect("unique member").spec.team =
-        TeamName::parse("other-team").expect("team");
-    let registry = |fixture: &Fixture| {
-        teammate::TeammateRegistry::new(
+    Arc::get_mut(&mut second.member).expect("unique member").spec = first.member.spec.clone();
+    let registry = || {
+        Arc::new(teammate::TeammateRegistry::new(
+            first.member.spec.root.clone(),
+            first.member.spec.team.clone(),
+            "lead",
+            first._home.path(),
+        ))
+    };
+    let first_registry = registry();
+    let second_registry = registry();
+    Arc::get_mut(&mut first.member).expect("unique member").lent.registry =
+        Arc::downgrade(&first_registry);
+    Arc::get_mut(&mut second.member).expect("unique member").lent.registry =
+        Arc::downgrade(&second_registry);
+    register(&first.member);
+    register(&second.member);
+    assert!(Arc::ptr_eq(
+        &control(&first_registry, "gate-worker").expect("first control").0,
+        &first.member,
+    ));
+    assert!(Arc::ptr_eq(
+        &control(&second_registry, "gate-worker").expect("second control").0,
+        &second.member,
+    ));
+    drop(second);
+    assert!(control(&second_registry, "gate-worker").is_none());
+    assert!(Arc::ptr_eq(
+        &control(&first_registry, "gate-worker").expect("first remains").0,
+        &first.member,
+    ));
+}
+
+#[tokio::test]
+async fn expired_controls_are_pruned_and_dead_registries_are_not_registered() {
+    let mut owners = Vec::new();
+    let mut expired = Vec::new();
+    for _ in 0..32 {
+        let mut fixture = Fixture::new().await;
+        let registry = Arc::new(teammate::TeammateRegistry::new(
             fixture.member.spec.root.clone(),
             fixture.member.spec.team.clone(),
             "lead",
             fixture._home.path(),
-        )
+        ));
+        Arc::get_mut(&mut fixture.member).expect("unique member").lent.registry =
+            Arc::downgrade(&registry);
+        register(&fixture.member);
+        expired.push(Arc::downgrade(&fixture.member));
+        owners.push(registry);
+    }
+    let mut fixture = Fixture::new().await;
+    register(&fixture.member);
+    let dead_member = Arc::downgrade(&fixture.member);
+    assert!(CONTROLS.lock().expect("control map").values().all(|entry| {
+        !Weak::ptr_eq(entry, &dead_member) && expired.iter().all(|old| !Weak::ptr_eq(entry, old))
+    }));
+    drop(dead_member);
+    let dead_registry = Arc::new(teammate::TeammateRegistry::new(
+        fixture.member.spec.root.clone(),
+        fixture.member.spec.team.clone(),
+        "lead",
+        fixture._home.path(),
+    ));
+    Arc::get_mut(&mut fixture.member).expect("unique member").lent.registry =
+        Arc::downgrade(&dead_registry);
+    drop(dead_registry);
+    register(&fixture.member);
+    let dead_member = Arc::downgrade(&fixture.member);
+    assert!(
+        CONTROLS
+            .lock()
+            .expect("control map")
+            .values()
+            .all(|entry| !Weak::ptr_eq(entry, &dead_member))
+    );
+    assert!(control(&owners[0], "gate-worker").is_none());
+    let mut lookup_fixture = Fixture::new().await;
+    Arc::get_mut(&mut lookup_fixture.member).expect("unique member").lent.registry =
+        Arc::downgrade(&owners[0]);
+    register(&lookup_fixture.member);
+    let expired_lookup = Arc::downgrade(&lookup_fixture.member);
+    drop(lookup_fixture);
+    assert!(control(&owners[0], "invalid name").is_none());
+    assert!(
+        CONTROLS
+            .lock()
+            .expect("control map")
+            .values()
+            .all(|entry| !Weak::ptr_eq(entry, &expired_lookup))
+    );
+}
+
+#[tokio::test]
+async fn same_named_members_in_different_teams_keep_independent_controls() {
+    let mut first = Fixture::new().await;
+    let mut second = Fixture::new().await;
+    Arc::get_mut(&mut second.member).expect("unique member").spec.team =
+        TeamName::parse("other-team").expect("team");
+    let registry = |fixture: &Fixture| {
+        Arc::new(teammate::TeammateRegistry::new(
+            fixture.member.spec.root.clone(),
+            fixture.member.spec.team.clone(),
+            "lead",
+            fixture._home.path(),
+        ))
     };
     let first_registry = registry(&first);
     let second_registry = registry(&second);
+    Arc::get_mut(&mut first.member).expect("unique member").lent.registry =
+        Arc::downgrade(&first_registry);
+    Arc::get_mut(&mut second.member).expect("unique member").lent.registry =
+        Arc::downgrade(&second_registry);
     register(&first.member);
     register(&second.member);
     let first_control = control(&first_registry, "gate-worker").expect("first control");
