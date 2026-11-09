@@ -20,6 +20,18 @@ ganja-protocol.workspace = true
 ganja-team.workspace = true
 # Endpoints carry validated header names and values, not vendor-specific fields.
 http.workspace = true
+# All cloud control and ingress hops are local Kubernetes port-forwards.
+base64.workspace = true
+httparse.workspace = true
+hyper-util.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+tower-service.workspace = true
+uuid.workspace = true
 # The checked-in Substrate wire has no build-time compiler dependency.
 prost.workspace = true
 prost-types.workspace = true
@@ -37,6 +49,10 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Real loopback HTTP fixtures exercise Kubernetes discovery and issuance.
+axum = { workspace = true, features = ["ws"] }
+jiff.workspace = true
+rcgen = { workspace = true, features = ["x509-parser"] }
 # Hashes pin both the published proto and the checked-in generated artifacts.
 sha2.workspace = true
 # The ateapi fixture serves gRPC without enabling tonic's axum router.
