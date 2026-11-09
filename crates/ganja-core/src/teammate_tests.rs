@@ -688,6 +688,7 @@ struct Recording {
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
+    owns_inbox: bool,
     allocated: Option<Arc<tokio::sync::Notify>>,
     hold_allocation: Option<Arc<tokio::sync::Notify>>,
     hold_launch: Option<Arc<tokio::sync::Notify>>,
@@ -710,6 +711,10 @@ impl Recording {
 
 #[async_trait::async_trait]
 impl TeammateBackend for Recording {
+    fn owns_inbox(&self) -> bool {
+        self.owns_inbox
+    }
+
     fn backend(&self) -> MemberBackend {
         MemberBackend::Ganja
     }
@@ -732,6 +737,8 @@ impl TeammateBackend for Recording {
             birth: "48213".to_owned(),
             spec: spec.clone(),
             refuse_launch: self.refuse_launch,
+            owns_inbox: self.owns_inbox,
+            owned_seed: std::sync::Mutex::new(None),
             launched: Arc::clone(&self.launched),
             killed: Arc::clone(&self.killed),
             hold_launch: self.hold_launch.clone(),
@@ -756,6 +763,8 @@ struct RecordedPane {
     birth: String,
     spec: SpawnSpec,
     refuse_launch: bool,
+    owns_inbox: bool,
+    owned_seed: std::sync::Mutex<Option<mailbox::Identity>>,
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     hold_launch: Option<Arc<tokio::sync::Notify>>,
@@ -770,6 +779,16 @@ impl Spawned for RecordedPane {
 
     async fn launch(&self) -> Result<(), Unsupported> {
         let spec = &self.spec;
+        if self.owns_inbox {
+            let seed =
+                super::seed_inbox(spec.inbox(), spec.lead.as_str().to_owned(), spec.prompt.clone())
+                    .await
+                    .map_err(|error| Unsupported {
+                        backend: spec.backend,
+                        reason: error.to_string(),
+                    })?;
+            *self.owned_seed.lock().expect("owned seed lock") = Some(seed);
+        }
         let recorded = std::fs::read_to_string(spec.root.config_path(&spec.team))
             .is_ok_and(|document| document.contains(&format!("\"{}\"", spec.name)));
         self.launched
@@ -809,7 +828,39 @@ impl Spawned for RecordedPane {
         if let Some(hold) = &self.hold_kill {
             hold.notified().await;
         }
+        let seeded = self.owned_seed.lock().expect("owned seed lock").take();
+        super::unseed_inbox(self.spec.inbox(), seeded, self.spec.name.as_str()).await;
     }
+}
+
+#[tokio::test]
+async fn cancellation_calls_the_backend_to_remove_its_owned_inbox_seed() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let backend = Arc::new(Recording {
+        owns_inbox: true,
+        hold_launch: Some(Arc::new(tokio::sync::Notify::new())),
+        ..Recording::default()
+    });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("owned-inbox", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    while backend.launched().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("owned-inbox").expect("name"));
+    assert_eq!(mailbox::read(&inbox).expect("seeded inbox").valid.len(), 1);
+    spawn.abort();
+    assert!(spawn.await.expect_err("cancelled caller").is_cancelled());
+    registry.shutdown().await;
+    assert_eq!(backend.killed().len(), 1);
+    assert!(mailbox::read(&inbox).expect("clean inbox").valid.is_empty());
+    assert!(!reserved(&registry).contains("owned-inbox"));
 }
 
 #[tokio::test]
