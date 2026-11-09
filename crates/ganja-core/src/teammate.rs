@@ -933,9 +933,10 @@ pub trait Spawned: fmt::Debug + Send + Sync {
     /// **D503**'s ring: what this member most recently did, newest last.
     fn recent(&self) -> Vec<String>;
 
-    /// Ends it within the backend's own cleanup bound. Idempotent: a member
-    /// that has already gone is nothing to end. Callers await completion rather
-    /// than cancelling cleanup with an additional deadline.
+    /// Backends must make cleanup idempotent and provide their own bound.
+    /// Callers await it rather than interrupting it with another deadline.
+    /// The tmux-driving backends currently rely on tmux returning, so this
+    /// requirement does not imply a total shutdown bound for those backends.
     async fn kill(&self);
 
     /// Tells this member it is waiting on the lead's answer to `request_id`,
@@ -1806,8 +1807,10 @@ pub struct TeammateRegistry {
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    /// Shutdown waits for admitted allocations to register their cleanup task.
+    /// Shutdown gives admitted allocations a grace interval to register cleanup.
     spawning: tokio::sync::RwLock<()>,
+    /// Each pending admission owns a clone until its cleanup task is registered.
+    admissions: Arc<()>,
     /// Where a member whose surface stopped running posts the fact, and where
     /// [`TeammateRegistry::take_exited`] drains it from ([`Exited`], **D512**
     /// as amended for bead g9u).
@@ -1901,6 +1904,7 @@ impl TeammateRegistry {
             next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
             spawning: tokio::sync::RwLock::new(()),
+            admissions: Arc::new(()),
             exits,
             exited: Mutex::new(exited),
             dialogs: Mutex::new(None),
@@ -2461,7 +2465,7 @@ impl TeammateRegistry {
         backend: Arc<dyn TeammateBackend>,
         request: SpawnRequest,
     ) -> Result<SpawnReport, SpawnError> {
-        let admission = self.spawning.read().await;
+        let admission = (Arc::clone(&self.admissions), self.spawning.read().await);
         if self.cancel.is_cancelled() {
             return Err(Unsupported {
                 backend: request.backend,
@@ -2578,7 +2582,10 @@ impl TeammateRegistry {
         self.reserved.lock().expect("the reserved names are never poisoned").remove(name.as_str());
     }
 
-    /// Ends every teammate and waits for each one to really be gone.
+    /// Ends published teammates and waits for registered cleanup tasks.
+    ///
+    /// In-flight allocations get one [`SETTLE`] interval to register cleanup;
+    /// a backend still allocating afterwards may unwind after this returns.
     ///
     /// The order is the one the lead's own exit path already keeps: the runners
     /// are told to stop, each teammate's turn is settled and its background
@@ -2599,11 +2606,16 @@ impl TeammateRegistry {
             self.cancel.cancel();
             members.values().map(Arc::clone).collect()
         };
-        // Closing publication precedes waiting for allocation to hand off its
-        // cleanup owner. No admitted spawn can register after the task drain.
-        let admission = self.spawning.write().await;
-        drop(admission);
         futures::future::join_all(members.iter().map(|member| member.spawned.kill())).await;
+        // Use the ordinary teammate grace interval only after existing members
+        // are killed. A late allocation still schedules its cancelled unwind;
+        // recovery if the process exits first remains backend-specific.
+        if tokio::time::timeout(SETTLE, self.spawning.write()).await.is_err() {
+            tracing::warn!(
+                pending_admissions = Arc::strong_count(&self.admissions).saturating_sub(1),
+                "teammate allocations did not settle before shutdown"
+            );
+        }
 
         let tasks =
             std::mem::take(&mut *self.tasks.lock().expect("the task list is never poisoned"));
