@@ -48,6 +48,7 @@ struct ControlState {
     noop_revert: bool,
     held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
     held_create_reply: Option<(Arc<Notify>, Arc<Notify>)>,
+    held_get_reply: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 #[derive(Clone)]
@@ -91,8 +92,11 @@ impl<I: Send + 'static, O: Send + 'static> tonic::server::UnaryService<I> for Un
                 let mut state = state.lock().expect("control lock");
                 let response = handler(&mut state, request.into_inner())?;
                 let lost = state.lost.remove(operation);
-                let held =
-                    (operation == "create").then(|| state.held_create_reply.clone()).flatten();
+                let held = match operation {
+                    "create" => state.held_create_reply.clone(),
+                    "get" => state.held_get_reply.take(),
+                    _ => None,
+                };
                 (response, lost, held)
             };
             if let Some((entered, release)) = held_reply {
@@ -615,6 +619,44 @@ async fn cancelling_a_committed_create_cleans_up_only_the_created_uid() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn cancellation_during_identity_reconciliation_retires_the_created_actor() {
+    let (_kube, control, provisioner) = fixture().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let mut state = control.state.lock().expect("state lock");
+        state.wrong_created_identity = true;
+        state.held_get_reply = Some((Arc::clone(&entered), Arc::clone(&release)));
+    }
+    let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("identity reconciliation reached after create returned");
+    assert_eq!(control.state.lock().expect("state lock").actors.len(), 1);
+    spawn.abort();
+    assert!(spawn.await.expect_err("cancelled spawn").is_cancelled());
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let complete = {
+                let state = control.state.lock().expect("state lock");
+                state.actors.is_empty() && state.calls.ends_with(&["delete", "get"])
+            };
+            if complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned reconciliation cleans up the actor");
+    let state = control.state.lock().expect("state lock");
+    assert_eq!(state.calls, ["get template", "create", "get", "delete", "get"]);
+    assert_eq!(state.retired.len(), 1);
+    assert!(state.policies.is_empty());
 }
 
 #[tokio::test]
