@@ -31,11 +31,12 @@ use super::{KubeFixture, TOKEN_CANARY};
 
 const ERROR_CANARY: &str = "synthetic-control-error-secret-canary";
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ControlState {
     actors: BTreeMap<String, Actor>,
     policies: BTreeMap<String, EgressPolicy>,
     calls: Vec<&'static str>,
+    retired: Vec<String>,
     lost: BTreeSet<&'static str>,
     template_ready: bool,
     deny_policy: bool,
@@ -366,7 +367,7 @@ impl Drop for ControlFixture {
 }
 
 #[derive(Debug)]
-struct ControlTunnel(Channel);
+struct ControlTunnel(Channel, Arc<Mutex<ControlState>>);
 
 #[async_trait]
 impl Tunnel for ControlTunnel {
@@ -374,10 +375,19 @@ impl Tunnel for ControlTunnel {
         Ok(self.0.clone())
     }
     async fn actor(&self, _actor: &ObjectRef) -> Result<TunnelIo, ProvisionError> {
-        Err(ProvisionError {
-            operation: "unexpected worker request",
-            kind: ProvisionErrorKind::Refused,
-        })
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut bytes = [0; 4096];
+            assert_ne!(server.read(&mut bytes).await.expect("read worker request"), 0);
+            server.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.expect("worker response");
+            while server.read(&mut bytes).await.expect("worker stream") != 0 {}
+        });
+        Ok(Box::new(client))
+    }
+
+    async fn retire(&self, actor: &ObjectRef) {
+        self.1.lock().expect("control state").retired.push(actor.name.clone());
     }
 }
 
@@ -408,7 +418,7 @@ async fn fixture() -> (KubeFixture, ControlFixture, SubstrateProvisioner) {
         settings,
         "ganja".to_owned(),
         SecretString::from("synthetic-worker-password"),
-        Arc::new(ControlTunnel(channel)),
+        Arc::new(ControlTunnel(channel, Arc::clone(&state))),
         identity,
     )
     .await
@@ -462,6 +472,32 @@ async fn the_grpc_state_machine_preserves_suspension_resume_results_and_running_
     assert_eq!(control.state.lock().expect("state lock").calls, ["delete", "get"]);
     assert_eq!(provisioner.state(&worker).await.expect("gone"), WorkerState::Gone);
     assert!(!format!("{worker:?} {provisioner:?}").contains("synthetic-worker-password"));
+}
+
+#[tokio::test]
+async fn deleting_an_actor_closes_its_established_proxy_stream() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (_kube, _control, provisioner) = fixture().await;
+    let worker = provisioner.spawn(&spec()).await.expect("spawn suspended");
+    let url = url::Url::parse(&worker.endpoint.base_url).expect("worker URL");
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", url.port().expect("port")))
+        .await
+        .expect("connect proxy");
+    let mut request = String::from("GET / HTTP/1.1\r\nHost: localhost\r\n");
+    for (name, value) in &worker.endpoint.headers {
+        request.push_str(&format!("{name}: {}\r\n", value.to_str().expect("header")));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.expect("send request");
+    let mut response = [0; 19];
+    stream.read_exact(&mut response).await.expect("read worker response");
+    assert_eq!(&response, b"HTTP/1.1 200 OK\r\n\r\n");
+    provisioner.kill(&worker).await.expect("delete actor");
+    let mut remaining = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_millis(200), stream.read_to_end(&mut remaining))
+        .await
+        .expect("deletion closes the established stream")
+        .expect("closed stream");
 }
 
 #[tokio::test]
@@ -563,6 +599,7 @@ async fn cancelling_a_committed_create_cleans_up_only_the_created_uid() {
         let state = control.state.lock().expect("state lock");
         assert_eq!(state.calls.iter().filter(|call| **call == "delete").count(), 1);
         assert_eq!(state.actors.len(), usize::from(replace_uid));
+        assert_eq!(state.retired.len(), 1, "abandoned creation retires local resources");
         if replace_uid {
             assert_eq!(
                 state
@@ -606,6 +643,7 @@ async fn cancelling_policy_installation_deletes_the_created_actor_by_uid() {
     .expect("owned cleanup deletes actor");
     let state = control.state.lock().expect("state lock");
     assert_eq!(state.calls.iter().filter(|call| **call == "delete").count(), 1);
+    assert_eq!(state.retired.len(), 1, "cancelled policy retires local resources");
     release.notify_one();
 }
 

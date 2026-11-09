@@ -1,9 +1,10 @@
 //! The same control and actor connection seam for in-process and command proxies.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Cursor};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -40,6 +41,11 @@ pub trait Tunnel: fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns a sanitized admission, TLS or connection failure.
     async fn actor(&self, actor: &ObjectRef) -> Result<TunnelIo, ProvisionError>;
+
+    /// Retires persistent local resources belonging to one actor.
+    ///
+    /// Streams without persistent resources are closed by the ingress owner.
+    async fn retire(&self, _actor: &ObjectRef) {}
 }
 
 pub(super) fn failure(operation: &'static str, kind: ProvisionErrorKind) -> ProvisionError {
@@ -52,6 +58,8 @@ pub struct ActorProxy {
     address: std::net::SocketAddr,
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    tunnel: Arc<dyn Tunnel>,
+    actors: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
 }
 
 impl ActorProxy {
@@ -68,6 +76,9 @@ impl ActorProxy {
             .map_err(|_| failure("proxy address", ProvisionErrorKind::Transient))?;
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
+        let actors = Arc::new(Mutex::new(BTreeMap::new()));
+        let routes = Arc::clone(&actors);
+        let backend = Arc::clone(&tunnel);
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
@@ -77,9 +88,10 @@ impl ActorProxy {
                     Some(_) = connections.join_next(), if !connections.is_empty() => {},
                     accepted = listener.accept() => {
                         let Ok((socket, _)) = accepted else { break };
-                        let tunnel = Arc::clone(&tunnel);
+                        let tunnel = Arc::clone(&backend);
+                        let actors = Arc::clone(&routes);
                         connections.spawn(async move {
-                            let _ = forward_worker(socket, tunnel).await;
+                            let _ = forward_worker(socket, tunnel, actors).await;
                         });
                     }
                 }
@@ -87,7 +99,16 @@ impl ActorProxy {
             connections.abort_all();
             while connections.join_next().await.is_some() {}
         });
-        Ok(Self { address, cancel, task })
+        Ok(Self { address, cancel, task, tunnel, actors })
+    }
+
+    /// Closes existing actor streams and retires any persistent command proxy.
+    pub async fn retire(&self, actor: &ObjectRef) {
+        let key = format!("{}/{}", actor.atespace, actor.name);
+        if let Some(cancel) = self.actors.lock().expect("actor routes lock").remove(&key) {
+            cancel.cancel();
+        }
+        self.tunnel.retire(actor).await;
     }
 
     /// The loopback base URL shared by this provisioner's workers.
@@ -106,23 +127,41 @@ impl Drop for ActorProxy {
 async fn forward_worker(
     mut socket: TcpStream,
     tunnel: Arc<dyn Tunnel>,
+    actors: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
 ) -> Result<(), ProvisionError> {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let bytes = read_head(&mut socket).await?;
         let (actor, request) = route_request(&bytes)?;
-        let mut remote = tunnel.actor(&actor).await?;
-        remote
-            .write_all(&request)
-            .await
-            .map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
-        Ok::<_, ProvisionError>(remote)
+        let cancel = actors
+            .lock()
+            .expect("actor routes lock")
+            .entry(format!("{}/{}", actor.atespace, actor.name))
+            .or_default()
+            .clone();
+        let remote = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(failure("proxy retired", ProvisionErrorKind::Gone)),
+            result = async {
+                let mut remote = tunnel.actor(&actor).await?;
+                remote
+                    .write_all(&request)
+                    .await
+                    .map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
+                Ok::<_, ProvisionError>(remote)
+            } => result,
+        }?;
+        Ok::<_, ProvisionError>((remote, cancel))
     })
     .await;
     match result {
-        Ok(Ok(mut remote)) => {
-            tokio::io::copy_bidirectional(&mut socket, &mut remote)
-                .await
-                .map_err(|_| failure("proxy stream", ProvisionErrorKind::Transient))?;
+        Ok(Ok((mut remote, cancel))) => {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {},
+                result = tokio::io::copy_bidirectional(&mut socket, &mut remote) => {
+                    result.map_err(|_| failure("proxy stream", ProvisionErrorKind::Transient))?;
+                }
+            }
             Ok(())
         }
         _ => {

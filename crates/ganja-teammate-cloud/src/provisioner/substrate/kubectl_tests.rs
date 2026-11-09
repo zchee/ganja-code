@@ -86,6 +86,57 @@ async fn a_held_startup_does_not_block_other_actors_and_same_actor_callers_share
 }
 
 #[tokio::test]
+async fn retiring_a_proxy_reaps_its_child_removes_the_entry_and_allows_a_fresh_start() {
+    const CHILD_ENV: &str = "GANJA_TEST_KUBECTL_LISTENER";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("child listener");
+        eprintln!("Proxying {} -> ganja/worker:80", listener.local_addr().expect("address"));
+        loop {
+            let _ = listener.accept().await.expect("proxy connection");
+        }
+    }
+    let directory = tempfile::tempdir().expect("temporary fixture directory");
+    let pid_file = directory.path().join("pid");
+    let starts = directory.path().join("starts");
+    let binary = executable(
+        directory.path(),
+        &format!(
+            "printf '%s' \"$$\" > '{}'\nprintf 'start\\n' >> '{}'\n{CHILD_ENV}=1 exec '{}' --exact provisioner::substrate::kubectl::tests::retiring_a_proxy_reaps_its_child_removes_the_entry_and_allows_a_fresh_start --nocapture",
+            pid_file.display(),
+            starts.display(),
+            std::env::current_exe().expect("test executable").display(),
+        ),
+    );
+    let tunnel = KubectlTunnel {
+        channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        executable: binary,
+        kubeconfig: directory.path().join("operator-config"),
+        context: None,
+        proxies: Mutex::new(BTreeMap::new()),
+    };
+    let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };
+    tunnel.actor(&actor).await.expect("first proxy");
+    let entry = Arc::clone(tunnel.proxies.lock().await.get("ganja/worker").expect("proxy entry"));
+    let address = entry.child.lock().await.as_ref().expect("child").address;
+    let pid = std::fs::read_to_string(&pid_file).expect("child PID");
+    tunnel.retire(&actor).await;
+    assert!(TcpStream::connect(address).await.is_err(), "child listener closed");
+    assert!(tunnel.proxies.lock().await.is_empty());
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(Stdio::null())
+            .status()
+            .expect("check retired PID")
+            .success()
+    );
+    tunnel.retire(&actor).await;
+    tunnel.actor(&actor).await.expect("fresh proxy");
+    assert_eq!(std::fs::read_to_string(&starts).expect("starts"), "start\nstart\n");
+    tunnel.retire(&actor).await;
+}
+
+#[tokio::test]
 async fn proxy_startup_errors_discard_stderr_and_return_within_the_budget() {
     let directory = tempfile::tempdir().expect("temporary fixture directory");
     let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };

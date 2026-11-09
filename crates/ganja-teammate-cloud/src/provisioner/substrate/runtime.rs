@@ -39,7 +39,7 @@ pub struct SubstrateProvisioner {
     settings: Settings,
     control: ControlClient<Channel>,
     identity: Arc<AteapiIdentity>,
-    proxy: ActorProxy,
+    proxy: Arc<ActorProxy>,
     username: String,
     password: SecretString,
 }
@@ -47,6 +47,7 @@ pub struct SubstrateProvisioner {
 struct SpawnCleanup {
     control: ControlClient<Channel>,
     identity: Arc<AteapiIdentity>,
+    proxy: Arc<ActorProxy>,
     actor: Option<ObjectRef>,
     uid: String,
 }
@@ -69,10 +70,12 @@ impl SpawnCleanup {
         let actor = self.actor.take()?;
         let control = self.control.clone();
         let identity = Arc::clone(&self.identity);
+        let proxy = Arc::clone(&self.proxy);
         let mut uid = self.uid.clone();
         // Tokio owns the bounded cleanup because Drop cannot await; cancellation
         // must not discard either an in-flight creation or its later deletion.
         Some(tokio::spawn(async move {
+            proxy.retire(&actor).await;
             let operation = async {
                 if uid.is_empty() {
                     let observed = read_actor(control.clone(), &identity, &actor).await?;
@@ -179,7 +182,7 @@ impl SubstrateProvisioner {
             return Err(failure("worker credentials", ProvisionErrorKind::Refused));
         }
         let control = ControlClient::new(tunnel.control().await?);
-        let proxy = ActorProxy::bind(tunnel).await?;
+        let proxy = Arc::new(ActorProxy::bind(tunnel).await?);
         Ok(Self { settings, control, identity: Arc::new(identity), proxy, username, password })
     }
 
@@ -473,12 +476,19 @@ impl Provisioner for SubstrateProvisioner {
         let creation_control = self.control.clone();
         let creation_identity = Arc::clone(&self.identity);
         let creation_ref = actor_ref.clone();
+        let creation_proxy = Arc::clone(&self.proxy);
         // The task's result owns the armed guard. If the caller disappears before
         // receiving it, Tokio drops that result and the guard schedules cleanup.
         let (created, mut cleanup) = tokio::spawn(async move {
             tokio::time::timeout(
                 Duration::from_secs(30),
-                create_actor(creation_control, creation_identity, actor, creation_ref),
+                create_actor(
+                    creation_control,
+                    creation_identity,
+                    actor,
+                    creation_ref,
+                    creation_proxy,
+                ),
             )
             .await
             .map_err(|_| failure("create", ProvisionErrorKind::Ambiguous))?
@@ -612,6 +622,7 @@ impl Provisioner for SubstrateProvisioner {
 
     async fn kill(&self, worker: &Worker) -> Result<(), ProvisionError> {
         let (actor, uid) = self.worker_ref(worker)?;
+        self.proxy.retire(&actor).await;
         self.delete_actor(&actor, &uid).await
     }
 
@@ -628,10 +639,12 @@ async fn create_actor(
     identity: Arc<AteapiIdentity>,
     actor: Actor,
     actor_ref: ObjectRef,
+    proxy: Arc<ActorProxy>,
 ) -> Result<(Actor, SpawnCleanup), ProvisionError> {
     let mut cleanup = SpawnCleanup {
         control: control.clone(),
         identity: Arc::clone(&identity),
+        proxy,
         actor: Some(actor_ref.clone()),
         uid: String::new(),
     };

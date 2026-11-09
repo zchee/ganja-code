@@ -29,7 +29,7 @@ pub struct KubectlTunnel {
     executable: PathBuf,
     kubeconfig: PathBuf,
     context: Option<String>,
-    proxies: Mutex<BTreeMap<String, Arc<Mutex<Option<ProxyChild>>>>>,
+    proxies: Mutex<BTreeMap<String, Arc<ProxyEntry>>>,
 }
 
 impl fmt::Debug for KubectlTunnel {
@@ -70,21 +70,27 @@ impl Tunnel for KubectlTunnel {
         parse_actor(&target)?;
         let entry = {
             let mut proxies = self.proxies.lock().await;
-            Arc::clone(proxies.entry(target).or_insert_with(|| Arc::new(Mutex::new(None))))
+            Arc::clone(proxies.entry(target).or_insert_with(|| Arc::new(ProxyEntry::default())))
         };
         // Serialize one actor's startup without blocking routes to other actors.
-        let mut proxy = entry.lock().await;
+        let mut proxy = entry.child.lock().await;
+        if entry.cancel.is_cancelled() {
+            return Err(failure("proxy retired", ProvisionErrorKind::Gone));
+        }
         if proxy.as_ref().is_none_or(|proxy| proxy.task.is_finished()) {
-            *proxy = Some(
-                start_proxy(
+            *proxy = Some(tokio::select! {
+                biased;
+                () = entry.cancel.cancelled() => {
+                    return Err(failure("proxy retired", ProvisionErrorKind::Gone));
+                },
+                result = start_proxy(
                     &self.executable,
                     &self.kubeconfig,
                     self.context.as_deref(),
                     actor,
                     Duration::from_secs(120),
-                )
-                .await?,
-            );
+                ) => result?,
+            });
         }
         let address = proxy
             .as_ref()
@@ -96,6 +102,25 @@ impl Tunnel for KubectlTunnel {
             .map_err(|_| failure("proxy connect", ProvisionErrorKind::Transient))?;
         Ok(Box::new(stream))
     }
+
+    async fn retire(&self, actor: &ObjectRef) {
+        let target = format!("{}/{}", actor.atespace, actor.name);
+        let Some(entry) = self.proxies.lock().await.remove(&target) else { return };
+        entry.cancel.cancel();
+        if let Some(mut proxy) = entry.child.lock().await.take() {
+            proxy.cancel.cancel();
+            if tokio::time::timeout(Duration::from_secs(2), &mut proxy.task).await.is_err() {
+                proxy.task.abort();
+                let _ = (&mut proxy.task).await;
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProxyEntry {
+    cancel: CancellationToken,
+    child: Mutex<Option<ProxyChild>>,
 }
 
 struct ProxyChild {
@@ -153,8 +178,8 @@ async fn start_proxy(
     let address = match result {
         Ok(Ok(address)) => address,
         _ => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
             return Err(failed());
         }
     };
@@ -169,8 +194,10 @@ async fn start_proxy(
             tokio::select! {
                 _ = child.wait() => {},
                 () = stop.cancelled() => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    if tokio::time::timeout(Duration::from_millis(100), child.wait()).await.is_err() {
+                        let _ = child.start_kill();
+                        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                    }
                 }
             }
         };
