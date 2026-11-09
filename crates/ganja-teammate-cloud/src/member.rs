@@ -167,9 +167,12 @@ impl CloudMember {
                 && url.password().is_none()
                 && url.query().is_none()
                 && url.fragment().is_none()
-                // Url normalizes an empty userinfo away, so inspect the authority too.
+                && url.path() == "/"
+                // Inspect the original spelling because URL parsing normalizes
+                // empty userinfo and dot-segments before the origin check.
                 && endpoint.base_url.split_once("://").is_some_and(|(_, rest)| {
-                    rest.split('/').next().is_some_and(|authority| !authority.contains('@'))
+                    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+                    !authority.contains('@') && !rest.contains('\\') && path.is_empty()
                 })
         }) && !endpoint.headers.contains_key(http::header::AUTHORIZATION)
             && !endpoint.headers.contains_key(http::header::PROXY_AUTHORIZATION);

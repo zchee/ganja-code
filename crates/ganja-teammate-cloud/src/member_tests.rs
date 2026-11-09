@@ -418,6 +418,27 @@ async fn same_named_members_in_different_teams_keep_independent_controls() {
 }
 
 #[tokio::test]
+async fn worker_endpoints_are_origins_without_path_prefixes() {
+    for (base_url, accepted) in [
+        ("https://worker.example", true),
+        ("https://worker.example/", true),
+        ("https://worker.example/prefix", false),
+        ("https://worker.example/.", false),
+        ("https://worker.example/%2e", false),
+        ("https://worker.example//", false),
+    ] {
+        let fixture = Fixture::with_endpoint(Endpoint {
+            base_url: base_url.to_owned(),
+            headers: http::HeaderMap::new(),
+            username: "ganja".to_owned(),
+            password: secrecy::SecretString::from("test-password"),
+        })
+        .await;
+        assert_eq!(fixture.member.client.is_some(), accepted, "{base_url}");
+    }
+}
+
+#[tokio::test]
 async fn worker_clients_require_trusted_endpoints_and_separate_auth_headers() {
     let cases = [
         ("https://worker.example", None, true),
