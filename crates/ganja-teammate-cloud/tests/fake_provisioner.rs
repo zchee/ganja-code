@@ -235,6 +235,68 @@ impl Hosted {
 }
 
 #[tokio::test]
+async fn a_crashed_or_gone_worker_stops_once_without_an_idle_claim() {
+    use ganja_teammate_cloud::provisioner::ProvisionErrorKind;
+    use ganja_teammate_cloud::state::Phase;
+    for (kind, phase, sentence) in [
+        (ProvisionErrorKind::Crashed, Phase::Crashed, "worker crashed"),
+        (ProvisionErrorKind::Gone, Phase::Gone, "worker is gone"),
+    ] {
+        let hosted = Hosted::new().await;
+        hosted.start().await;
+        hosted.wait_suspended(1).await;
+        hosted.provisioner.fail_next(ganja_testkit::provisioner::ProvisionOperation::Resume, kind);
+        let control = ganja_teammate_cloud::control(&hosted.name).expect("control");
+        hosted.send("next request");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while control.phase() != phase {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal lifecycle state");
+        assert_eq!(hosted.idle_count(), 1, "an interrupted resume is not another idle turn");
+        let mail = ganja_team::mailbox::read(&hosted.registry.lead_inbox()).expect("inbox");
+        assert_eq!(mail.valid.iter().filter(|message| message.text.contains(sentence)).count(), 1);
+        hosted.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_request_is_acknowledged_without_resuming_the_worker() {
+    let hosted = Hosted::new().await;
+    hosted.start().await;
+    hosted.wait_suspended(1).await;
+    let frame =
+        ganja_protocol::team::Frame::ShutdownRequest(ganja_protocol::team::ShutdownRequest {
+            request_id: "shutdown-test".to_owned(),
+            from: "team-lead".to_owned(),
+            reason: None,
+            timestamp: ganja_team::record::now_iso8601(),
+        });
+    hosted.send(&serde_json::to_string(&frame).expect("shutdown frame"));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let mail = ganja_team::mailbox::read(&hosted.registry.lead_inbox()).expect("inbox");
+            if mail.valid.iter().any(|message| matches!(serde_json::from_str::<ganja_protocol::team::Frame>(&message.text), Ok(ganja_protocol::team::Frame::ShutdownApproved(ref approved)) if approved.request_id == "shutdown-test")) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("shutdown acknowledgement");
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation
+                == ganja_testkit::provisioner::ProvisionOperation::Resume)
+            .count(),
+        1
+    );
+    assert!(hosted.provisioner.worker(&hosted.name).is_none());
+    hosted.close().await;
+}
+
+#[tokio::test]
 async fn a_stalled_resume_releases_the_registry_name_and_record() {
     let hosted = Hosted::with_deadline(std::time::Duration::from_millis(150)).await;
     let _release =

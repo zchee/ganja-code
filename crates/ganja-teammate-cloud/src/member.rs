@@ -321,11 +321,23 @@ impl CloudMember {
         }
         self.set_phase(Phase::Resuming);
         let result = timeout(self.runtime.deadlines.launch, async {
-            self.runtime
-                .provisioner
-                .resume(&self.worker)
-                .await
-                .map_err(|_| "worker resume failed")?;
+            if let Err(error) = self.runtime.provisioner.resume(&self.worker).await {
+                match error.kind {
+                    ProvisionErrorKind::Crashed => {
+                        self.terminal_failure(
+                            Phase::Crashed,
+                            "worker crashed; owner recovery is required",
+                        )
+                        .await;
+                        return Err("worker crashed");
+                    }
+                    ProvisionErrorKind::Gone => {
+                        self.terminal_failure(Phase::Gone, "worker is gone").await;
+                        return Err("worker is gone");
+                    }
+                    _ => return Err("worker resume failed"),
+                }
+            }
             let events = self.events()?;
             self.gate.open_stream();
             events.release();
@@ -366,9 +378,23 @@ impl CloudMember {
             self.set_phase(Phase::Idle);
         } else {
             self.gate.close();
-            self.set_phase(Phase::RecoveryRequired);
+            if self.alive.load(Ordering::SeqCst) {
+                self.set_phase(Phase::RecoveryRequired);
+            }
         }
         result
+    }
+
+    async fn terminal_failure(&self, phase: Phase, message: &str) {
+        self.gate.close();
+        if let Some(events) = &self.events {
+            events.invalidate().await;
+        }
+        if self.alive.swap(false, Ordering::SeqCst) {
+            self.mail(message.to_owned()).await;
+        }
+        self.set_phase(phase);
+        self.announce_exit();
     }
 
     async fn quiesce(&self) {
@@ -457,6 +483,10 @@ impl CloudMember {
             ))
             .await;
         }
+        self.announce_exit();
+    }
+
+    fn announce_exit(&self) {
         if !self.exited.swap(true, Ordering::SeqCst) {
             let _ = self.lent.exits.send(Exited {
                 name: self.spec.name.as_str().to_owned(),
@@ -719,10 +749,11 @@ impl CloudMember {
     }
 
     async fn run(self: Arc<Self>) {
-        while !self.lent.cancel.is_cancelled() {
+        while !self.lent.cancel.is_cancelled() && self.alive.load(Ordering::SeqCst) {
             let contents = runner::read_inbox(self.spec.inbox(), self.spec.name.as_str()).await;
             if let Some(contents) = contents {
-                if let Some((_, message, _)) = runner::shutdown_ahead(&contents.valid) {
+                if let Some((_, message, request)) = runner::shutdown_ahead(&contents.valid) {
+                    let request_id = request.request_id.clone();
                     runner::prune_inbox(
                         self.spec.inbox(),
                         vec![mailbox::identity(message)],
@@ -730,6 +761,19 @@ impl CloudMember {
                     )
                     .await;
                     self.cleanup().await;
+                    runner::write_frame(
+                        self.lent.lead_inbox.clone(),
+                        self.spec.name.as_str(),
+                        &Frame::ShutdownApproved(ganja_protocol::team::ShutdownApproved {
+                            request_id,
+                            from: self.spec.name.as_str().to_owned(),
+                            timestamp: record::now_iso8601(),
+                            pane_id: None,
+                            backend_type: Some("cloud".to_owned()),
+                        }),
+                        "cloud shutdown acknowledgement",
+                    )
+                    .await;
                     return;
                 }
                 for message in contents.valid {
@@ -755,6 +799,9 @@ impl CloudMember {
                     match result {
                         Ok(()) => self.quiesce().await,
                         Err(reason) => {
+                            if !self.alive.load(Ordering::SeqCst) {
+                                return;
+                            }
                             self.set_phase(Phase::RecoveryRequired);
                             self.mail(format!("recovery required: {reason}")).await;
                         }
@@ -797,3 +844,7 @@ impl Spawned for CloudMember {
         self.cleanup().await;
     }
 }
+
+#[cfg(test)]
+#[path = "member_tests.rs"]
+mod tests;
