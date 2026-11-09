@@ -55,16 +55,21 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
         .prompt(&health.session_id, &Prompt::new("inspect and update note.txt"))
         .await
         .expect("prompt accepted");
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(event) = events.next().await {
-            if let Event::MessageFinished { reason, .. } = event.expect("event") {
-                assert_eq!(reason, FinishReason::Completed);
-                break;
+    let reason = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let event = events
+                .next()
+                .await
+                .expect("event stream ended before MessageFinished")
+                .expect("event");
+            if let Event::MessageFinished { reason, .. } = event {
+                break reason;
             }
         }
     })
     .await
     .expect("tool turn completes");
+    assert_eq!(reason, FinishReason::Completed);
     assert_eq!(
         std::fs::read_to_string(worker.work.join("note.txt")).expect("updated file"),
         "after\n"
