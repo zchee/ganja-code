@@ -106,6 +106,7 @@ pub struct CloudMember {
     cleaned: AtomicBool,
     exited: AtomicBool,
     terminal: Mutex<BTreeMap<MessageId, Option<FinishReason>>>,
+    observed_text: Mutex<BTreeMap<MessageId, usize>>,
     launch_timeout: Mutex<LaunchFailure>,
     uncertainty_reported: AtomicBool,
     trace: Mutex<Option<TraceLog>>,
@@ -167,6 +168,7 @@ impl CloudMember {
             cleaned: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             terminal: Mutex::new(BTreeMap::new()),
+            observed_text: Mutex::new(BTreeMap::new()),
             launch_timeout: Mutex::new(LaunchFailure::ResumeTimedOut),
             uncertainty_reported: AtomicBool::new(false),
             trace: Mutex::new(trace),
@@ -310,6 +312,7 @@ impl CloudMember {
             events.invalidate().await;
         }
         self.terminal.lock().expect("terminal decision lock").clear();
+        self.observed_text.lock().expect("observed text lock").clear();
         self.needs_resync.store(true, Ordering::SeqCst);
         self.set_phase(phase);
         self.remember(reason.to_owned());
@@ -425,7 +428,7 @@ impl CloudMember {
                     connected.head.clone()
                 };
                 self.gate.open_rest();
-                if let Some(pending) = self.recover_gap(&head, None).await? {
+                if let Some(pending) = self.recover_gap(&head, None, &BTreeMap::new()).await? {
                     self.wait_for_terminal(None, Some(pending), true).await?;
                 }
                 self.needs_resync.store(false, Ordering::SeqCst);
@@ -583,7 +586,13 @@ impl CloudMember {
         }
     }
 
-    async fn finish(&self, message: &Message, reason: Option<FinishReason>, gap: bool) {
+    async fn finish(
+        &self,
+        message: &Message,
+        reason: Option<FinishReason>,
+        gap: bool,
+        observed_bytes: usize,
+    ) {
         let first = {
             let mut terminal = self.terminal.lock().expect("terminal decision lock");
             match terminal.entry(message.id.clone()) {
@@ -605,6 +614,13 @@ impl CloudMember {
             }
             return;
         }
+        let observed_bytes = observed_bytes.max(
+            self.observed_text
+                .lock()
+                .expect("observed text lock")
+                .remove(&message.id)
+                .unwrap_or_default(),
+        );
         let mut text = message
             .parts
             .iter()
@@ -615,7 +631,15 @@ impl CloudMember {
             .collect::<Vec<_>>()
             .join("\n");
         if gap {
-            text.push_str("\n\nfinal text may be incomplete; turn outcome unknown");
+            let recovered_bytes: usize =
+                message.parts.iter().filter_map(|part| part.as_text()).map(str::len).sum();
+            if recovered_bytes < observed_bytes {
+                text.push_str("\n\ntext lost");
+            }
+            text.push_str("\n\nfinal text may be incomplete");
+            if reason.is_none() {
+                text.push_str("; turn outcome unknown");
+            }
         }
         self.mail(text).await;
         let idle_reason = match reason {
@@ -644,6 +668,7 @@ impl CloudMember {
         &self,
         head: &ganja_client::EventId,
         after: Option<&MessageId>,
+        observed: &BTreeMap<MessageId, usize>,
     ) -> Result<Option<MessageId>, &'static str> {
         let cold = self
             .epoch
@@ -672,7 +697,13 @@ impl CloudMember {
         }) {
             if message.time.completed.is_some() || cold || self.needs_resync.load(Ordering::SeqCst)
             {
-                self.finish(message, None, true).await;
+                self.finish(
+                    message,
+                    None,
+                    true,
+                    observed.get(&message.id).copied().unwrap_or_default(),
+                )
+                .await;
             } else if !self
                 .terminal
                 .lock()
@@ -725,6 +756,7 @@ impl CloudMember {
         let client = self.client()?;
         let session = self.session()?;
         let mut streamed = BTreeMap::<MessageId, Message>::new();
+        let mut observed = self.observed_text.lock().expect("observed text lock").clone();
         let mut deadline = Instant::now() + self.runtime.deadlines.terminal;
         loop {
             let item = timeout_at(deadline, self.events()?.next())
@@ -741,8 +773,21 @@ impl CloudMember {
             match item {
                 Resumed::Gap { head } => {
                     gap = true;
+                    for (id, message) in &streamed {
+                        let bytes = message
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.as_text())
+                            .map(str::len)
+                            .sum();
+                        observed
+                            .entry(id.clone())
+                            .and_modify(|previous| *previous = (*previous).max(bytes))
+                            .or_insert(bytes);
+                    }
+                    *self.observed_text.lock().expect("observed text lock") = observed.clone();
                     streamed.clear();
-                    current = self.recover_gap(&head, last.as_ref()).await?;
+                    current = self.recover_gap(&head, last.as_ref(), &observed).await?;
                     if current.is_none()
                         && self
                             .terminal
@@ -819,7 +864,13 @@ impl CloudMember {
                                 .find(|message| message.id == message_id),
                         }
                         .ok_or("terminal message was not available in storage or stream")?;
-                        self.finish(&message, Some(reason), gap).await;
+                        self.finish(
+                            &message,
+                            Some(reason),
+                            gap,
+                            observed.get(&message_id).copied().unwrap_or_default(),
+                        )
+                        .await;
                         return Ok(());
                     }
                     _ => {}

@@ -11,6 +11,7 @@ struct GapSource {
     inner: ClientSource,
     gap: AtomicBool,
     gap_after_finish: AtomicBool,
+    prefix: Mutex<VecDeque<Resumed>>,
 }
 
 #[async_trait]
@@ -20,6 +21,10 @@ impl EventSource for GapSource {
     }
 
     async fn next(&self) -> Option<Result<Resumed, ClientError>> {
+        let prefix = self.prefix.lock().expect("prefix events").pop_front();
+        if let Some(prefix) = prefix {
+            return Some(Ok(prefix));
+        }
         if self.gap_after_finish.swap(false, Ordering::SeqCst) {
             loop {
                 let item = self.inner.next().await?;
@@ -104,6 +109,7 @@ impl Running {
             inner: ClientSource::new(client.clone(), fixture.member.gate.clone()),
             gap: AtomicBool::new(false),
             gap_after_finish: AtomicBool::new(false),
+            prefix: Mutex::new(VecDeque::new()),
         });
         let member = Arc::get_mut(&mut fixture.member).expect("unique fixture member");
         member.client = Some(client);
@@ -131,6 +137,7 @@ impl Running {
             inner: ClientSource::new(client.clone(), self.fixture.member.gate.clone()),
             gap: AtomicBool::new(true),
             gap_after_finish: AtomicBool::new(false),
+            prefix: Mutex::new(VecDeque::new()),
         });
         let member = Arc::get_mut(&mut self.fixture.member).expect("unique member");
         member.client = Some(client);
@@ -219,6 +226,106 @@ async fn a_saved_envelope_is_mailed_once_when_its_finish_arrives_after_the_gap()
         Some(&Some(FinishReason::Completed))
     );
     assert_eq!(running.mail().len(), before.len(), "retained finish cannot mail twice");
+    running.close().await;
+}
+
+#[tokio::test]
+async fn only_shorter_recovered_text_gets_a_positive_loss_marker() {
+    for (prefix, lost) in [("a much longer streamed prefix", true), ("stored", false), ("s", false)]
+    {
+        let running = Running::new(vec![ganja_testkit::says("stored")]).await;
+        let mut events = running.engine.subscribe().await.expect("events");
+        running.engine.send(prompt()).await.expect("prompt");
+        let events = ganja_testkit::drain(&mut events).await;
+        let mut started = events.into_iter().find(|event| matches!(event, Event::MessageStarted { message, .. } if message.role == Role::Assistant)).expect("assistant start");
+        let transcript = running
+            .storage
+            .load_transcript(&running.engine.session_id())
+            .expect("stored transcript");
+        if let Event::MessageStarted { message, .. } = &mut started {
+            *message = transcript
+                .into_iter()
+                .find(|stored| stored.id == message.id)
+                .expect("stored assistant");
+            message.time.completed = None;
+            for part in &mut message.parts {
+                if let PartBody::Text { text } = &mut part.body {
+                    *text = prefix.to_owned();
+                }
+            }
+        }
+        running
+            .source
+            .prefix
+            .lock()
+            .expect("prefix events")
+            .push_back(Resumed::Event(Box::new(started)));
+        running.source.gap.store(true, Ordering::SeqCst);
+        running.fixture.member.wait_for_terminal(None, None, false).await.expect("gap convergence");
+        let mail = running.mail();
+        let text = &mail
+            .iter()
+            .find(|message| message.text.contains("final text may be incomplete"))
+            .expect("gap mail")
+            .text;
+        assert!(text.starts_with("stored"), "mail uses storage, never a stitched prefix");
+        assert_eq!(text.contains("text lost"), lost);
+        assert!(!text.contains("much longer"), "missing text is never synthesized");
+        assert_eq!(mail.len(), 2);
+        running.close().await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn text_loss_evidence_survives_a_terminal_reconciliation_timeout() {
+    let running = Running::new(vec![ganja_testkit::says("stored")]).await;
+    let fault = ganja_core::session::CompletedEnvelopeFailure::new(running.engine.session_id());
+    let mut events = running.engine.subscribe().await.expect("events");
+    running.engine.send(prompt()).await.expect("prompt");
+    let events = ganja_testkit::drain(&mut events).await;
+    let mut started = events.into_iter().find(|event| matches!(event, Event::MessageStarted { message, .. } if message.role == Role::Assistant)).expect("assistant start");
+    let transcript =
+        running.storage.load_transcript(&running.engine.session_id()).expect("transcript");
+    if let Event::MessageStarted { message, .. } = &mut started {
+        *message = transcript
+            .into_iter()
+            .find(|stored| stored.id == message.id)
+            .expect("stored assistant");
+        for part in &mut message.parts {
+            if let PartBody::Text { text } = &mut part.body {
+                *text = "a much longer streamed prefix".to_owned();
+            }
+        }
+    }
+    running
+        .source
+        .prefix
+        .lock()
+        .expect("prefix events")
+        .push_back(Resumed::Event(Box::new(started)));
+    running.source.gap.store(true, Ordering::SeqCst);
+    assert_eq!(
+        running.fixture.member.wait_for_terminal(None, None, false).await,
+        Err("terminal state unavailable")
+    );
+    assert!(!running.fixture.member.observed_text.lock().expect("byte counts").is_empty());
+    running.fixture.member.set_phase(Phase::RecoveryRequired);
+    CloudControl(running.fixture.member.clone())
+        .resume_for_inspection()
+        .await
+        .expect("explicit continuation");
+    let mail = running.mail();
+    assert_eq!(mail.len(), 2);
+    let text = &mail
+        .iter()
+        .find(|message| message.text.contains("final text may be incomplete"))
+        .expect("gap mail")
+        .text;
+    assert!(text.starts_with("stored"));
+    assert!(text.contains("text lost"));
+    assert!(!text.contains("longer streamed"));
+    drop(fault);
     running.close().await;
 }
 
