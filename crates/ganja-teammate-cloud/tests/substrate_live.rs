@@ -20,6 +20,7 @@
 //! template whose golden snapshot is ready; it creates, resumes, suspends and
 //! deletes one Actor it owns and touches no shared component.
 
+use std::future::Future;
 use std::path::PathBuf;
 
 use ganja_team::MemberName;
@@ -140,19 +141,59 @@ async fn actor_lifecycle() {
     };
     let worker = provisioner.spawn(&spec).await.expect("spawn a SUSPENDED Actor");
     eprintln!("live actor: {}", provisioner.describe(&worker));
-    let outcome = async {
-        assert_eq!(provisioner.state(&worker).await?, WorkerState::Suspended);
-        let resumed = provisioner.resume(&worker).await?;
-        assert!(resumed.was_suspended, "the created Actor resumes from SUSPENDED");
-        let suspended = provisioner.suspend(&worker).await?;
-        assert_eq!(suspended, SuspendOutcome::Suspended, "a running Actor suspends on request");
-        provisioner.resume(&worker).await?;
-        Ok::<_, ganja_teammate_cloud::provisioner::ProvisionError>(())
-    }
+    let outcome = finish_with_cleanup(
+        async {
+            let initial = provisioner.state(&worker).await?;
+            let resumed = provisioner.resume(&worker).await?;
+            let suspended = provisioner.suspend(&worker).await?;
+            provisioner.resume(&worker).await?;
+            Ok::<_, ganja_teammate_cloud::provisioner::ProvisionError>((
+                initial, resumed, suspended,
+            ))
+        },
+        provisioner.kill(&worker),
+    )
     .await;
-    // The Actor is deleted RUNNING on the success path and in any state on the
-    // failure path, so a failed assertion cannot leak a live worker.
-    provisioner.kill(&worker).await.expect("DeleteActor with the known UID in any state");
+    // Assertions run only after UID-guarded deletion, including failed RPCs.
+    let (initial, resumed, suspended) = outcome.expect("live lifecycle and cleanup");
+    assert_eq!(initial, WorkerState::Suspended);
+    assert!(resumed.was_suspended, "the created Actor resumes from SUSPENDED");
+    assert_eq!(suspended, SuspendOutcome::Suspended, "a running Actor suspends on request");
     assert_eq!(provisioner.state(&worker).await.expect("reconciling read"), WorkerState::Gone);
-    outcome.expect("live lifecycle");
+}
+
+async fn finish_with_cleanup<T, E>(
+    operation: impl Future<Output = Result<T, E>>,
+    cleanup: impl Future<Output = Result<(), E>>,
+) -> Result<T, E> {
+    let outcome = operation.await;
+    cleanup.await?;
+    outcome
+}
+
+#[tokio::test]
+async fn lifecycle_outcomes_are_inspected_only_after_cleanup() {
+    use std::cell::RefCell;
+
+    for outcome in [Ok(()), Err("lifecycle failed")] {
+        let events = RefCell::new(Vec::new());
+        let result = finish_with_cleanup(
+            async {
+                events.borrow_mut().push("lifecycle");
+                outcome
+            },
+            async {
+                events.borrow_mut().push("cleanup");
+                Ok(())
+            },
+        )
+        .await;
+        events.borrow_mut().push("inspect");
+        assert_eq!(result, outcome);
+        assert_eq!(*events.borrow(), ["lifecycle", "cleanup", "inspect"]);
+    }
+    assert_eq!(
+        finish_with_cleanup(async { Ok(()) }, async { Err("cleanup failed") }).await,
+        Err("cleanup failed")
+    );
 }
