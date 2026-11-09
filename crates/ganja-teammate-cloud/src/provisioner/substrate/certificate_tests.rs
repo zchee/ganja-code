@@ -83,6 +83,110 @@ async fn handshake(server_name: &'static str, correct_trust: bool) -> bool {
 }
 
 #[tokio::test]
+async fn connection_timeout_does_not_cancel_shared_certificate_issuance() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::Json;
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use http::{Method, Uri};
+    use rcgen::CertificateSigningRequestParams;
+    use serde_json::{Value, json};
+    use tokio::sync::Notify;
+
+    struct IssuerState {
+        issuer: Issuer<'static, KeyPair>,
+        ca: String,
+        object: std::sync::Mutex<Value>,
+        entered: Notify,
+        release: Notify,
+        creates: AtomicUsize,
+        deletes: AtomicUsize,
+    }
+    async fn answer(
+        State(state): State<Arc<IssuerState>>,
+        method: Method,
+        uri: Uri,
+        body: Bytes,
+    ) -> Json<Value> {
+        if uri.path().ends_with("/v1") {
+            return Json(
+                json!({"apiVersion":"v1","kind":"APIResourceList","groupVersion":"certificates.k8s.io/v1","resources":[{"name":"podcertificaterequests","kind":"PodCertificateRequest","namespaced":true,"verbs":["create","get","delete"]}]}),
+            );
+        }
+        if method == Method::POST {
+            state.creates.fetch_add(1, Ordering::SeqCst);
+            let mut object: Value = serde_json::from_slice(&body).expect("request");
+            let csr = STANDARD
+                .decode(object["spec"]["stubPKCS10Request"].as_str().expect("CSR"))
+                .expect("base64 CSR");
+            let mut request =
+                CertificateSigningRequestParams::from_der(&csr.into()).expect("signed CSR");
+            request.params.subject_alt_names =
+                vec![SanType::URI(IDENTITY.try_into().expect("URI"))];
+            let certificate = request.signed_by(&state.issuer).expect("issue certificate");
+            object["status"] = json!({"conditions":[{"type":"Issued","status":"True"}],"certificateChain":format!("{}{}",certificate.pem(),state.ca)});
+            *state.object.lock().expect("object") = object.clone();
+            return Json(object);
+        }
+        if method == Method::DELETE {
+            state.deletes.fetch_add(1, Ordering::SeqCst);
+            return Json(json!({"apiVersion":"v1","kind":"Status","status":"Success"}));
+        }
+        state.entered.notify_one();
+        state.release.notified().await;
+        Json(state.object.lock().expect("object").clone())
+    }
+    let key = KeyPair::generate().expect("CA key");
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = params.self_signed(&key).expect("CA").pem();
+    let state = Arc::new(IssuerState {
+        issuer: Issuer::new(params, key),
+        ca: ca.clone(),
+        object: std::sync::Mutex::new(Value::Null),
+        entered: Notify::new(),
+        release: Notify::new(),
+        creates: AtomicUsize::new(0),
+        deletes: AtomicUsize::new(0),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let address = listener.local_addr().expect("address");
+    let app = axum::Router::new().fallback(answer).with_state(Arc::clone(&state));
+    let server =
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("issuer server") });
+    let client =
+        Client::try_from(kube::Config::new(format!("http://{address}").parse().expect("URI")))
+            .expect("client");
+    let identity = Arc::new(RouterIdentity {
+        client,
+        trust: ca.into_bytes().into(),
+        current: Arc::new(Mutex::new(None)),
+        renewal: Arc::new(Mutex::new(None)),
+    });
+    let first = {
+        let identity = Arc::clone(&identity);
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(30), identity.config()).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(3), state.entered.notified())
+        .await
+        .expect("issuer is pending");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert!(first.await.expect("first caller").is_err());
+    tokio::time::resume();
+    state.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), identity.config())
+        .await
+        .expect("next connection deadline")
+        .expect("completed shared certificate");
+    assert_eq!(state.creates.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn router_tls_requires_the_serving_name_root_and_client_identity() {
     assert!(handshake("atenet-router.ate-system.svc", true).await);
     assert!(!handshake("wrong.ate-system.svc", true).await);

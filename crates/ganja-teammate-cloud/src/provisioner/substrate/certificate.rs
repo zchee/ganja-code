@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use futures::FutureExt as _;
+use futures::future::{BoxFuture, Shared};
 use kube::api::{DeleteParams, DynamicObject, ObjectMeta, PostParams};
 use kube::{Api, Client, ResourceExt};
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
@@ -22,10 +24,14 @@ use crate::provisioner::{ProvisionError, ProvisionErrorKind};
 const IDENTITY: &str = "spiffe://cluster.local/ns/ate-system/sa/atenet-client";
 const ISSUE_BUDGET: Duration = Duration::from_secs(120);
 
+type Renewal = Shared<BoxFuture<'static, Result<Arc<ClientConfig>, ProvisionError>>>;
+
+#[derive(Clone)]
 pub(super) struct RouterIdentity {
     client: Client,
-    trust: Vec<u8>,
-    current: Mutex<Option<Issued>>,
+    trust: Arc<[u8]>,
+    current: Arc<Mutex<Option<Issued>>>,
+    renewal: Arc<Mutex<Option<Renewal>>>,
 }
 
 struct Issued {
@@ -36,12 +42,48 @@ struct Issued {
 
 impl RouterIdentity {
     pub(super) async fn new(client: Client, trust: Vec<u8>) -> Result<Self, ProvisionError> {
-        let identity = Self { client, trust, current: Mutex::new(None) };
-        identity.config().await?;
+        let identity = Self {
+            client,
+            trust: trust.into(),
+            current: Arc::new(Mutex::new(None)),
+            renewal: Arc::new(Mutex::new(None)),
+        };
+        // Construction has no later caller that could use abandoned issuance.
+        identity.refresh().await?;
         Ok(identity)
     }
 
     pub(super) async fn config(&self) -> Result<Arc<ClientConfig>, ProvisionError> {
+        if let Ok(current) = self.current.try_lock()
+            && let Some(issued) = current.as_ref().filter(|issued| {
+                let now = SystemTime::now();
+                now < issued.refresh_at && now < issued.expires_at
+            })
+        {
+            return Ok(Arc::clone(&issued.config));
+        }
+        let renewal = {
+            let mut pending = self.renewal.lock().await;
+            if let Some(renewal) = pending.as_ref().filter(|renewal| renewal.peek().is_none()) {
+                renewal.clone()
+            } else {
+                let identity = self.clone();
+                // The task owns issuance beyond any individual connection's cap.
+                let task = tokio::spawn(async move { identity.refresh().await });
+                let renewal = async move {
+                    task.await
+                        .map_err(|_| failure("router certificate", ProvisionErrorKind::Refused))?
+                }
+                .boxed()
+                .shared();
+                *pending = Some(renewal.clone());
+                renewal
+            }
+        };
+        renewal.await
+    }
+
+    async fn refresh(&self) -> Result<Arc<ClientConfig>, ProvisionError> {
         let mut current = self.current.lock().await;
         let now = SystemTime::now();
         if let Some(issued) =

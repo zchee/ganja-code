@@ -65,6 +65,8 @@ toml.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Pause the clock to prove certificate renewal and connection deadline ownership.
+tokio = { workspace = true, features = ["test-util"] }
 # Real loopback HTTP fixtures exercise Kubernetes discovery and issuance.
 axum = { workspace = true, features = ["ws"] }
 jiff.workspace = true
