@@ -3,29 +3,21 @@ use ganja_protocol::team::MemberBackend;
 
 use super::*;
 
-/// Restores, as a test, the exhaustiveness check `Backends` traded away
-/// (plan ADR "Consequences", mitigated by U-6): every name
-/// [`ganja_core::teammate::BACKENDS`] spells resolves through [`backends`],
-/// except `in-process`, which is the engine's own entry and is never one this
-/// crate assembles.
+/// Every named local backend is assembled here, and non-local entries are not.
+/// The engine owns in-process members; cloud members are configured separately.
 #[test]
-fn every_named_backend_but_in_process_is_assembled() {
+fn every_named_local_backend_and_only_local_backends_are_assembled() {
     let assembled = backends(PaneShell::default(), PaneShare::default());
 
     for name in BACKENDS {
         let parsed =
             parse_backend(name).unwrap_or_else(|error| panic!("{name:?} should parse: {error}"));
 
-        if parsed == MemberBackend::InProcess {
-            assert!(
-                assembled.of(parsed).is_none(),
-                "{name:?} is the engine's own entry and must not be assembled here"
-            );
-        } else {
-            assert!(
-                assembled.of(parsed).is_some(),
-                "{name:?} has no backend implementation in `backends()`"
-            );
-        }
+        let local = !matches!(parsed, MemberBackend::InProcess | MemberBackend::Cloud);
+        assert_eq!(
+            assembled.of(parsed).is_some(),
+            local,
+            "{name:?} must be assembled if and only if it is a local backend"
+        );
     }
 }
