@@ -222,8 +222,11 @@ async fn guarded(state: AppState, request: Request, next: Next) -> Response {
         "serving"
     );
 
+    let readiness = state.transport == Transport::Tcp
+        && request.method() == axum::http::Method::GET
+        && request.uri().path() == "/readyz";
     if state.transport == Transport::Tcp
-        && !(request.method() == axum::http::Method::GET && request.uri().path() == "/readyz")
+        && !readiness
         && let Some(credentials) = &state.credentials
         && !auth::authorized(request.headers(), request.uri().query(), credentials)
     {
@@ -237,6 +240,9 @@ async fn guarded(state: AppState, request: Request, next: Next) -> Response {
     }
 
     if let Some(refusal) = wrong_directory(&state, request.uri(), request.headers()) {
+        if readiness {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
         return refusal.into_response();
     }
 
