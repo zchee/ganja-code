@@ -25,7 +25,7 @@ use super::identity::AteapiIdentity;
 use super::kube::{KubeTunnel, client_from_config};
 use super::kubectl::KubectlTunnel;
 use super::settings::{Settings, TunnelMode};
-use super::tunnel::{ActorProxy, Tunnel, failure, parse_actor};
+use super::tunnel::{ActorProxy, TOKEN_HEADER, Tunnel, failure, parse_actor};
 use crate::provisioner::{
     Endpoint, ProvisionError, ProvisionErrorKind, Provisioner, Resumed, SuspendOutcome, Worker,
     WorkerHandle, WorkerSpec, WorkerState,
@@ -182,7 +182,7 @@ impl SubstrateProvisioner {
             return Err(failure("worker credentials", ProvisionErrorKind::Refused));
         }
         let control = ControlClient::new(tunnel.control().await?);
-        let proxy = Arc::new(ActorProxy::bind(tunnel).await?);
+        let proxy = Arc::new(ActorProxy::bind(&settings.atespace, tunnel).await?);
         Ok(Self { settings, control, identity: Arc::new(identity), proxy, username, password })
     }
 
@@ -362,6 +362,7 @@ impl SubstrateProvisioner {
             HeaderValue::try_from(format!("{}/{}", metadata.atespace, metadata.name))
                 .map_err(|_| failure("worker route", ProvisionErrorKind::Refused))?,
         );
+        headers.insert(TOKEN_HEADER, self.proxy.token_header());
         Ok(Worker {
             handle: WorkerHandle::new(format!(
                 "{}/{}/{}",
@@ -527,6 +528,7 @@ impl Provisioner for SubstrateProvisioner {
         let result = self.control.clone().create_actor_egress_policy(request).await;
         if let Err(status) = result {
             if self.read_policy(&actor_ref).await.is_ok_and(|value| value.rules == policy.rules) {
+                self.proxy.admit(&actor_ref)?;
                 cleanup.disarm();
                 return Ok(worker);
             }
@@ -536,6 +538,7 @@ impl Provisioner for SubstrateProvisioner {
                 .map_err(|_| failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous))?;
             return Err(rpc_error("create policy", &status, true));
         }
+        self.proxy.admit(&actor_ref)?;
         cleanup.disarm();
         Ok(worker)
     }

@@ -37,6 +37,7 @@ struct ControlState {
     policies: BTreeMap<String, EgressPolicy>,
     calls: Vec<&'static str>,
     retired: Vec<String>,
+    actor_connections: usize,
     lost: BTreeSet<&'static str>,
     template_ready: bool,
     deny_policy: bool,
@@ -380,6 +381,7 @@ impl Tunnel for ControlTunnel {
     }
     async fn actor(&self, _actor: &ObjectRef) -> Result<TunnelIo, ProvisionError> {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        self.1.lock().expect("control state").actor_connections += 1;
         let (client, mut server) = tokio::io::duplex(4096);
         tokio::spawn(async move {
             let mut bytes = [0; 4096];
@@ -502,6 +504,76 @@ async fn deleting_an_actor_closes_its_established_proxy_stream() {
         .await
         .expect("deletion closes the established stream")
         .expect("closed stream");
+}
+
+#[tokio::test]
+async fn proxy_admission_refuses_unissued_targets_and_invalid_local_credentials() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (_kube, control, provisioner) = fixture().await;
+    let worker = provisioner.spawn(&spec()).await.expect("spawn");
+    let url = url::Url::parse(&worker.endpoint.base_url).expect("endpoint");
+    for case in [
+        "missing token",
+        "wrong token",
+        "short token",
+        "malformed token",
+        "wrong atespace",
+        "unknown actor",
+        "killed actor",
+    ] {
+        let mut headers = worker.endpoint.headers.clone();
+        match case {
+            "missing token" => {
+                headers.remove("x-ganja-proxy-token");
+            }
+            "wrong token" => {
+                use base64::Engine as _;
+                let mut bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(headers["x-ganja-proxy-token"].as_bytes())
+                    .expect("valid token");
+                bytes[0] ^= 1;
+                headers.insert(
+                    "x-ganja-proxy-token",
+                    http::HeaderValue::try_from(
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+                    )
+                    .expect("wrong token header"),
+                );
+            }
+            "short token" => {
+                headers.insert("x-ganja-proxy-token", http::HeaderValue::from_static("AA"));
+            }
+            "malformed token" => {
+                headers.insert("x-ganja-proxy-token", http::HeaderValue::from_static("!"));
+            }
+            "wrong atespace" => {
+                headers.insert("ate-target-actor", http::HeaderValue::from_static("other/worker"));
+            }
+            "unknown actor" => {
+                headers.insert("ate-target-actor", http::HeaderValue::from_static("ganja/unknown"));
+            }
+            "killed actor" => {
+                provisioner.kill(&worker).await.expect("kill");
+            }
+            _ => unreachable!(),
+        }
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", url.port().expect("port")))
+            .await
+            .expect("proxy socket");
+        let mut request = String::from("GET / HTTP/1.1\r\nHost: localhost\r\n");
+        for (name, value) in &headers {
+            request.push_str(&format!("{name}: {}\r\n", value.to_str().expect("header")));
+        }
+        request.push_str("\r\n");
+        socket.write_all(request.as_bytes()).await.expect("send request");
+        let mut status = [0; 12];
+        tokio::time::timeout(std::time::Duration::from_secs(2), socket.read_exact(&mut status))
+            .await
+            .expect("refusal deadline")
+            .expect("response status");
+        assert_ne!(&status, b"HTTP/1.1 200", "{case}");
+        assert_eq!(control.state.lock().expect("state").actor_connections, 0, "{case}");
+    }
 }
 
 #[tokio::test]

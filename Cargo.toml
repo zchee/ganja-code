@@ -415,6 +415,9 @@ serde_with = { version = "3.24.0", default-features = false, features = ["alloc"
 # 43-byte string needs neither); rmcp enables both through feature
 # unification in the workspace build anyway.
 sha2 = { version = "0.11.1", default-features = false }
+# Compare fixed-size local proxy credentials without content-dependent exits.
+# Already resolved by rustls; this adds no additional version to the workspace.
+subtle = "2.6.1"
 # One shell word at a time, for the launch line a pane teammate is typed in
 # with: bare when every byte is safe, quoted when one is not. Chosen over the
 # hand-rolled `'\''` idiom because the idle shell reading that line is the

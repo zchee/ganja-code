@@ -26,6 +26,10 @@ ganja-team.workspace = true
 http.workspace = true
 # All cloud control and ingress hops are local Kubernetes port-forwards.
 base64.workspace = true
+# The loopback proxy token gets fresh entropy directly from the operating system.
+getrandom.workspace = true
+# Local proxy credentials are compared as fixed-size arrays in constant time.
+subtle.workspace = true
 httparse.workspace = true
 hyper-util.workspace = true
 k8s-openapi.workspace = true

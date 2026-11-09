@@ -57,6 +57,13 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
 - Both tunnels sit behind one seam: in-process kube port-forwards, or the
   released `kubectl ate proxy actor` child whose readiness is its own stderr
   line — never a probe connection, which would wake a suspended actor.
+  The shared ingress requires a sensitive process-local token and admits only
+  issued, unretired actors in the configured atespace. It consumes the token
+  before forwarding. The plugin owns its separate unauthenticated socket and
+  has no header-authentication hook; it is bound explicitly to `127.0.0.1`,
+  targets only its fixed actor, and still requires the worker's Basic auth.
+  Other local processes can reach that plugin socket; use in-process mode
+  when local users or processes are outside the trust boundary.
 - Mutations are reconciled by reads (`GetActor`, `GetActorEgressPolicy`),
   never blindly resent; deletion carries the known Actor UID and succeeds
   only on a confirmed `NOT_FOUND`. A cancelled policy installation schedules

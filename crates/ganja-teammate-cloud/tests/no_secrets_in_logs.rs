@@ -159,8 +159,26 @@ async fn canary_kubernetes(
     (client, server, denied_reads)
 }
 
+#[derive(Debug)]
+struct RefusingTunnel;
+
+#[async_trait::async_trait]
+impl ganja_teammate_cloud::provisioner::substrate::tunnel::Tunnel for RefusingTunnel {
+    async fn control(&self) -> Result<tonic::transport::Channel, ProvisionError> {
+        Err(ProvisionError { operation: "unused control", kind: ProvisionErrorKind::Refused })
+    }
+
+    async fn actor(
+        &self,
+        _actor: &ganja_teammate_cloud::provisioner::substrate::ateapi_v1::ObjectRef,
+    ) -> Result<ganja_teammate_cloud::provisioner::substrate::tunnel::TunnelIo, ProvisionError>
+    {
+        Err(ProvisionError { operation: "canary actor", kind: ProvisionErrorKind::Refused })
+    }
+}
+
 /// The kube/ateapi half: ganja's formatting and shipped filters redact credentials.
-async fn substrate_credentials_are_redacted() {
+async fn substrate_credentials_are_redacted() -> String {
     use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
     use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
 
@@ -199,6 +217,33 @@ async fn substrate_credentials_are_redacted() {
     ))
     .expect_err("unknown key refused");
     assert_redacted(&format!("{invalid:?} {invalid}"));
+
+    use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::ObjectRef;
+    use ganja_teammate_cloud::provisioner::substrate::tunnel::ActorProxy;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let proxy = ActorProxy::bind("ganja", Arc::new(RefusingTunnel)).await.expect("local proxy");
+    proxy
+        .admit(&ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() })
+        .expect("admit worker");
+    let token = proxy.token_header();
+    assert!(token.is_sensitive());
+    let token = token.to_str().expect("ASCII proxy token").to_owned();
+    let rendered = format!("{proxy:?}");
+    assert!(!rendered.contains(&token));
+    tracing::debug!(target: "ganja_teammate_cloud", ?proxy, "local proxy canary");
+    let address = proxy.base_url();
+    let mut socket = tokio::net::TcpStream::connect(address.trim_start_matches("http://"))
+        .await
+        .expect("local proxy socket");
+    socket.write_all(format!("GET / HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {token}\r\n\r\n").as_bytes()).await.expect("proxy request");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
+        .await
+        .expect("proxy refusal deadline")
+        .expect("proxy refusal");
+    assert!(response.starts_with(b"HTTP/1.1 502"));
+    assert!(!String::from_utf8_lossy(&response).contains(&token));
+    token
 }
 
 #[test]
@@ -214,11 +259,12 @@ fn substrate_credentials_stay_redacted_with_both_shipped_log_filters() {
                 .finish(),
         )
         .expect("isolated child subscriber");
-        tokio::runtime::Builder::new_current_thread()
+        let token = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("canary runtime")
             .block_on(substrate_credentials_are_redacted());
+        assert!(!capture.logged().contains(&token));
         assert_redacted(&capture.logged());
         return;
     }
@@ -280,7 +326,7 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
     .expect("one subscriber in this test binary");
     tracing::info!("cloud runtime canary capture is active");
     wrapper_formatting_is_redacted();
-    substrate_credentials_are_redacted().await;
+    let proxy_token = substrate_credentials_are_redacted().await;
 
     let home = tempfile::tempdir().expect("home");
     let bootstrap = ganja_serve::bootstrap::Service::new(
@@ -432,5 +478,6 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
     server.close().await.expect("server closed");
     let logs = capture.logged();
     assert!(logs.contains("cloud runtime canary capture is active"));
+    assert!(!logs.contains(&proxy_token));
     assert_redacted(&logs);
 }

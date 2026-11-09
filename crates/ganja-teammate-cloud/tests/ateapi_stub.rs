@@ -511,6 +511,7 @@ impl Tunnel for RecordingTunnel {
                 request.push(server.read_u8().await.expect("read inner request"));
             }
             let request = String::from_utf8(request).expect("HTTP fixture headers");
+            assert!(!request.to_ascii_lowercase().contains("x-ganja-proxy-token"));
             assert!(!request.contains("ate-target-actor"));
             assert!(request.contains("Authorization: Basic inner-canary"));
             if request.starts_with("GET /event") {
@@ -533,11 +534,19 @@ impl Tunnel for RecordingTunnel {
 #[tokio::test]
 async fn a_long_lived_event_stream_does_not_block_a_separate_actor_post() {
     let tunnel = Arc::new(RecordingTunnel::default());
-    let proxy =
-        ActorProxy::bind(Arc::clone(&tunnel) as Arc<dyn Tunnel>).await.expect("bind actor proxy");
+    let proxy = ActorProxy::bind("ganja", Arc::clone(&tunnel) as Arc<dyn Tunnel>)
+        .await
+        .expect("bind actor proxy");
+    for name in ["first", "second"] {
+        proxy
+            .admit(&ObjectRef { atespace: "ganja".to_owned(), name: name.to_owned() })
+            .expect("issued actor");
+    }
+    let token = proxy.token_header();
+    let token = token.to_str().expect("ASCII token");
     let address = proxy.base_url().trim_start_matches("http://").to_owned();
     let mut stream = TcpStream::connect(&address).await.expect("connect event stream");
-    stream.write_all(b"GET /event HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/first\r\nAuthorization: Basic inner-canary\r\n\r\n").await.expect("request event stream");
+    stream.write_all(format!("GET /event HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/first\r\nx-ganja-proxy-token: {token}\r\nAuthorization: Basic inner-canary\r\n\r\n").as_bytes()).await.expect("request event stream");
     let mut first = [0; 128];
     let length = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut first))
         .await
@@ -546,7 +555,7 @@ async fn a_long_lived_event_stream_does_not_block_a_separate_actor_post() {
     assert!(first[..length].starts_with(b"HTTP/1.1 200"));
 
     let mut post = TcpStream::connect(&address).await.expect("connect independent POST");
-    post.write_all(b"POST /session HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nate-target-actor: ganja/second\r\nAuthorization: Basic inner-canary\r\n\r\n").await.expect("request POST");
+    post.write_all(format!("POST /session HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nate-target-actor: ganja/second\r\nx-ganja-proxy-token: {token}\r\nAuthorization: Basic inner-canary\r\n\r\n").as_bytes()).await.expect("request POST");
     let mut response = Vec::new();
     tokio::time::timeout(Duration::from_secs(2), post.read_to_end(&mut response))
         .await

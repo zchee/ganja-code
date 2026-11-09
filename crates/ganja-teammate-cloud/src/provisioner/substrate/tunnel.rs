@@ -9,6 +9,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use http::HeaderValue;
+use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -19,6 +22,7 @@ use super::ateapi_v1::ObjectRef;
 use crate::provisioner::{ProvisionError, ProvisionErrorKind};
 
 const HEADER_LIMIT: usize = 64 * 1024;
+pub(super) const TOKEN_HEADER: &str = "x-ganja-proxy-token";
 
 /// An owned bidirectional tunnel, including any underlying forward's lifetime.
 pub trait TunnelStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -56,6 +60,8 @@ pub(super) fn failure(operation: &'static str, kind: ProvisionErrorKind) -> Prov
 #[derive(Debug)]
 pub struct ActorProxy {
     address: std::net::SocketAddr,
+    atespace: String,
+    token: HeaderValue,
     cancel: CancellationToken,
     task: JoinHandle<()>,
     tunnel: Arc<dyn Tunnel>,
@@ -67,7 +73,15 @@ impl ActorProxy {
     ///
     /// # Errors
     /// Fails when the operating system cannot allocate a loopback listener.
-    pub async fn bind(tunnel: Arc<dyn Tunnel>) -> Result<Self, ProvisionError> {
+    pub async fn bind(atespace: &str, tunnel: Arc<dyn Tunnel>) -> Result<Self, ProvisionError> {
+        parse_actor(&format!("{atespace}/proxy"))?;
+        let mut random = [0; 32];
+        getrandom::fill(&mut random)
+            .map_err(|_| failure("proxy entropy", ProvisionErrorKind::Refused))?;
+        let mut token =
+            HeaderValue::try_from(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random))
+                .map_err(|_| failure("proxy token", ProvisionErrorKind::Refused))?;
+        token.set_sensitive(true);
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|_| failure("proxy bind", ProvisionErrorKind::Transient))?;
@@ -79,6 +93,8 @@ impl ActorProxy {
         let actors = Arc::new(Mutex::new(BTreeMap::new()));
         let routes = Arc::clone(&actors);
         let backend = Arc::clone(&tunnel);
+        let credential = token.clone();
+        let scope = atespace.to_owned();
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
@@ -90,8 +106,10 @@ impl ActorProxy {
                         let Ok((socket, _)) = accepted else { break };
                         let tunnel = Arc::clone(&backend);
                         let actors = Arc::clone(&routes);
+                        let token = credential.clone();
+                        let atespace = scope.clone();
                         connections.spawn(async move {
-                            let _ = forward_worker(socket, tunnel, actors).await;
+                            let _ = forward_worker(socket, tunnel, actors, &atespace, &token).await;
                         });
                     }
                 }
@@ -99,7 +117,26 @@ impl ActorProxy {
             connections.abort_all();
             while connections.join_next().await.is_some() {}
         });
-        Ok(Self { address, cancel, task, tunnel, actors })
+        Ok(Self { address, atespace: atespace.to_owned(), token, cancel, task, tunnel, actors })
+    }
+
+    /// Admits an actor after its handle is ready to be returned to the caller.
+    ///
+    /// # Errors
+    /// Refuses invalid names and actors outside this provisioner's atespace.
+    pub fn admit(&self, actor: &ObjectRef) -> Result<(), ProvisionError> {
+        let key = format!("{}/{}", actor.atespace, actor.name);
+        parse_actor(&key)?;
+        if actor.atespace != self.atespace {
+            return Err(failure("proxy admission", ProvisionErrorKind::Refused));
+        }
+        self.actors.lock().expect("actor routes lock").entry(key).or_default();
+        Ok(())
+    }
+
+    /// Returns the sensitive local credential, never sent into the actor tunnel.
+    pub fn token_header(&self) -> HeaderValue {
+        self.token.clone()
     }
 
     /// Closes existing actor streams and retires any persistent command proxy.
@@ -128,16 +165,21 @@ async fn forward_worker(
     mut socket: TcpStream,
     tunnel: Arc<dyn Tunnel>,
     actors: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    atespace: &str,
+    token: &HeaderValue,
 ) -> Result<(), ProvisionError> {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let bytes = read_head(&mut socket).await?;
-        let (actor, request) = route_request(&bytes)?;
+        let (actor, request) = route_request(&bytes, token)?;
+        if actor.atespace != atespace {
+            return Err(failure("proxy admission", ProvisionErrorKind::Refused));
+        }
         let cancel = actors
             .lock()
             .expect("actor routes lock")
-            .entry(format!("{}/{}", actor.atespace, actor.name))
-            .or_default()
-            .clone();
+            .get(&format!("{}/{}", actor.atespace, actor.name))
+            .cloned()
+            .ok_or_else(|| failure("proxy admission", ProvisionErrorKind::Refused))?;
         let remote = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(failure("proxy retired", ProvisionErrorKind::Gone)),
@@ -197,8 +239,19 @@ async fn read_head(io: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, Provisi
     }
 }
 
-fn route_request(bytes: &[u8]) -> Result<(ObjectRef, Vec<u8>), ProvisionError> {
+fn route_request(
+    bytes: &[u8],
+    token: &HeaderValue,
+) -> Result<(ObjectRef, Vec<u8>), ProvisionError> {
     let refused = || failure("proxy routing", ProvisionErrorKind::Refused);
+    let mut expected = [0_u8; 32];
+    if !matches!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode_slice(token.as_bytes(), &mut expected),
+        Ok(32)
+    ) {
+        return Err(refused());
+    }
     let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut request = httparse::Request::new(&mut headers);
     let httparse::Status::Complete(head_length) = request.parse(bytes).map_err(|_| refused())?
@@ -209,6 +262,7 @@ fn route_request(bytes: &[u8]) -> Result<(ObjectRef, Vec<u8>), ProvisionError> {
         return Err(refused());
     }
     let mut target = None;
+    let mut authenticated = false;
     let mut result = Vec::with_capacity(bytes.len());
     let method = request.method.ok_or_else(refused)?;
     let path = request.path.ok_or_else(refused)?;
@@ -222,12 +276,28 @@ fn route_request(bytes: &[u8]) -> Result<(ObjectRef, Vec<u8>), ProvisionError> {
                 return Err(refused());
             }
             target = Some(parse_actor(std::str::from_utf8(header.value).map_err(|_| refused())?)?);
+        } else if header.name.eq_ignore_ascii_case(TOKEN_HEADER) {
+            let mut presented = [0_u8; 32];
+            if authenticated
+                || !matches!(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode_slice(header.value, &mut presented),
+                    Ok(32)
+                )
+                || !bool::from(presented.ct_eq(&expected))
+            {
+                return Err(refused());
+            }
+            authenticated = true;
         } else if !header.name.eq_ignore_ascii_case("connection") {
             result.extend_from_slice(header.name.as_bytes());
             result.extend_from_slice(b": ");
             result.extend_from_slice(header.value);
             result.extend_from_slice(b"\r\n");
         }
+    }
+    if !authenticated {
+        return Err(refused());
     }
     // A shared origin must not reuse an actor's tunnel for another actor. The
     // connection closes after this response; an SSE connection remains open.

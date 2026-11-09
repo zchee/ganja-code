@@ -3,9 +3,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 
 #[test]
-fn routing_consumes_only_the_outer_header_and_preserves_the_inner_password_and_body() {
-    let input = b"POST /session HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/worker\r\nAuthorization: Basic secret-canary\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nbody";
-    let (actor, request) = route_request(input).expect("route a valid worker request");
+fn routing_consumes_outer_headers_and_preserves_the_inner_password_and_body() {
+    let input = b"POST /session HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\nAuthorization: Basic secret-canary\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nbody";
+    let (actor, request) = route_request(
+        input,
+        &HeaderValue::from_static("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    )
+    .expect("route a valid worker request");
     assert_eq!(actor, ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() });
     assert_eq!(request, b"POST /session HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic secret-canary\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
 }
@@ -13,13 +17,13 @@ fn routing_consumes_only_the_outer_header_and_preserves_the_inner_password_and_b
 #[test]
 fn ambiguous_or_absent_routing_is_refused_before_opening_an_actor() {
     for input in [
-        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(),
-        b"GET / HTTP/1.1\r\nate-target-actor: g/a\r\nate-target-actor: g/b\r\n\r\n",
-        b"GET / HTTP/1.1\r\nate-target-actor: g/a/b\r\n\r\n",
-        b"CONNECT a:80 HTTP/1.1\r\nate-target-actor: g/a\r\n\r\n",
+        b"GET / HTTP/1.1\r\nHost: localhost\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n".as_slice(),
+        b"GET / HTTP/1.1\r\nate-target-actor: g/a\r\nate-target-actor: g/b\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n",
+        b"GET / HTTP/1.1\r\nate-target-actor: g/a/b\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n",
+        b"CONNECT a:80 HTTP/1.1\r\nate-target-actor: g/a\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n",
     ] {
         assert_eq!(
-            route_request(input).expect_err("refuse invalid routing").kind,
+            route_request(input, &HeaderValue::from_static("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).expect_err("refuse invalid routing").kind,
             ProvisionErrorKind::Refused
         );
     }
