@@ -497,6 +497,9 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
     let health =
         client.get(format!("{SOCKET_URL}/global/health")).send().await.expect("the socket answers");
     assert_eq!(health.status(), 200);
+    let readiness =
+        client.get(format!("{SOCKET_URL}/readyz")).send().await.expect("socket answers");
+    assert_eq!(readiness.status(), 404, "readiness exists only on TCP");
 
     let receipt = client
         .post(format!("{SOCKET_URL}/peer/receipt"))

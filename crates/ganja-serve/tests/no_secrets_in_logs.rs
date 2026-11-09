@@ -14,16 +14,34 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use base64::Engine as _;
+use futures::future::BoxFuture;
 use ganja_core::permission::Permissions;
 use ganja_core::tool::Registry;
 use ganja_serve::Credentials;
+use ganja_serve::bootstrap::{Bootstrap, Cloned, Executor, Failure, Service, Stage};
 use ganja_testkit::{LogCapture as Capture, says};
 use secrecy::SecretString;
 use support::{base_url, loopback_config, scripted_engine};
 
 /// The password planted in the server. Nothing may render it.
 const CANARY: &str = "pw-canary-XYZZY-73";
+
+struct Refused;
+
+impl Executor for Refused {
+    fn execute(
+        &self,
+        _: Bootstrap,
+        _: tokio::time::Instant,
+    ) -> BoxFuture<'static, Result<Cloned, Failure>> {
+        Box::pin(async {
+            Err(Failure { stage: Stage::Dispatch, detail: format!("refused {CANARY}") })
+        })
+    }
+}
 
 #[tokio::test]
 async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
@@ -78,6 +96,36 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
     assert!(refusal_body.is_empty(), "the 401 is empty-bodied, echoing nothing: {refusal_body:?}");
 
     handle.shutdown().await.expect("a clean stop");
+
+    let service = Service::new(
+        Credentials { username: "ganja".into(), password: CANARY.into() },
+        std::env::current_dir().expect("cwd"),
+        Arc::new(Refused),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let init = service.serve(listener).expect("init");
+    let base = format!("http://{}", init.address());
+    let body = serde_json::json!({"repository":"https://example.test/repo", "reference":"main", "branch":"work", "author":{"name":"worker", "email":"worker@example.test"}, "deadline_secs":5});
+    let response = reqwest::Client::new()
+        .post(format!("{base}/bootstrap"))
+        .basic_auth("ganja", Some(CANARY))
+        .json(&body)
+        .send()
+        .await
+        .expect("refused bootstrap");
+    assert_eq!(response.status(), 409);
+    let text = response.text().await.expect("body");
+    assert!(!text.contains(CANARY), "bootstrap failure redacts its credential");
+    let malformed = reqwest::Client::new()
+        .post(format!("{base}/bootstrap"))
+        .basic_auth("ganja", Some(CANARY))
+        .json(&serde_json::json!({CANARY: CANARY}))
+        .send()
+        .await
+        .expect("invalid body");
+    assert_eq!(malformed.status(), 400);
+    assert!(!malformed.text().await.expect("body").contains(CANARY));
+    init.shutdown().await.expect("init stops");
 
     let logged = capture.logged();
     // The search space is real: the request lines the serve layer writes are

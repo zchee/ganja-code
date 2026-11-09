@@ -17,6 +17,107 @@ use ganja_protocol::Message;
 use ganja_testkit::{BlockingTool, ScriptedProvider, says, seed_message, tool_call};
 use support::{DEADLINE, base_url, loopback_config};
 
+#[tokio::test]
+async fn readiness_is_empty_get_only_and_the_only_unguarded_tcp_route() {
+    let mut config = loopback_config();
+    config.credentials = Some(support::credentials());
+    let handle = ganja_serve::serve(support::engine(), config).await.expect("serve");
+    let base = base_url(&handle);
+    let client = reqwest::Client::new();
+    let response = client.get(format!("{base}/readyz")).send().await.expect("readiness");
+    assert_eq!(response.status(), 200);
+    assert!(response.bytes().await.expect("body").is_empty());
+    for method in [reqwest::Method::HEAD, reqwest::Method::POST, reqwest::Method::PUT] {
+        let response = client
+            .request(method.clone(), format!("{base}/readyz"))
+            .send()
+            .await
+            .expect("method refusal");
+        assert_eq!(response.status(), 401, "{method} does not bypass authentication");
+        let response = client
+            .request(method.clone(), format!("{base}/readyz"))
+            .header("authorization", support::basic())
+            .send()
+            .await
+            .expect("method refusal");
+        assert_eq!(response.status(), 405, "{method} is not readiness");
+    }
+    for path in ["/readyz/", "/global/health", "/readyz/anything"] {
+        assert_eq!(client.get(format!("{base}{path}")).send().await.expect("guard").status(), 401);
+    }
+    assert_eq!(
+        client
+            .get(format!("{base}/readyz"))
+            .body("unexpected")
+            .send()
+            .await
+            .expect("body refusal")
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/readyz"))
+            .header(ganja_serve::DIRECTORY_HEADER, "/not-this-project")
+            .send()
+            .await
+            .expect("directory refusal")
+            .status(),
+        400
+    );
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn every_tcp_response_identifies_the_same_journal_epoch() {
+    let mut config = loopback_config();
+    config.credentials = Some(support::credentials());
+    let epoch = config.journal.epoch().to_owned();
+    assert!(ganja_protocol::is_uuidv7(&epoch));
+    let handle = ganja_serve::serve(support::engine(), config).await.expect("serve");
+    let base = base_url(&handle);
+    let client = reqwest::Client::new();
+    for (path, authorized, body, expected) in [
+        ("/readyz", false, "", 200),
+        ("/global/health", false, "", 401),
+        ("/readyz", false, "invalid body", 400),
+        ("/absent", true, "", 404),
+    ] {
+        let mut request = client.get(format!("{base}{path}")).body(body);
+        if authorized {
+            request = request.header("authorization", support::basic());
+        }
+        let response = request.send().await.expect("response");
+        assert_eq!(response.status(), expected);
+        assert_eq!(response.headers()[ganja_serve::EPOCH_HEADER], epoch);
+    }
+    let mut response = client
+        .get(format!("{base}/event"))
+        .header("authorization", support::basic())
+        .send()
+        .await
+        .expect("stream");
+    assert_eq!(response.headers()[ganja_serve::EPOCH_HEADER], epoch);
+    let mut bytes = Vec::new();
+    let connected = tokio::time::timeout(DEADLINE, async {
+        loop {
+            bytes.extend_from_slice(&response.chunk().await.expect("chunk").expect("open stream"));
+            if let Some(frame) = support::drain_frames(&mut bytes).into_iter().next() {
+                break frame;
+            }
+        }
+    })
+    .await
+    .expect("connected frame");
+    let head = serde_json::from_str::<serde_json::Value>(&connected.data).expect("JSON")["head"]
+        .as_str()
+        .expect("head")
+        .to_owned();
+    assert_eq!(head.rsplit_once('-').expect("cursor").0, epoch);
+    drop(response);
+    handle.shutdown().await.expect("shutdown");
+}
+
 /// A persistent engine over a scripted provider, its store seeded with one
 /// session holding one user message, served on a loopback socket.
 struct Fixture {
