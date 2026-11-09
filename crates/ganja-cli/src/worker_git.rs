@@ -11,6 +11,15 @@ use tokio::process::Command;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const CHILD_ENVIRONMENT: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "GANJA_SERVER_PASSWORD",
+    "GANJA_SERVER_USERNAME",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_SSL_CAINFO",
+];
+
 const OUTPUT_CAP: usize = 4096;
 const REAP_BOUND: Duration = Duration::from_secs(5);
 
@@ -220,6 +229,12 @@ async fn git(
     }
     let mut command = Command::new("git");
     command
+        .env_clear()
+        .envs(
+            CHILD_ENVIRONMENT
+                .into_iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+        )
         .args(arguments.iter().map(OsString::from))
         .current_dir(directory)
         .env("GIT_TERMINAL_PROMPT", "0")

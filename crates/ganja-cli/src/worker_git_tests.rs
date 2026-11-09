@@ -79,6 +79,34 @@ async fn a_never_completing_git_child_is_killed_under_the_deadline() {
 }
 
 #[tokio::test]
+async fn git_children_do_not_inherit_unlisted_environment() {
+    const CHILD: &str = "GANJA_WORKER_ENV_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "worker_git::tests::git_children_do_not_inherit_unlisted_environment",
+            ])
+            .env(CHILD, "1")
+            .env("GANJA_WORKER_ENV_CANARY", "synthetic-inherited-secret")
+            .output()
+            .expect("run isolated environment test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let root = tempfile::tempdir().expect("git directory");
+    let output = git(
+        root.path(),
+        &["-c", "alias.inspect=!printf '%s' \"${GANJA_WORKER_ENV_CANARY-unset}\"", "inspect"],
+        Instant::now() + Duration::from_secs(5),
+        Stage::Config,
+    )
+    .await
+    .expect("git alias");
+    assert_eq!(output, b"unset");
+}
+
+#[tokio::test]
 async fn git_output_is_bounded_and_command_failures_are_typed() {
     let root = tempfile::tempdir().expect("worker root");
     let version =

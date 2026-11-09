@@ -105,6 +105,42 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
 }
 
 #[tokio::test]
+async fn the_served_worker_does_not_inherit_host_config_overrides() {
+    let server = GitServer::start(false).await;
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[("GANJA_CONFIG", "/missing-synthetic-host-config.toml")],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/environment".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if worker.client.health().await.is_ok() {
+                break;
+            }
+            assert!(worker.is_alive(), "host config override must not reach serve");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("isolated serve starts");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
 async fn terminating_init_reaps_a_running_clone_before_exit() {
     let server = GitServer::start(true).await;
     let mut worker = worker_support::WorkerProcess::start(&server).await;

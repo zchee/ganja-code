@@ -184,33 +184,52 @@ pub struct WorkerProcess {
     pub work: PathBuf,
     child: std::process::Child,
     _state: TempDir,
+    _provider: ganja_testkit::responses_server::Endpoint,
 }
 
 impl WorkerProcess {
     pub async fn start(git: &GitServer) -> Self {
+        Self::start_with_environment(git, &[]).await
+    }
+
+    pub async fn start_with_environment(git: &GitServer, environment: &[(&str, &str)]) -> Self {
         let state = tempfile::tempdir().expect("worker process state");
         let work = state.path().join("work");
-        let config = state.path().join("config");
+        let config = state.path().join(".config/ganja");
         std::fs::create_dir_all(&work).expect("work directory");
         std::fs::create_dir_all(&config).expect("config directory");
-        std::fs::write(config.join("ganja.toml"), "[permission]\n\"*\" = \"allow\"\n")
-            .expect("worker policy");
-        let script = state.path().join("script.json");
+        let provider = ganja_testkit::responses_server::serve().await;
+        let calls = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                {"index": 0, "id": "call_read", "type": "function", "function": {
+                    "name": "read", "arguments": "{\"filePath\":\"note.txt\"}"
+                }},
+                {"index": 1, "id": "call_write", "type": "function", "function": {
+                    "name": "write", "arguments": "{\"filePath\":\"note.txt\",\"content\":\"after\\n\"}"
+                }}
+            ]}, "finish_reason": "tool_calls"}]
+        });
+        let finished = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "finished"},
+                "finish_reason": "stop"}]
+        });
+        provider.answers_the_next_requests_with([format!("data: {calls}\n\ndata: [DONE]\n\n")]);
+        provider.answers_turns_with(format!("data: {finished}\n\ndata: [DONE]\n\n"));
+        // Reuse the synthetic test password so no provider variable must survive
+        // the worker's environment boundary. Only the loopback fixture receives it.
         std::fs::write(
-            &script,
-            serde_json::to_vec(&serde_json::json!({
-                "cadence_ms": 1,
-                "turns": [
-                    {"text": "inspect", "tool_calls": [
-                        {"name": "read", "args": {"filePath": "note.txt"}},
-                        {"name": "write", "args": {"filePath": "note.txt", "content": "after\n"}}
-                    ]},
-                    {"text": "finished"}
-                ]
-            }))
-            .expect("script serializes"),
+            config.join("ganja.toml"),
+            format!(
+                "model = \"worker-fixture/test\"\n\
+                 [provider.worker-fixture]\n\
+                 dialect = \"openai-chat-completions\"\n\
+                 base_url = {:?}\n\
+                 key_env = \"GANJA_SERVER_PASSWORD\"\n\
+                 [permission]\n\"*\" = \"allow\"\n",
+                provider.base_url
+            ),
         )
-        .expect("fake script");
+        .expect("worker policy");
         let reserved =
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("reserve port");
         let port = reserved.local_addr().expect("port").port();
@@ -225,8 +244,6 @@ impl WorkerProcess {
             .env("XDG_DATA_HOME", state.path().join("data"))
             .env("XDG_CONFIG_HOME", &config)
             .env("GANJA_CONFIG_HOME", &config)
-            .env("GANJA_PROVIDER", "fake")
-            .env("GANJA_FAKE_SCRIPT", &script)
             .env("GANJA_DISABLE_MODELS_FETCH", "1")
             .env("GANJA_DISABLE_TERM_PROBE", "1")
             .env("GANJA_SERVER_USERNAME", "ganja")
@@ -236,25 +253,7 @@ impl WorkerProcess {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
-        for key in [
-            "GANJA_CONFIG",
-            "GANJA_MODEL",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "OPENCODE_API_KEY",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "GIT_SSL_NO_VERIFY",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            command.env_remove(key);
-        }
+        command.envs(environment.iter().copied());
         let child = command.spawn().expect("spawn worker init");
         let address = format!("http://127.0.0.1:{port}");
         let client = ganja_client::Client::new(
@@ -262,7 +261,7 @@ impl WorkerProcess {
             Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
         )
         .expect("client");
-        let mut worker = Self { client, address, work, child, _state: state };
+        let mut worker = Self { client, address, work, child, _state: state, _provider: provider };
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 if matches!(
