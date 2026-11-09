@@ -5,6 +5,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,7 +29,7 @@ pub struct KubectlTunnel {
     executable: PathBuf,
     kubeconfig: PathBuf,
     context: Option<String>,
-    proxies: Mutex<BTreeMap<String, ProxyChild>>,
+    proxies: Mutex<BTreeMap<String, Arc<Mutex<Option<ProxyChild>>>>>,
 }
 
 impl fmt::Debug for KubectlTunnel {
@@ -67,23 +68,29 @@ impl Tunnel for KubectlTunnel {
     async fn actor(&self, actor: &ObjectRef) -> Result<TunnelIo, ProvisionError> {
         let target = format!("{}/{}", actor.atespace, actor.name);
         parse_actor(&target)?;
-        let mut proxies = self.proxies.lock().await;
-        if proxies.get(&target).is_none_or(|proxy| proxy.task.is_finished()) {
-            let proxy = start_proxy(
-                &self.executable,
-                &self.kubeconfig,
-                self.context.as_deref(),
-                actor,
-                Duration::from_secs(120),
-            )
-            .await?;
-            proxies.insert(target.clone(), proxy);
+        let entry = {
+            let mut proxies = self.proxies.lock().await;
+            Arc::clone(proxies.entry(target).or_insert_with(|| Arc::new(Mutex::new(None))))
+        };
+        // Serialize one actor's startup without blocking routes to other actors.
+        let mut proxy = entry.lock().await;
+        if proxy.as_ref().is_none_or(|proxy| proxy.task.is_finished()) {
+            *proxy = Some(
+                start_proxy(
+                    &self.executable,
+                    &self.kubeconfig,
+                    self.context.as_deref(),
+                    actor,
+                    Duration::from_secs(120),
+                )
+                .await?,
+            );
         }
-        let address = proxies
-            .get(&target)
+        let address = proxy
+            .as_ref()
             .ok_or_else(|| failure("proxy startup", ProvisionErrorKind::Transient))?
             .address;
-        drop(proxies);
+        drop(proxy);
         let stream = TcpStream::connect(address)
             .await
             .map_err(|_| failure("proxy connect", ProvisionErrorKind::Transient))?;
