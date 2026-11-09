@@ -306,6 +306,48 @@ async fn a_shutdown_request_is_acknowledged_without_resuming_the_worker() {
 }
 
 #[tokio::test]
+async fn abandoning_a_pending_launch_deletes_and_reconciles_the_worker() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+
+    let hosted = Hosted::new().await;
+    let _release = hosted.provisioner.hold_next(ProvisionOperation::Resume);
+    let mut starting = Box::pin(hosted.start());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                () = &mut starting => panic!("launch should be held"),
+                () = tokio::task::yield_now() => {
+                    if hosted.provisioner.calls().iter().any(|(operation, _)| *operation == ProvisionOperation::Resume) {
+                        break;
+                    }
+                }
+            }
+        }
+    }).await.expect("allocated worker reaches resume");
+    let worker = hosted.provisioner.worker(&hosted.name).expect("allocated worker");
+    drop(starting);
+    tokio::time::timeout(std::time::Duration::from_secs(3), hosted.registry.shutdown())
+        .await
+        .expect("pending launch cleanup is joined");
+    assert_eq!(hosted.provisioner.current(&worker), WorkerState::Gone);
+    let calls = hosted.provisioner.calls();
+    assert_eq!(
+        calls.iter().filter(|(operation, _)| *operation == ProvisionOperation::Kill).count(),
+        1
+    );
+    assert!(calls.iter().any(|(operation, _)| *operation == ProvisionOperation::State));
+    assert!(ganja_testkit::teammates_recorded(&hosted.root, &hosted.team).is_empty());
+    let name = MemberName::parse(&hosted.name).expect("name");
+    assert!(
+        ganja_team::mailbox::read(&hosted.root.inbox_path(&hosted.team, &name))
+            .expect("inbox")
+            .valid
+            .is_empty()
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
 async fn a_stalled_resume_releases_the_registry_name_and_record() {
     let hosted = Hosted::with_deadline(std::time::Duration::from_millis(150)).await;
     let _release =

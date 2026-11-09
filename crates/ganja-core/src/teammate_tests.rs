@@ -688,6 +688,9 @@ struct Recording {
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
+    allocated: Option<Arc<tokio::sync::Notify>>,
+    hold_launch: Option<Arc<tokio::sync::Notify>>,
+    hold_kill: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Why a refusing [`Recording`] refuses.
@@ -716,6 +719,9 @@ impl TeammateBackend for Recording {
     }
 
     async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        if let Some(allocated) = &self.allocated {
+            allocated.notify_one();
+        }
         Ok(Arc::new(RecordedPane {
             id: "%7".to_owned(),
             birth: "48213".to_owned(),
@@ -723,6 +729,8 @@ impl TeammateBackend for Recording {
             refuse_launch: self.refuse_launch,
             launched: Arc::clone(&self.launched),
             killed: Arc::clone(&self.killed),
+            hold_launch: self.hold_launch.clone(),
+            hold_kill: self.hold_kill.clone(),
         }))
     }
 
@@ -741,6 +749,8 @@ struct RecordedPane {
     refuse_launch: bool,
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    hold_launch: Option<Arc<tokio::sync::Notify>>,
+    hold_kill: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[async_trait::async_trait]
@@ -757,6 +767,9 @@ impl Spawned for RecordedPane {
             .lock()
             .expect("the launch log is never poisoned")
             .push((spec.name.as_str().to_owned(), recorded));
+        if let Some(hold) = &self.hold_launch {
+            hold.notified().await;
+        }
         if self.refuse_launch {
             return Err(Unsupported {
                 backend: MemberBackend::Ganja,
@@ -784,6 +797,81 @@ impl Spawned for RecordedPane {
             .lock()
             .expect("the kill log is never poisoned")
             .push((self.id.clone(), self.birth.clone()));
+        if let Some(hold) = &self.hold_kill {
+            hold.notified().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn abandoning_record_or_launch_unwinds_once_and_shutdown_joins_it() {
+    for phase in ["record", "launch", "unwind"] {
+        let while_recording = phase == "record";
+        let home = tempfile::tempdir().expect("temporary home");
+        let registry = registry(home.path());
+        let allocated = Arc::new(tokio::sync::Notify::new());
+        let release_kill = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(Recording {
+            allocated: Some(allocated.clone()),
+            refuse_launch: phase == "unwind",
+            hold_launch: (phase != "unwind").then(|| Arc::new(tokio::sync::Notify::new())),
+            hold_kill: Some(release_kill.clone()),
+            ..Recording::default()
+        });
+        let record_hold =
+            if while_recording { Some(registry.team_file.lock().await) } else { None };
+        let registry_task = registry.clone();
+        let backend_task = backend.clone();
+        let request = request("abandoned", MemberBackend::Ganja, home.path());
+        let task = tokio::spawn(async move { registry_task.spawn(backend_task, request).await });
+        tokio::time::timeout(Duration::from_secs(2), allocated.notified())
+            .await
+            .expect("allocated");
+        if !while_recording {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while backend.launched().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("launch held");
+        }
+        if phase == "unwind" {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while backend.killed().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("inline unwind has started");
+        }
+        task.abort();
+        assert!(task.await.expect_err("caller was cancelled").is_cancelled());
+        drop(record_hold);
+        let shutting_down = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.shutdown().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backend.killed().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abandoned allocation is killed");
+        assert!(!shutting_down.is_finished(), "shutdown must join the pending unwind");
+        release_kill.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), shutting_down)
+            .await
+            .expect("shutdown joins cleanup")
+            .expect("shutdown task");
+        assert_eq!(backend.killed().len(), 1);
+        assert!(!reserved(&registry).contains("abandoned"));
+        assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
+        let inbox = registry
+            .root()
+            .inbox_path(registry.team(), &MemberName::parse("abandoned").expect("name"));
+        assert!(mailbox::read(&inbox).expect("inbox").valid.is_empty());
     }
 }
 
