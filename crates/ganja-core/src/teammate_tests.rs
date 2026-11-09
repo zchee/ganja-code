@@ -921,6 +921,77 @@ async fn cancellation_calls_the_backend_to_remove_its_owned_inbox_seed() {
     assert!(!reserved(&registry).contains("owned-inbox"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn stalled_allocation_does_not_delay_published_member_cleanup() {
+    for release_before_bound in [false, true] {
+        let home = tempfile::tempdir().expect("temporary home");
+        let registry = registry(home.path());
+        let published = [Arc::new(Recording::default()), Arc::new(Recording::default())];
+        for (index, backend) in published.iter().enumerate() {
+            registry
+                .spawn(
+                    backend.clone(),
+                    request(&format!("published-{index}"), MemberBackend::Ganja, home.path()),
+                )
+                .await
+                .expect("published member");
+        }
+        let allocated = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let pending = Arc::new(Recording {
+            allocated: Some(allocated.clone()),
+            hold_allocation: Some(release.clone()),
+            ..Recording::default()
+        });
+        let spawn = {
+            let registry = registry.clone();
+            let backend = pending.clone();
+            let request = request("pending-allocation", MemberBackend::Ganja, home.path());
+            tokio::spawn(async move { registry.spawn(backend, request).await })
+        };
+        allocated.notified().await;
+        let started = tokio::time::Instant::now();
+        let mut shutdown = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.shutdown().await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while published.iter().any(|backend| backend.killed().is_empty()) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("published cleanup must not wait for allocation admission");
+        for backend in &published {
+            assert_eq!(backend.killed().len(), 1);
+        }
+        if release_before_bound {
+            release.notify_one();
+        }
+        tokio::time::timeout(super::SETTLE + Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("registry bounds the admission wait")
+            .expect("shutdown task");
+        if !release_before_bound {
+            assert!(started.elapsed() >= super::SETTLE);
+            release.notify_one();
+        }
+        assert!(spawn.await.expect("pending spawn task").is_err());
+        assert_eq!(pending.killed().len(), 1);
+        assert!(!reserved(&registry).contains("pending-allocation"));
+        assert!(!registry.members().contains_key("pending-allocation"));
+        if release_before_bound {
+            assert!(
+                registry.tasks.lock().expect("task list").is_empty(),
+                "shutdown joined the registered unwind task"
+            );
+        }
+        for backend in &published {
+            assert_eq!(backend.killed().len(), 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn shutdown_waits_for_admitted_allocations_to_register_cleanup() {
     let home = tempfile::tempdir().expect("temporary home");
