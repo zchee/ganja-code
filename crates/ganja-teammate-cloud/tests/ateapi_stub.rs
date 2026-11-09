@@ -24,6 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 const CERT_CANARY: &str = "synthetic-router-certificate-private-key-canary";
+const TOKEN_CANARY: &str = "synthetic-ateapi-bearer-canary";
 
 struct KubeState {
     version: &'static str,
@@ -37,6 +38,9 @@ struct KubeState {
     pod_lookups: AtomicUsize,
     forwarded_pods: Mutex<Vec<String>>,
     connect_headers: Mutex<Vec<String>>,
+    tokens: AtomicUsize,
+    token_mode: AtomicU8,
+    token_ttl: AtomicUsize,
 }
 
 struct KubeFixture {
@@ -69,6 +73,9 @@ impl KubeFixture {
             pod_lookups: AtomicUsize::new(0),
             forwarded_pods: Mutex::new(Vec::new()),
             connect_headers: Mutex::new(Vec::new()),
+            tokens: AtomicUsize::new(0),
+            token_mode: AtomicU8::new(0),
+            token_ttl: AtomicUsize::new(3600),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake Kubernetes API");
         let address = listener.local_addr().expect("Kubernetes fixture address");
@@ -114,6 +121,36 @@ async fn kube_request(
         )
     };
     let path = uri.path();
+    if path == "/api/v1/namespaces/ate-users/serviceaccounts/ganja/token" {
+        assert_eq!(method, Method::POST);
+        let request: Value = serde_json::from_slice(&body).expect("TokenRequest JSON");
+        assert_eq!(request["spec"]["audiences"], json!(["api.ate-system.svc"]));
+        assert_eq!(request["spec"]["expirationSeconds"], 3600);
+        let count = state.tokens.fetch_add(1, Ordering::SeqCst) + 1;
+        let mode = state.token_mode.load(Ordering::SeqCst);
+        if mode == 1 {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":TOKEN_CANARY}),
+                ),
+            );
+        }
+        let expiry = if mode == 2 {
+            "2000-01-01T00:00:00Z".to_owned()
+        } else {
+            jiff::Timestamp::now()
+                .checked_add(Duration::from_secs(state.token_ttl.load(Ordering::SeqCst) as u64))
+                .expect("token expiry")
+                .to_string()
+        };
+        return (
+            StatusCode::CREATED,
+            Json(
+                json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","metadata":{},"status":{"token":format!("{TOKEN_CANARY}-{count}"),"expirationTimestamp":expiry}}),
+            ),
+        );
+    }
     if state.router_enabled.load(Ordering::SeqCst) {
         if path == "/api/v1/namespaces/ate-system/services/atenet-router" {
             return (
@@ -216,6 +253,54 @@ async fn kube_request(
         );
     }
     missing()
+}
+
+#[tokio::test]
+async fn ateapi_tokens_use_the_scoped_audience_and_renew_from_the_returned_expiry() {
+    use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
+
+    let fixture = KubeFixture::start("v1", 0).await;
+    fixture.state.token_ttl.store(3, Ordering::SeqCst);
+    let identity =
+        AteapiIdentity::new(fixture.client.clone()).await.expect("request initial token");
+    let first = identity.authorize(()).await.expect("authenticate control request");
+    assert_eq!(
+        first.metadata().get("authorization").expect("bearer").to_str().expect("ASCII"),
+        format!("Bearer {TOKEN_CANARY}-1")
+    );
+    assert!(!format!("{identity:?} {first:?}").contains(TOKEN_CANARY));
+    assert_eq!(fixture.state.tokens.load(Ordering::SeqCst), 1);
+    fixture.state.token_ttl.store(3600, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let second = identity.authorize(()).await.expect("renew expired token");
+    assert_eq!(
+        second.metadata().get("authorization").expect("bearer").to_str().expect("ASCII"),
+        format!("Bearer {TOKEN_CANARY}-2")
+    );
+    identity.authorize(()).await.expect("reuse unexpired token");
+    assert_eq!(fixture.state.tokens.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn invalid_and_expired_ateapi_credentials_fail_closed_without_exposing_tokens() {
+    use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
+
+    for mode in [1, 2] {
+        let fixture = KubeFixture::start("v1", 0).await;
+        fixture.state.token_mode.store(mode, Ordering::SeqCst);
+        let error =
+            AteapiIdentity::new(fixture.client.clone()).await.expect_err("refuse invalid identity");
+        assert!(!format!("{error:?} {error}").contains(TOKEN_CANARY));
+    }
+    let fixture = KubeFixture::start("v1", 0).await;
+    fixture.state.token_ttl.store(3, Ordering::SeqCst);
+    let identity = AteapiIdentity::new(fixture.client.clone()).await.expect("initial identity");
+    fixture.state.token_mode.store(1, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let error =
+        identity.authorize(()).await.expect_err("failed renewal does not send cached bearer");
+    assert!(!format!("{error:?} {error}").contains(TOKEN_CANARY));
 }
 
 #[tokio::test]

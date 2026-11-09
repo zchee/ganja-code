@@ -4,6 +4,8 @@
 //! moving API branch. Transport credentials remain separate from worker auth.
 
 mod certificate;
+/// Renewable control-plane bearer credentials, separate from router identity.
+pub mod identity;
 /// In-process Kubernetes control and actor forwarding.
 pub mod kube;
 /// Explicit released-plugin tunnel fallback.
