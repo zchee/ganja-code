@@ -178,6 +178,148 @@ async fn read_file(
     }
 }
 
+pub struct WorkerProcess {
+    pub client: ganja_client::Client,
+    pub address: String,
+    pub work: PathBuf,
+    child: std::process::Child,
+    _state: TempDir,
+}
+
+impl WorkerProcess {
+    pub async fn start(git: &GitServer) -> Self {
+        let state = tempfile::tempdir().expect("worker process state");
+        let work = state.path().join("work");
+        let config = state.path().join("config");
+        std::fs::create_dir_all(&work).expect("work directory");
+        std::fs::create_dir_all(&config).expect("config directory");
+        std::fs::write(config.join("ganja.toml"), "[permission]\n\"*\" = \"allow\"\n")
+            .expect("worker policy");
+        let script = state.path().join("script.json");
+        std::fs::write(
+            &script,
+            serde_json::to_vec(&serde_json::json!({
+                "cadence_ms": 1,
+                "turns": [
+                    {"text": "inspect", "tool_calls": [
+                        {"name": "read", "args": {"filePath": "note.txt"}},
+                        {"name": "write", "args": {"filePath": "note.txt", "content": "after\n"}}
+                    ]},
+                    {"text": "finished"}
+                ]
+            }))
+            .expect("script serializes"),
+        )
+        .expect("fake script");
+        let reserved =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("reserve port");
+        let port = reserved.local_addr().expect("port").port();
+        drop(reserved);
+        let stdout = std::fs::File::create(state.path().join("stdout")).expect("stdout file");
+        let stderr = std::fs::File::create(state.path().join("stderr")).expect("stderr file");
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ganja"));
+        command
+            .args(["worker", "init", "--port", &port.to_string()])
+            .current_dir(&work)
+            .env("HOME", state.path())
+            .env("XDG_DATA_HOME", state.path().join("data"))
+            .env("XDG_CONFIG_HOME", &config)
+            .env("GANJA_CONFIG_HOME", &config)
+            .env("GANJA_PROVIDER", "fake")
+            .env("GANJA_FAKE_SCRIPT", &script)
+            .env("GANJA_DISABLE_MODELS_FETCH", "1")
+            .env("GANJA_DISABLE_TERM_PROBE", "1")
+            .env("GANJA_SERVER_USERNAME", "ganja")
+            .env("GANJA_SERVER_PASSWORD", "synthetic-worker-password")
+            .env("GIT_CONFIG_GLOBAL", &git.gitconfig)
+            .env("GIT_SSL_CAINFO", &git.ca)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr);
+        for key in [
+            "GANJA_CONFIG",
+            "GANJA_MODEL",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENCODE_API_KEY",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GIT_SSL_NO_VERIFY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env_remove(key);
+        }
+        let child = command.spawn().expect("spawn worker init");
+        let address = format!("http://127.0.0.1:{port}");
+        let client = ganja_client::Client::new(
+            &address,
+            Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
+        )
+        .expect("client");
+        let mut worker = Self { client, address, work, child, _state: state };
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(
+                    worker.client.bootstrap_status().await,
+                    Ok(ganja_client::BootstrapStatus::Idle)
+                ) {
+                    break;
+                }
+                assert!(
+                    worker.child.try_wait().expect("child state").is_none(),
+                    "worker init exited before listening"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("init listener ready");
+        worker
+    }
+
+    pub fn is_alive(&mut self) -> bool {
+        self.child.try_wait().expect("child state").is_none()
+    }
+
+    fn signal_shutdown(&mut self) {
+        if self.is_alive() {
+            let pid = i32::try_from(self.child.id()).expect("child pid fits");
+            // SAFETY: this is the live child owned by this handle; the test never
+            // signals a pid obtained from a name search or from persisted state.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+
+    pub async fn terminate(&mut self) {
+        self.signal_shutdown();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.is_alive() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker killed and reaped its active git group");
+    }
+}
+
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        self.signal_shutdown();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn git(directory: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)

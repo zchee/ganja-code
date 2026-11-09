@@ -94,6 +94,9 @@ serde_json.workspace = true
 # leave no litter, which a hand-named `.tmp` could only approximate. The test
 # tier already carried this; production reaches for it now.
 tempfile.workspace = true
+# The worker's git executor returns typed stages and validates HTTPS repository URLs.
+thiserror.workspace = true
+url.workspace = true
 tokio.workspace = true
 # A login flow's wait is ended by a `CancellationToken`, and the binary is the
 # only crate that can catch the keystroke which fires one. The token lives
@@ -119,9 +122,8 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rcgen.workspace = true
-# The pre-engine checkout is exercised directly before its HTTP handoff is wired.
-thiserror.workspace = true
-url.workspace = true
+# Tests drive the existing undo and agent routes not yet exposed by the typed client.
+reqwest.workspace = true
 # `tests/teammate_pane.rs` alone: the pane argv this binary is the child of is
 # that crate's contract, so the test reads its constants rather than restating
 # them. Dev-only — the shipped binary reaches the pane backends through
@@ -142,11 +144,12 @@ tokio = { workspace = true, features = ["test-util"] }
 # pane suite composes.
 shlex.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Bootstrap cancellation signals every process in git's isolated group.
+libc.workspace = true
+
 [target.'cfg(unix)'.dev-dependencies]
 expectrl.workspace = true
-# The unix-only staging-write failure test uses `setrlimit` to force a real
-# short write; production no longer reaches libc for the local date.
-libc.workspace = true
 
 # `harness = false` because this binary is both the test **and** the `claude`
 # CLI the shipped `ganja` spawns: its `main` checks `GANJA_FAKE_CLAUDE_SCRIPT`

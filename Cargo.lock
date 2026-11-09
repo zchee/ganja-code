@@ -1465,6 +1465,7 @@ dependencies = [
  "ratatui",
  "rcgen",
  "regex",
+ "reqwest",
  "secrecy",
  "serde_json",
  "shlex",

@@ -11,10 +11,132 @@ mod worker_support;
 
 use std::time::Duration;
 
+use futures::StreamExt as _;
+use ganja_client::{Bootstrap, BootstrapAuthor, BootstrapOutcome, Prompt};
+use ganja_protocol::{Event, FinishReason};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use worker_git::{Checkout, GitOptions, Stage, prepare};
 use worker_support::GitServer;
+
+#[tokio::test]
+async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
+    let server = GitServer::start(false).await;
+    let mut worker = worker_support::WorkerProcess::start(&server).await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/http".to_owned(),
+        author: BootstrapAuthor {
+            name: "ganja-cloud-http".to_owned(),
+            email: "http@example.invalid".to_owned(),
+        },
+    };
+    let result = worker
+        .client
+        .bootstrap(&bootstrap, Duration::from_secs(15))
+        .await
+        .expect("bootstrap response");
+    assert!(matches!(result, BootstrapOutcome::Cloned { .. }), "{result:?}");
+    let health = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(health) = worker.client.health().await {
+                break health;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("exec reaches authenticated health");
+    assert!(worker.is_alive(), "the original worker process remains alive after exec");
+    let mut events = worker.client.events().await.expect("event stream");
+    worker
+        .client
+        .prompt(&health.session_id, &Prompt::new("inspect and update note.txt"))
+        .await
+        .expect("prompt accepted");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = events.next().await {
+            if let Event::MessageFinished { reason, .. } = event.expect("event") {
+                assert_eq!(reason, FinishReason::Completed);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("tool turn completes");
+    assert_eq!(
+        std::fs::read_to_string(worker.work.join("note.txt")).expect("updated file"),
+        "after\n"
+    );
+    let stored = worker.client.messages(&health.session_id).await.expect("stored transcript");
+    let text = serde_json::to_string(&stored).expect("transcript serializes");
+    assert!(
+        text.contains("before"),
+        "the read tool resolved its relative path inside the checkout"
+    );
+    let response = reqwest::Client::new()
+        .post(format!("{}/session/{}/revert", worker.address, health.session_id.as_str()))
+        .basic_auth("ganja", Some("synthetic-worker-password"))
+        .send()
+        .await
+        .expect("undo request");
+    assert!(response.status().is_success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_to_string(worker.work.join("note.txt"))
+                .is_ok_and(|text| text == "before\n")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("undo restored the real checkout");
+    let author = std::process::Command::new("git")
+        .args(["config", "--local", "user.email"])
+        .current_dir(&worker.work)
+        .output()
+        .expect("author config");
+    assert_eq!(String::from_utf8(author.stdout).expect("author").trim(), "http@example.invalid");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn terminating_init_reaps_a_running_clone_before_exit() {
+    let server = GitServer::start(true).await;
+    let mut worker = worker_support::WorkerProcess::start(&server).await;
+    let client = worker.client.clone();
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/cancel".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    let request =
+        tokio::spawn(async move { client.bootstrap(&bootstrap, Duration::from_secs(5)).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.authorized.lock().expect("requests").is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("clone reached the peer");
+    worker.terminate().await;
+    assert_eq!(std::fs::read_dir(&worker.work).expect("work directory remains").count(), 0);
+    let outcome = request.await.expect("bootstrap request task");
+    assert!(
+        !matches!(outcome, Ok(BootstrapOutcome::Cloned { .. } | BootstrapOutcome::AlreadyServing)),
+        "a terminated initializer cannot report success: {outcome:?}"
+    );
+    drop(worker);
+    server.close().await;
+}
 
 fn request(server: &GitServer, reference: &str) -> Checkout {
     Checkout {
