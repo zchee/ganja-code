@@ -511,3 +511,75 @@ Pinned by: `Cargo.toml`, `.github/renovate.json5`,
 `a_key_the_sdk_will_not_send_is_configuration_and_is_never_repeated`).
 
 Commit: this commit
+
+## D574 — every SSE frame carries a cursor and `GET /event` replays from `Last-Event-ID` (2026-11-10)
+
+Crates: ganja-serve, ganja-client, ganja-cli
+Amends: none (extends D505)
+
+`ganja serve` keeps one in-memory event journal per engine lifetime, minted with a random epoch, fed by one ordered consumer that also keeps the `GET /permission` projection, so a registration's head never runs ahead of the permissions it implies. Every frame carries `id:`: a `message` its `<epoch>-<seq>`; `connected`, `heartbeat` and `evicted` a non-advancing id. `Last-Event-ID` inside the window answers `connected {"head", "replay": "from"}` and every frame after it; another epoch, a cursor older than the window, or one ahead of the head answers `"replay": "gap"`. The client commits its cursor only when an event is yielded. The journal is constructed by the caller (`ServeConfig.journal`). `ganja-client`'s `Resumable` reconnects while released, holds on request (acknowledging only after an in-flight attempt is classified), yields one `Gap` per declared gap, and converges past it without applying deltas to text it did not stream or inferring a finish reason it did not see.
+
+Pinned by: `crates/ganja-cli/tests/frames.rs`, `crates/ganja-serve/tests/resume.rs`, `crates/ganja-client/tests/wire.rs`, `crates/ganja-cli/tests/attach_resume.rs`
+
+## D575 — `GET /readyz` answers 200 without a credential and nothing else does (2026-11-10)
+
+Crates: ganja-serve
+Amends: D505
+
+On TCP, `GET /readyz` returns 200 with an empty body whether or not a password is configured; other methods on that path and every other TCP route keep the 401; not on the socket. `/global/health` is unchanged. The route answers in both phases of the worker process so a wakeup probe can pass; it proves a listener, not an engine.
+
+Pinned by: `crates/ganja-serve/tests/surface.rs`, `tests/team.rs`, `src/routes_tests.rs`
+
+## D576 — `ganja-teammate-cloud` is the member above the engine for teammates that run elsewhere (2026-11-10)
+
+Crates: ganja-teammate-cloud, ganja-serve (deny), ganja-testkit, ganja-tui
+Amends: D539
+
+The crate holds the `Provisioner` trait, the cloud `TeammateBackend`/`Spawned`, and the first provisioner; internal dependencies exactly `ganja-client`, `ganja-core` and the six beneath; no `axum*`/`ratatui*` (tonic client-only, defaults off); `ganja-serve` never links it; `ganja-testkit` links it and `ganja-serve` for the fake (dev-only cycle). The TUI assembles it when `[cloud]` is configured.
+
+Pinned by: `depgate.toml`, `crates/ganja-teammate-cloud/tests/fake_provisioner.rs`
+
+## D577 — one cloud teammate is one worker the lead quiesces before every suspend and never claims asleep without proof (2026-11-10)
+
+Crates: ganja-teammate-cloud
+Amends: none (implements the hosting interview's mapping and transport rulings)
+
+The member forwards its inbox to the worker's `prompt_async`, follows the resumable stream to the turn's `MessageFinished`, mails the final text and writes `idle_notification`, then closes admission to the worker, holds its stream and waits for the acknowledgement, ends the established stream and joins its task, waits a bounded time for outstanding REST calls to complete, and suspends the worker only if every request it made since it last stood idle with a clean record ended in a typed answer from the worker's own server. An attempt that was shed, cancelled, timed out or failed before such an answer makes the member uncertain for the rest of that worker's life: it keeps working and reports reachability, but **never suspends that worker automatically again**, because no later answer — not a health answer, not an owner's own suspend of the same Actor — proves that the earlier request cannot still wake it; the owner either keeps it running or retires it, and a replacement is spawned under a new name. While suspended no request reaches the worker. The next message resumes the worker, reopens the stream door, reconnects from the cursor, and opens the REST door only after the stream's acknowledgement. A worker found crashed or gone ends the member with one mail; a failed suspend or a deferred one reopens admission and mails; an unexpected permission request aborts the turn and is mailed once; a turn whose finish the member did not see is reported once as interrupted with an unknown outcome, and a retained finish for the same message later changes only what the row says; a turn whose terminal state is on neither the store nor the stream within a bounded wait ends the member's automatic progression with one owner-action mail and no idle claim.
+
+Pinned by: `crates/ganja-teammate-cloud/tests/fake_provisioner.rs` (`a_healthy_stream_is_ended_by_the_member_not_by_a_timeout`, `no_reconnect_is_admitted_between_the_hold_and_the_suspend`, `a_shed_attempt_turns_automatic_suspend_off_for_the_life_of_the_worker`, `a_health_answer_through_another_router_does_not_clear_the_uncertainty`, `an_owners_suspend_of_the_same_worker_does_not_clear_the_uncertainty`, `an_old_dispatch_arriving_late_finds_a_retired_worker_gone_and_a_replacement_unaffected`, `a_suspended_worker_receives_no_request_until_the_next_message`, `a_failed_suspend_reopens_admission`, `a_terminal_is_decided_once_per_message_id`, `a_missing_terminal_ends_automatic_progression_with_one_mail`)
+
+## D578 — a cloud worker boots as `ganja worker init` and becomes `ganja serve` only after its checkout exists (2026-11-10)
+
+Crates: ganja-cli, ganja-serve, ganja-client, ganja-teammate-cloud
+Amends: none (implements the hosting interview's working-tree ruling)
+
+The worker image's process answers `GET /readyz`, a credential-gated `POST /bootstrap` that clones the named repository, reference and branch into its working directory with a host-scoped placeholder `Authorization` header and the projected trust bundle, writes the author identity, and answers a bounded machine-readable result before replacing itself with `ganja serve` in that checkout, and a `GET /bootstrap` that reports the clone's state for a client whose response was lost. The clone runs in its own process group under a relative deadline the request carries and the init process starts at admission; on expiry the init process kills and reaps it, empties the working directory and reports the failure, so a later bootstrap starts clean. A failed clone leaves the init process answering; a client that reaches `ganja serve` on those paths reads `404` as "already serving". The member bounds the whole launch under one caller-owned deadline — the initial resume, the bootstrap, lost-response status reconciliation, the health wait, the session and the first stream acknowledgement — so it always returns; after an ambiguous bootstrap request it never sends a second one and fails as ambiguous instead; it deletes the worker in any state on failure within its own cleanup budget, and mails the owner once if the deletion cannot be confirmed. The member treats the wake probe as init-ready only and waits for an authenticated health answer before any event or prompt. Commits made by the worker are unsigned on its own branch; signing happens on a landing branch the lead creates, never by rewriting the worker's branch.
+
+Pinned by: `crates/ganja-cli/tests/worker_init.rs`, `crates/ganja-cli/tests/client_routes.rs`, `crates/ganja-teammate-cloud/tests/bootstrap_fs.rs`, `crates/ganja-serve/tests/bootstrap_init.rs`
+
+## D579 — the Agent Substrate provisioner speaks the v1.0.0 wire behind Kubernetes API connectors (2026-11-10)
+
+Crates: ganja-teammate-cloud
+Amends: none
+
+`provisioner::substrate` reads its own settings file. Its generated client is pinned to Agent Substrate **v1.0.0**, commit `b34fbee742906494b5eb4f1f36987176bf8770a4`, proto `api/ateapi/v1/ateapi.proto`, service **`substrate.ateapi.v1.Control`**, Go module `go.ate.dev/substrate`; checked-in stubs have regenerate-and-compare and hash pins. The API connector uses port-forwarded TLS to `api.ate-system.svc`, the live ClusterTrustBundle and an `ate-users/ganja` ServiceAccount token (audience `api.ate-system.svc`) renewed from returned expiry and sent only to ateapi. Authorization is enforced: the owner grants this principal editor on atespace `ganja` through its `default` AccessPolicy; it is not a global owner. `spawn` creates a SUSPENDED Actor and its egress policy. `CreateActor` wraps `Actor`; `ResumeActor` wraps its `ObjectRef`; `SuspendActor` sets `SuspendOptions` explicitly to asynchronous durability while requiring confirmed SUSPENDED state; `DeleteActor` has `DeleteOptions` identity/version guards, **no `any_state` field**, and deletes a RUNNING Actor without a preparatory suspend. Lost responses are reconciled by reads, never blind mutation retries. The workload connector is the transport design's **mTLS CONNECT to `atenet-router:8444` over a Kubernetes API port-forward**, using a locally generated key and a PodCertificateRequest-issued certificate for the allowed router identity (default `ate-system/atenet-client`). Its SPIFFE URI is checked against the installed `ingressAllowedSPIFFEIDs`; the live probe before implementation gates operator PCR RBAC and the actual handshake. `ate-target-actor` is the outer CONNECT header; the serve password remains the inner Basic credential. The in-process form implements that flow; the fallback spawns the released `kubectl ate proxy actor` and dials its local port, and is used only when the router hop itself fails, never for an API-connector failure. No router JWT support is assumed. A ganja-specific ingress identity, if the live probe requires one, needs the separately confirmed install action of the confirmed shared-action list.
+
+Pinned by: `crates/ganja-teammate-cloud/tests/ateapi_stub.rs`, the drift and hash tests, `tests/substrate_live.rs` (owner-run; `control_plane` with the provisioner, `actor_lifecycle` in the live acceptance)
+
+## D580 — `[cloud]` is a neutral trusted-tier table, the provisioner's settings are its own file, and the template password is `GANJA_CLOUD_PASSWORD` (2026-11-10)
+
+Crates: ganja-core, ganja-teammate-cloud
+Amends: D536
+
+`[cloud]` names a provisioner, the worker's bootstrap, its user name and its no-reply email; a project file that sets it fails the load naming the key and the file. Provisioner-specific settings live in `<config home>/cloud/<provisioner>.toml`, read by the provisioner alone and refused on any unknown key. The serve password shared by a template's workers is read from `GANJA_CLOUD_PASSWORD`, never from a file; a cloud spawn without it is refused by a sentence naming the variable. No secret reaches a log, a transcript or a test's evidence.
+
+Pinned by: `crates/ganja-core/src/config_tests.rs`, `tests/config_schema.rs`, the substrate settings drift test, `crates/ganja-teammate-cloud/tests/no_secrets_in_logs.rs`
+
+## D581 — `cloud` joins the backend vocabulary and records itself with `Surface::Cloud` (2026-11-10)
+
+Crates: ganja-protocol, ganja-core, ganja-team
+Amends: D508, D549
+
+`MemberBackend::Cloud` (`"cloud"`) is the seventh surface; `/team … @cloud` and `--backend cloud` spawn it. `ganja-team` gains `Surface::Cloud`, whose record carries `backendType: "cloud"` and the in-process `tmuxPaneId` sentinel, and which reads back as an in-process member for the reason the headless shims do.
+
+Pinned by: `crates/ganja-core/src/teammate_tests.rs`, `crates/ganja-core/src/command_tests.rs`, `crates/ganja-team/src/record_tests.rs`
