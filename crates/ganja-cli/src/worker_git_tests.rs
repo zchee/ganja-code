@@ -111,6 +111,19 @@ async fn a_never_completing_git_child_is_killed_under_the_deadline() {
 }
 
 #[tokio::test]
+async fn failure_debug_reports_only_the_stage() {
+    let root = tempfile::tempdir().expect("git directory");
+    let secret = "synthetic-secret-detail";
+    let failure =
+        git(root.path(), &[secret], Instant::now() + Duration::from_secs(5), Stage::Clone)
+            .await
+            .expect_err("unknown command fails");
+    let debug = format!("{failure:?}");
+    assert!(!debug.contains(secret));
+    assert_eq!(debug, "Clone");
+}
+
+#[tokio::test]
 async fn git_children_do_not_inherit_unlisted_environment() {
     const CHILD: &str = "GANJA_WORKER_ENV_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {

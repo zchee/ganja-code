@@ -50,10 +50,16 @@ pub(crate) enum Stage {
     Cleanup,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("git bootstrap failed during {stage:?}")]
 pub(crate) struct Failure {
     pub stage: Stage,
+}
+
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.stage, formatter)
+    }
 }
 
 /// Creates the clone and installs it into an otherwise empty worker directory.
