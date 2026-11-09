@@ -20,6 +20,75 @@ use worker_git::{Checkout, GitOptions, Stage, prepare};
 use worker_support::GitServer;
 
 #[tokio::test]
+async fn the_initializer_and_replacement_server_announce_the_same_ephemeral_port() {
+    let server = GitServer::start(false).await;
+    let worker = worker_support::WorkerProcess::start(&server).await;
+    let initial = worker.announced_ports();
+    assert_eq!(initial.len(), 1);
+    assert_ne!(initial[0], 0);
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/same-port".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let ports = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let ports = worker.announced_ports();
+            if ports.len() >= 2 {
+                break ports;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("replacement announces its bound port");
+    assert_eq!(
+        ports,
+        [initial[0], initial[0]],
+        "exec preserves the initializer's actual bound port"
+    );
+    worker.client.health().await.expect("same client reaches replacement server");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn an_early_initializer_exit_reports_status_and_redacted_stderr() {
+    use futures::FutureExt as _;
+
+    let server = GitServer::start(false).await;
+    let failure =
+        std::panic::AssertUnwindSafe(worker_support::WorkerProcess::start_with_environment(
+            &server,
+            &[("GIT_CONFIG_GLOBAL", "/missing-synthetic-worker-gitconfig")],
+        ))
+        .catch_unwind()
+        .await
+        .err()
+        .expect("invalid worker configuration is refused");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("panic text");
+    assert!(message.contains("exit status: 1"), "child exit status was omitted: {message}");
+    assert!(
+        message.contains("requires GIT_CONFIG_GLOBAL to name a readable file"),
+        "child stderr was omitted: {message}"
+    );
+    assert!(!message.contains("synthetic-worker-password"), "password must be redacted");
+    server.close().await;
+}
+
+#[tokio::test]
 async fn an_initializer_announces_its_bound_ephemeral_port() {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
