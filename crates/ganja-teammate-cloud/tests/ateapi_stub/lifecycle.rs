@@ -617,9 +617,9 @@ async fn proxy_admission_refuses_unissued_targets_and_invalid_local_credentials(
 
 #[tokio::test]
 async fn lost_mutation_responses_are_reconciled_without_repeating_the_mutation() {
-    for operation in ["create", "create policy", "resume", "suspend", "delete"] {
+    for operation in ["create policy", "resume", "suspend", "delete"] {
         let (_kube, control, provisioner) = fixture().await;
-        if operation == "create" || operation == "create policy" {
+        if operation == "create policy" {
             control.state.lock().expect("state lock").lost.insert(operation);
         }
         let worker = provisioner.spawn(&spec()).await.expect("reconciled creation");
@@ -656,6 +656,56 @@ async fn template_readiness_and_policy_failure_prevent_an_unreported_worker() {
     assert_eq!(error.kind, ProvisionErrorKind::Refused);
     assert!(control.state.lock().expect("state lock").actors.is_empty());
     assert!(!format!("{error:?} {error}").contains(ERROR_CANARY));
+}
+
+#[tokio::test]
+async fn an_unknown_creation_uid_never_deletes_a_replacement() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("cleanup log capture");
+    let (_kube, control, provisioner) = fixture().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    control.state.lock().expect("state").held_create_reply =
+        Some((Arc::clone(&entered), Arc::clone(&release)));
+    let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .expect("committed create pending reply");
+    let name = {
+        let mut state = control.state.lock().expect("state");
+        let actor = state.actors.values_mut().next().expect("committed actor");
+        let metadata = actor.metadata.as_mut().expect("metadata");
+        metadata.uid = "replacement-uid".to_owned();
+        metadata.name.clone()
+    };
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert_eq!(
+        spawn.await.expect("creation task").expect_err("unknown creation").kind,
+        ProvisionErrorKind::Ambiguous
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if control.state.lock().expect("state").calls.contains(&"delete")
+                || capture.logged().contains(&name)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup outcome recorded");
+    let state = control.state.lock().expect("state");
+    assert_eq!(state.calls.iter().filter(|call| **call == "delete").count(), 0);
+    assert_eq!(state.actors[&name].metadata.as_ref().expect("replacement").uid, "replacement-uid");
+    assert_eq!(state.retired.as_slice(), std::slice::from_ref(&name));
+    assert_eq!(capture.logged().matches(&name).count(), 1);
+    release.notify_one();
 }
 
 #[tokio::test]
@@ -733,40 +783,35 @@ async fn cancelling_a_committed_create_cleans_up_only_the_created_uid() {
 }
 
 #[tokio::test]
-async fn cancellation_during_identity_reconciliation_retires_the_created_actor() {
+async fn cancellation_during_an_unowned_create_reply_leaves_the_actor_untouched() {
     let (_kube, control, provisioner) = fixture().await;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     {
         let mut state = control.state.lock().expect("state lock");
         state.wrong_created_identity = true;
-        state.held_get_reply = Some((Arc::clone(&entered), Arc::clone(&release)));
+        state.held_create_reply = Some((Arc::clone(&entered), Arc::clone(&release)));
     }
     let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
     tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
         .await
-        .expect("identity reconciliation reached after create returned");
-    assert_eq!(control.state.lock().expect("state lock").actors.len(), 1);
+        .expect("unowned create reply pending");
     spawn.abort();
     assert!(spawn.await.expect_err("cancelled spawn").is_cancelled());
     release.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let complete = {
-                let state = control.state.lock().expect("state lock");
-                state.actors.is_empty() && state.calls.ends_with(&["delete", "get"])
-            };
-            if complete {
+            if control.state.lock().expect("state lock").retired.len() == 1 {
                 break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("owned reconciliation cleans up the actor");
+    .expect("unknown identity retires local resources");
     let state = control.state.lock().expect("state lock");
-    assert_eq!(state.calls, ["get template", "create", "get", "delete", "get"]);
-    assert_eq!(state.retired.len(), 1);
+    assert_eq!(state.calls, ["get template", "create"]);
+    assert_eq!(state.actors.len(), 1);
     assert!(state.policies.is_empty());
 }
 
@@ -832,16 +877,31 @@ async fn crashed_reverted_gone_and_unconfirmed_delete_states_remain_distinct() {
 }
 
 #[tokio::test]
-async fn creation_reconciles_identity_but_never_returns_an_unrelated_worker() {
-    let (_kube, control, provisioner) = fixture().await;
-    control.state.lock().expect("state lock").wrong_created_identity = true;
-    let worker = provisioner.spawn(&spec()).await.expect("reconcile malformed create reply");
-    assert!(!worker.handle.as_str().contains("unrelated"));
-    provisioner.kill(&worker).await.expect("cleanup");
-    control.state.lock().expect("state lock").wrong_read_identity = true;
-    let error = provisioner.spawn(&spec()).await.expect_err("reject mismatched reconciliation");
-    assert_eq!(error.kind, ProvisionErrorKind::Ambiguous);
-    assert!(control.state.lock().expect("state lock").policies.is_empty());
+async fn lost_or_unrelated_create_replies_never_claim_ownership() {
+    for lost in [false, true] {
+        let (_kube, control, provisioner) = fixture().await;
+        {
+            let mut state = control.state.lock().expect("state lock");
+            if lost {
+                state.lost.insert("create");
+            } else {
+                state.wrong_created_identity = true;
+            }
+        }
+        let error = provisioner.spawn(&spec()).await.expect_err("unproven creation");
+        assert_eq!(error.kind, ProvisionErrorKind::Ambiguous);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while control.state.lock().expect("state").retired.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("local resources retired");
+        let state = control.state.lock().expect("state lock");
+        assert_eq!(state.calls, ["get template", "create"]);
+        assert_eq!(state.actors.len(), 1);
+        assert!(state.policies.is_empty());
+    }
 }
 
 #[tokio::test]

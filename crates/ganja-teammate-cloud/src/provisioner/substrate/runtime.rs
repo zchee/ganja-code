@@ -71,25 +71,18 @@ impl SpawnCleanup {
         let control = self.control.clone();
         let identity = Arc::clone(&self.identity);
         let proxy = Arc::clone(&self.proxy);
-        let mut uid = self.uid.clone();
+        let uid = self.uid.clone();
         // Tokio owns the bounded cleanup because Drop cannot await; cancellation
         // must not discard either an in-flight creation or its later deletion.
         Some(tokio::spawn(async move {
             proxy.retire(&actor).await;
             let operation = async {
                 if uid.is_empty() {
-                    let observed = read_actor(control.clone(), &identity, &actor).await?;
-                    uid = observed
-                        .metadata
-                        .filter(|metadata| {
-                            metadata.atespace == actor.atespace
-                                && metadata.name == actor.name
-                                && !metadata.uid.is_empty()
-                        })
-                        .map(|metadata| metadata.uid)
-                        .ok_or_else(|| {
-                            failure("created identity", ProvisionErrorKind::Ambiguous)
-                        })?;
+                    // A later object with the same name does not prove ownership.
+                    return Err(failure(
+                        "spawn cleanup unconfirmed",
+                        ProvisionErrorKind::Ambiguous,
+                    ));
                 }
                 delete_actor(control, &identity, &actor, &uid).await
             };
@@ -657,15 +650,11 @@ async fn create_actor(
         actor: Some(actor_ref.clone()),
         uid: String::new(),
     };
-    let response = control
+    let created = control
         .create_actor(identity.authorize(CreateActorRequest { actor: Some(actor) }).await?)
-        .await;
-    let mut created = match response {
-        Ok(response) => response.into_inner(),
-        Err(status) => read_actor(control.clone(), &identity, &actor_ref)
-            .await
-            .map_err(|_| rpc_error("create", &status, true))?,
-    };
+        .await
+        .map_err(|status| rpc_error("create", &status, true))?
+        .into_inner();
     let expected_identity = |value: &Actor| {
         value.metadata.as_ref().is_some_and(|metadata| {
             metadata.atespace == actor_ref.atespace
@@ -673,9 +662,7 @@ async fn create_actor(
                 && !metadata.uid.is_empty()
         })
     };
-    if !expected_identity(&created) {
-        created = read_actor(control, &identity, &actor_ref).await?;
-    }
+    // The wire has no create-operation identifier for a later ownership read.
     if !expected_identity(&created) {
         return Err(failure("created identity", ProvisionErrorKind::Ambiguous));
     }

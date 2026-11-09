@@ -70,10 +70,13 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   targets only its fixed actor, and still requires the worker's Basic auth.
   Other local processes can reach that plugin socket; use in-process mode
   when local users or processes are outside the trust boundary.
-- Mutations are reconciled by reads (`GetActor`, `GetActorEgressPolicy`),
-  never blindly resent; deletion carries the known Actor UID and succeeds
-  only on a confirmed `NOT_FOUND`. A cancelled policy installation schedules
-  bounded, UID-guarded cleanup independently of the cancelled caller.
+- State and policy mutations are reconciled by reads (`GetActor`,
+  `GetActorEgressPolicy`), never blindly resent; deletion carries the known
+  Actor UID and succeeds only on a confirmed `NOT_FOUND`. Creation ownership
+  requires a matching successful create reply: an unknown UID leaves the name
+  logged for owner reconciliation and is never adopted from a later read.
+  A cancelled policy installation schedules bounded, UID-guarded cleanup
+  independently of the cancelled caller.
 - Live cases in `tests/substrate_live.rs` are `#[ignore]` and inert without
   `GANJA_LIVE_TEST=1`; with it set, missing `GANJA_SUBSTRATE_CONFIG_HOME`
   (or `GANJA_CLOUD_PASSWORD` for `actor_lifecycle`) fails naming the variable.
