@@ -116,6 +116,28 @@ impl Running {
         (Self { fixture, engine, storage, journal, server, source }, blocker)
     }
 
+    async fn restart(mut self) -> Self {
+        self.source.hold().await;
+        self.server.shutdown().await.expect("stop old incarnation");
+        let mut config = ServeConfig::in_directory(self.fixture._home.path().to_owned());
+        config.listen = Listen::loopback();
+        config.storage = Some(self.storage.clone());
+        self.journal = config.journal.clone();
+        self.server =
+            ganja_serve::serve(self.engine.clone(), config).await.expect("new incarnation");
+        let client =
+            Client::new(&format!("http://{}", self.server.address()), None).expect("client");
+        self.source = Arc::new(GapSource {
+            inner: ClientSource::new(client.clone(), self.fixture.member.gate.clone()),
+            gap: AtomicBool::new(true),
+            gap_after_finish: AtomicBool::new(false),
+        });
+        let member = Arc::get_mut(&mut self.fixture.member).expect("unique member");
+        member.client = Some(client);
+        member.events = Some(self.source.clone());
+        self
+    }
+
     fn mail(&self) -> Vec<MailboxMessage> {
         mailbox::read(&self.fixture.member.lent.lead_inbox).expect("mailbox").valid
     }
@@ -197,6 +219,68 @@ async fn a_saved_envelope_is_mailed_once_when_its_finish_arrives_after_the_gap()
         Some(&Some(FinishReason::Completed))
     );
     assert_eq!(running.mail().len(), before.len(), "retained finish cannot mail twice");
+    running.close().await;
+}
+
+#[tokio::test]
+async fn a_new_epoch_converges_to_the_same_idle_transcript() {
+    let running = Running::new(vec![ganja_testkit::says("persisted answer")]).await;
+    let mut events = running.engine.subscribe().await.expect("events");
+    running.engine.send(prompt()).await.expect("prompt");
+    ganja_testkit::drain(&mut events).await;
+    let before = running.storage.load_transcript(&running.engine.session_id()).expect("before");
+    let epoch = running.journal.epoch().to_owned();
+    let running = running.restart().await;
+    assert_ne!(running.journal.epoch(), epoch);
+    running.fixture.member.wait_for_terminal(None, None, false).await.expect("cold convergence");
+    let after = running.storage.load_transcript(&running.engine.session_id()).expect("after");
+    assert_eq!(before, after);
+    assert_eq!(running.mail().len(), 2);
+    assert!(
+        running.mail().iter().any(|message| message.text.contains("final text may be incomplete"))
+    );
+    running.close().await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn a_new_epoch_interrupts_a_stored_turn_without_a_completed_envelope() {
+    let running = Running::new(vec![ganja_testkit::says("interrupted answer")]).await;
+    let fault = ganja_core::session::CompletedEnvelopeFailure::new(running.engine.session_id());
+    let mut events = running.engine.subscribe().await.expect("events");
+    running.engine.send(prompt()).await.expect("prompt");
+    ganja_testkit::drain(&mut events).await;
+    let running = running.restart().await;
+    running
+        .fixture
+        .member
+        .wait_for_terminal(None, None, false)
+        .await
+        .expect("cold interrupted turn");
+    assert_eq!(running.mail().len(), 2);
+    assert!(running.mail().iter().any(|message| matches!(serde_json::from_str::<Frame>(&message.text), Ok(Frame::IdleNotification(ref idle)) if idle.idle_reason == Some(IdleReason::Interrupted))));
+    assert_eq!(running.fixture.member.terminal.lock().expect("decisions").len(), 1);
+    drop(fault);
+    running.close().await;
+}
+
+#[tokio::test]
+async fn an_owner_reported_revert_invalidates_before_any_explicit_resume() {
+    let running = Running::new(vec![ganja_testkit::says("old answer")]).await;
+    running.fixture.member.turn("team-lead", "first request").await.expect("first turn");
+    assert_eq!(running.mail().len(), 2);
+    assert!(!running.fixture.member.terminal.lock().expect("decisions").is_empty());
+    let control = CloudControl(running.fixture.member.clone());
+    control.report_external_revert().await;
+    assert_eq!(control.phase(), Phase::Suspended);
+    assert!(running.source.cursor().await.is_none(), "held checkpoint cursor was invalidated");
+    assert!(running.fixture.member.terminal.lock().expect("decisions").is_empty());
+    assert_eq!(running.mail().len(), 2, "reporting a revert must not resume or mail automatically");
+    assert!(!running.fixture.member.gate.state().stream_open);
+    assert!(!running.fixture.member.gate.state().rest_open);
+    control.resume_for_inspection().await.expect("explicit resume");
+    assert_eq!(running.mail().len(), 4, "the new history gets its own conservative decision");
+    assert_eq!(control.phase(), Phase::Idle);
     running.close().await;
 }
 

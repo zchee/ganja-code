@@ -85,6 +85,7 @@ impl CloudControl {
         if let Some(events) = &self.0.events {
             events.invalidate().await;
         }
+        self.0.terminal.lock().expect("terminal decision lock").clear();
         self.0.needs_resync.store(true, Ordering::SeqCst);
         self.0.set_phase(Phase::Suspended);
         self.0.remember("external revert reported; cursor invalidated".to_owned());
@@ -583,6 +584,9 @@ impl CloudMember {
             .expect("epoch lock")
             .as_ref()
             .is_some_and(|epoch| epoch != head.epoch());
+        if cold {
+            self.terminal.lock().expect("terminal decision lock").clear();
+        }
         self.traced(|trace| trace.frame(head, "gap", None));
         let events = self.events()?;
         events
