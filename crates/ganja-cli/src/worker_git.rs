@@ -64,7 +64,22 @@ pub(crate) async fn prepare(
 ) -> Result<String, Failure> {
     let parsed =
         url::Url::parse(&request.repository).map_err(|_| Failure { stage: Stage::Dispatch })?;
-    if parsed.scheme() != "https"
+    // URL parsing removes dot-segments, so validate their original spelling first.
+    let raw_path = request
+        .repository
+        .split_once("://")
+        .and_then(|(_, authority)| authority.split_once('/'))
+        .map_or("", |(_, path)| path);
+    if request.repository.contains('\\')
+        || request.repository.chars().any(char::is_control)
+        || raw_path.split('/').any(|segment| {
+            matches!(segment, "." | "..")
+                || ["%2e", ".%2e", "%2e.", "%2e%2e"]
+                    .iter()
+                    .any(|dots| segment.eq_ignore_ascii_case(dots))
+        })
+        || matches!(parsed.host(), Some(url::Host::Ipv6(_)))
+        || parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
         || parsed.password().is_some()

@@ -42,6 +42,38 @@ async fn credentials_and_non_https_repositories_are_refused_before_git() {
 }
 
 #[tokio::test]
+async fn repositories_with_ambiguous_original_paths_are_refused_before_git() {
+    let cases = [
+        ("https://example.invalid/repo.git", true),
+        ("https://EXAMPLE.invalid/a/repo.git", true),
+        ("https://127.0.0.1/repo.git", true),
+        ("https://[::1]/repo.git", false),
+        ("https://example.invalid/a/./repo.git", false),
+        ("https://example.invalid/a/../repo.git", false),
+        ("https://example.invalid/a/%2e/repo.git", false),
+        ("https://example.invalid/a/%2E%2e/repo.git", false),
+        ("https://example.invalid/a/.%2E/repo.git", false),
+        ("https://example.invalid/a/%2e./repo.git", false),
+        ("https://example.invalid/a\\repo.git", false),
+        ("https://example.invalid/a/\nrepo.git", false),
+        ("https://example.invalid/a/%2e%2e", false),
+        ("https://example.invalid/.git", true),
+        ("https://example.invalid/a..b/repo.git", true),
+    ];
+    for (repository, accepted) in cases {
+        let root = tempfile::tempdir().expect("worker root");
+        let failure = prepare(root.path().to_owned(), checkout(repository), Instant::now())
+            .await
+            .expect_err("expired deadline or invalid repository");
+        assert_eq!(
+            failure.stage,
+            if accepted { Stage::Deadline } else { Stage::Dispatch },
+            "{repository}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_existing_worker_file_is_not_deleted_or_overwritten() {
     let root = tempfile::tempdir().expect("worker root");
     std::fs::write(root.path().join("keep"), "owned by another process").expect("file");
