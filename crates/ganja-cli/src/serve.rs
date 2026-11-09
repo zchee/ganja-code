@@ -107,6 +107,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             storage: Some(assembled.storage),
             config: Some(assembled.config),
             heartbeat: ganja_serve::HEARTBEAT,
+            journal: ganja_serve::EventJournal::default(),
         },
     )
     .await?;

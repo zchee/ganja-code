@@ -78,7 +78,9 @@
 //!   id it does not know.
 
 mod auth;
+pub mod bootstrap;
 mod error;
+mod journal;
 mod routes;
 pub mod socket;
 mod sse;
@@ -92,10 +94,10 @@ use std::time::Duration;
 use std::{fmt, io};
 
 pub use auth::{Credentials, PASSWORD_ENV};
-use futures::StreamExt as _;
 use ganja_core::{Config, Engine, EngineError, Storage};
-use ganja_protocol::{Event, SessionId};
-pub use routes::DIRECTORY_HEADER;
+use ganja_protocol::SessionId;
+pub use journal::{EventJournal, JOURNAL_BYTES, JOURNAL_FRAMES};
+pub use routes::{DIRECTORY_HEADER, EPOCH_HEADER};
 pub use socket::DirectoryRefusal;
 use tokio::net::TcpListener;
 
@@ -232,6 +234,8 @@ pub struct ServeConfig {
     /// How often the event stream heartbeats. [`HEARTBEAT`] everywhere but a
     /// test that cannot wait ten seconds.
     pub heartbeat: Duration,
+    /// Caller-owned history; reuse it when restarting a listener on this engine.
+    pub journal: EventJournal,
 }
 
 impl ServeConfig {
@@ -248,6 +252,7 @@ impl ServeConfig {
             storage: None,
             config: None,
             heartbeat: HEARTBEAT,
+            journal: EventJournal::default(),
         }
     }
 }
@@ -255,6 +260,9 @@ impl ServeConfig {
 /// Why a server did not come up.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
+    /// Reusing a journal for another engine would mix unrelated event histories.
+    #[error("an event journal may only be attached to its original engine")]
+    JournalEngineMismatch,
     /// A bind that faces the network was asked for with nothing guarding it.
     /// Upstream warns and serves anyway; refusing is deliberate — see the
     /// crate docs (deviation: non-loopback-requires-a-password).
@@ -304,7 +312,7 @@ pub enum ServeError {
         /// What was wrong with it.
         reason: DirectoryRefusal,
     },
-    /// The engine refused the subscription the permission tracker lives on.
+    /// The engine refused the subscription the journal lives on.
     /// Documented as unreachable today; carried rather than unwrapped so the
     /// day it becomes reachable is a compile-time fact here.
     #[error(transparent)]
@@ -402,14 +410,10 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Handle, S
         Listen::Session { id, directory } => bind_session(directory, id).await?,
     };
 
-    // The tracker's subscription is claimed before the router exists, so no
-    // request can race a dialog past it: every `PermissionRequested` the
-    // engine ever emits from here on is in this queue. It is lossless — the
-    // tracker only moves a map entry, so it always drains and the turn task
-    // never waits on it.
-    let subscription = engine.subscribe().await?;
-    let pending = state::Pending::default();
-    spawn_permission_tracker(subscription, pending.clone());
+    // Registration and permission projection share the journal's ordering.
+    // Rebinding the same journal does not add another engine subscription.
+    config.journal.attach(&engine).await?;
+    let pending = config.journal.pending();
 
     let (shutdown, watch) = tokio::sync::watch::channel(false);
     let state = state::AppState::new(engine, config, pending, watch.clone());
@@ -482,42 +486,6 @@ where
             })
             .into_future(),
     )
-}
-
-/// Keeps the map behind `GET /permission` current: a request enters when the
-/// engine asks, and leaves when anything answers it — a person over the
-/// reply route, or a cancel refusing it.
-fn spawn_permission_tracker(
-    mut events: futures::stream::BoxStream<'static, Event>,
-    pending: state::Pending,
-) {
-    tokio::spawn(async move {
-        while let Some(event) = events.next().await {
-            match event {
-                Event::PermissionRequested {
-                    session_id,
-                    id,
-                    call_id,
-                    tool,
-                    title,
-                    args,
-                    directories,
-                } => {
-                    pending.insert(state::PendingPermission {
-                        session_id,
-                        id,
-                        call_id,
-                        tool,
-                        title,
-                        args,
-                        directories,
-                    });
-                }
-                Event::PermissionReplied { id, .. } => pending.remove(&id),
-                _ => {}
-            }
-        }
-    });
 }
 
 /// The address `hostname` names, without a resolver: an IP address is itself,
