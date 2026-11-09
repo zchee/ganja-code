@@ -94,10 +94,35 @@ pub(crate) struct TraceLog(BufWriter<std::fs::File>);
 impl TraceLog {
     pub(crate) fn from_env(name: &str) -> std::io::Result<Option<Self>> {
         let Some(directory) = std::env::var_os("GANJA_CLOUD_TRACE") else { return Ok(None) };
-        std::fs::create_dir_all(&directory)?;
-        let path = std::path::PathBuf::from(directory).join(format!("{name}.jsonl"));
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
-        Ok(Some(Self(BufWriter::new(file))))
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)?;
+            let metadata = std::fs::symlink_metadata(&directory)?;
+            // Do not silently change a shared directory's access policy, or follow
+            // a symlink when deciding where private trace identities are written.
+            if !metadata.is_dir() || metadata.permissions().mode() & 0o7077 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the trace directory must be private",
+                ));
+            }
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+            let path = std::path::PathBuf::from(directory).join(format!("{name}.jsonl"));
+            let file =
+                std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            Ok(Some(Self(BufWriter::new(file))))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, name);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "private trace permissions require a Unix filesystem",
+            ))
+        }
     }
 
     pub(crate) fn frame(
