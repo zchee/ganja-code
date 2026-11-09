@@ -55,8 +55,12 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   loader and schema classifying identically). The serve password is
   `GANJA_CLOUD_PASSWORD` only, never a file key.
 - Both tunnels sit behind one seam: in-process kube port-forwards, or the
-  released `kubectl ate proxy actor` child whose readiness is its own stderr
-  line — never a probe connection, which would wake a suspended actor.
+  released `kubectl ate proxy actor` child, with `--kubeconfig=...` and optional
+  `--context=...` after the plugin name; readiness is its own stderr line,
+  never a probe connection, which would wake a suspended actor.
+  The child receives only operator-owned `PATH` and `HOME` plus the explicit
+  settings `KUBECONFIG`: credential and kubectl plugins resolve through those
+  trusted operator paths, so pinning kubectl does not pin plugin resolution.
   The shared ingress requires a sensitive process-local token and admits only
   issued, unretired actors in the configured atespace. It consumes the token
   before forwarding. The plugin owns its separate unauthenticated socket and

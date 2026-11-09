@@ -137,6 +137,105 @@ async fn retiring_a_proxy_reaps_its_child_removes_the_entry_and_allows_a_fresh_s
 }
 
 #[tokio::test]
+async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
+    const MODE: &str = "GANJA_TEST_PROXY_ENV";
+    let Ok(mode) = std::env::var(MODE) else {
+        for mode in ["record", "PATH", "HOME"] {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"));
+            child.env_clear()
+                .env(MODE, mode)
+                .env("PATH", "/trusted/plugin/bin")
+                .env("HOME", "/trusted/home")
+                .env("GANJA_CLOUD_PASSWORD", "synthetic-password-canary")
+                .env("ANTHROPIC_API_KEY", "synthetic-provider-canary")
+                .env("OPENAI_API_KEY", "synthetic-provider-canary")
+                .env("GOOGLE_API_KEY", "synthetic-provider-canary")
+                .env("HTTP_PROXY", "synthetic-proxy-canary")
+                .env("KUBECONFIG", "/ambient/config")
+                .args(["--exact", "provisioner::substrate::kubectl::tests::proxy_child_receives_only_operator_paths_and_plugin_flags", "--nocapture"]);
+            if mode != "record" {
+                child.env_remove(mode);
+            }
+            let output = child.output().expect("isolated environment fixture");
+            assert!(output.status.success(), "{mode}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let args = directory.path().join("args");
+    let env = directory.path().join("env");
+    let binary = executable(
+        directory.path(),
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\nunset PWD SHLVL _\n/usr/bin/env > '{}'\nprintf 'Proxying 127.0.0.1:12345 -> ganja/worker:80\\n' >&2\nexec /bin/sleep 60",
+            args.display(),
+            env.display(),
+        ),
+    );
+    let kubeconfig = directory.path().join("operator-config");
+    let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };
+    if mode == "record" {
+        let command =
+            proxy_command(&binary, &kubeconfig, Some("chosen-context"), &actor).expect("command");
+        let names = command
+            .as_std()
+            .get_envs()
+            .map(|(name, _)| name.to_str().expect("environment name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["HOME", "KUBECONFIG", "PATH"]);
+    }
+    let result =
+        start_proxy(&binary, &kubeconfig, Some("chosen-context"), &actor, Duration::from_secs(2))
+            .await;
+    if mode != "record" {
+        let Err(error) = result else { panic!("missing {mode} must fail") };
+        assert_eq!(error.operation, mode);
+        assert_eq!(error.kind, ProvisionErrorKind::Refused);
+        return;
+    }
+    let mut proxy = result.expect("record command");
+    proxy.cancel.cancel();
+    (&mut proxy.task).await.expect("reap fixture");
+    let environment = std::fs::read_to_string(env).expect("recorded environment");
+    // The shell sets `_`, and macOS injects its encoding variable at exec.
+    // Neither comes from the command's explicit environment checked above.
+    let mut names = environment
+        .lines()
+        .map(|line| line.split_once('=').expect("env entry").0)
+        .filter(|name| !matches!(*name, "_" | "__CF_USER_TEXT_ENCODING"))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, ["HOME", "KUBECONFIG", "PATH"]);
+    assert!(environment.contains("HOME=/trusted/home\n"));
+    assert!(environment.contains("PATH=/trusted/plugin/bin\n"));
+    assert!(environment.contains(&format!("KUBECONFIG={}\n", kubeconfig.display())));
+    for canary in [
+        "synthetic-password-canary",
+        "synthetic-provider-canary",
+        "synthetic-proxy-canary",
+        "/ambient/config",
+    ] {
+        assert!(!environment.contains(canary), "ambient value escaped");
+    }
+    let actual = std::fs::read_to_string(args).expect("recorded arguments");
+    assert_eq!(
+        actual.lines().collect::<Vec<_>>(),
+        [
+            "ate",
+            "proxy",
+            "actor",
+            "worker",
+            "0:80",
+            "--atespace=ganja",
+            &format!("--kubeconfig={}", kubeconfig.display()),
+            "--context=chosen-context",
+            "--address=127.0.0.1"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn proxy_startup_errors_discard_stderr_and_return_within_the_budget() {
     let directory = tempfile::tempdir().expect("temporary fixture directory");
     let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };

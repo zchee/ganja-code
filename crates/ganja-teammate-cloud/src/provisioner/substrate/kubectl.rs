@@ -135,6 +135,32 @@ impl Drop for ProxyChild {
     }
 }
 
+fn proxy_command(
+    executable: &std::path::Path,
+    kubeconfig: &std::path::Path,
+    context: Option<&str>,
+    actor: &ObjectRef,
+) -> Result<Command, ProvisionError> {
+    let path =
+        std::env::var_os("PATH").ok_or_else(|| failure("PATH", ProvisionErrorKind::Refused))?;
+    let home =
+        std::env::var_os("HOME").ok_or_else(|| failure("HOME", ProvisionErrorKind::Refused))?;
+    let mut command = Command::new(executable);
+    // Credential and kubectl plugins resolve through the operator's PATH and
+    // HOME. Pinning kubectl does not pin these plugins; that trust is accepted.
+    command.env_clear().env("PATH", path).env("HOME", home).env("KUBECONFIG", kubeconfig);
+    command.args(["ate", "proxy", "actor", &actor.name, "0:80"]);
+    command.arg(format!("--atespace={}", actor.atespace));
+    let mut config_flag = std::ffi::OsString::from("--kubeconfig=");
+    config_flag.push(kubeconfig);
+    command.arg(config_flag);
+    if let Some(context) = context {
+        command.arg(format!("--context={context}"));
+    }
+    command.arg("--address=127.0.0.1");
+    Ok(command)
+}
+
 async fn start_proxy(
     executable: &std::path::Path,
     kubeconfig: &std::path::Path,
@@ -143,22 +169,7 @@ async fn start_proxy(
     budget: Duration,
 ) -> Result<ProxyChild, ProvisionError> {
     let failed = || failure("proxy startup", ProvisionErrorKind::Transient);
-    let mut command = Command::new(executable);
-    command.arg("--kubeconfig").arg(kubeconfig);
-    if let Some(context) = context {
-        command.arg("--context").arg(context);
-    }
-    command.args([
-        "ate",
-        "proxy",
-        "actor",
-        &actor.name,
-        "0:80",
-        "-a",
-        &actor.atespace,
-        "--address",
-        "127.0.0.1",
-    ]);
+    let mut command = proxy_command(executable, kubeconfig, context, actor)?;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
