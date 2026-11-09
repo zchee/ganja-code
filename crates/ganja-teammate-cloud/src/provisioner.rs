@@ -9,6 +9,9 @@ use http::HeaderMap;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+/// Agent Substrate's lifecycle and tunnel implementation.
+pub mod substrate;
+
 /// A worker identity opaque to the member and interpreted only by its provisioner.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkerHandle(String);

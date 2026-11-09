@@ -278,6 +278,14 @@ percent-encoding = "2.3.2"
 # encoding still needs a crate of its own, and this one is the encoder alone
 # rather than the whole `image` stack a second time.
 png = "0.18.1"
+# Agent Substrate's published protobuf wire and its well-known timestamp types.
+prost = "0.14.4"
+prost-types = "0.14.4"
+# Client-only gRPC; server is enabled only by the cloud crate's test dependency.
+# In particular, router stays off so axum never enters a provisioner's closure.
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "tls-ring"] }
+# The generated Substrate services use prost messages, not the cursor codec.
+tonic-prost = "0.14.9"
 # Markdown parsed into block events the chat renderer styles; the default
 # `html` renderer and the example binary's `getopts` stay off — parsing is
 # the only piece the TUI consumes.
