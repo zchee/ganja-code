@@ -36,7 +36,7 @@ cargo clippy --locked --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps   # intra-doc links must resolve
 cargo nextest run --locked --workspace --profile ci           # one process per test; profiles in .config/nextest.toml
 cargo test --workspace --doc                                  # nextest skips doctests
-cargo depgate check --config depgate.toml                     # 19 dependency-boundary rules
+cargo depgate check --config depgate.toml                     # 21 dependency-boundary rules
 cargo deny check                                              # advisories, licenses, bans, sources (deny.toml)
 ```
 
@@ -118,7 +118,7 @@ dist build                                  # local archive under target/distrib
 
 | File | Purpose |
 |---|---|
-| `Cargo.toml`, `depgate.toml`, `deny.toml`, `.config/nextest.toml` | Every dependency version with its reason; the 19 dependency rules with theirs; cargo-deny policy; nextest profiles. |
+| `Cargo.toml`, `depgate.toml`, `deny.toml`, `.config/nextest.toml` | Every dependency version with its reason; the 21 dependency rules with theirs; cargo-deny policy; nextest profiles. |
 | `schema/ganja-config.schema.json` | JSON Schema for `ganja.toml`; taplo reads it through a `#:schema` line. |
 | `CONTEXT.md` | Glossary: the canonical term for each concept and the words to avoid. |
 | `PRACTICE.md` | Rust exercises for the owner, mapped to the port's phases. |
