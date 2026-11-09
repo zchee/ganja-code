@@ -22,16 +22,11 @@ use super::certificate::RouterIdentity;
 use super::tunnel::{Tunnel, TunnelIo, connect_actor, failure};
 use crate::provisioner::{ProvisionError, ProvisionErrorKind};
 
-/// Builds the operator client without ambiguous process-wide crypto selection.
+/// Builds the operator client using the workspace's single crypto provider.
 ///
 /// # Errors
 /// Refuses invalid Kubernetes client configuration without retaining its contents.
 pub fn client_from_config(config: ::kube::Config) -> Result<Client, ProvisionError> {
-    // Other workspace transports may enable aws-lc as well as ring. kube's
-    // default builder needs one process choice; preserve any existing choice.
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
     Client::try_from(config).map_err(|_| failure("Kubernetes client", ProvisionErrorKind::Refused))
 }
 

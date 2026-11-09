@@ -375,7 +375,7 @@ async fn router_socket(mut socket: WebSocket, state: Arc<KubeState>) {
     for root in CertificateDer::pem_slice_iter(state.ca_pem.as_bytes()) {
         roots.add(root.expect("fixture root")).expect("valid root");
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
         Arc::new(roots),
         Arc::clone(&provider),

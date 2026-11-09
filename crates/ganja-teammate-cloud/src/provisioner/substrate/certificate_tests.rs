@@ -51,7 +51,7 @@ async fn handshake(server_name: &'static str, correct_trust: bool) -> bool {
         .expect("server parameters")
         .signed_by(&server_key, &issuer)
         .expect("server certificate");
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut roots = RootCertStore::empty();
     roots.add(ca.der().clone()).expect("client trust root");
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(

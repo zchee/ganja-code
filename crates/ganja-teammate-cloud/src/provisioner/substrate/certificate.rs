@@ -176,16 +176,17 @@ fn validate(
     if roots.is_empty() {
         return Err(refused());
     }
-    let config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|_| refused())?
-            .with_root_certificates(roots)
-            .with_client_auth_cert(
-                certificates,
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-            )
-            .map_err(|_| refused())?;
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| refused())?
+    .with_root_certificates(roots)
+    .with_client_auth_cert(
+        certificates,
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+    )
+    .map_err(|_| refused())?;
     Ok(Issued { config: Arc::new(config), refresh_at, expires_at })
 }
 
