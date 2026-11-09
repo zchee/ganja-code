@@ -69,6 +69,27 @@ async fn readiness_is_empty_get_only_and_the_only_unguarded_tcp_route() {
 }
 
 #[tokio::test]
+async fn readiness_directory_refusals_do_not_disclose_the_served_directory() {
+    let mut config = loopback_config();
+    config.credentials = Some(support::credentials());
+    let handle = ganja_serve::serve(support::engine(), config).await.expect("serve");
+    let base = base_url(&handle);
+    let client = reqwest::Client::new();
+    for request in [
+        client.get(format!("{base}/readyz")).header(ganja_serve::DIRECTORY_HEADER, "/wrong"),
+        client.get(format!("{base}/readyz?directory=/wrong")),
+    ] {
+        let response = request.send().await.expect("directory refusal");
+        assert_eq!(response.status(), 400);
+        assert!(
+            response.bytes().await.expect("body").is_empty(),
+            "unauthenticated readiness must not disclose paths"
+        );
+    }
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn every_tcp_response_identifies_the_same_journal_epoch() {
     let mut config = loopback_config();
     config.credentials = Some(support::credentials());

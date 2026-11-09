@@ -122,11 +122,11 @@ pub enum Status {
         /// Created work branch.
         branch: String,
     },
-    /// A bounded, redacted failure from the executor.
+    /// A fixed failure message; executor diagnostics remain in the server log.
     Failed {
         /// Failed operation.
         stage: Stage,
-        /// At most 4096 UTF-8 bytes, without known credential or request values.
+        /// Fixed text with no executor output.
         detail: String,
         /// True while the timed-out executor is still finishing cleanup.
         #[serde(default)]
@@ -335,15 +335,22 @@ async fn bootstrap(State(service): State<Service>, body: Bytes) -> Response {
                 cleanup_in_progress: false,
             },
             (Ok(cloned), false) => Status::Cloned { head: cloned.head, branch: cloned.branch },
-            (Err(failure), expired) => Status::Failed {
-                stage: if expired && failure.stage != Stage::Cleanup {
-                    Stage::Deadline
-                } else {
-                    failure.stage
-                },
-                detail: redact(failure.detail, &request, &service.inner.credentials),
-                cleanup_in_progress: false,
-            },
+            (Err(failure), expired) => {
+                tracing::warn!(
+                    stage = ?failure.stage,
+                    detail = %redact(failure.detail, &request, &service.inner.credentials),
+                    "bootstrap executor failed"
+                );
+                Status::Failed {
+                    stage: if expired && failure.stage != Stage::Cleanup {
+                        Stage::Deadline
+                    } else {
+                        failure.stage
+                    },
+                    detail: "bootstrap failed; consult the server log".into(),
+                    cleanup_in_progress: false,
+                }
+            }
         };
         {
             let mut operation =
@@ -401,11 +408,15 @@ fn redact(mut detail: String, request: &Bootstrap, credentials: &Credentials) ->
             detail = detail.replace(value, "[redacted]");
         }
     }
-    let mut end = detail.len().min(4096);
-    while !detail.is_char_boundary(end) {
-        end -= 1;
+    if let Ok(repository) = url::Url::parse(&request.repository) {
+        for value in std::iter::once(repository.username()).chain(repository.password()) {
+            if !value.is_empty() {
+                detail = detail.replace(value, "[redacted]");
+                let decoded = percent_encoding::percent_decode_str(value).decode_utf8_lossy();
+                detail = detail.replace(decoded.as_ref(), "[redacted]");
+            }
+        }
     }
-    detail.truncate(end);
     detail
 }
 

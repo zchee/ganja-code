@@ -655,7 +655,9 @@ impl Client {
 
     /// Attaches fixed headers to every request this client sends.
     ///
-    /// Explicit protocol headers and credentials take precedence.
+    /// Explicit protocol headers and credentials take precedence: content type
+    /// and replay cursor are reserved, as is the event stream's accept type.
+    /// Fixed authorization is used only when no credentials are configured.
     #[must_use]
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         self.headers = headers;
@@ -938,8 +940,16 @@ impl Client {
         method: reqwest::Method,
         path: &str,
     ) -> reqwest::RequestBuilder {
-        let builder =
-            http.request(method, format!("{}{path}", self.base)).headers(self.headers.clone());
+        let mut headers = self.headers.clone();
+        headers.remove(reqwest::header::CONTENT_TYPE);
+        headers.remove("last-event-id");
+        if path == EVENT_PATH {
+            headers.remove(reqwest::header::ACCEPT);
+        }
+        if self.credentials.is_some() {
+            headers.remove(reqwest::header::AUTHORIZATION);
+        }
+        let builder = http.request(method, format!("{}{path}", self.base)).headers(headers);
 
         match &self.credentials {
             Some(credentials) => {

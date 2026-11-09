@@ -16,7 +16,7 @@ fn bootstrap_and_author_bodies_refuse_unknown_fields() {
 }
 
 #[test]
-fn failure_text_is_redacted_before_it_is_bounded_at_a_utf8_boundary() {
+fn failure_logs_preserve_diagnostics_but_redact_request_credentials() {
     let request = Bootstrap {
         repository: "https://example.test/repo".into(),
         reference: "main".into(),
@@ -32,7 +32,7 @@ fn failure_text_is_redacted_before_it_is_bounded_at_a_utf8_boundary() {
     );
     assert!(!text.contains("canary"));
     assert!(!text.contains(&request.repository));
-    assert!(text.len() <= 4096);
+    assert_eq!(text, format!("[redacted] [redacted] {}", "界".repeat(5000)));
 }
 
 #[test]
