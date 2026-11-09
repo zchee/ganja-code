@@ -88,9 +88,8 @@ dist build                                  # local archive under target/distrib
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Endpoint overrides; https or loopback only. |
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER` | `websearch` credentials and which service (`exa` or `parallel`). Without a key the search is refused, not sent. |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool and, when a trusted tier lists `[evaluate] screen`, the judge that marks screened tool results (experimental, D567). Without the key the tool is not registered and no judge is built. A base URL that is not https or loopback, carries userinfo, a query or a fragment, has a host an HTTP request cannot carry or is over 2,048 bytes once parsed, and a key the `decision-model-sdk` client will not send (D569) are refused the same way; `ganja evaluate` exits 3 on each. |
-| `GANJA_SUBSTRATE_CONFIG_HOME` | `substrate_live` only: the config home whose `cloud/substrate.toml` the owner-run live suite loads. The settings file is validated against `schema/ganja-cloud-substrate.schema.json`. |
 | `EDITOR` | What `/editor` opens; default `vi`. |
-| `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS` | Test opt-ins and paths; see Gates. |
+| `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS`, `GANJA_SUBSTRATE_CONFIG_HOME` | Test opt-ins and paths; see Gates and the cloud crate's live-test notes. |
 
 ## Conventions
 
