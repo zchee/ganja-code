@@ -122,7 +122,7 @@ dist build                                  # local archive under target/distrib
 | `CONTEXT.md` | Glossary: the canonical term for each concept and the words to avoid. |
 | `PRACTICE.md` | Rust exercises for the owner, mapped to the port's phases. |
 | `README.md` | Public positioning; the cloud design is described there and not implemented. |
-| `docs/` | `references/` (feature inventories of Claude Code, opencode and Codex; not roadmaps), `recipes/` (worked examples), `decisions/` (frozen decision ledgers), `prompts/`. |
+| `docs/` | `references/` (feature inventories of Claude Code, opencode and Codex; not roadmaps), `recipes/` (worked examples), `decisions/` (frozen decision ledgers), `research/` (task inventories and findings in English and Japanese; not plans), `prompts/`. |
 
 <!-- br-agent-instructions-v1 -->
 
