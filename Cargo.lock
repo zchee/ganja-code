@@ -1649,6 +1649,7 @@ name = "ganja-teammate-cloud"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "ganja-client",
  "ganja-core",
  "ganja-protocol",
@@ -1658,6 +1659,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -1692,14 +1694,18 @@ name = "ganja-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "buffa",
  "futures",
  "ganja-core",
  "ganja-protocol",
+ "ganja-serve",
  "ganja-teammate-cloud",
  "ganja-teammate-local",
  "ganja-tool",
+ "reqwest",
  "schemars",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",

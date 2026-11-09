@@ -12,6 +12,8 @@ publish = false
 [dependencies]
 # Provisioners are selected at runtime and held as trait objects.
 async-trait.workspace = true
+# The reconnect admission hook returns the client's boxed future type.
+futures.workspace = true
 ganja-client.workspace = true
 ganja-core.workspace = true
 ganja-protocol.workspace = true
@@ -32,3 +34,4 @@ url.workspace = true
 [dev-dependencies]
 # The fake implements this contract; the reverse edge is confined to tests.
 ganja-testkit.workspace = true
+tempfile.workspace = true

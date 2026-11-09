@@ -1,6 +1,8 @@
 //! A delivered trace proves only the retained interval it names. Inspection
 //! events before or after that interval cannot repair a missing frame within it.
 
+use std::io::{BufRead, BufWriter, Write as _};
+
 use serde::{Deserialize, Serialize};
 
 /// Value-free identity of a journal frame.
@@ -47,6 +49,106 @@ pub enum TraceError {
     /// A scripted expectation is independent evidence of which events should exist.
     #[error("the journal interval differs from the expected event manifest")]
     Manifest,
+    /// The trace could not be read completely.
+    #[error("the trace could not be read")]
+    Read,
+    /// A line is not a value-free trace frame.
+    #[error("the trace contains an invalid frame")]
+    Decode,
+    /// Declared loss cannot become an exactly-once claim.
+    #[error("the trace contains a declared gap")]
+    Gap,
+}
+
+/// Loads JSON-line trace frames through the last recorded terminal event.
+///
+/// # Errors
+/// Rejects unreadable or malformed data, a declared gap, and missing boundaries.
+pub fn read(reader: impl BufRead) -> Result<DeliveredTrace, TraceError> {
+    let mut initial = None;
+    let mut frames = Vec::new();
+    for line in reader.lines() {
+        let frame: TraceFrame = serde_json::from_str(&line.map_err(|_| TraceError::Read)?)
+            .map_err(|_| TraceError::Decode)?;
+        if frame.event_type == "gap" {
+            return Err(TraceError::Gap);
+        }
+        if frame.event_type == "connected" {
+            initial.get_or_insert(frame);
+        } else {
+            frames.push(frame);
+        }
+    }
+    let initial = initial.ok_or(TraceError::Interval)?;
+    let terminal_position = frames
+        .iter()
+        .rposition(|frame| frame.event_type == "message_finished")
+        .ok_or(TraceError::Interval)?;
+    frames.truncate(terminal_position + 1);
+    let terminal = frames.last().cloned().ok_or(TraceError::Interval)?;
+    Ok(DeliveredTrace { initial, terminal, frames })
+}
+
+pub(crate) struct TraceLog(BufWriter<std::fs::File>);
+
+impl TraceLog {
+    pub(crate) fn from_env(name: &str) -> std::io::Result<Option<Self>> {
+        let Some(directory) = std::env::var_os("GANJA_CLOUD_TRACE") else { return Ok(None) };
+        std::fs::create_dir_all(&directory)?;
+        let path = std::path::PathBuf::from(directory).join(format!("{name}.jsonl"));
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        Ok(Some(Self(BufWriter::new(file))))
+    }
+
+    pub(crate) fn frame(
+        &mut self,
+        id: &ganja_client::EventId,
+        event_type: &str,
+        message_id: Option<String>,
+    ) -> std::io::Result<()> {
+        let frame = TraceFrame {
+            epoch: id.epoch().to_owned(),
+            seq: id.seq(),
+            event_type: event_type.to_owned(),
+            message_id,
+        };
+        serde_json::to_writer(&mut self.0, &frame)?;
+        self.0.write_all(b"\n")?;
+        self.0.flush()
+    }
+
+    pub(crate) fn event(
+        &mut self,
+        id: &ganja_client::EventId,
+        event: &ganja_protocol::Event,
+    ) -> std::io::Result<()> {
+        use ganja_protocol::Event;
+        let (kind, message) = match event {
+            Event::MessageStarted { message, .. } => ("message_started", Some(message.id.as_str())),
+            Event::PartStarted { message_id, .. } => ("part_started", Some(message_id.as_str())),
+            Event::PartDelta { message_id, .. } => ("part_delta", Some(message_id.as_str())),
+            Event::PartUpdated { message_id, .. } => ("part_updated", Some(message_id.as_str())),
+            Event::MessageFinished { message_id, .. } => {
+                ("message_finished", Some(message_id.as_str()))
+            }
+            Event::PermissionRequested { .. } => ("permission_requested", None),
+            Event::PermissionReplied { .. } => ("permission_replied", None),
+            Event::SteerConsumed { .. } => ("steer_consumed", None),
+            Event::QuestionAsked { .. } => ("question_asked", None),
+            Event::QuestionReplied { .. } => ("question_replied", None),
+            Event::QuestionRejected { .. } => ("question_rejected", None),
+            Event::RevertChanged { .. } => ("revert_changed", None),
+            Event::AgentChanged { .. } => ("agent_changed", None),
+            Event::EffortChanged { .. } => ("effort_changed", None),
+            Event::FastChanged { .. } => ("fast_changed", None),
+            Event::PermissionModeChanged { .. } => ("permission_mode_changed", None),
+            Event::PeerHeld { .. } => ("peer_held", None),
+            Event::PeerHoldSettled { .. } => ("peer_hold_settled", None),
+            Event::PeerReceipt { .. } => ("peer_receipt", None),
+            Event::CompactionProgress { .. } => ("compaction_progress", None),
+        };
+        self.frame(id, kind, message.map(str::to_owned))
+    }
 }
 
 /// Compares delivered frames, the retained journal, and an independent script manifest.
@@ -90,3 +192,7 @@ pub fn check(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "trace_tests.rs"]
+mod tests;

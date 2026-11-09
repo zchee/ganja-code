@@ -34,6 +34,11 @@ buffa.workspace = true
 ganja-teammate-local.workspace = true
 # Hosted lifecycle fixtures implement the same contract as real provisioners.
 ganja-teammate-cloud.workspace = true
+# The fake serves the real init and engine protocols behind a loopback router.
+ganja-serve.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
 # Same rule for the `Tool` trait and the task seam the doubles implement: the
 # tool crate is where they live, so it is the crate this one names.
 ganja-tool.workspace = true
