@@ -1609,6 +1609,113 @@ pub enum SpawnError {
     Lost(#[from] tokio::task::JoinError),
 }
 
+/// Owns an allocation until it is registered or its complete rollback has finished.
+struct PendingSpawn {
+    registry: Arc<TeammateRegistry>,
+    spec: SpawnSpec,
+    spawned: Arc<dyn Spawned>,
+    seeded: Option<mailbox::Identity>,
+    recording: Option<JoinHandle<Result<(), SpawnError>>>,
+}
+
+impl PendingSpawn {
+    async fn finish(
+        mut self,
+        backend: Arc<dyn TeammateBackend>,
+        cancelled: CancellationToken,
+    ) -> Result<SpawnReport, SpawnError> {
+        let kind = self.spec.backend;
+        let interrupted = || Unsupported {
+            backend: kind,
+            reason: "the teammate launch was cancelled".to_owned(),
+        };
+        let registry = Arc::clone(&self.registry);
+        let spec = self.spec.clone();
+        let surface = self.spawned.surface();
+        // Keep the write owned even if the caller disappears while blocking I/O
+        // is running, so rollback cannot race a late record insertion.
+        self.recording = Some(tokio::spawn(async move { registry.record(&spec, surface).await }));
+        let recorded = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => None,
+            result = self.recording.as_mut().expect("pending record task") => Some(result),
+        };
+        let Some(recorded) = recorded else {
+            self.unwind(true).await;
+            return Err(interrupted().into());
+        };
+        self.recording.take();
+        let recorded = recorded.map_err(SpawnError::from).and_then(|result| result);
+        if let Err(error) = recorded {
+            self.unwind(false).await;
+            return Err(error);
+        }
+        let launched = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(interrupted()),
+            result = self.spawned.launch() => result,
+        };
+        if let Err(error) = launched {
+            self.unwind(true).await;
+            return Err(error.into());
+        }
+        if cancelled.is_cancelled() {
+            self.unwind(true).await;
+            return Err(interrupted().into());
+        }
+        let report = SpawnReport {
+            name: self.spec.name.clone(),
+            agent_id: self.spec.agent_id(),
+            backend: kind,
+            delivery: backend.delivery(),
+            note: SPAWNED,
+        };
+        self.registry
+            .tasks
+            .lock()
+            .expect("the task list is never poisoned")
+            .extend(Arc::clone(&self.spawned).start());
+        self.registry.members().insert(
+            self.spec.name.as_str().to_owned(),
+            Arc::new(Member {
+                name: self.spec.name.clone(),
+                agent_id: self.spec.agent_id(),
+                backend: kind,
+                color: self.spec.color.clone(),
+                spawned: self.spawned,
+                surface: backend,
+            }),
+        );
+        Ok(report)
+    }
+
+    async fn unwind(mut self, recorded: bool) {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            self.spawned.kill().await;
+            if let Some(recording) = &mut self.recording {
+                let _ = recording.await;
+            }
+            if recorded && let Err(error) = self.registry.unrecord(self.spec.name.as_str()).await {
+                tracing::warn!(
+                    teammate = self.spec.name.as_str(),
+                    %error,
+                    "a refused launch left its record in the team file"
+                );
+            }
+            unseed_inbox(self.spec.inbox(), self.seeded.take(), self.spec.name.as_str()).await;
+            self.registry.release(&self.spec.name);
+        })
+        .await;
+        if outcome.is_err() {
+            if let Some(recording) = self.recording.take() {
+                recording.abort();
+                let _ = recording.await;
+            }
+            tracing::warn!(teammate = self.spec.name.as_str(), "teammate launch cleanup timed out");
+        }
+    }
+}
+
 /// Every teammate this session started, and the lifetime none of its turns
 /// owns.
 ///
@@ -2389,61 +2496,21 @@ impl TeammateRegistry {
                 return Err(SpawnError::Unsupported(unsupported));
             }
         };
-        if let Err(error) = self.record(&spec, spawned.surface()).await {
-            spawned.kill().await;
-            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
-            self.release(&spec.name);
-            return Err(error);
-        }
-        if let Err(unsupported) = spawned.launch().await {
-            spawned.kill().await;
-            match self.unrecord(spec.name.as_str()).await {
-                Ok(_) => {}
-                // Not fatal to the unwind and not retried: what is left is a
-                // stale row naming a surface that has already been ended,
-                // which the next lead's startup sweep is what drops.
-                Err(error) => tracing::warn!(
-                    teammate = spec.name.as_str(),
-                    %error,
-                    "a refused launch left its record in the team file"
-                ),
-            }
-            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
-            self.release(&spec.name);
-            return Err(SpawnError::Unsupported(unsupported));
-        }
-
-        let report = SpawnReport {
-            name: spec.name.clone(),
-            agent_id: spec.agent_id(),
+        let cancelled = self.cancel.child_token();
+        let guard = cancelled.clone().drop_guard();
+        let pending =
+            PendingSpawn { registry: Arc::clone(self), spec, spawned, seeded, recording: None };
+        let (finished, result) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = finished.send(pending.finish(backend, cancelled).await);
+        });
+        self.tasks.lock().expect("the task list is never poisoned").push(task);
+        let outcome = result.await.map_err(|_| Unsupported {
             backend: request.backend,
-            delivery: backend.delivery(),
-            note: SPAWNED,
-        };
-        // Every task the member started is registered here, which is what makes
-        // `shutdown()` correct: it cancels, `join_all`s every kill, **and then
-        // drains this list**. A task that was never pushed would leave a child
-        // being reaped after the process it belonged to had returned.
-        self.tasks
-            .lock()
-            .expect("the task list is never poisoned")
-            .extend(Arc::clone(&spawned).start());
-        // Registered, and never given back: a spent name stays reserved for
-        // the life of the registry. Why that is the fix rather than an
-        // oversight is on [`TeammateRegistry::reserved`].
-        self.members().insert(
-            spec.name.as_str().to_owned(),
-            Arc::new(Member {
-                name: spec.name.clone(),
-                agent_id: spec.agent_id(),
-                backend: spec.backend,
-                color: spec.color.clone(),
-                spawned,
-                surface: backend,
-            }),
-        );
-
-        Ok(report)
+            reason: "the teammate launch task stopped".to_owned(),
+        });
+        guard.disarm();
+        outcome?
     }
 
     /// Resolves a free name and holds it until the spawn is registered.

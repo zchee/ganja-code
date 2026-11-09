@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
@@ -26,19 +27,21 @@ use crate::state::{LaunchFailure, Phase};
 use crate::trace::TraceLog;
 use crate::transport::{ClientSource, EventSource};
 
-static CONTROLS: LazyLock<Mutex<BTreeMap<String, Weak<CloudMember>>>> =
+static CONTROLS: LazyLock<Mutex<BTreeMap<PathBuf, Weak<CloudMember>>>> =
     LazyLock::new(Mutex::default);
 
 pub(crate) fn register(member: &Arc<CloudMember>) {
     CONTROLS
         .lock()
         .expect("cloud control map lock")
-        .insert(member.spec.name.as_str().to_owned(), Arc::downgrade(member));
+        .insert(member.spec.inbox(), Arc::downgrade(member));
 }
 
-/// Looks up a live hosted member without retaining it in a global registry.
-pub fn control(name: &str) -> Option<CloudControl> {
-    CONTROLS.lock().expect("cloud control map lock").get(name)?.upgrade().map(CloudControl)
+/// Looks up a hosted member in its owning registry without retaining it globally.
+pub fn control(registry: &teammate::TeammateRegistry, name: &str) -> Option<CloudControl> {
+    let name = ganja_team::MemberName::parse(name).ok()?;
+    let inbox = registry.root().inbox_path(registry.team(), &name);
+    CONTROLS.lock().expect("cloud control map lock").get(&inbox)?.upgrade().map(CloudControl)
 }
 
 /// Owner controls bypass neither the request gate nor the permanent uncertain latch.
@@ -106,6 +109,7 @@ pub struct CloudMember {
     cleaned: AtomicBool,
     exited: AtomicBool,
     terminal: Mutex<BTreeMap<MessageId, Option<FinishReason>>>,
+    observed_text: Mutex<BTreeMap<MessageId, usize>>,
     launch_timeout: Mutex<LaunchFailure>,
     uncertainty_reported: AtomicBool,
     trace: Mutex<Option<TraceLog>>,
@@ -134,15 +138,38 @@ impl CloudMember {
     ) -> Arc<Self> {
         let gate = WorkerGate::new();
         let endpoint = &worker.endpoint;
-        let client = Client::new(
-            &endpoint.base_url,
-            Some(ganja_client::Credentials::new(
-                &endpoint.username,
-                endpoint.password.expose_secret(),
-            )),
-        )
-        .map(|client| client.with_headers(endpoint.headers.clone()))
-        .ok();
+        let trusted = url::Url::parse(&endpoint.base_url).is_ok_and(|url| {
+            let loopback = match url.host() {
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+            (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                // Url normalizes an empty userinfo away, so inspect the authority too.
+                && endpoint.base_url.split_once("://").is_some_and(|(_, rest)| {
+                    rest.split('/').next().is_some_and(|authority| !authority.contains('@'))
+                })
+        }) && !endpoint.headers.contains_key(http::header::AUTHORIZATION)
+            && !endpoint.headers.contains_key(http::header::PROXY_AUTHORIZATION);
+        let client = if trusted {
+            Client::new(
+                &endpoint.base_url,
+                Some(ganja_client::Credentials::new(
+                    &endpoint.username,
+                    endpoint.password.expose_secret(),
+                )),
+            )
+            .map(|client| client.with_headers(endpoint.headers.clone()))
+            .ok()
+        } else {
+            None
+        };
         let events = client.as_ref().map(|client| {
             Arc::new(ClientSource::new(client.clone(), Arc::clone(&gate))) as Arc<dyn EventSource>
         });
@@ -167,6 +194,7 @@ impl CloudMember {
             cleaned: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             terminal: Mutex::new(BTreeMap::new()),
+            observed_text: Mutex::new(BTreeMap::new()),
             launch_timeout: Mutex::new(LaunchFailure::ResumeTimedOut),
             uncertainty_reported: AtomicBool::new(false),
             trace: Mutex::new(trace),
@@ -310,6 +338,7 @@ impl CloudMember {
             events.invalidate().await;
         }
         self.terminal.lock().expect("terminal decision lock").clear();
+        self.observed_text.lock().expect("observed text lock").clear();
         self.needs_resync.store(true, Ordering::SeqCst);
         self.set_phase(phase);
         self.remember(reason.to_owned());
@@ -425,7 +454,7 @@ impl CloudMember {
                     connected.head.clone()
                 };
                 self.gate.open_rest();
-                if let Some(pending) = self.recover_gap(&head, None).await? {
+                if let Some(pending) = self.recover_gap(&head, None, &BTreeMap::new()).await? {
                     self.wait_for_terminal(None, Some(pending), true).await?;
                 }
                 self.needs_resync.store(false, Ordering::SeqCst);
@@ -583,7 +612,13 @@ impl CloudMember {
         }
     }
 
-    async fn finish(&self, message: &Message, reason: Option<FinishReason>, gap: bool) {
+    async fn finish(
+        &self,
+        message: &Message,
+        reason: Option<FinishReason>,
+        gap: bool,
+        observed_bytes: usize,
+    ) {
         let first = {
             let mut terminal = self.terminal.lock().expect("terminal decision lock");
             match terminal.entry(message.id.clone()) {
@@ -605,6 +640,13 @@ impl CloudMember {
             }
             return;
         }
+        let observed_bytes = observed_bytes.max(
+            self.observed_text
+                .lock()
+                .expect("observed text lock")
+                .remove(&message.id)
+                .unwrap_or_default(),
+        );
         let mut text = message
             .parts
             .iter()
@@ -615,7 +657,15 @@ impl CloudMember {
             .collect::<Vec<_>>()
             .join("\n");
         if gap {
-            text.push_str("\n\nfinal text may be incomplete; turn outcome unknown");
+            let recovered_bytes: usize =
+                message.parts.iter().filter_map(|part| part.as_text()).map(str::len).sum();
+            if recovered_bytes < observed_bytes {
+                text.push_str("\n\ntext lost");
+            }
+            text.push_str("\n\nfinal text may be incomplete");
+            if reason.is_none() {
+                text.push_str("; turn outcome unknown");
+            }
         }
         self.mail(text).await;
         let idle_reason = match reason {
@@ -644,6 +694,7 @@ impl CloudMember {
         &self,
         head: &ganja_client::EventId,
         after: Option<&MessageId>,
+        observed: &BTreeMap<MessageId, usize>,
     ) -> Result<Option<MessageId>, &'static str> {
         let cold = self
             .epoch
@@ -672,7 +723,13 @@ impl CloudMember {
         }) {
             if message.time.completed.is_some() || cold || self.needs_resync.load(Ordering::SeqCst)
             {
-                self.finish(message, None, true).await;
+                self.finish(
+                    message,
+                    None,
+                    true,
+                    observed.get(&message.id).copied().unwrap_or_default(),
+                )
+                .await;
             } else if !self
                 .terminal
                 .lock()
@@ -725,6 +782,7 @@ impl CloudMember {
         let client = self.client()?;
         let session = self.session()?;
         let mut streamed = BTreeMap::<MessageId, Message>::new();
+        let mut observed = self.observed_text.lock().expect("observed text lock").clone();
         let mut deadline = Instant::now() + self.runtime.deadlines.terminal;
         loop {
             let item = timeout_at(deadline, self.events()?.next())
@@ -741,8 +799,21 @@ impl CloudMember {
             match item {
                 Resumed::Gap { head } => {
                     gap = true;
+                    for (id, message) in &streamed {
+                        let bytes = message
+                            .parts
+                            .iter()
+                            .filter_map(|part| part.as_text())
+                            .map(str::len)
+                            .sum();
+                        observed
+                            .entry(id.clone())
+                            .and_modify(|previous| *previous = (*previous).max(bytes))
+                            .or_insert(bytes);
+                    }
+                    *self.observed_text.lock().expect("observed text lock") = observed.clone();
                     streamed.clear();
-                    current = self.recover_gap(&head, last.as_ref()).await?;
+                    current = self.recover_gap(&head, last.as_ref(), &observed).await?;
                     if current.is_none()
                         && self
                             .terminal
@@ -819,7 +890,13 @@ impl CloudMember {
                                 .find(|message| message.id == message_id),
                         }
                         .ok_or("terminal message was not available in storage or stream")?;
-                        self.finish(&message, Some(reason), gap).await;
+                        self.finish(
+                            &message,
+                            Some(reason),
+                            gap,
+                            observed.get(&message_id).copied().unwrap_or_default(),
+                        )
+                        .await;
                         return Ok(());
                     }
                     _ => {}

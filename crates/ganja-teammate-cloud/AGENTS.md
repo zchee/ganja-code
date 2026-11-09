@@ -68,6 +68,14 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   but never looks up its named template or reads a worker password; it proves
   control reads and trust, not a spawned-actor proxy connection.
 
+## Environment
+
+`CloudBackend::new` reads `GANJA_CLOUD_PASSWORD` once as the worker template's
+Basic-auth password. If it is unset, empty, or not Unicode, cloud spawn is refused;
+it does not fall back to `GANJA_SERVER_PASSWORD`. The backend installs this value
+as the client's password for the worker endpoint; provisioner routing headers
+cannot override that authentication.
+
 ## Code and tests
 
 - `src/provisioner.rs`: lifecycle types and trait.

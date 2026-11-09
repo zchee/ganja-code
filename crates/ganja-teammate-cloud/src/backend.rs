@@ -59,6 +59,38 @@ impl CloudBackend {
     }
 }
 
+fn valid_repository(repository: &str, host: &str) -> bool {
+    // URL parsing removes dot-segments, so validate their original spelling first.
+    let raw_path = repository
+        .split_once("://")
+        .and_then(|(_, authority)| authority.split_once('/'))
+        .map_or("", |(_, path)| path);
+    if repository.contains('\\')
+        || repository.chars().any(char::is_control)
+        || raw_path.split('/').any(|segment| {
+            matches!(segment, "." | "..")
+                || ["%2e", ".%2e", "%2e.", "%2e%2e"]
+                    .iter()
+                    .any(|dots| segment.eq_ignore_ascii_case(dots))
+        })
+    {
+        return false;
+    }
+    url::Url::parse(repository).is_ok_and(|url| {
+        url.scheme() == "https"
+            && !matches!(url.host(), Some(url::Host::Ipv6(_)))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.host_str().is_some_and(|value| value.eq_ignore_ascii_case(host))
+    })
+}
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod tests;
+
 #[async_trait]
 impl TeammateBackend for CloudBackend {
     fn backend(&self) -> MemberBackend {
@@ -74,18 +106,7 @@ impl TeammateBackend for CloudBackend {
             .filter(|password| !password.expose_secret().is_empty())
             .ok_or_else(|| refused(format!("cloud teammates require {PASSWORD_ENV}")))?;
         let config = &self.runtime.config;
-        let repository = url::Url::parse(&config.bootstrap.repository).map_err(|_| {
-            refused(
-                "cloud.bootstrap.repository must be an HTTPS URL without credentials".to_owned(),
-            )
-        })?;
-        if repository.scheme() != "https"
-            || !repository.username().is_empty()
-            || repository.password().is_some()
-            || repository.query().is_some()
-            || repository.fragment().is_some()
-            || repository.host_str().is_none_or(|host| !host.eq_ignore_ascii_case(&config.git_host))
-        {
+        if !valid_repository(&config.bootstrap.repository, &config.git_host) {
             return Err(refused(
                 "cloud.bootstrap.repository must use HTTPS on cloud.git_host without credentials"
                     .to_owned(),

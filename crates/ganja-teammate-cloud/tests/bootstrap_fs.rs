@@ -160,7 +160,19 @@ async fn deadline_failure_keeps_cleanup_visible_and_never_hands_off_late_success
         .await
         .expect("bounded result");
     assert!(!matches!(outcome, BootstrapOutcome::Cloned { .. } | BootstrapOutcome::AlreadyServing));
-    let status = fixture.client.bootstrap_status().await.expect("cleanup status");
+    // The client's budget starts before server admission; its expiry does not
+    // prove that the server has published its own deadline transition yet.
+    let status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let status = fixture.client.bootstrap_status().await.expect("cleanup status");
+            if status != BootstrapStatus::InProgress {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server publishes its deadline failure");
     assert!(
         matches!(status, BootstrapStatus::Failed { cleanup_in_progress: true, .. }),
         "{status:?}"

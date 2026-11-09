@@ -55,16 +55,21 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
         .prompt(&health.session_id, &Prompt::new("inspect and update note.txt"))
         .await
         .expect("prompt accepted");
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(event) = events.next().await {
-            if let Event::MessageFinished { reason, .. } = event.expect("event") {
-                assert_eq!(reason, FinishReason::Completed);
-                break;
+    let reason = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let event = events
+                .next()
+                .await
+                .expect("event stream ended before MessageFinished")
+                .expect("event");
+            if let Event::MessageFinished { reason, .. } = event {
+                break reason;
             }
         }
     })
     .await
     .expect("tool turn completes");
+    assert_eq!(reason, FinishReason::Completed);
     assert_eq!(
         std::fs::read_to_string(worker.work.join("note.txt")).expect("updated file"),
         "after\n"
@@ -100,6 +105,42 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
         .output()
         .expect("author config");
     assert_eq!(String::from_utf8(author.stdout).expect("author").trim(), "http@example.invalid");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn the_served_worker_does_not_inherit_host_config_overrides() {
+    let server = GitServer::start(false).await;
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[("GANJA_CONFIG", "/missing-synthetic-host-config.toml")],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/environment".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if worker.client.health().await.is_ok() {
+                break;
+            }
+            assert!(worker.is_alive(), "host config override must not reach serve");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("isolated serve starts");
     drop(worker);
     server.close().await;
 }

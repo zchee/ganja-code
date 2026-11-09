@@ -149,6 +149,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_endpoint(Endpoint {
+            base_url: "http://127.0.0.1:1".to_owned(),
+            headers: Default::default(),
+            username: "ganja".to_owned(),
+            password: secrecy::SecretString::from("test-password"),
+        })
+        .await
+    }
+
+    async fn with_endpoint(endpoint: Endpoint) -> Self {
         let home = tempfile::tempdir().expect("fixture home");
         let name = MemberName::parse("gate-worker").expect("name");
         let lead = MemberName::lead();
@@ -162,12 +172,7 @@ impl Fixture {
             },
             deadline_secs: 5,
         };
-        let provisioner = Arc::new(TestProvisioner::from_endpoint(Endpoint {
-            base_url: "http://127.0.0.1:1".to_owned(),
-            headers: Default::default(),
-            username: "ganja".to_owned(),
-            password: secrecy::SecretString::from("test-password"),
-        }));
+        let provisioner = Arc::new(TestProvisioner::from_endpoint(endpoint));
         let worker = provisioner
             .spawn(&WorkerSpec {
                 name: name.clone(),
@@ -240,6 +245,84 @@ impl Fixture {
 
     fn suspends(&self) -> usize {
         self.provisioner.suspended.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn same_named_members_in_different_teams_keep_independent_controls() {
+    let first = Fixture::new().await;
+    let mut second = Fixture::new().await;
+    Arc::get_mut(&mut second.member).expect("unique member").spec.team =
+        TeamName::parse("other-team").expect("team");
+    let registry = |fixture: &Fixture| {
+        teammate::TeammateRegistry::new(
+            fixture.member.spec.root.clone(),
+            fixture.member.spec.team.clone(),
+            "lead",
+            fixture._home.path(),
+        )
+    };
+    let first_registry = registry(&first);
+    let second_registry = registry(&second);
+    register(&first.member);
+    register(&second.member);
+    let first_control = control(&first_registry, "gate-worker").expect("first control");
+    assert!(Arc::ptr_eq(&first_control.0, &first.member));
+    first_control.report_external_revert().await;
+    assert_eq!(first.member.phase(), Phase::Suspended);
+    assert_eq!(second.member.phase(), Phase::Idle);
+    let second_control = control(&second_registry, "gate-worker").expect("second control");
+    assert!(Arc::ptr_eq(&second_control.0, &second.member));
+    second_control.retire().await.expect("second worker retired");
+    assert_eq!(second.member.phase(), Phase::Gone);
+    assert_ne!(first.member.phase(), Phase::Gone);
+    drop(second_control);
+    drop(second);
+    assert!(
+        control(&second_registry, "gate-worker").is_none(),
+        "second registry has no live member"
+    );
+    assert!(Arc::ptr_eq(
+        &control(&first_registry, "gate-worker").expect("first remains").0,
+        &first.member
+    ));
+}
+
+#[tokio::test]
+async fn worker_clients_require_trusted_endpoints_and_separate_auth_headers() {
+    let cases = [
+        ("https://worker.example", None, true),
+        ("http://127.0.0.1:12345", Some("ate-target-actor"), true),
+        ("http://127.12.34.56:80", None, true),
+        ("http://[::1]:12345", None, true),
+        ("http://localhost:12345", None, true),
+        ("http://worker.example", None, false),
+        ("http://192.0.2.1", None, false),
+        ("http://[::2]", None, false),
+        ("https://user@worker.example", None, false),
+        ("https://@worker.example", None, false),
+        ("https://worker.example?route=other", None, false),
+        ("https://worker.example#route", None, false),
+        ("http://127.0.0.1:12345", Some("Authorization"), false),
+        ("http://127.0.0.1:12345", Some("aUtHoRiZaTiOn"), false),
+        ("http://127.0.0.1:12345", Some("Proxy-Authorization"), false),
+    ];
+    for (base_url, header, accepted) in cases {
+        let mut headers = http::HeaderMap::new();
+        if let Some(header) = header {
+            headers.insert(
+                http::HeaderName::from_bytes(header.as_bytes()).expect("header name"),
+                http::HeaderValue::from_static("space/actor"),
+            );
+        }
+        let fixture = Fixture::with_endpoint(Endpoint {
+            base_url: base_url.to_owned(),
+            headers,
+            username: "ganja".to_owned(),
+            password: secrecy::SecretString::from("test-password"),
+        })
+        .await;
+        assert_eq!(fixture.member.client.is_some(), accepted, "{base_url}, {header:?}");
     }
 }
 

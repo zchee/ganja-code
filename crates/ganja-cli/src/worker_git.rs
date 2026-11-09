@@ -11,6 +11,15 @@ use tokio::process::Command;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const CHILD_ENVIRONMENT: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "GANJA_SERVER_PASSWORD",
+    "GANJA_SERVER_USERNAME",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_SSL_CAINFO",
+];
+
 const OUTPUT_CAP: usize = 4096;
 const REAP_BOUND: Duration = Duration::from_secs(5);
 
@@ -41,10 +50,16 @@ pub(crate) enum Stage {
     Cleanup,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("git bootstrap failed during {stage:?}")]
 pub(crate) struct Failure {
     pub stage: Stage,
+}
+
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.stage, formatter)
+    }
 }
 
 /// Creates the clone and installs it into an otherwise empty worker directory.
@@ -55,7 +70,22 @@ pub(crate) async fn prepare(
 ) -> Result<String, Failure> {
     let parsed =
         url::Url::parse(&request.repository).map_err(|_| Failure { stage: Stage::Dispatch })?;
-    if parsed.scheme() != "https"
+    // URL parsing removes dot-segments, so validate their original spelling first.
+    let raw_path = request
+        .repository
+        .split_once("://")
+        .and_then(|(_, authority)| authority.split_once('/'))
+        .map_or("", |(_, path)| path);
+    if request.repository.contains('\\')
+        || request.repository.chars().any(char::is_control)
+        || raw_path.split('/').any(|segment| {
+            matches!(segment, "." | "..")
+                || ["%2e", ".%2e", "%2e.", "%2e%2e"]
+                    .iter()
+                    .any(|dots| segment.eq_ignore_ascii_case(dots))
+        })
+        || matches!(parsed.host(), Some(url::Host::Ipv6(_)))
+        || parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -220,6 +250,12 @@ async fn git(
     }
     let mut command = Command::new("git");
     command
+        .env_clear()
+        .envs(
+            CHILD_ENVIRONMENT
+                .into_iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+        )
         .args(arguments.iter().map(OsString::from))
         .current_dir(directory)
         .env("GIT_TERMINAL_PROMPT", "0")

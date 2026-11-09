@@ -215,7 +215,8 @@ impl Hosted {
     }
 
     async fn wait_idle(&self, idle: usize) {
-        let control = ganja_teammate_cloud::control(&self.name).expect("cloud control");
+        let control =
+            ganja_teammate_cloud::control(&self.registry, &self.name).expect("cloud control");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while self.idle_count() != idle
                 || control.phase() != ganja_teammate_cloud::state::Phase::Idle
@@ -255,7 +256,8 @@ async fn a_crashed_or_gone_worker_stops_once_without_an_idle_claim() {
         hosted.start().await;
         hosted.wait_suspended(1).await;
         hosted.provisioner.fail_next(ganja_testkit::provisioner::ProvisionOperation::Resume, kind);
-        let control = ganja_teammate_cloud::control(&hosted.name).expect("control");
+        let control =
+            ganja_teammate_cloud::control(&hosted.registry, &hosted.name).expect("control");
         hosted.send("next request");
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while control.phase() != phase {
@@ -302,6 +304,48 @@ async fn a_shutdown_request_is_acknowledged_without_resuming_the_worker() {
         1
     );
     assert!(hosted.provisioner.worker(&hosted.name).is_none());
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn abandoning_a_pending_launch_deletes_and_reconciles_the_worker() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+
+    let hosted = Hosted::new().await;
+    let _release = hosted.provisioner.hold_next(ProvisionOperation::Resume);
+    let mut starting = Box::pin(hosted.start());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                () = &mut starting => panic!("launch should be held"),
+                () = tokio::task::yield_now() => {
+                    if hosted.provisioner.calls().iter().any(|(operation, _)| *operation == ProvisionOperation::Resume) {
+                        break;
+                    }
+                }
+            }
+        }
+    }).await.expect("allocated worker reaches resume");
+    let worker = hosted.provisioner.worker(&hosted.name).expect("allocated worker");
+    drop(starting);
+    tokio::time::timeout(std::time::Duration::from_secs(3), hosted.registry.shutdown())
+        .await
+        .expect("pending launch cleanup is joined");
+    assert_eq!(hosted.provisioner.current(&worker), WorkerState::Gone);
+    let calls = hosted.provisioner.calls();
+    assert_eq!(
+        calls.iter().filter(|(operation, _)| *operation == ProvisionOperation::Kill).count(),
+        1
+    );
+    assert!(calls.iter().any(|(operation, _)| *operation == ProvisionOperation::State));
+    assert!(ganja_testkit::teammates_recorded(&hosted.root, &hosted.team).is_empty());
+    let name = MemberName::parse(&hosted.name).expect("name");
+    assert!(
+        ganja_team::mailbox::read(&hosted.root.inbox_path(&hosted.team, &name))
+            .expect("inbox")
+            .valid
+            .is_empty()
+    );
     hosted.close().await;
 }
 
@@ -404,7 +448,7 @@ async fn a_shed_attempt_and_an_owners_suspend_never_clear_the_uncertain_latch() 
     hosted.start().await;
     hosted.wait_suspended(1).await;
     let worker = hosted.provisioner.worker(&hosted.name).expect("worker");
-    let control = ganja_teammate_cloud::control(&hosted.name).expect("control");
+    let control = ganja_teammate_cloud::control(&hosted.registry, &hosted.name).expect("control");
     hosted.server.reply_next("/event", 503);
     assert!(control.resume_for_inspection().await.is_err(), "shed reconnect is not success");
     let first_release = Arc::new(Notify::new());

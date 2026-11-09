@@ -42,6 +42,38 @@ async fn credentials_and_non_https_repositories_are_refused_before_git() {
 }
 
 #[tokio::test]
+async fn repositories_with_ambiguous_original_paths_are_refused_before_git() {
+    let cases = [
+        ("https://example.invalid/repo.git", true),
+        ("https://EXAMPLE.invalid/a/repo.git", true),
+        ("https://127.0.0.1/repo.git", true),
+        ("https://[::1]/repo.git", false),
+        ("https://example.invalid/a/./repo.git", false),
+        ("https://example.invalid/a/../repo.git", false),
+        ("https://example.invalid/a/%2e/repo.git", false),
+        ("https://example.invalid/a/%2E%2e/repo.git", false),
+        ("https://example.invalid/a/.%2E/repo.git", false),
+        ("https://example.invalid/a/%2e./repo.git", false),
+        ("https://example.invalid/a\\repo.git", false),
+        ("https://example.invalid/a/\nrepo.git", false),
+        ("https://example.invalid/a/%2e%2e", false),
+        ("https://example.invalid/.git", true),
+        ("https://example.invalid/a..b/repo.git", true),
+    ];
+    for (repository, accepted) in cases {
+        let root = tempfile::tempdir().expect("worker root");
+        let failure = prepare(root.path().to_owned(), checkout(repository), Instant::now())
+            .await
+            .expect_err("expired deadline or invalid repository");
+        assert_eq!(
+            failure.stage,
+            if accepted { Stage::Deadline } else { Stage::Dispatch },
+            "{repository}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_existing_worker_file_is_not_deleted_or_overwritten() {
     let root = tempfile::tempdir().expect("worker root");
     std::fs::write(root.path().join("keep"), "owned by another process").expect("file");
@@ -76,6 +108,47 @@ async fn a_never_completing_git_child_is_killed_under_the_deadline() {
     )
     .await;
     assert_eq!(result.expect_err("deadline").stage, Stage::Deadline);
+}
+
+#[tokio::test]
+async fn failure_debug_reports_only_the_stage() {
+    let root = tempfile::tempdir().expect("git directory");
+    let secret = "synthetic-secret-detail";
+    let failure =
+        git(root.path(), &[secret], Instant::now() + Duration::from_secs(5), Stage::Clone)
+            .await
+            .expect_err("unknown command fails");
+    let debug = format!("{failure:?}");
+    assert!(!debug.contains(secret));
+    assert_eq!(debug, "Clone");
+}
+
+#[tokio::test]
+async fn git_children_do_not_inherit_unlisted_environment() {
+    const CHILD: &str = "GANJA_WORKER_ENV_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "worker_git::tests::git_children_do_not_inherit_unlisted_environment",
+            ])
+            .env(CHILD, "1")
+            .env("GANJA_WORKER_ENV_CANARY", "synthetic-inherited-secret")
+            .output()
+            .expect("run isolated environment test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let root = tempfile::tempdir().expect("git directory");
+    let output = git(
+        root.path(),
+        &["-c", "alias.inspect=!printf '%s' \"${GANJA_WORKER_ENV_CANARY-unset}\"", "inspect"],
+        Instant::now() + Duration::from_secs(5),
+        Stage::Config,
+    )
+    .await
+    .expect("git alias");
+    assert_eq!(output, b"unset");
 }
 
 #[tokio::test]

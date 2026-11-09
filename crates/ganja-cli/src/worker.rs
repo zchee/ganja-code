@@ -67,6 +67,12 @@ pub(crate) async fn run(action: Action) -> Result<()> {
 
     use std::os::unix::process::CommandExt as _;
     let error = std::process::Command::new(std::env::current_exe().context("cannot locate ganja")?)
+        .env_clear()
+        .envs(
+            worker_git::CHILD_ENVIRONMENT
+                .into_iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+        )
         .args(["serve", "--hostname", "0.0.0.0", "--port", &port.to_string()])
         .current_dir(directory)
         .exec();
