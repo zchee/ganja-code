@@ -20,10 +20,13 @@ axum.workspace = true
 # `user:password`; decoding them is the one thing this crate borrows the
 # encoder for.
 base64.workspace = true
-# `subscribe_droppable` hands back a `BoxStream`, and the SSE pump and the
-# permission tracker both drain one; the trait that `.next()` lives on is
-# here.
+# The journal drains the engine's BoxStream; bootstrap executors return boxed
+# futures so the init router can own their asynchronous work.
 futures.workspace = true
+# Repository userinfo may appear decoded in executor diagnostics; use the URL
+# parser and percent decoder rather than an ad-hoc credential splitter.
+percent-encoding.workspace = true
+url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The configured password is held wiped-on-drop and out of `Debug`, the same

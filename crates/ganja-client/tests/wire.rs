@@ -14,9 +14,13 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use ganja_client::sse::EvictedNotice;
-use ganja_client::{Bounds, Client, ClientError, Credentials, PermissionReply, Prompt, SessionId};
+use ganja_client::{
+    Bootstrap, BootstrapAuthor, BootstrapOutcome, BootstrapStatus, Bounds, Client, ClientError,
+    Credentials, EventId, HeaderMap, HeaderValue, PermissionReply, Prompt, Resumable, Resumed,
+    SessionId,
+};
 use ganja_protocol::{Event, Message};
-use support::{DEADLINE, HEALTHY, Reply, Stub, frame};
+use support::{DEADLINE, EPOCH, HEALTHY, Reply, Stub, frame, frame_at};
 
 /// The session every fixture talks about.
 fn session() -> SessionId {
@@ -189,6 +193,29 @@ async fn a_reply_names_the_dialog_and_the_decision() {
 // ---------------------------------------------------------------------------
 // The credential posture, which is serve's.
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fixed_headers_do_not_override_json_or_stream_protocol_headers() {
+    let stub = Stub::answering(|request| {
+        if request.path == "/event" {
+            assert_eq!(request.headers["accept"], "text/event-stream");
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Stream { chunks: vec![connected(0, 0, "fresh")] }
+        } else {
+            assert_eq!(request.headers["content-type"], "application/json");
+            Reply::Accepted
+        }
+    })
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("accept", HeaderValue::from_static("text/plain"));
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    headers.insert("last-event-id", HeaderValue::from_static("stale"));
+    let client = stub.client().with_headers(headers);
+    client.prompt(&session(), &Prompt::new("hello")).await.expect("JSON prompt");
+    client.events().await.expect("fresh stream");
+    assert_eq!(stub.received().len(), 2);
+}
 
 #[tokio::test]
 async fn a_configured_credential_travels_as_basic_auth_on_every_route() {
@@ -643,4 +670,666 @@ async fn a_stream_left_unread_while_a_slow_prompt_is_accepted_still_delivers_wha
         .expect("what follows the heartbeats arrives")
         .expect("the stream is still open");
     assert_eq!(read.expect("a stream nobody read during the prompt has not stalled"), event);
+}
+
+#[tokio::test]
+async fn messages_and_shell_follow_the_existing_wire_shapes() {
+    let message = Message::user("stored prompt");
+    let body = serde_json::to_string(&vec![message.clone()]).expect("message json");
+    let stub = Stub::answering(move |request| match request.method.as_str() {
+        "GET" => Reply::ok(body.clone()),
+        "POST" => Reply::Accepted,
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    assert_eq!(stub.client().messages(&session()).await.expect("messages"), vec![message]);
+    stub.client().shell(&session(), "printf hello").await.expect("shell accepted");
+    let requests = stub.received();
+    assert_eq!(requests[0].path, "/session/ses_attached/message");
+    assert_eq!(requests[1].path, "/session/ses_attached/shell");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("body"),
+        serde_json::json!({"command":"printf hello"})
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_stored_message_field_is_version_skew() {
+    let mut message = serde_json::to_value(Message::user("stored")).expect("message");
+    message["unknown"] = true.into();
+    let stub = Stub::always(Reply::ok(serde_json::json!([message]).to_string())).await;
+    assert!(matches!(stub.client().messages(&session()).await, Err(ClientError::Skew { .. })));
+}
+
+#[tokio::test]
+async fn an_idle_status_after_an_ambiguous_post_never_authorizes_resending() {
+    let stub = Stub::answering(|request| {
+        if request.method == "POST" { Reply::Silent } else { Reply::ok(r#"{"status":"idle"}"#) }
+    })
+    .await;
+    let client = Client::with_bounds(
+        stub.address(),
+        None,
+        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
+    )
+    .expect("client");
+    assert_eq!(
+        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("classified ambiguity"),
+        BootstrapOutcome::AmbiguousStartup
+    );
+    assert_eq!(stub.received().iter().filter(|request| request.method == "POST").count(), 1);
+}
+
+#[tokio::test]
+async fn holding_an_established_stream_keeps_its_cursor_until_explicit_invalidation() {
+    let (_, json) = started();
+    let stub = Stub::always(Reply::Held {
+        chunks: vec![
+            (Duration::ZERO, connected(0, 0, "fresh")),
+            (Duration::ZERO, frame_at("message", &json, 1)),
+        ],
+    })
+    .await;
+    let resumable = Resumable::new(stub.client());
+    resumable.next().await.expect("item").expect("event");
+    resumable.hold().await;
+    assert_eq!(resumable.cursor().await, Some(id(1)));
+    assert!(resumable.next().await.is_none());
+    resumable.invalidate().await;
+    assert_eq!(resumable.cursor().await, None);
+    resumable.release();
+    let fresh = resumable.connect().await.expect("fresh connection").expect("released");
+    assert_eq!(fresh.replay, ganja_client::sse::Replay::Fresh);
+    assert!(!stub.received().last().expect("request").headers.contains_key("last-event-id"));
+}
+
+#[tokio::test]
+async fn a_cut_after_fresh_registration_replays_from_that_head() {
+    let (_, json) = started();
+    let stub = Stub::answering(move |request| {
+        if request.headers.contains_key("last-event-id") {
+            assert_eq!(request.headers["last-event-id"], format!("{EPOCH}-5"));
+            Reply::Stream { chunks: vec![connected(5, 6, "from"), frame_at("message", &json, 6)] }
+        } else {
+            Reply::Stream { chunks: vec![connected(5, 5, "fresh")] }
+        }
+    })
+    .await;
+    let resumed = Resumable::new(stub.client());
+    resumed.connect().await.expect("registration").expect("not held");
+    assert_eq!(resumed.cursor().await, Some(id(5)));
+    tokio::time::timeout(DEADLINE, resumed.next())
+        .await
+        .expect("reconnect")
+        .expect("item")
+        .expect("event");
+    assert_eq!(resumed.cursor().await, Some(id(6)));
+}
+
+#[derive(Debug)]
+struct TestConnectPolicy {
+    allowed: std::sync::atomic::AtomicBool,
+    released: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    outcomes: std::sync::Mutex<Vec<ganja_client::AttemptOutcome>>,
+}
+
+impl TestConnectPolicy {
+    fn new(allowed: bool) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            allowed: std::sync::atomic::AtomicBool::new(allowed),
+            released: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            outcomes: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn outcomes(&self) -> Vec<ganja_client::AttemptOutcome> {
+        self.outcomes.lock().expect("outcome mutex").clone()
+    }
+}
+
+struct TestPermit(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for TestPermit {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl ganja_client::ConnectPolicy for TestConnectPolicy {
+    fn admit(&self) -> futures::future::BoxFuture<'_, Option<ganja_client::ConnectionPermit>> {
+        Box::pin(async {
+            self.allowed.load(std::sync::atomic::Ordering::SeqCst).then(|| {
+                Box::new(TestPermit(self.released.clone())) as ganja_client::ConnectionPermit
+            })
+        })
+    }
+
+    fn observe(&self, outcome: ganja_client::AttemptOutcome) {
+        self.outcomes.lock().expect("outcome mutex").push(outcome);
+    }
+}
+
+#[tokio::test]
+async fn live_eviction_reconnects_through_admission_and_yields_one_gap_before_fresh_events() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = AtomicUsize::new(0);
+    let (event, json) = started();
+    let stub = Stub::answering(move |request| match calls.fetch_add(1, Ordering::SeqCst) {
+        0 => Reply::Stream {
+            chunks: vec![
+                connected(0, 0, "fresh"),
+                frame_at("message", &json, 1),
+                frame_at(
+                    "evicted",
+                    r#"{"type":"evicted","message":"journal history overflow"}"#,
+                    1,
+                ),
+            ],
+        },
+        1 => {
+            assert_eq!(request.headers["last-event-id"], format!("{EPOCH}-1"));
+            Reply::Stream { chunks: vec![connected(1, 10, "gap")] }
+        }
+        2 => {
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Held {
+                chunks: vec![
+                    (Duration::ZERO, connected(10, 10, "fresh")),
+                    (Duration::ZERO, frame_at("message", &json, 11)),
+                ],
+            }
+        }
+        count => panic!("unexpected connection {count}"),
+    })
+    .await;
+    let policy = TestConnectPolicy::new(true);
+    let resumable = Resumable::new(stub.client()).with_policy(policy.clone());
+    assert_eq!(
+        resumable.next().await.expect("item").expect("event"),
+        Resumed::Event(Box::new(event.clone()))
+    );
+    assert_eq!(resumable.cursor().await, Some(id(1)));
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, resumable.next())
+            .await
+            .expect("reconnect")
+            .expect("item")
+            .expect("gap"),
+        Resumed::Gap { head: id(10) }
+    );
+    assert_eq!(resumable.cursor().await, None, "a gap discards the old cursor");
+    assert_eq!(
+        resumable.next().await.expect("item").expect("event"),
+        Resumed::Event(Box::new(event))
+    );
+    assert_eq!(resumable.cursor().await, Some(id(11)));
+    let replays = policy
+        .outcomes()
+        .into_iter()
+        .map(|outcome| {
+            let ganja_client::AttemptOutcome::Connected(ack) = outcome else {
+                panic!("every attempt receives a typed acknowledgement")
+            };
+            ack.replay
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replays,
+        vec![
+            ganja_client::sse::Replay::Fresh,
+            ganja_client::sse::Replay::Gap,
+            ganja_client::sse::Replay::Fresh
+        ]
+    );
+    assert_eq!(policy.released.load(Ordering::SeqCst), 2, "evicted and gap permits are released");
+}
+
+#[tokio::test]
+async fn refused_admission_sends_no_request_and_reports_no_attempt() {
+    let stub = Stub::always(Reply::Silent).await;
+    let policy = TestConnectPolicy::new(false);
+    let resumable = Resumable::new(stub.client()).with_policy(policy.clone());
+    assert!(resumable.connect().await.expect("admission refused").is_none());
+    assert!(resumable.next().await.is_none());
+    assert!(stub.received().is_empty());
+    assert!(policy.outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn every_reconnect_is_admitted_and_reports_exactly_one_outcome() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ganja_client::AttemptOutcome;
+    let calls = AtomicUsize::new(0);
+    let (_, json) = started();
+    let stub = Stub::answering(move |_| match calls.fetch_add(1, Ordering::SeqCst) {
+        0 => Reply::Json { status: 503, body: "shed".to_owned() },
+        1 => Reply::Stream { chunks: Vec::new() },
+        _ => Reply::Held {
+            chunks: vec![
+                (Duration::ZERO, connected(0, 0, "fresh")),
+                (Duration::ZERO, frame_at("message", &json, 1)),
+            ],
+        },
+    })
+    .await;
+    let policy = TestConnectPolicy::new(true);
+    let resumable = Resumable::new(stub.client()).with_policy(policy.clone());
+    tokio::time::timeout(DEADLINE, resumable.next())
+        .await
+        .expect("bounded retry")
+        .expect("item")
+        .expect("event");
+    let outcomes = policy.outcomes();
+    assert_eq!(outcomes.len(), 3);
+    assert_eq!(outcomes[0], AttemptOutcome::Shed);
+    assert_eq!(outcomes[1], AttemptOutcome::Transport);
+    assert!(
+        matches!(&outcomes[2], AttemptOutcome::Connected(ack) if ack.replay == ganja_client::sse::Replay::Fresh)
+    );
+    assert_eq!(
+        policy.released.load(Ordering::SeqCst),
+        2,
+        "successful permit lives with the connection"
+    );
+    resumable.hold().await;
+    assert_eq!(policy.released.load(Ordering::SeqCst), 3);
+    assert_eq!(policy.outcomes().len(), 3, "closing an acknowledged stream is not another attempt");
+}
+
+#[tokio::test]
+async fn a_hold_classifies_a_cancelled_attempt_before_acknowledging() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let stub = Stub::answering(move |_| {
+        tx.send(()).expect("request receiver");
+        Reply::Silent
+    })
+    .await;
+    let policy = TestConnectPolicy::new(true);
+    let resumable = std::sync::Arc::new(Resumable::new(stub.client()).with_policy(policy.clone()));
+    let reader = tokio::spawn({
+        let resumable = resumable.clone();
+        async move { resumable.connect().await }
+    });
+    rx.recv().await.expect("attempt began");
+    resumable.hold().await;
+    assert_eq!(policy.outcomes(), vec![ganja_client::AttemptOutcome::Cancelled]);
+    assert_eq!(policy.released.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(reader.await.expect("joined").expect("held").is_none());
+}
+
+#[tokio::test]
+async fn a_connection_timeout_is_reported_once() {
+    let stub = Stub::always(Reply::Silent).await;
+    let policy = TestConnectPolicy::new(true);
+    let client = Client::with_bounds(
+        stub.address(),
+        None,
+        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
+    )
+    .expect("client");
+    let resumable = Resumable::new(client).with_policy(policy.clone());
+    assert!(matches!(resumable.connect().await, Err(ClientError::Silent { .. })));
+    assert_eq!(policy.outcomes(), vec![ganja_client::AttemptOutcome::TimedOut]);
+}
+
+#[tokio::test]
+async fn hold_stops_an_established_heartbeat_only_stream() {
+    let stub = Stub::always(Reply::Held {
+        chunks: vec![
+            (Duration::ZERO, connected(0, 0, "fresh")),
+            (Duration::ZERO, frame_at("heartbeat", "{}", 0)),
+        ],
+    })
+    .await;
+    let policy = TestConnectPolicy::new(true);
+    let resumable = std::sync::Arc::new(Resumable::new(stub.client()).with_policy(policy.clone()));
+    resumable.connect().await.expect("connected");
+    let reader = tokio::spawn({
+        let resumable = resumable.clone();
+        async move { resumable.next().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(2), resumable.hold())
+        .await
+        .expect("hold does not await conversation data");
+    assert!(reader.await.expect("joined").is_none());
+    assert_eq!(policy.released.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(policy.outcomes().len(), 1);
+}
+
+#[derive(Debug, Default)]
+struct WaitingPolicy(tokio::sync::Notify);
+
+impl ganja_client::ConnectPolicy for WaitingPolicy {
+    fn admit(&self) -> futures::future::BoxFuture<'_, Option<ganja_client::ConnectionPermit>> {
+        Box::pin(async {
+            self.0.notify_one();
+            futures::future::pending().await
+        })
+    }
+
+    fn observe(&self, _outcome: ganja_client::AttemptOutcome) {
+        panic!("no attempt began while admission was waiting");
+    }
+}
+
+#[tokio::test]
+async fn hold_cancels_waiting_admission_without_needing_the_stream_door() {
+    let stub = Stub::always(Reply::Silent).await;
+    let policy = std::sync::Arc::new(WaitingPolicy::default());
+    let resumable = std::sync::Arc::new(Resumable::new(stub.client()).with_policy(policy.clone()));
+    let reader = tokio::spawn({
+        let resumable = resumable.clone();
+        async move { resumable.connect().await }
+    });
+    policy.0.notified().await;
+    tokio::time::timeout(Duration::from_secs(2), resumable.hold())
+        .await
+        .expect("hold bypasses blocked admission");
+    assert!(reader.await.expect("joined").expect("held").is_none());
+    assert!(stub.received().is_empty());
+}
+
+#[tokio::test]
+async fn http_refusal_and_invalid_response_are_each_observed_once() {
+    use ganja_client::AttemptOutcome;
+    for (reply, expected) in [
+        (
+            Reply::Json { status: 401, body: String::new() },
+            AttemptOutcome::Http { status: 401, from_serve: false },
+        ),
+        (
+            Reply::Stream { chunks: vec![frame_at("unknown", "{}", 0)] },
+            AttemptOutcome::InvalidResponse,
+        ),
+    ] {
+        let stub = Stub::always(reply).await;
+        let policy = TestConnectPolicy::new(true);
+        let resumable = Resumable::new(stub.client()).with_policy(policy.clone());
+        assert!(resumable.connect().await.is_err());
+        assert_eq!(policy.outcomes(), vec![expected]);
+        assert_eq!(policy.released.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn http_errors_and_attempts_preserve_valid_server_provenance() {
+    use ganja_client::AttemptOutcome;
+    for (status, epoch, expected) in [
+        (409, Some(EPOCH), true),
+        (503, None, false),
+        (404, None, false),
+        (409, Some("malformed"), false),
+        (409, Some("01998ad0-0000-4000-8000-00000000d505"), false),
+        (503, Some(EPOCH), true),
+        (401, Some(EPOCH), true),
+    ] {
+        let headers = epoch
+            .map(|epoch| vec![("ganja-serve-epoch".to_owned(), epoch.to_owned())])
+            .unwrap_or_default();
+        let stub = Stub::always(Reply::JsonWithHeaders {
+            status,
+            body: r#"{"message":"refused"}"#.to_owned(),
+            headers,
+        })
+        .await;
+        let error = stub.client().abort(&session()).await.expect_err("refusal");
+        match error {
+            ClientError::Refused { from_serve, .. }
+            | ClientError::Unauthorized { from_serve, .. } => assert_eq!(from_serve, expected),
+            other => panic!("unexpected error {other:?}"),
+        }
+        let policy = TestConnectPolicy::new(true);
+        let resumed = Resumable::new(stub.client()).with_policy(policy.clone());
+        assert!(resumed.connect().await.is_err());
+        let outcome = if status == 503 && !expected {
+            AttemptOutcome::Shed
+        } else {
+            AttemptOutcome::Http { status, from_serve: expected }
+        };
+        assert_eq!(policy.outcomes(), vec![outcome]);
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_failures_preserve_cleanup_in_progress_and_default_it_when_absent() {
+    for cleanup in [None, Some(false), Some(true)] {
+        let mut body =
+            serde_json::json!({"status":"failed","stage":"deadline","detail":"budget expired"});
+        if let Some(cleanup) = cleanup {
+            body["cleanup_in_progress"] = cleanup.into();
+        }
+        let stub = Stub::always(Reply::Json { status: 409, body: body.to_string() }).await;
+        assert!(
+            matches!(stub.client().bootstrap_status().await.expect("status"), BootstrapStatus::Failed { cleanup_in_progress, .. } if cleanup_in_progress == cleanup.unwrap_or(false))
+        );
+        assert!(
+            matches!(stub.client().bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("outcome"), BootstrapOutcome::Failed { cleanup_in_progress, .. } if cleanup_in_progress == cleanup.unwrap_or(false))
+        );
+    }
+}
+
+fn id(seq: u64) -> EventId {
+    format!("{EPOCH}-{seq}").parse().expect("a fixture cursor")
+}
+
+fn connected(seq: u64, head: u64, replay: &str) -> String {
+    frame_at("connected", &format!(r#"{{"head":"{EPOCH}-{head}","replay":"{replay}"}}"#), seq)
+}
+
+#[tokio::test]
+async fn a_resume_cursor_is_sent_and_advances_only_when_an_event_is_yielded() {
+    let (_, json) = started();
+    let stub = Stub::always(Reply::Stream {
+        chunks: vec![
+            connected(2, 4, "from"),
+            frame_at("message", &json, 3),
+            frame_at("heartbeat", "{}", 3),
+            frame_at("message", &json, 4),
+        ],
+    })
+    .await;
+    let mut events = stub.client().events_from(Some(id(2))).await.expect("resumed");
+    assert_eq!(events.cursor(), Some(&id(2)));
+    assert_eq!(events.connected().head, id(4));
+    assert_eq!(stub.only_request().headers["last-event-id"], id(2).to_string());
+    events.next().await.expect("one event").expect("valid event");
+    assert_eq!(events.cursor(), Some(&id(3)), "buffered and control frames cannot commit a cursor");
+    events.next().await.expect("second event").expect("valid event");
+    assert_eq!(events.cursor(), Some(&id(4)));
+}
+
+#[tokio::test]
+async fn malformed_or_missing_frame_ids_and_unknown_connected_fields_are_skew() {
+    for bytes in [
+        "event: connected\ndata: {}\n\n".to_owned(),
+        "id: not-a-cursor\nevent: connected\ndata: {}\n\n".to_owned(),
+        frame_at(
+            "connected",
+            &format!(r#"{{"head":"{EPOCH}-0","replay":"fresh","extra":true}}"#),
+            0,
+        ),
+    ] {
+        let stub = Stub::always(Reply::Stream { chunks: vec![bytes] }).await;
+        assert!(matches!(stub.client().events().await, Err(ClientError::Skew { .. })));
+    }
+}
+
+#[tokio::test]
+async fn a_severed_stream_reconnects_after_the_last_yielded_event() {
+    let (event, json) = started();
+    let stub = Stub::answering(move |request| {
+        match request.headers.get("last-event-id").map(String::as_str) {
+            None => Reply::Stream {
+                chunks: vec![connected(0, 0, "fresh"), frame_at("message", &json, 1)],
+            },
+            Some(cursor) if cursor == format!("{EPOCH}-1") => Reply::Stream {
+                chunks: vec![connected(1, 2, "from"), frame_at("message", &json, 2)],
+            },
+            other => panic!("unexpected cursor: {other:?}"),
+        }
+    })
+    .await;
+    let resumed = Resumable::new(stub.client());
+    for seq in 1..=2 {
+        assert_eq!(
+            tokio::time::timeout(DEADLINE, resumed.next())
+                .await
+                .expect("bounded reconnect")
+                .expect("item")
+                .expect("valid event"),
+            Resumed::Event(Box::new(event.clone()))
+        );
+        assert_eq!(resumed.cursor().await, Some(id(seq)));
+    }
+    assert_eq!(stub.received().len(), 2);
+}
+
+#[tokio::test]
+async fn a_gap_discards_the_tail_and_the_next_connection_is_fresh() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = AtomicUsize::new(0);
+    let (event, json) = started();
+    let stub = Stub::answering(move |request| match calls.fetch_add(1, Ordering::SeqCst) {
+        0 => {
+            Reply::Stream { chunks: vec![connected(0, 0, "fresh"), frame_at("message", &json, 1)] }
+        }
+        1 => {
+            assert_eq!(request.headers.get("last-event-id"), Some(&format!("{EPOCH}-1")));
+            Reply::Stream { chunks: vec![connected(1, 9, "gap"), frame_at("message", &json, 8)] }
+        }
+        2 => {
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Stream { chunks: vec![connected(9, 9, "fresh"), frame_at("message", &json, 10)] }
+        }
+        _ => panic!("unexpected reconnect"),
+    })
+    .await;
+    let resumed = Resumable::new(stub.client());
+    assert_eq!(
+        resumed.next().await.expect("item").expect("event"),
+        Resumed::Event(Box::new(event.clone()))
+    );
+    assert_eq!(resumed.next().await.expect("item").expect("gap"), Resumed::Gap { head: id(9) });
+    assert_eq!(resumed.cursor().await, None);
+    assert_eq!(
+        resumed.next().await.expect("item").expect("fresh event"),
+        Resumed::Event(Box::new(event))
+    );
+    assert_eq!(resumed.cursor().await, Some(id(10)));
+}
+
+#[tokio::test]
+async fn hold_acknowledges_an_inflight_connect_without_waiting_for_its_network_deadline() {
+    let (seen, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let stub = Stub::answering(move |_| {
+        seen.send(()).expect("receiver exists");
+        Reply::Silent
+    })
+    .await;
+    let resumed = std::sync::Arc::new(Resumable::new(stub.client()));
+    let reader = tokio::spawn({
+        let resumed = resumed.clone();
+        async move { resumed.next().await }
+    });
+    requests.recv().await.expect("connect started");
+    tokio::time::timeout(Duration::from_secs(2), resumed.hold())
+        .await
+        .expect("hold has its own control path");
+    assert!(reader.await.expect("reader joined").is_none());
+    assert!(resumed.next().await.is_none(), "held consumer cannot reconnect");
+    assert_eq!(stub.received().len(), 1);
+    resumed.release();
+    let reader = tokio::spawn({
+        let resumed = resumed.clone();
+        async move { resumed.next().await }
+    });
+    requests.recv().await.expect("release permits a new attempt");
+    resumed.hold().await;
+    assert!(reader.await.expect("reader joined").is_none());
+}
+
+#[tokio::test]
+async fn fixed_headers_apply_to_reads_posts_and_streams() {
+    let stub = Stub::answering(|request| match request.path.as_str() {
+        "/event" => Reply::Stream { chunks: vec![connected(0, 0, "fresh")] },
+        "/session/ses_attached/abort" => Reply::ok("true"),
+        _ => Reply::ok(HEALTHY),
+    })
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-worker-target", HeaderValue::from_static("worker-one"));
+    let client = stub.client().with_headers(headers);
+    client.health().await.expect("health");
+    assert!(client.abort(&session()).await.expect("boolean acknowledgement"));
+    client.events().await.expect("stream");
+    assert!(
+        stub.received().iter().all(|request| request.headers["x-worker-target"] == "worker-one")
+    );
+}
+
+fn bootstrap() -> Bootstrap {
+    Bootstrap {
+        repository: "https://example.com/repo.git".to_owned(),
+        reference: "main".to_owned(),
+        branch: "worker-one".to_owned(),
+        author: BootstrapAuthor {
+            name: "Worker".to_owned(),
+            email: "worker@example.com".to_owned(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_sends_its_server_budget_and_decodes_the_result() {
+    let stub =
+        Stub::always(Reply::ok(r#"{"status":"cloned","head":"abc","branch":"worker-one"}"#)).await;
+    assert_eq!(
+        stub.client().bootstrap(&bootstrap(), Duration::from_secs(30)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { head: "abc".to_owned(), branch: "worker-one".to_owned() }
+    );
+    let request = stub.only_request();
+    assert_eq!((request.method.as_str(), request.path.as_str()), ("POST", "/bootstrap"));
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("json body");
+    assert_eq!(body["deadline_secs"], 30);
+    assert_eq!(body["author"]["name"], "Worker");
+}
+
+#[tokio::test]
+async fn bootstrap_reconciles_a_timed_out_post_without_sending_it_again() {
+    let stub = Stub::answering(|request| {
+        if request.method == "POST" {
+            Reply::Silent
+        } else {
+            Reply::ok(r#"{"status":"cloned","head":"abc","branch":"worker-one"}"#)
+        }
+    })
+    .await;
+    let client = Client::with_bounds(
+        stub.address(),
+        None,
+        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
+    )
+    .expect("client");
+    assert!(matches!(
+        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("reconciled"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let received = stub.received();
+    assert_eq!(received.iter().filter(|request| request.method == "POST").count(), 1);
+    assert_eq!(received.iter().filter(|request| request.method == "GET").count(), 1);
+}
+
+#[tokio::test]
+async fn bootstrap_status_and_abort_refuse_unknown_shapes() {
+    let stub = Stub::always(Reply::ok(r#"{"status":"idle","unknown":1}"#)).await;
+    assert!(matches!(stub.client().bootstrap_status().await, Err(ClientError::Skew { .. })));
+    assert!(matches!(stub.client().abort(&session()).await, Err(ClientError::Skew { .. })));
+    let stub = Stub::always(Reply::Json { status: 404, body: String::new() }).await;
+    assert_eq!(
+        stub.client().bootstrap_status().await.expect("serve handoff"),
+        BootstrapStatus::AlreadyServing
+    );
 }

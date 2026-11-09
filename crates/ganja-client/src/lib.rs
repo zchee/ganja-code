@@ -60,15 +60,23 @@
 //! has no business duplicating, so it reads the two fields it acts on and
 //! tolerates the rest.
 
+mod bootstrap;
+mod resumable;
 pub mod sse;
 
 #[cfg(unix)]
 use std::path::Path;
 
+pub use bootstrap::{
+    Bootstrap, BootstrapAuthor, BootstrapOutcome, BootstrapStage, BootstrapStatus,
+};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _};
 pub use ganja_protocol::{Event, Mention, PermissionId, PermissionReply, SessionId};
+pub use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+pub use resumable::{AttemptOutcome, ConnectPolicy, ConnectionPermit, Resumable, Resumed};
 use serde::{Deserialize, Serialize};
+pub use sse::EventId;
 
 /// The credential a password-protected server requires on every route.
 ///
@@ -153,6 +161,12 @@ pub enum ClientError {
         /// What was given.
         given: std::time::Duration,
     },
+    /// The initializer only accepts relative budgets between five and 600 seconds.
+    #[error("a bootstrap deadline of {given:?} must be between 5 and 600 seconds")]
+    BootstrapDeadline {
+        /// The rejected budget.
+        given: std::time::Duration,
+    },
     /// Nothing answered, the connection failed part-way through, or a bound
     /// ran out: a connect past the connect bound, or a read not answered in
     /// full within the read bound — every silence but the event stream's,
@@ -164,6 +178,12 @@ pub enum ClientError {
         /// What the transport said.
         #[source]
         source: reqwest::Error,
+    },
+    /// The event connection closed before its registration acknowledgement.
+    #[error("the ganja server at {address} closed GET /event before registration")]
+    Disconnected {
+        /// The server that closed the connection.
+        address: String,
     },
     /// `GET /event` gave nothing this client could read within a read bound
     /// ([`Bounds::read`]): no head and `connected` frame while the stream
@@ -190,6 +210,8 @@ pub enum ClientError {
     Unauthorized {
         /// The server that refused.
         address: String,
+        /// Whether the response carried a well-formed server epoch.
+        from_serve: bool,
     },
     /// The server answered, and the answer was a refusal.
     #[error("the ganja server refused {method} {path} with {status}: {body}")]
@@ -200,6 +222,8 @@ pub enum ClientError {
         path: String,
         /// The status it carried.
         status: u16,
+        /// Whether the response carried a well-formed server epoch.
+        from_serve: bool,
         /// What the server said, which for this server is a JSON message.
         body: String,
     },
@@ -419,6 +443,7 @@ const SOCKET_SCHEME: &str = "uds:";
 /// spelled under. They are one string for a TCP client and differ for a
 /// socket-bound one, whose requests need an `http://` base the socket does
 /// not have and whose errors should name the socket, not the label.
+#[derive(Clone)]
 pub struct Client {
     /// Every `GET` but the event stream: the reads, each under the read
     /// bound, kept by `reqwest` — whole over TCP, per read on a socket.
@@ -432,6 +457,7 @@ pub struct Client {
     address: String,
     base: String,
     credentials: Option<Credentials>,
+    headers: HeaderMap,
 }
 
 impl std::fmt::Debug for Client {
@@ -555,7 +581,15 @@ impl Client {
         let http = build(reqwest::Client::builder().timeout(bounds.read))?;
         let patient = build(reqwest::Client::builder())?;
 
-        Ok(Self { http, patient, bounds, base: address.clone(), address, credentials })
+        Ok(Self {
+            http,
+            patient,
+            bounds,
+            base: address.clone(),
+            address,
+            credentials,
+            headers: HeaderMap::new(),
+        })
     }
 
     /// A client bound to the session socket at `path` (**D505**).
@@ -615,7 +649,19 @@ impl Client {
             address: format!("{SOCKET_SCHEME}{shown}"),
             base: SOCKET_URL.to_owned(),
             credentials: None,
+            headers: HeaderMap::new(),
         })
+    }
+
+    /// Attaches fixed headers to every request this client sends.
+    ///
+    /// Explicit protocol headers and credentials take precedence: content type
+    /// and replay cursor are reserved, as is the event stream's accept type.
+    /// Fixed authorization is used only when no credentials are configured.
+    #[must_use]
+    pub fn with_headers(mut self, headers: HeaderMap) -> Self {
+        self.headers = headers;
+        self
     }
 
     /// The address this client drives, as it will appear in every error.
@@ -682,6 +728,74 @@ impl Client {
             .await
     }
 
+    /// Reads the stored transcript, oldest message first.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::health`]. In-progress text may lag the event stream.
+    pub async fn messages(
+        &self,
+        session: &SessionId,
+    ) -> Result<Vec<ganja_protocol::Message>, ClientError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StoredMessage {
+            id: ganja_protocol::MessageId,
+            role: ganja_protocol::Role,
+            parts: Vec<ganja_protocol::Part>,
+            time: ganja_protocol::MessageTime,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            usage: Option<ganja_protocol::Usage>,
+            #[serde(default)]
+            request_only: bool,
+            #[serde(default)]
+            compaction_summary: bool,
+            #[serde(default)]
+            command: Option<String>,
+        }
+        let messages: Vec<StoredMessage> =
+            self.get(&format!("/session/{}/message", session.as_str())).await?;
+        Ok(messages
+            .into_iter()
+            .map(|message| ganja_protocol::Message {
+                id: message.id,
+                role: message.role,
+                parts: message.parts,
+                time: message.time,
+                model: message.model,
+                usage: message.usage,
+                request_only: message.request_only,
+                compaction_summary: message.compaction_summary,
+                command: message.command,
+            })
+            .collect())
+    }
+
+    /// Starts a shell turn; output arrives on the event stream.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::prompt`].
+    pub async fn shell(&self, session: &SessionId, command: &str) -> Result<(), ClientError> {
+        self.send_empty(
+            "POST",
+            &format!("/session/{}/shell", session.as_str()),
+            Some(serde_json::json!({"command": command})),
+        )
+        .await
+    }
+
+    /// Cancels the current turn, returning the server's acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::prompt`]; a non-boolean response is version skew.
+    pub async fn abort(&self, session: &SessionId) -> Result<bool, ClientError> {
+        self.send("POST", &format!("/session/{}/abort", session.as_str()), None).await
+    }
+
     /// `GET /permission`: every request the engine is waiting on, oldest
     /// first — what a client that just connected reads before it can answer
     /// anything.
@@ -744,15 +858,28 @@ impl Client {
     /// with anything but `connected`, and [`ClientError::Silent`] when the
     /// head and the `connected` frame have not both come within a read bound.
     pub async fn events(&self) -> Result<Events, ClientError> {
+        self.events_from(None).await
+    }
+
+    /// Opens a stream strictly after `cursor`, or fresh when it is absent.
+    ///
+    /// A gap is reported in [`Events::connected`]; callers must discard that
+    /// stream and register fresh before reading REST projections.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::events`], including malformed ids and acknowledgements.
+    pub async fn events_from(&self, cursor: Option<EventId>) -> Result<Events, ClientError> {
         let path = EVENT_PATH;
         let bound = self.bounds.read;
-        let (bytes, frames) = tokio::time::timeout(bound, async {
-            let response = self
+        let (bytes, frames, connected) = tokio::time::timeout(bound, async {
+            let mut request = self
                 .request_on(&self.patient, reqwest::Method::GET, path)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .send()
-                .await
-                .map_err(|source| self.transport(source))?;
+                .header(reqwest::header::ACCEPT, "text/event-stream");
+            if let Some(cursor) = &cursor {
+                request = request.header("Last-Event-ID", cursor.to_string());
+            }
+            let response = request.send().await.map_err(|source| self.transport(source))?;
             let response = self.checked("GET", path, response).await?;
 
             let mut bytes = response.bytes_stream().boxed();
@@ -760,8 +887,19 @@ impl Client {
             loop {
                 if let Some(frame) = frames.pop() {
                     let frame = frame?;
-                    if frame == sse::Frame::Connected {
-                        return Ok((bytes, frames));
+                    if let sse::Frame::Connected(id, connected) = frame {
+                        let valid = match (&cursor, connected.replay) {
+                            (None, sse::Replay::Fresh) => id == connected.head,
+                            (Some(cursor), sse::Replay::From | sse::Replay::Gap) => id == *cursor,
+                            _ => false,
+                        };
+                        if !valid {
+                            return Err(ClientError::Skew {
+                                detail: "the connected cursor disagrees with the request"
+                                    .to_owned(),
+                            });
+                        }
+                        return Ok((bytes, frames, connected));
                     }
                     return Err(ClientError::Skew {
                         detail: format!(
@@ -776,9 +914,7 @@ impl Client {
                     Some(Ok(chunk)) => frames.push(chunk.as_ref()),
                     Some(Err(source)) => return Err(self.transport(source)),
                     None => {
-                        return Err(ClientError::Skew {
-                            detail: "the event stream ended before it said hello".to_owned(),
-                        });
+                        return Err(ClientError::Disconnected { address: self.address.clone() });
                     }
                 }
             }
@@ -786,7 +922,7 @@ impl Client {
         .await
         .map_err(|_| ClientError::Silent { address: self.address.clone(), bound })??;
 
-        Ok(Events::new(self.address.clone(), bound, bytes, frames))
+        Ok(Events::new(self.address.clone(), bound, bytes, frames, connected, cursor))
     }
 
     /// A request on the client whose bounds fit its method (see
@@ -804,7 +940,16 @@ impl Client {
         method: reqwest::Method,
         path: &str,
     ) -> reqwest::RequestBuilder {
-        let builder = http.request(method, format!("{}{path}", self.base));
+        let mut headers = self.headers.clone();
+        headers.remove(reqwest::header::CONTENT_TYPE);
+        headers.remove("last-event-id");
+        if path == EVENT_PATH {
+            headers.remove(reqwest::header::ACCEPT);
+        }
+        if self.credentials.is_some() {
+            headers.remove(reqwest::header::AUTHORIZATION);
+        }
+        let builder = http.request(method, format!("{}{path}", self.base)).headers(headers);
 
         match &self.credentials {
             Some(credentials) => {
@@ -826,14 +971,27 @@ impl Client {
         path: &str,
         response: reqwest::Response,
     ) -> Result<reqwest::Response, ClientError> {
+        let from_serve = response
+            .headers()
+            .get("ganja-serve-epoch")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|epoch| {
+                epoch.len() == 36 && format!("{epoch}-0").parse::<EventId>().is_ok()
+            });
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized { address: self.address.clone() });
+            return Err(ClientError::Unauthorized { address: self.address.clone(), from_serve });
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = self.bounded(method, path, response).await?;
 
-            return Err(ClientError::Refused { method, path: path.to_owned(), status, body });
+            return Err(ClientError::Refused {
+                method,
+                path: path.to_owned(),
+                status,
+                from_serve,
+                body,
+            });
         }
 
         Ok(response)
@@ -888,7 +1046,20 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<(), ClientError> {
-        self.text(method, path, body).await.map(|_| ())
+        let verb = reqwest::Method::from_bytes(method.as_bytes())
+            .expect("every method this crate sends is a valid one");
+        let mut request = self.request(verb, path);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|source| self.transport(source))?;
+        let response = self.checked(method, path, response).await?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(ClientError::Skew {
+                detail: format!("{method} {path} did not answer 204"),
+            });
+        }
+        Ok(())
     }
 
     async fn text(
@@ -920,7 +1091,9 @@ impl Client {
 /// its next bytes; the time a caller spends elsewhere between reads is not
 /// counted, and what serve sent meanwhile is waiting when it reads again.
 pub struct Events {
-    inner: BoxStream<'static, Result<Event, ClientError>>,
+    inner: BoxStream<'static, Result<(EventId, Event), ClientError>>,
+    connected: sse::Connected,
+    cursor: Option<EventId>,
 }
 
 impl std::fmt::Debug for Events {
@@ -932,7 +1105,26 @@ impl std::fmt::Debug for Events {
 }
 
 impl Events {
-    fn new<S, B>(address: String, bound: std::time::Duration, bytes: S, frames: sse::Frames) -> Self
+    /// The acknowledgement read before this stream was returned.
+    #[must_use]
+    pub fn connected(&self) -> &sse::Connected {
+        &self.connected
+    }
+
+    /// The last position delivered to the caller, or the fresh registration head.
+    #[must_use]
+    pub fn cursor(&self) -> Option<&EventId> {
+        self.cursor.as_ref()
+    }
+
+    fn new<S, B>(
+        address: String,
+        bound: std::time::Duration,
+        bytes: S,
+        frames: sse::Frames,
+        connected: sse::Connected,
+        cursor: Option<EventId>,
+    ) -> Self
     where
         S: Stream<Item = reqwest::Result<B>> + Send + 'static,
         B: AsRef<[u8]>,
@@ -940,6 +1132,12 @@ impl Events {
         let state = Reading { address, bound, bytes: Box::pin(bytes), frames, done: false };
 
         Self {
+            cursor: if connected.replay == sse::Replay::Fresh {
+                Some(connected.head.clone())
+            } else {
+                cursor
+            },
+            connected,
             inner: futures::stream::unfold(state, |mut state| async move {
                 if state.done {
                     return None;
@@ -948,11 +1146,21 @@ impl Events {
                 loop {
                     if let Some(frame) = state.frames.pop() {
                         match frame {
-                            Ok(sse::Frame::Message(event)) => return Some((Ok(*event), state)),
-                            // Both say the connection is alive and nothing
-                            // about the conversation.
-                            Ok(sse::Frame::Connected | sse::Frame::Heartbeat) => continue,
-                            Ok(sse::Frame::Evicted(notice)) => {
+                            Ok(sse::Frame::Message(id, event)) => {
+                                return Some((Ok((id, *event)), state));
+                            }
+                            // Control frames do not acknowledge conversation events.
+                            Ok(sse::Frame::Heartbeat(_)) => continue,
+                            Ok(sse::Frame::Connected(_, _)) => {
+                                state.done = true;
+                                return Some((
+                                    Err(ClientError::Skew {
+                                        detail: "a second connected frame".to_owned(),
+                                    }),
+                                    state,
+                                ));
+                            }
+                            Ok(sse::Frame::Evicted(_, notice)) => {
                                 state.done = true;
                                 let evicted = ClientError::Evicted { notice: notice.message };
 
@@ -1033,7 +1241,15 @@ impl Stream for Events {
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.poll_next_unpin(context)
+        match self.inner.poll_next_unpin(context) {
+            std::task::Poll::Ready(Some(Ok((id, event)))) => {
+                self.cursor = Some(id);
+                std::task::Poll::Ready(Some(Ok(event)))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => std::task::Poll::Ready(Some(Err(error))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 }
 

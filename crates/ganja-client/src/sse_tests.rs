@@ -6,19 +6,26 @@ use super::{EvictedNotice, FRAMES, Frame, Frames};
 #[test]
 fn a_frame_split_across_reads_is_still_one_frame() {
     let mut frames = Frames::new();
-    frames.push(b"event: connect");
+    frames.push(b"id: 01998ad0-0000-7000-8000-00000000d505-0\nevent: connect");
     assert!(frames.pop().is_none());
-    frames.push(b"ed\ndata: {}\n\nevent: heartbeat\ndata: {}\n\n");
+    frames.push(b"ed\ndata: {\"head\":\"01998ad0-0000-7000-8000-00000000d505-0\",\"replay\":\"fresh\"}\n\nid: 01998ad0-0000-7000-8000-00000000d505-0\nevent: heartbeat\ndata: {}\n\n");
 
-    assert_eq!(frames.pop().transpose().expect("a declared frame"), Some(Frame::Connected));
-    assert_eq!(frames.pop().transpose().expect("a declared frame"), Some(Frame::Heartbeat));
+    let id: super::EventId = "01998ad0-0000-7000-8000-00000000d505-0".parse().expect("valid id");
+    assert_eq!(
+        frames.pop().transpose().expect("a declared frame"),
+        Some(Frame::Connected(
+            id.clone(),
+            super::Connected { head: id.clone(), replay: super::Replay::Fresh }
+        ))
+    );
+    assert_eq!(frames.pop().transpose().expect("a declared frame"), Some(Frame::Heartbeat(id)));
     assert!(frames.pop().is_none());
 }
 
 #[test]
 fn a_frame_named_outside_the_vocabulary_is_a_version_mismatch() {
     let mut frames = Frames::new();
-    frames.push(b"event: server.hello\ndata: {}\n\n");
+    frames.push(b"id: 01998ad0-0000-7000-8000-00000000d505-0\nevent: server.hello\ndata: {}\n\n");
 
     let error =
         frames.pop().expect("a complete frame").expect_err("a name outside the set is refused");
@@ -41,6 +48,33 @@ fn an_evicted_notice_round_trips_through_the_declared_shape() {
         serde_json::from_str::<EvictedNotice>(r#"{"type":"evicted","message":"x","why":1}"#)
             .is_err()
     );
+}
+
+#[test]
+fn event_ids_are_canonical_and_bounded() {
+    let epoch = "01998ad0-0000-7000-8000-00000000d505";
+    for seq in [0, 1, u64::MAX] {
+        let text = format!("{epoch}-{seq}");
+        let id: super::EventId = text.parse().expect("valid cursor");
+        assert_eq!(id.epoch(), epoch);
+        assert_eq!(id.seq(), seq);
+        assert_eq!(id.to_string(), text);
+    }
+    for text in [
+        "",
+        "epoch-1",
+        "-1",
+        "01998ad0-0000-4000-8000-00000000d505-1",
+        "01998ad0-0000-7000-7000-00000000d505-1",
+        "01998ad0-0000-7000-8000-00000000d505--1",
+        "01998ad0-0000-7000-8000-00000000d505-01",
+        "01998ad0-0000-7000-8000-00000000d505-18446744073709551616",
+    ] {
+        assert!(
+            matches!(text.parse::<super::EventId>(), Err(crate::ClientError::Skew { .. })),
+            "{text:?}"
+        );
+    }
 }
 
 #[test]

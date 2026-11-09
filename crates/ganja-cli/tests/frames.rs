@@ -49,11 +49,10 @@ const FAST_HEARTBEAT: Duration = Duration::from_millis(50);
 /// One word appearing nowhere else, so finding it means the turn ran.
 const CLOSING: &str = "script-finished-zarquon";
 
-/// Events a subscriber's queue holds before a full one evicts it
-/// (`ganja-core/src/engine.rs`, `EVENT_CAPACITY`). Not re-exported, so it is
-/// spelled here — the burst below only has to *exceed* it, and does so by
-/// enough that the exact number is not load-bearing.
-const EVENT_CAPACITY: usize = 1024;
+/// Words whose encoded deltas exceed the journal's 16 MiB byte window.
+/// The burst below exceeds three windows, including any replay batch the
+/// sender already holds while the socket is stalled.
+const WORDS_PER_WINDOW: usize = 4096;
 
 /// A server on a fake provider that streams `reply`, one word at a time.
 async fn served(reply: &str) -> (Arc<Engine>, ganja_serve::Handle) {
@@ -141,6 +140,20 @@ impl Reader {
             // The serve → client direction: a frame outside the declared
             // vocabulary is a parse error, and the error names it.
             let frame = frame.expect("every frame a real server writes is one the client declares");
+            if let Some(previous) = self.seen.last() {
+                assert_eq!(frame.id().epoch(), previous.id().epoch());
+                if matches!(frame, Frame::Message(_, _)) {
+                    assert!(frame.id().seq() > previous.id().seq(), "message ids advance");
+                } else {
+                    assert_eq!(frame.id(), previous.id(), "control frames do not advance");
+                }
+            } else {
+                let Frame::Connected(id, connected) = &frame else {
+                    panic!("stream opens with connected")
+                };
+                assert_eq!(id, &connected.head);
+                assert_eq!(connected.replay, sse::Replay::Fresh);
+            }
             self.names.push(named(&frame).to_owned());
             self.seen.push(frame);
         }
@@ -177,10 +190,10 @@ impl Reader {
 /// back off the parsed value, so the mapping itself is part of the pin.
 fn named(frame: &Frame) -> &'static str {
     match frame {
-        Frame::Connected => sse::CONNECTED,
-        Frame::Message(_) => sse::MESSAGE,
-        Frame::Heartbeat => sse::HEARTBEAT,
-        Frame::Evicted(_) => sse::EVICTED,
+        Frame::Connected(_, _) => sse::CONNECTED,
+        Frame::Message(_, _) => sse::MESSAGE,
+        Frame::Heartbeat(_) => sse::HEARTBEAT,
+        Frame::Evicted(_, _) => sse::EVICTED,
     }
 }
 
@@ -216,7 +229,7 @@ async fn a_running_server_writes_the_frames_the_client_declares() {
     // have carried something the client could parse into a protocol event.
     reader.read_until(|names| names.iter().filter(|name| *name == sse::MESSAGE).count() > 3).await;
     let finished = reader.seen.iter().any(|frame| {
-        matches!(frame, Frame::Message(event) if matches!(**event, Event::MessageStarted { .. }))
+        matches!(frame, Frame::Message(_, event) if matches!(**event, Event::MessageStarted { .. }))
     });
     assert!(finished, "a message frame carried a protocol event");
 
@@ -253,7 +266,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     // queue behind it. Big words rather than many, so the socket fills in
     // hundreds of frames rather than hundreds of thousands.
     let word = "w".repeat(4096);
-    let burst = EVENT_CAPACITY * 3;
+    let burst = WORDS_PER_WINDOW * 3;
     let reply = std::iter::repeat_n(word.as_str(), burst).collect::<Vec<_>>().join(" ");
 
     let (engine, handle) = served(&reply).await;
@@ -294,7 +307,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     reader.read_until(|names| names.iter().any(|name| name == sse::EVICTED)).await;
 
     let last = reader.seen.last().expect("the stream said something");
-    let Frame::Evicted(notice) = last else {
+    let Frame::Evicted(_, notice) = last else {
         panic!(
             "a subscriber that stopped reading should be evicted, and told: {:?}",
             reader.names.last()
@@ -302,8 +315,8 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     };
     assert_eq!(notice.kind, sse::EVICTED, "the payload names itself too");
     assert!(
-        notice.message.contains("fell behind"),
-        "the notice carries the engine's own account: {notice:?}"
+        notice.message.contains("journal history overflow"),
+        "the notice names the lost replay history: {notice:?}"
     );
     assert_eq!(
         reader.names.iter().filter(|name| *name == sse::EVICTED).count(),
@@ -312,6 +325,77 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     );
 
     handle.shutdown().await.expect("the server stops cleanly");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumable_reader_recovers_from_live_journal_overflow_with_one_gap() {
+    let word = "w".repeat(4096);
+    let reply =
+        std::iter::repeat_n(word.as_str(), WORDS_PER_WINDOW * 3).collect::<Vec<_>>().join(" ");
+    let (engine, handle) = served(&reply).await;
+    let client = ganja_client::Client::new(
+        &format!("http://{}", handle.address().tcp().expect("tcp address")),
+        None,
+    )
+    .expect("client");
+    let reader = ganja_client::Resumable::new(client);
+    reader.connect().await.expect("connect").expect("registration");
+    let mut direct = engine.subscribe().await.expect("lossless subscription");
+    engine
+        .send(Command::SendPrompt {
+            text: "overflow the unread journal".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("prompt");
+    tokio::time::timeout(DEADLINE, async {
+        while let Some(event) = direct.next().await {
+            if matches!(event, Event::MessageFinished { .. }) {
+                return;
+            }
+        }
+        panic!("the lossless subscription ended before the turn");
+    })
+    .await
+    .expect("the turn finishes while the network reader is held");
+
+    let gap = tokio::time::timeout(DEADLINE, async {
+        loop {
+            match reader.next().await.expect("reader remains live").expect("resumed item") {
+                ganja_client::Resumed::Event(_) => {}
+                ganja_client::Resumed::Gap { head } => break head,
+            }
+        }
+    })
+    .await
+    .expect("overflow reconnects and declares a gap");
+    assert!(gap.seq() > 0, "the overflow advanced the journal");
+    assert_eq!(reader.cursor().await, None, "the gap discards the old cursor");
+    let fresh = reader.connect().await.expect("fresh connect").expect("registration");
+    assert_eq!(fresh.replay, sse::Replay::Fresh);
+    assert!(fresh.head.seq() >= gap.seq());
+    engine
+        .send(Command::SendPrompt {
+            text: "continue after the gap".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("next prompt");
+    let next = tokio::time::timeout(DEADLINE, reader.next())
+        .await
+        .expect("fresh event arrives")
+        .expect("reader remains live")
+        .expect("fresh event");
+    assert!(matches!(next, ganja_client::Resumed::Event(_)), "one gap then fresh events");
+    assert!(reader.cursor().await.expect("event cursor").seq() > fresh.head.seq());
+    reader.hold().await;
+    handle.shutdown().await.expect("server stops");
 }
 
 /// The declaration itself: four names, and the pin above covers each of them.

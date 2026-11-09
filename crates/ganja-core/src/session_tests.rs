@@ -26,6 +26,22 @@ use crate::tool::tasklist::{Status as TaskStatus, TaskFailure};
 use crate::tool::team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered};
 use crate::tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput};
 
+#[cfg(debug_assertions)]
+#[test]
+fn completed_envelope_failure_guards_are_session_scoped_and_nestable() {
+    let session = SessionId::ascending();
+    let other = SessionId::ascending();
+    assert!(!super::CompletedEnvelopeFailure::active(&session));
+    let first = super::CompletedEnvelopeFailure::new(session.clone());
+    let second = super::CompletedEnvelopeFailure::new(session.clone());
+    assert!(super::CompletedEnvelopeFailure::active(&session));
+    assert!(!super::CompletedEnvelopeFailure::active(&other));
+    drop(first);
+    assert!(super::CompletedEnvelopeFailure::active(&session));
+    drop(second);
+    assert!(!super::CompletedEnvelopeFailure::active(&session));
+}
+
 /// Two dialogs stand open together, and each reply reaches the one it
 /// names.
 ///

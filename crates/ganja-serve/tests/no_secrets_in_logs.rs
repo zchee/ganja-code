@@ -14,16 +14,45 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use base64::Engine as _;
+use futures::future::BoxFuture;
 use ganja_core::permission::Permissions;
 use ganja_core::tool::Registry;
 use ganja_serve::Credentials;
+use ganja_serve::bootstrap::{Bootstrap, Cloned, Executor, Failure, Service, Stage};
 use ganja_testkit::{LogCapture as Capture, says};
 use secrecy::SecretString;
 use support::{base_url, loopback_config, scripted_engine};
 
 /// The password planted in the server. Nothing may render it.
 const CANARY: &str = "pw-canary-XYZZY-73";
+const ENCODED_USER: &str = "repo%2Duser%2Dcanary";
+const DECODED_USER: &str = "repo-user-canary";
+const ENCODED_PASSWORD: &str = "repo%2Dpassword%2Dcanary";
+const DECODED_PASSWORD: &str = "repo-password-canary";
+const EXECUTOR_DETAIL: &str = "bootstrap-executor-diagnostic";
+
+struct Refused;
+
+impl Executor for Refused {
+    fn execute(
+        &self,
+        request: Bootstrap,
+        _: tokio::time::Instant,
+    ) -> BoxFuture<'static, Result<Cloned, Failure>> {
+        Box::pin(async move {
+            Err(Failure {
+                stage: Stage::Dispatch,
+                detail: format!(
+                    "{EXECUTOR_DETAIL}: {CANARY} {} {ENCODED_USER} {DECODED_USER} {ENCODED_PASSWORD} {DECODED_PASSWORD}",
+                    request.repository
+                ),
+            })
+        })
+    }
+}
 
 #[tokio::test]
 async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
@@ -79,6 +108,48 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
 
     handle.shutdown().await.expect("a clean stop");
 
+    let service = Service::new(
+        Credentials { username: "ganja".into(), password: CANARY.into() },
+        std::env::current_dir().expect("cwd"),
+        Arc::new(Refused),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let init = service.serve(listener).expect("init");
+    let base = format!("http://{}", init.address());
+    let repository = format!("https://{ENCODED_USER}:{ENCODED_PASSWORD}@example.test/repo");
+    let body = serde_json::json!({"repository":repository, "reference":"main", "branch":"work", "author":{"name":"worker", "email":"worker@example.test"}, "deadline_secs":5});
+    let response = reqwest::Client::new()
+        .post(format!("{base}/bootstrap"))
+        .basic_auth("ganja", Some(CANARY))
+        .json(&body)
+        .send()
+        .await
+        .expect("refused bootstrap");
+    assert_eq!(response.status(), 409);
+    let text = response.text().await.expect("body");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).expect("failure JSON"),
+        serde_json::json!({
+            "status": "failed", "stage": "dispatch",
+            "detail": "bootstrap failed; consult the server log", "cleanup_in_progress": false
+        }),
+        "executor details never enter the failure body"
+    );
+    for secret in [CANARY, ENCODED_USER, DECODED_USER, ENCODED_PASSWORD, DECODED_PASSWORD] {
+        assert!(!text.contains(secret), "bootstrap body must omit every credential form");
+    }
+    assert!(!text.contains(EXECUTOR_DETAIL), "even non-credential stderr stays server-side");
+    let malformed = reqwest::Client::new()
+        .post(format!("{base}/bootstrap"))
+        .basic_auth("ganja", Some(CANARY))
+        .json(&serde_json::json!({CANARY: CANARY}))
+        .send()
+        .await
+        .expect("invalid body");
+    assert_eq!(malformed.status(), 400);
+    assert!(!malformed.text().await.expect("body").contains(CANARY));
+    init.shutdown().await.expect("init stops");
+
     let logged = capture.logged();
     // The search space is real: the request lines the serve layer writes are
     // in it, path and method and nothing more.
@@ -89,4 +160,8 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
     assert!(!logged.contains(CANARY), "the password reached a log line: {logged}");
     assert!(!logged.contains(&token), "the encoded credential reached a log line: {logged}");
     assert!(!logged.contains("auth_token"), "a query string reached a log line: {logged}");
+    assert!(logged.contains(EXECUTOR_DETAIL), "redacted executor diagnostics remain observable");
+    for secret in [ENCODED_USER, DECODED_USER, ENCODED_PASSWORD, DECODED_PASSWORD] {
+        assert!(!logged.contains(secret), "repository userinfo reached a log line: {logged}");
+    }
 }

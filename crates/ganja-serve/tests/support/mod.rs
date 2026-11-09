@@ -106,6 +106,7 @@ pub fn base_url(handle: &Handle) -> String {
 /// One SSE frame: the event name and the data line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
+    pub id: String,
     pub event: String,
     pub data: String,
 }
@@ -120,14 +121,17 @@ pub fn drain_frames(buffer: &mut Vec<u8>) -> Vec<Frame> {
         let text = String::from_utf8_lossy(&raw);
         let mut event = String::new();
         let mut data = String::new();
+        let mut id = String::new();
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("event: ") {
                 event = rest.to_owned();
+            } else if let Some(rest) = line.strip_prefix("id: ") {
+                id = rest.to_owned();
             } else if let Some(rest) = line.strip_prefix("data: ") {
                 data = rest.to_owned();
             }
         }
-        frames.push(Frame { event, data });
+        frames.push(Frame { id, event, data });
     }
 
     frames
