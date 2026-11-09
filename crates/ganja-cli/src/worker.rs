@@ -18,8 +18,10 @@ use crate::worker_git;
 
 // The worker image/template supplies binary lookup and home, mandatory server
 // authentication, the engine configuration/data homes and trust bundle, plus
-// its scripted provider selection and noninteractive startup switches.
-const SERVE_ENVIRONMENT: [&str; 11] = [
+// its scripted provider selection and noninteractive startup switches. Git's
+// non-secret paths to image/platform trust inputs are needed by git commands
+// run through the engine's tools.
+const SERVE_ENVIRONMENT: [&str; 13] = [
     "PATH",
     "HOME",
     "GANJA_SERVER_PASSWORD",
@@ -27,6 +29,8 @@ const SERVE_ENVIRONMENT: [&str; 11] = [
     "GANJA_CONFIG_HOME",
     "XDG_DATA_HOME",
     "SSL_CERT_FILE",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_SSL_CAINFO",
     "GANJA_PROVIDER",
     "GANJA_FAKE_SCRIPT",
     "GANJA_DISABLE_MODELS_FETCH",
