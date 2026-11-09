@@ -5,15 +5,15 @@
 //! thing a loopback fixture cannot — that the identities, trust bundles and
 //! RPCs this build sends are ones the installed release accepts today.
 //!
-//! Every test is `#[ignore]`, so `cargo test` never reaches them, and
-//! `cargo test -- --ignored` finds them inert unless `GANJA_LIVE_TEST=1`.
+//! Live tests are `#[ignore]`, so ordinary `cargo test` runs only off-cluster checks;
+//! `cargo test -- --ignored` finds live tests inert unless `GANJA_LIVE_TEST=1`.
 //! With the opt-in set, a missing input is a hard failure that names the
 //! variable, never a silent pass. The owner runs them:
 //!
 //! ```sh
 //! GANJA_LIVE_TEST=1 \
 //! GANJA_SUBSTRATE_CONFIG_HOME=~/.config/ganja \
-//! cargo test -p ganja-teammate-cloud --test substrate_live -- --ignored control_plane
+//! cargo test -p ganja-teammate-cloud --test substrate_live -- --ignored control_plane_authorized_reads
 //! ```
 //!
 //! `actor_lifecycle` additionally needs `GANJA_CLOUD_PASSWORD` and a worker
@@ -25,6 +25,10 @@ use std::path::PathBuf;
 
 use ganja_team::MemberName;
 use ganja_teammate_cloud::provisioner::substrate::SubstrateProvisioner;
+use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::control_client::ControlClient;
+use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::{
+    GetAtespaceRequest, ListActorTemplatesRequest, ListOptions, ObjectRef,
+};
 use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
 use ganja_teammate_cloud::provisioner::substrate::kube::{KubeTunnel, client_from_config};
 use ganja_teammate_cloud::provisioner::substrate::kubectl::KubectlTunnel;
@@ -64,9 +68,14 @@ async fn live_provisioner() -> SubstrateProvisioner {
         .expect("connect to the installed Substrate control plane")
 }
 
+/// Proves scoped control reads, not a spawned-actor proxy connection.
+///
+/// The strict settings file must be complete, but its named template is not
+/// looked up and no worker password is read. The optional command connector
+/// contributes its control channel only; it does not start an actor proxy.
 #[tokio::test]
 #[ignore = "talks to the owner's cluster; needs GANJA_LIVE_TEST=1 and GANJA_SUBSTRATE_CONFIG_HOME"]
-async fn control_plane() {
+async fn control_plane_authorized_reads() {
     if !opted_in() {
         return;
     }
@@ -88,7 +97,7 @@ async fn control_plane() {
         KubeTunnel::with_services(client.clone(), &settings.api_service, &settings.router_service)
             .await
             .expect("in-process connector: trust bundle, control channel, router certificate");
-    in_process.control().await.expect("in-process control channel");
+    let mut channels = vec![in_process.control().await.expect("in-process control channel")];
     if let Some(kubectl) = settings.kubectl.clone() {
         let command = KubectlTunnel::connect(
             client.clone(),
@@ -99,21 +108,42 @@ async fn control_plane() {
         )
         .await
         .expect("command connector over the same serving trust");
-        command.control().await.expect("command control channel");
+        channels.push(command.control().await.expect("command control channel"));
     }
 
-    // Control-plane smoke through the provisioner's own authorized wrappers.
-    // No Actor is created and no shared router pod is touched.
-    let provisioner = live_provisioner().await;
-    let atespace = provisioner.get_atespace().await.expect("GetAtespace as the ganja editor");
-    assert_eq!(
-        atespace.metadata.expect("atespace metadata").name,
-        settings.atespace,
-        "the authorized atespace is the configured one"
-    );
-    let templates =
-        provisioner.list_actor_templates(String::new()).await.expect("ListActorTemplates");
-    eprintln!("live control plane: {} template(s) listed", templates.actor_templates.len());
+    for channel in channels {
+        let mut control = ControlClient::new(channel);
+        let atespace = control
+            .get_atespace(
+                identity
+                    .authorize(GetAtespaceRequest {
+                        atespace: Some(ObjectRef {
+                            atespace: String::new(),
+                            name: settings.atespace.clone(),
+                        }),
+                    })
+                    .await
+                    .expect("authorize atespace read"),
+            )
+            .await
+            .expect("GetAtespace as the ganja editor")
+            .into_inner();
+        assert_eq!(atespace.metadata.expect("atespace metadata").name, settings.atespace);
+        let templates = control
+            .list_actor_templates(
+                identity
+                    .authorize(ListActorTemplatesRequest {
+                        atespace: settings.atespace.clone(),
+                        options: Some(ListOptions { page_size: 100, page_token: String::new() }),
+                    })
+                    .await
+                    .expect("authorize template list"),
+            )
+            .await
+            .expect("ListActorTemplates")
+            .into_inner();
+        eprintln!("live control reads: {} template(s) listed", templates.actor_templates.len());
+    }
 }
 
 #[tokio::test]
