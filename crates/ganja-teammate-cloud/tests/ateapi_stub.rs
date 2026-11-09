@@ -272,6 +272,7 @@ async fn ateapi_tokens_use_the_scoped_audience_and_renew_from_the_returned_expir
         first.metadata().get("authorization").expect("bearer").to_str().expect("ASCII"),
         format!("Bearer {TOKEN_CANARY}-1")
     );
+    assert!(first.metadata().get("authorization").expect("bearer").is_sensitive());
     assert!(!format!("{identity:?} {first:?}").contains(TOKEN_CANARY));
     assert_eq!(fixture.state.tokens.load(Ordering::SeqCst), 1);
     fixture.state.token_ttl.store(3600, Ordering::SeqCst);
@@ -281,7 +282,10 @@ async fn ateapi_tokens_use_the_scoped_audience_and_renew_from_the_returned_expir
         second.metadata().get("authorization").expect("bearer").to_str().expect("ASCII"),
         format!("Bearer {TOKEN_CANARY}-2")
     );
-    identity.authorize(()).await.expect("reuse unexpired token");
+    assert!(second.metadata().get("authorization").expect("renewed bearer").is_sensitive());
+    let cached = identity.authorize(()).await.expect("reuse unexpired token");
+    assert!(cached.metadata().get("authorization").expect("cached bearer").is_sensitive());
+    assert!(!format!("{cached:?}").contains(TOKEN_CANARY));
     assert_eq!(fixture.state.tokens.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 0);
 }

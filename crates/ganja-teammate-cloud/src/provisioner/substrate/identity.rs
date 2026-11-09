@@ -21,7 +21,7 @@ pub struct AteapiIdentity {
 }
 
 struct Credential {
-    token: SecretString,
+    authorization: SecretString,
     renew_at: SystemTime,
     expires_at: SystemTime,
 }
@@ -93,22 +93,21 @@ impl AteapiIdentity {
             if remaining.is_zero() {
                 return Err(refused());
             }
-            let token = status.token.filter(|token| !token.is_empty()).ok_or_else(refused)?;
-            // Header validation occurs before caching, without preserving any error body.
+            let token = SecretString::from(
+                status.token.filter(|token| !token.is_empty()).ok_or_else(refused)?,
+            );
+            let authorization = SecretString::from(format!("Bearer {}", token.expose_secret()));
+            // Build once in wiped storage; requests copy only into sensitive metadata.
             let mut header =
-                MetadataValue::try_from(format!("Bearer {token}")).map_err(|_| refused())?;
+                MetadataValue::try_from(authorization.expose_secret()).map_err(|_| refused())?;
             header.set_sensitive(true);
-            *current = Some(Credential {
-                token: SecretString::from(token),
-                renew_at: now + remaining / 2,
-                expires_at,
-            });
+            *current =
+                Some(Credential { authorization, renew_at: now + remaining / 2, expires_at });
             return Ok(header);
         }
         let credential = current.as_ref().ok_or_else(refused)?;
-        let mut header =
-            MetadataValue::try_from(format!("Bearer {}", credential.token.expose_secret()))
-                .map_err(|_| refused())?;
+        let mut header = MetadataValue::try_from(credential.authorization.expose_secret())
+            .map_err(|_| refused())?;
         header.set_sensitive(true);
         Ok(header)
     }
