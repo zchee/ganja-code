@@ -46,6 +46,34 @@ address; this relies on one tenant per worker sandbox and mandatory Basic auth.
 The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
 `GIT_SSL_CAINFO`; these trusted paths are followed, including projection symlinks.
 
+### Child environments
+
+`ganja worker init` clears inherited environment for both child types and copies
+only the corresponding allowlist:
+
+- Served engine: `PATH`, `HOME`, `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`,
+  `GANJA_CONFIG_HOME`, `XDG_DATA_HOME`, `SSL_CERT_FILE`, `GIT_CONFIG_GLOBAL`,
+  `GIT_SSL_CAINFO`, `GANJA_PROVIDER`, `GANJA_FAKE_SCRIPT`,
+  `GANJA_DISABLE_MODELS_FETCH`, `GANJA_DISABLE_TERM_PROBE`.
+  These image/template inputs supply engine configuration, authentication and
+  non-secret Git trust paths needed by commands run through the engine's tools.
+- Git: `PATH`, `HOME`, `GIT_CONFIG_GLOBAL`, `GIT_SSL_CAINFO`.
+  These image/platform inputs supply binary lookup, home, Git policy and the
+  projected CA bundle; Git needs no server credentials or engine configuration.
+  The child also sets `GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_NOSYSTEM=1` explicitly.
+
+Every other inherited variable is cleared; the two Git overrides above are not
+copied from the parent.
+
+### Worker endpoints
+
+A worker endpoint must use HTTPS with a host, or HTTP with a loopback IP address
+or `localhost`. It must name only the origin: parsed path `/`, spelled with no
+path or one trailing slash, and no userinfo (including empty userinfo), query or
+fragment. Backslashes and original nonempty paths, including dot-segments that
+URL parsing would normalize, are refused. Provisioner headers named
+`Authorization` or `Proxy-Authorization` are refused case-insensitively.
+
 ## Code and tests
 
 - `src/provisioner.rs`: lifecycle types and trait.
