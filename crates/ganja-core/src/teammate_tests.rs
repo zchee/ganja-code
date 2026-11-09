@@ -686,6 +686,7 @@ struct Recording {
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// `(name, whether the team file named it at launch time)`.
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    launch_span: Arc<std::sync::Mutex<Option<tracing::Id>>>,
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
     owns_inbox: bool,
@@ -740,6 +741,7 @@ impl TeammateBackend for Recording {
             owns_inbox: self.owns_inbox,
             owned_seed: std::sync::Mutex::new(None),
             launched: Arc::clone(&self.launched),
+            launch_span: Arc::clone(&self.launch_span),
             killed: Arc::clone(&self.killed),
             hold_launch: self.hold_launch.clone(),
             hold_kill: self.hold_kill.clone(),
@@ -766,6 +768,7 @@ struct RecordedPane {
     owns_inbox: bool,
     owned_seed: std::sync::Mutex<Option<mailbox::Identity>>,
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    launch_span: Arc<std::sync::Mutex<Option<tracing::Id>>>,
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     hold_launch: Option<Arc<tokio::sync::Notify>>,
     hold_kill: Option<Arc<tokio::sync::Notify>>,
@@ -778,6 +781,7 @@ impl Spawned for RecordedPane {
     }
 
     async fn launch(&self) -> Result<(), Unsupported> {
+        *self.launch_span.lock().expect("launch span lock") = tracing::Span::current().id();
         let spec = &self.spec;
         if self.owns_inbox {
             let seed =
@@ -831,6 +835,60 @@ impl Spawned for RecordedPane {
         let seeded = self.owned_seed.lock().expect("owned seed lock").take();
         super::unseed_inbox(self.spec.inbox(), seeded, self.spec.name.as_str()).await;
     }
+}
+
+#[tokio::test]
+async fn repeated_failed_spawns_keep_only_unfinished_task_handles() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let waiter = release.clone();
+    registry.tasks.lock().expect("task list").push(tokio::spawn(async move {
+        waiter.notified().await;
+    }));
+    let backend = Arc::new(Recording { refuse_launch: true, ..Recording::default() });
+    for _ in 0..32 {
+        assert!(
+            registry
+                .spawn(backend.clone(), request("retry", MemberBackend::Ganja, home.path()))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        registry.tasks.lock().expect("task list").len() <= 2,
+        "completed attempts must be reaped"
+    );
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!shutdown.is_finished(), "the unfinished task must remain tracked");
+    release.notify_one();
+    shutdown.await.expect("shutdown joined retained task");
+}
+
+#[tokio::test]
+async fn pending_launch_keeps_the_callers_tracing_span() {
+    use tracing::Instrument as _;
+
+    let subscriber = tracing_subscriber::Registry::default();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let span = tracing::info_span!("spawn caller");
+    let expected = span.id().expect("enabled span");
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let backend = Arc::new(Recording::default());
+    registry
+        .spawn(backend.clone(), request("traced", MemberBackend::Ganja, home.path()))
+        .instrument(span)
+        .await
+        .expect("member spawned");
+    assert_eq!(*backend.launch_span.lock().expect("launch span"), Some(expected));
+    registry.shutdown().await;
 }
 
 #[tokio::test]

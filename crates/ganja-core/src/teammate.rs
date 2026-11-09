@@ -139,6 +139,7 @@ use ganja_team::{
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::engine::Evicted;
 use crate::permission::Permissions;
@@ -2518,10 +2519,17 @@ impl TeammateRegistry {
         let pending =
             PendingSpawn { registry: Arc::clone(self), spec, spawned, seeded, recording: None };
         let (finished, result) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _ = finished.send(pending.finish(backend, cancelled).await);
-        });
-        self.tasks.lock().expect("the task list is never poisoned").push(task);
+        let task = tokio::spawn(
+            async move {
+                let _ = finished.send(pending.finish(backend, cancelled).await);
+            }
+            .in_current_span(),
+        );
+        {
+            let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(task);
+        }
         drop(admission);
         let outcome = result.await.map_err(|_| Unsupported {
             backend: request.backend,
