@@ -379,6 +379,7 @@ impl TeammateBackend for ClaudePane {
         Ok(Arc::new(ClaudeMember {
             pane: Arc::new(PaneMember::new(pane, "claude teammate", server, spec, &lent)),
             spec: spec.clone(),
+            inbox: tokio::sync::Mutex::default(),
         }))
     }
 
@@ -403,6 +404,63 @@ struct ClaudeMember {
     /// Held because the launch needs it: the flags, the inbox and the root are
     /// all read off the spec at the moment the line is typed.
     spec: SpawnSpec,
+    inbox: tokio::sync::Mutex<LaunchInbox>,
+}
+
+#[derive(Debug, Default)]
+enum LaunchInbox {
+    #[default]
+    Empty,
+    Writing {
+        path: std::path::PathBuf,
+        task: JoinHandle<Result<mailbox::Identity, Unsupported>>,
+    },
+    Seeded {
+        path: std::path::PathBuf,
+        identity: mailbox::Identity,
+    },
+}
+
+impl ClaudeMember {
+    async fn launch_on(
+        &self,
+        server: &Server,
+        root: &TeamsRoot,
+        binary: &std::path::Path,
+    ) -> Result<(), Unsupported> {
+        let spec = &self.spec;
+        // Compose before seeding: unquotable arguments must leave no inbox entry.
+        let line = tmux::launch_line(binary, &arguments(spec))
+            .map_err(|error| ClaudePane::refused(&error))?;
+        let path = root.inbox_path(&spec.team, &spec.name);
+        let mut inbox = self.inbox.lock().await;
+        let seed_spec = spec.clone();
+        let seed_root = root.clone();
+        // Retain the write task even when launch is dropped: blocking mailbox
+        // I/O may still finish, and kill must join it before removing its entry.
+        let task = tokio::spawn(async move { ClaudePane::seed(&seed_spec, &seed_root).await });
+        *inbox = LaunchInbox::Writing { path: path.clone(), task };
+        let LaunchInbox::Writing { task, .. } = &mut *inbox else {
+            unreachable!("the seed task was just installed")
+        };
+        let result = task.await;
+        *inbox = LaunchInbox::Empty;
+        let identity = result.map_err(|error| ClaudePane::cannot(error.to_string()))??;
+        *inbox = LaunchInbox::Seeded { path, identity };
+        drop(inbox);
+        server
+            .type_line(&self.pane.pane().id, &line)
+            .await
+            .map_err(|error| ClaudePane::refused(&error))?;
+        *self.inbox.lock().await = LaunchInbox::Empty;
+        tracing::info!(
+            teammate = spec.name.as_str(),
+            pane = self.pane.pane().id,
+            "a claude teammate's pane was launched"
+        );
+        tmux::trace_launch_line(spec.name.as_str(), &self.pane.pane().id, &line);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -416,47 +474,14 @@ impl Spawned for ClaudeMember {
     /// # Errors
     ///
     /// [`Unsupported`] when the inbox could not be seeded or the launch line
-    /// could not be typed. The registry unwinds — the pane killed, the record
-    /// taken back out, the name given back — and the one thing it cannot
-    /// unwind, this backend's own inbox write, is unwound here.
+    /// could not be typed. The registry unwinds the pane and its record; this
+    /// member keeps ownership of its pending inbox write until kill completes
+    /// it and removes the unused prompt.
     async fn launch(&self) -> Result<(), Unsupported> {
-        let spec = &self.spec;
         let server = Server::current().map_err(|error| ClaudePane::refused(&error))?;
         let binary = on_path(BINARY).ok_or_else(|| ClaudePane::cannot(REFUSED_NO_BINARY))?;
         let root = teams_root().ok_or_else(|| ClaudePane::cannot(REFUSED_NO_CONFIG_DIR))?;
-        // Composed before the seed, so its one refusal — a word no shell
-        // quoting can carry — leaves no inbox to unseed.
-        let line = tmux::launch_line(&binary, &arguments(spec))
-            .map_err(|error| ClaudePane::refused(&error))?;
-
-        // §4.1 steps 4 and 5 before step 6, which is the order that matters:
-        // the pane reads its inbox on its way up, so a process launched before
-        // the task was in it would either idle or ask what it is for.
-        let seeded = ClaudePane::seed(spec, &root).await?;
-
-        if let Err(error) = server.type_line(&self.pane.pane().id, &line).await {
-            // The one failing path past the seed, and this backend's to unwind:
-            // the registry seeded nothing here and cannot prune what it does not
-            // know the root of (`TeammateBackend::owns_inbox`). A prompt left in
-            // an inbox nothing will read is the half of a failed spawn still
-            // visible tomorrow.
-            ganja_core::teammate::unseed_inbox(
-                root.inbox_path(&spec.team, &spec.name),
-                Some(seeded),
-                spec.name.as_str(),
-            )
-            .await;
-
-            return Err(ClaudePane::refused(&error));
-        }
-        tracing::info!(
-            teammate = spec.name.as_str(),
-            pane = self.pane.pane().id,
-            "a claude teammate's pane was launched"
-        );
-        tmux::trace_launch_line(spec.name.as_str(), &self.pane.pane().id, &line);
-
-        Ok(())
+        self.launch_on(&server, &root, &binary).await
     }
 
     /// The pane member's own liveness watch (**D541**), which is this
@@ -476,6 +501,25 @@ impl Spawned for ClaudeMember {
 
     async fn kill(&self) {
         self.pane.kill().await;
+        let mut inbox = self.inbox.lock().await;
+        let seeded = match std::mem::take(&mut *inbox) {
+            LaunchInbox::Empty => None,
+            LaunchInbox::Seeded { path, identity } => Some((path, identity)),
+            LaunchInbox::Writing { path, task } => match task.await {
+                Ok(Ok(identity)) => Some((path, identity)),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "the cancelled teammate's inbox write failed");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the cancelled teammate's inbox write task failed");
+                    None
+                }
+            },
+        };
+        if let Some((path, identity)) = seeded {
+            ganja_core::teammate::unseed_inbox(path, Some(identity), self.spec.name.as_str()).await;
+        }
     }
 }
 

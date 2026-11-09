@@ -98,6 +98,8 @@ impl TraceLog {
         {
             use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
+            // The builder applies this mode to every new ancestor; umask can
+            // only remove bits. An existing wider leaf is refused below, not tightened.
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)?;
             let metadata = std::fs::symlink_metadata(&directory)?;
             // Do not silently change a shared directory's access policy, or follow

@@ -20,6 +20,125 @@ use worker_git::{Checkout, GitOptions, Stage, prepare};
 use worker_support::GitServer;
 
 #[tokio::test]
+async fn the_initializer_and_replacement_server_announce_the_same_ephemeral_port() {
+    let server = GitServer::start(false).await;
+    let worker = worker_support::WorkerProcess::start(&server).await;
+    let initial = worker.announced_ports();
+    assert_eq!(initial.len(), 1);
+    assert_ne!(initial[0], 0);
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/same-port".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let ports = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let ports = worker.announced_ports();
+            if ports.len() >= 2 {
+                break ports;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("replacement announces its bound port");
+    assert_eq!(
+        ports,
+        [initial[0], initial[0]],
+        "exec preserves the initializer's actual bound port"
+    );
+    worker.client.health().await.expect("same client reaches replacement server");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn an_early_initializer_exit_reports_status_and_redacted_stderr() {
+    use futures::FutureExt as _;
+
+    let server = GitServer::start(false).await;
+    let failure =
+        std::panic::AssertUnwindSafe(worker_support::WorkerProcess::start_with_environment(
+            &server,
+            &[("GIT_CONFIG_GLOBAL", "/missing-synthetic-worker-gitconfig")],
+        ))
+        .catch_unwind()
+        .await
+        .err()
+        .expect("invalid worker configuration is refused");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("panic text");
+    assert!(message.contains("exit status: 1"), "child exit status was omitted: {message}");
+    assert!(
+        message.contains("requires GIT_CONFIG_GLOBAL to name a readable file"),
+        "child stderr was omitted: {message}"
+    );
+    assert!(!message.contains("synthetic-worker-password"), "password must be redacted");
+    server.close().await;
+}
+
+#[tokio::test]
+async fn an_initializer_announces_its_bound_ephemeral_port() {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let home = tempfile::tempdir().expect("worker home");
+    let gitconfig = home.path().join("gitconfig");
+    let ca = home.path().join("ca.pem");
+    std::fs::write(&gitconfig, "").expect("git configuration");
+    std::fs::write(&ca, "fixture").expect("trust file");
+    let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"))
+        .args(["worker", "init", "--port", "0"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").expect("PATH"))
+        .env("HOME", home.path())
+        .env("GANJA_SERVER_PASSWORD", "synthetic-worker-password")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("GIT_SSL_CAINFO", &ca)
+        .current_dir(home.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("worker init");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut lines = BufReader::new(stdout).lines();
+    let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("initializer announces its bound address")
+        .expect("address line")
+        .expect("stdout stays open");
+    let address: std::net::SocketAddr = line
+        .strip_prefix("ganja server listening on http://")
+        .expect("same address format as serve")
+        .parse()
+        .expect("bound socket address");
+    assert!(address.ip().is_unspecified());
+    assert_ne!(address.port(), 0);
+    let client = ganja_client::Client::new(
+        &format!("http://127.0.0.1:{}", address.port()),
+        Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
+    )
+    .expect("client");
+    assert!(matches!(
+        client.bootstrap_status().await.expect("announced listener responds"),
+        ganja_client::BootstrapStatus::Idle
+    ));
+    child.kill().await.expect("stop initializer");
+    child.wait().await.expect("reap initializer");
+}
+
+#[tokio::test]
 async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
     let server = GitServer::start(false).await;
     let mut worker = worker_support::WorkerProcess::start(&server).await;
@@ -141,6 +260,99 @@ async fn the_served_worker_does_not_inherit_host_config_overrides() {
     })
     .await
     .expect("isolated serve starts");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider() {
+    let server = GitServer::start(false).await;
+    let template = tempfile::tempdir().expect("worker template");
+    let config = template.path().join("engine-config");
+    let data = template.path().join("engine-data");
+    let script = template.path().join("turns.json");
+    std::fs::create_dir(&config).expect("config directory");
+    std::fs::write(config.join("ganja.toml"), "model = \"fake/worker-template-model\"\n")
+        .expect("template configuration");
+    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}${GIT_CONFIG_GLOBAL+x}${GIT_SSL_CAINFO+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
+    std::fs::write(&script, serde_json::json!({"turns": [
+        {"text": "checking environment", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
+        {"text": "worker-template-script-finished"}
+    ]}).to_string()).expect("template script");
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[
+            ("GANJA_CONFIG_HOME", config.to_str().expect("config path")),
+            ("XDG_DATA_HOME", data.to_str().expect("data path")),
+            ("SSL_CERT_FILE", server.ca.to_str().expect("CA path")),
+            ("GANJA_PROVIDER", "fake"),
+            ("GANJA_FAKE_SCRIPT", script.to_str().expect("script path")),
+            ("GIT_SSL_NO_VERIFY", "1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("ANTHROPIC_API_KEY", "synthetic-provider-value"),
+            ("GANJA_CONFIG", "/missing-synthetic-host-config.toml"),
+            ("GANJA_WORKER_ENV_CANARY", "synthetic-unlisted-value"),
+        ],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/template-env".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let health = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(health) = worker.client.health().await {
+                break health;
+            }
+            assert!(worker.is_alive(), "served worker remains alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("served worker health");
+    let mut events = worker.client.events().await.expect("events");
+    worker
+        .client
+        .prompt(&health.session_id, &Prompt::new("check template environment"))
+        .await
+        .expect("prompt");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(
+                events.next().await.expect("stream open").expect("event"),
+                Event::MessageFinished { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("scripted turn finishes");
+    assert_eq!(
+        std::fs::read_to_string(worker.work.join("environment.txt"))
+            .expect("script ran with clean environment"),
+        "template-environment"
+    );
+    let messages = worker.client.messages(&health.session_id).await.expect("messages");
+    assert!(
+        messages.iter().any(|message| message.model.as_deref() == Some("worker-template-model")),
+        "model from template ganja.toml was used"
+    );
+    assert!(
+        serde_json::to_string(&messages)
+            .expect("messages serialize")
+            .contains("worker-template-script-finished")
+    );
+    assert!(data.join("ganja").is_dir(), "template data home was used");
     drop(worker);
     server.close().await;
 }

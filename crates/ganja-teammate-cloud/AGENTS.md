@@ -89,6 +89,11 @@ it does not fall back to `GANJA_SERVER_PASSWORD`. The backend installs this valu
 as the client's password for the worker endpoint; provisioner routing headers
 cannot override that authentication.
 
+The served engine binds all interfaces so the platform router can reach its pod
+address; this relies on one tenant per worker sandbox and mandatory Basic auth.
+The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
+`GIT_SSL_CAINFO`; these trusted paths are followed, including projection symlinks.
+
 ## Code and tests
 
 - `src/provisioner.rs`: lifecycle types and trait.

@@ -178,6 +178,20 @@ async fn read_file(
     }
 }
 
+fn announced_ports(output: &str) -> impl Iterator<Item = u16> + '_ {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("ganja server listening on http://"))
+        .filter_map(|address| address.parse::<std::net::SocketAddr>().ok())
+        .map(|address| address.port())
+}
+
+fn worker_stderr(state: &Path) -> String {
+    std::fs::read_to_string(state.join("stderr"))
+        .expect("stderr log")
+        .replace("synthetic-worker-password", "[redacted]")
+}
+
 pub struct WorkerProcess {
     pub client: ganja_client::Client,
     pub address: String,
@@ -230,15 +244,11 @@ impl WorkerProcess {
             ),
         )
         .expect("worker policy");
-        let reserved =
-            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("reserve port");
-        let port = reserved.local_addr().expect("port").port();
-        drop(reserved);
         let stdout = std::fs::File::create(state.path().join("stdout")).expect("stdout file");
         let stderr = std::fs::File::create(state.path().join("stderr")).expect("stderr file");
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ganja"));
         command
-            .args(["worker", "init", "--port", &port.to_string()])
+            .args(["worker", "init", "--port", "0"])
             .current_dir(&work)
             .env("HOME", state.path())
             .env("XDG_DATA_HOME", state.path().join("data"))
@@ -254,7 +264,36 @@ impl WorkerProcess {
             .stdout(stdout)
             .stderr(stderr);
         command.envs(environment.iter().copied());
-        let child = command.spawn().expect("spawn worker init");
+        let mut child = command.spawn().expect("spawn worker init");
+        let announced = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(status) = child.try_wait().expect("child state") {
+                    return Err(status);
+                }
+                let output =
+                    std::fs::read_to_string(state.path().join("stdout")).expect("stdout log");
+                if let Some(port) = announced_ports(&output).next() {
+                    return Ok(port);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let port = match announced {
+            Ok(Ok(port)) => port,
+            Ok(Err(status)) => panic!(
+                "worker init exited before listening ({status}); stderr: {}",
+                worker_stderr(state.path()),
+            ),
+            Err(_) => {
+                let _ = child.kill();
+                let status = child.wait().expect("reap initializer");
+                panic!(
+                    "worker init did not announce its address ({status}); stderr: {}",
+                    worker_stderr(state.path())
+                );
+            }
+        };
         let address = format!("http://127.0.0.1:{port}");
         let client = ganja_client::Client::new(
             &address,
@@ -270,16 +309,25 @@ impl WorkerProcess {
                 ) {
                     break;
                 }
-                assert!(
-                    worker.child.try_wait().expect("child state").is_none(),
-                    "worker init exited before listening"
-                );
+                if let Some(status) = worker.child.try_wait().expect("child state") {
+                    panic!(
+                        "worker init exited before listening ({status}); stderr: {}",
+                        worker_stderr(worker._state.path())
+                    );
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("init listener ready");
         worker
+    }
+
+    /// Ports announced by the initializer and its replacement server.
+    pub fn announced_ports(&self) -> Vec<u16> {
+        let output =
+            std::fs::read_to_string(self._state.path().join("stdout")).expect("stdout log");
+        announced_ports(&output).collect()
     }
 
     pub fn is_alive(&mut self) -> bool {

@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
@@ -27,21 +26,38 @@ use crate::state::{LaunchFailure, Phase};
 use crate::trace::TraceLog;
 use crate::transport::{ClientSource, EventSource};
 
-static CONTROLS: LazyLock<Mutex<BTreeMap<PathBuf, Weak<CloudMember>>>> =
+type ControlKey = (usize, String);
+
+static CONTROLS: LazyLock<Mutex<BTreeMap<ControlKey, Weak<CloudMember>>>> =
     LazyLock::new(Mutex::default);
 
 pub(crate) fn register(member: &Arc<CloudMember>) {
-    CONTROLS
-        .lock()
-        .expect("cloud control map lock")
-        .insert(member.spec.inbox(), Arc::downgrade(member));
+    let mut controls = CONTROLS.lock().expect("cloud control map lock");
+    controls.retain(|_, member| {
+        member.upgrade().is_some_and(|member| member.lent.registry.strong_count() != 0)
+    });
+    if member.lent.registry.strong_count() == 0 {
+        return;
+    }
+    // A live member retains the registry's Weak allocation; prune dead owners
+    // as well as expired members so no control survives its registry lifetime.
+    let key = (member.lent.registry.as_ptr() as usize, member.spec.name.as_str().to_owned());
+    controls.insert(key, Arc::downgrade(member));
 }
 
 /// Looks up a hosted member in its owning registry without retaining it globally.
 pub fn control(registry: &teammate::TeammateRegistry, name: &str) -> Option<CloudControl> {
+    let mut controls = CONTROLS.lock().expect("cloud control map lock");
+    controls.retain(|_, member| {
+        member.upgrade().is_some_and(|member| member.lent.registry.strong_count() != 0)
+    });
     let name = ganja_team::MemberName::parse(name).ok()?;
-    let inbox = registry.root().inbox_path(registry.team(), &name);
-    CONTROLS.lock().expect("cloud control map lock").get(&inbox)?.upgrade().map(CloudControl)
+    let key = (std::ptr::from_ref(registry) as usize, name.as_str().to_owned());
+    controls
+        .get(&key)?
+        .upgrade()
+        .filter(|member| member.lent.registry.strong_count() != 0)
+        .map(CloudControl)
 }
 
 /// Owner controls bypass neither the request gate nor the permanent uncertain latch.
@@ -151,9 +167,12 @@ impl CloudMember {
                 && url.password().is_none()
                 && url.query().is_none()
                 && url.fragment().is_none()
-                // Url normalizes an empty userinfo away, so inspect the authority too.
+                && url.path() == "/"
+                // Inspect the original spelling because URL parsing normalizes
+                // empty userinfo and dot-segments before the origin check.
                 && endpoint.base_url.split_once("://").is_some_and(|(_, rest)| {
-                    rest.split('/').next().is_some_and(|authority| !authority.contains('@'))
+                    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+                    !authority.contains('@') && !rest.contains('\\') && path.is_empty()
                 })
         }) && !endpoint.headers.contains_key(http::header::AUTHORIZATION)
             && !endpoint.headers.contains_key(http::header::PROXY_AUTHORIZATION);
