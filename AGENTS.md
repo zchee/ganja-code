@@ -17,8 +17,7 @@ Fifteen members under `crates/`, each with its own `AGENTS.md`. Dependency direc
 | `ganja-provider` | Vendor wires, credentials and logins, the model catalog. |
 | `ganja-storage` | The SQLite session store and working-tree snapshots for `/undo` and `/rewind`. |
 | `ganja-core` | The engine: sessions, the agent loop, config, hooks, MCP, LSP, plugins, teammates. No terminal or HTTP-server dependency. |
-| `ganja-teammate-cloud` | Hosted teammate lifecycle and vendor-neutral provisioners. Above the engine; `ganja-serve` never links it. |
-| `ganja-teammate-local` | tmux-pane and foreign-CLI teammate backends. Above the engine; `ganja-serve` never links it. |
+| `ganja-teammate-cloud`, `ganja-teammate-local` | Hosted teammate lifecycle and vendor-neutral provisioners; tmux-pane and foreign-CLI backends. Both are above the engine; `ganja-serve` links neither. |
 | `ganja-tui` | The ratatui frontend. Every pixel, no engine logic. |
 | `ganja-serve` | The engine over HTTP + SSE, plus the per-session Unix socket. |
 | `ganja-client` | The typed client for `ganja-serve`. |
@@ -82,7 +81,7 @@ dist build                                  # local archive under target/distrib
 | `GANJA_DISABLE_TERM_PROBE` | Truthy skips the kitty keyboard probe. Every pty test sets it. |
 | `GANJA_DISABLE_MODELS_FETCH`, `GANJA_MODELS_URL`, `GANJA_MODELS_PATH` | Catalog fetching off; fetch base URL; read-only cache path override. |
 | `GANJA_AUTH_ISSUER` | Login endpoint origin for tests. Loopback only; anything else is refused. |
-| `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME` | `serve` Basic auth. Without the password `serve` refuses a non-loopback `--hostname`. |
+| `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`, `GANJA_CLOUD_PASSWORD` | `serve` Basic auth: without the server password, a non-loopback `--hostname` is refused. The cloud backend reads `GANJA_CLOUD_PASSWORD` once for worker Basic auth; unset or empty makes cloud spawn fail. |
 | `GANJA_CLAUDE_BIN` | Absolute path of the `claude` binary the `claude-code` provider spawns. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY` | Credentials; they outrank the stored `auth.json`. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Endpoint overrides; https or loopback only. |
