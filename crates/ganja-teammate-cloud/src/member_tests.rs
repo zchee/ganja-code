@@ -249,6 +249,34 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn a_retained_member_does_not_keep_its_dead_registry_control() {
+    let mut fixture = Fixture::new().await;
+    let registry = Arc::new(teammate::TeammateRegistry::new(
+        fixture.member.spec.root.clone(),
+        fixture.member.spec.team.clone(),
+        "lead",
+        fixture._home.path(),
+    ));
+    Arc::get_mut(&mut fixture.member).expect("unique member").lent.registry =
+        Arc::downgrade(&registry);
+    register(&fixture.member);
+    let retained = control(&registry, "gate-worker").expect("live control");
+    drop(registry);
+    let replacement = teammate::TeammateRegistry::new(
+        fixture.member.spec.root.clone(),
+        fixture.member.spec.team.clone(),
+        "lead",
+        fixture._home.path(),
+    );
+    assert!(control(&replacement, "gate-worker").is_none());
+    let old = Arc::downgrade(&retained.0);
+    assert!(
+        CONTROLS.lock().expect("control map").values().all(|entry| !Weak::ptr_eq(entry, &old)),
+        "a dead registry must be pruned even while its member lives"
+    );
+}
+
+#[tokio::test]
 async fn identical_disk_paths_do_not_alias_live_registry_controls() {
     let mut first = Fixture::new().await;
     let mut second = Fixture::new().await;
