@@ -143,7 +143,7 @@ async fn canary_kubernetes(deny_token: bool) -> (kube::Client, tokio::task::Join
     (client, server)
 }
 
-/// The kube/ateapi half: control-plane credentials and bodies stay out of output.
+/// The kube/ateapi half: ganja's formatting and shipped filters redact credentials.
 async fn substrate_credentials_are_redacted() {
     use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
     use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
@@ -175,6 +175,49 @@ async fn substrate_credentials_are_redacted() {
     assert_redacted(&format!("{invalid:?} {invalid}"));
 }
 
+#[test]
+fn substrate_credentials_stay_redacted_with_both_shipped_log_filters() {
+    const FILTER_ENV: &str = "GANJA_TEST_SUBSTRATE_LOG_FILTER";
+    if let Ok(filter) = std::env::var(FILTER_ENV) {
+        let capture = ganja_testkit::LogCapture::default();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(capture.clone())
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+                .finish(),
+        )
+        .expect("isolated child subscriber");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("canary runtime")
+            .block_on(substrate_credentials_are_redacted());
+        assert_redacted(&capture.logged());
+        return;
+    }
+    // Each subscriber is process-wide, so isolate filter variants from one another
+    // and from the member/serve canary test in this binary.
+    for filter in ["info", "info,ganja=debug"] {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "substrate_credentials_stay_redacted_with_both_shipped_log_filters",
+                "--nocapture",
+            ])
+            .env(FILTER_ENV, filter)
+            .output()
+            .expect("run filter canary child");
+        assert!(
+            output.status.success(),
+            "filter {filter}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_redacted(&String::from_utf8_lossy(&output.stdout));
+        assert_redacted(&String::from_utf8_lossy(&output.stderr));
+    }
+}
+
 struct EchoFailure;
 
 impl ganja_serve::bootstrap::Executor for EchoFailure {
@@ -202,10 +245,9 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
         tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
-            // The shipped verbose filter: ganja's own targets at debug and
-            // dependencies at info. kube_client prints remote Status bodies in
-            // its own debug logging, which no ganja filter enables; the pin
-            // holds for what a `--verbose` run can actually write.
+            // The shipped verbose filter keeps dependency targets at info.
+            // Enabling third-party HTTP/Kubernetes debug targets is unsupported:
+            // kube_client can print raw remote Status bodies at that level.
             .with_env_filter(tracing_subscriber::EnvFilter::new("info,ganja=debug"))
             .finish(),
     )
