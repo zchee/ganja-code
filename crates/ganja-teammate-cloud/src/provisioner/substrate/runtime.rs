@@ -124,11 +124,6 @@ impl SubstrateProvisioner {
     /// Refuses invalid settings, missing `GANJA_CLOUD_PASSWORD`, or unavailable identities.
     pub async fn connect(config_home: &Path, username: &str) -> Result<Self, ProvisionError> {
         let settings = Settings::load(config_home)?;
-        let password = std::env::var("GANJA_CLOUD_PASSWORD")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(SecretString::from)
-            .ok_or_else(|| failure("GANJA_CLOUD_PASSWORD", ProvisionErrorKind::Refused))?;
         let kubeconfig = ::kube::config::Kubeconfig::read_from(&settings.kubeconfig)
             .map_err(|_| failure("kubeconfig", ProvisionErrorKind::Refused))?;
         let options = ::kube::config::KubeConfigOptions {
@@ -138,6 +133,17 @@ impl SubstrateProvisioner {
         let config = ::kube::Config::from_custom_kubeconfig(kubeconfig, &options)
             .await
             .map_err(|_| failure("kubeconfig", ProvisionErrorKind::Refused))?;
+        if config.accept_invalid_certs {
+            return Err(failure("insecure-skip-tls-verify", ProvisionErrorKind::Refused));
+        }
+        if config.cluster_url.scheme_str() != Some("https") {
+            return Err(failure("server", ProvisionErrorKind::Refused));
+        }
+        let password = std::env::var("GANJA_CLOUD_PASSWORD")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(SecretString::from)
+            .ok_or_else(|| failure("GANJA_CLOUD_PASSWORD", ProvisionErrorKind::Refused))?;
         let client = client_from_config(config)?;
         let identity = AteapiIdentity::new(client.clone()).await?;
         let tunnel: Arc<dyn Tunnel> = match settings.tunnel {

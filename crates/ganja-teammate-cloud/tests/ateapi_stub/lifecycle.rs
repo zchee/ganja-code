@@ -432,6 +432,45 @@ async fn fixture() -> (KubeFixture, ControlFixture, SubstrateProvisioner) {
     (kube, ControlFixture { state, task }, provisioner)
 }
 
+#[tokio::test]
+async fn insecure_operator_clusters_are_refused_before_requesting_credentials() {
+    const CHILD: &str = "GANJA_TEST_INSECURE_CLUSTER";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "lifecycle::insecure_operator_clusters_are_refused_before_requesting_credentials",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("GANJA_CLOUD_PASSWORD")
+            .output()
+            .expect("isolated config test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    for (operation, server, insecure) in [
+        ("insecure-skip-tls-verify", "https://127.0.0.1:1", true),
+        ("server", "http://127.0.0.1:1", false),
+    ] {
+        let directory = tempfile::tempdir().expect("config directory");
+        let kubeconfig = directory.path().join("kubeconfig.yaml");
+        std::fs::write(&kubeconfig, format!(
+            "apiVersion: v1\nkind: Config\ncurrent-context: test\nclusters:\n  - name: test\n    cluster:\n      server: {server}\n      insecure-skip-tls-verify: {insecure}\ncontexts:\n  - name: test\n    context:\n      cluster: test\n      user: test\nusers:\n  - name: test\n    user:\n      token: synthetic-token\n"
+        )).expect("write kubeconfig");
+        std::fs::create_dir(directory.path().join("cloud")).expect("cloud directory");
+        std::fs::write(directory.path().join("cloud/substrate.toml"), format!(
+            "kubeconfig = '{}'\ntemplate = 'worker'\ngit_credential_uri = 'ate-secret://kubernetes/ganja-cloud/git/token'\n",
+            kubeconfig.display()
+        )).expect("write settings");
+        let error = SubstrateProvisioner::connect(directory.path(), "ganja")
+            .await
+            .expect_err("insecure cluster refused");
+        assert_eq!(error.operation, operation);
+        assert_eq!(error.kind, ProvisionErrorKind::Refused);
+    }
+}
+
 fn spec() -> WorkerSpec {
     WorkerSpec {
         name: MemberName::parse("worker").expect("name"),
