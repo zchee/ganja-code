@@ -249,6 +249,46 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn same_named_members_in_different_teams_keep_independent_controls() {
+    let first = Fixture::new().await;
+    let mut second = Fixture::new().await;
+    Arc::get_mut(&mut second.member).expect("unique member").spec.team =
+        TeamName::parse("other-team").expect("team");
+    let registry = |fixture: &Fixture| {
+        teammate::TeammateRegistry::new(
+            fixture.member.spec.root.clone(),
+            fixture.member.spec.team.clone(),
+            "lead",
+            fixture._home.path(),
+        )
+    };
+    let first_registry = registry(&first);
+    let second_registry = registry(&second);
+    register(&first.member);
+    register(&second.member);
+    let first_control = control(&first_registry, "gate-worker").expect("first control");
+    assert!(Arc::ptr_eq(&first_control.0, &first.member));
+    first_control.report_external_revert().await;
+    assert_eq!(first.member.phase(), Phase::Suspended);
+    assert_eq!(second.member.phase(), Phase::Idle);
+    let second_control = control(&second_registry, "gate-worker").expect("second control");
+    assert!(Arc::ptr_eq(&second_control.0, &second.member));
+    second_control.retire().await.expect("second worker retired");
+    assert_eq!(second.member.phase(), Phase::Gone);
+    assert_ne!(first.member.phase(), Phase::Gone);
+    drop(second_control);
+    drop(second);
+    assert!(
+        control(&second_registry, "gate-worker").is_none(),
+        "second registry has no live member"
+    );
+    assert!(Arc::ptr_eq(
+        &control(&first_registry, "gate-worker").expect("first remains").0,
+        &first.member
+    ));
+}
+
+#[tokio::test]
 async fn worker_clients_require_trusted_endpoints_and_separate_auth_headers() {
     let cases = [
         ("https://worker.example", None, true),

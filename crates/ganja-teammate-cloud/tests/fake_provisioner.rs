@@ -215,7 +215,8 @@ impl Hosted {
     }
 
     async fn wait_idle(&self, idle: usize) {
-        let control = ganja_teammate_cloud::control(&self.name).expect("cloud control");
+        let control =
+            ganja_teammate_cloud::control(&self.registry, &self.name).expect("cloud control");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while self.idle_count() != idle
                 || control.phase() != ganja_teammate_cloud::state::Phase::Idle
@@ -255,7 +256,8 @@ async fn a_crashed_or_gone_worker_stops_once_without_an_idle_claim() {
         hosted.start().await;
         hosted.wait_suspended(1).await;
         hosted.provisioner.fail_next(ganja_testkit::provisioner::ProvisionOperation::Resume, kind);
-        let control = ganja_teammate_cloud::control(&hosted.name).expect("control");
+        let control =
+            ganja_teammate_cloud::control(&hosted.registry, &hosted.name).expect("control");
         hosted.send("next request");
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while control.phase() != phase {
@@ -446,7 +448,7 @@ async fn a_shed_attempt_and_an_owners_suspend_never_clear_the_uncertain_latch() 
     hosted.start().await;
     hosted.wait_suspended(1).await;
     let worker = hosted.provisioner.worker(&hosted.name).expect("worker");
-    let control = ganja_teammate_cloud::control(&hosted.name).expect("control");
+    let control = ganja_teammate_cloud::control(&hosted.registry, &hosted.name).expect("control");
     hosted.server.reply_next("/event", 503);
     assert!(control.resume_for_inspection().await.is_err(), "shed reconnect is not success");
     let first_release = Arc::new(Notify::new());

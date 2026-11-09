@@ -187,7 +187,7 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
     )
     .await
     .expect("start member");
-    let member = control(name).expect("control");
+    let member = control(&registry, name).expect("control");
     tokio::time::timeout(Duration::from_secs(5), async {
         while member.phase() != ganja_teammate_cloud::state::Phase::Suspended {
             tokio::time::sleep(Duration::from_millis(10)).await;
