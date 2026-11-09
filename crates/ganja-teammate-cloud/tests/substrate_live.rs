@@ -35,7 +35,8 @@ use ganja_teammate_cloud::provisioner::substrate::kubectl::KubectlTunnel;
 use ganja_teammate_cloud::provisioner::substrate::settings::Settings;
 use ganja_teammate_cloud::provisioner::substrate::tunnel::Tunnel as _;
 use ganja_teammate_cloud::provisioner::{
-    Author, Bootstrap, Provisioner as _, SuspendOutcome, WorkerSpec, WorkerState,
+    Author, Bootstrap, ProvisionError, ProvisionErrorKind, Provisioner as _, SuspendOutcome,
+    WorkerSpec, WorkerState,
 };
 
 /// Variable that has to be `1` before any of this talks to the cluster.
@@ -182,6 +183,7 @@ async fn actor_lifecycle() {
             ))
         },
         provisioner.kill(&worker),
+        ProvisionError { operation: "live lifecycle timeout", kind: ProvisionErrorKind::Transient },
     )
     .await;
     // Assertions run only after UID-guarded deletion, including failed RPCs.
@@ -195,10 +197,32 @@ async fn actor_lifecycle() {
 async fn finish_with_cleanup<T, E>(
     operation: impl Future<Output = Result<T, E>>,
     cleanup: impl Future<Output = Result<(), E>>,
+    timeout_error: E,
 ) -> Result<T, E> {
-    let outcome = operation.await;
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), operation)
+        .await
+        .unwrap_or(Err(timeout_error));
     cleanup.await?;
     outcome
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hung_lifecycle_still_runs_cleanup_before_reporting_its_timeout() {
+    let cleaned = std::cell::Cell::new(false);
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(301),
+        finish_with_cleanup(
+            std::future::pending::<Result<(), &str>>(),
+            async {
+                cleaned.set(true);
+                Ok(())
+            },
+            "lifecycle timed out",
+        ),
+    )
+    .await;
+    assert!(cleaned.get(), "the lifecycle deadline must not bypass cleanup");
+    assert_eq!(outcome.expect("bounded lifecycle and cleanup"), Err("lifecycle timed out"));
 }
 
 #[tokio::test]
@@ -216,6 +240,7 @@ async fn lifecycle_outcomes_are_inspected_only_after_cleanup() {
                 events.borrow_mut().push("cleanup");
                 Ok(())
             },
+            "lifecycle timed out",
         )
         .await;
         events.borrow_mut().push("inspect");
@@ -223,7 +248,12 @@ async fn lifecycle_outcomes_are_inspected_only_after_cleanup() {
         assert_eq!(*events.borrow(), ["lifecycle", "cleanup", "inspect"]);
     }
     assert_eq!(
-        finish_with_cleanup(async { Ok(()) }, async { Err("cleanup failed") }).await,
+        finish_with_cleanup(
+            async { Ok(()) },
+            async { Err("cleanup failed") },
+            "lifecycle timed out"
+        )
+        .await,
         Err("cleanup failed")
     );
 }

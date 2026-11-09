@@ -54,6 +54,8 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   `schema/ganja-cloud-substrate.schema.json` (one shared fixture corpus keeps
   loader and schema classifying identically). The serve password is
   `GANJA_CLOUD_PASSWORD` only, never a file key.
+  Like the main configuration, location-only settings and the selected kubectl
+  executable have no extra owner/mode check; the operator owns their permissions.
 - Both tunnels sit behind one seam: in-process kube port-forwards, or the
   released `kubectl ate proxy actor` child, with `--kubeconfig=...` and optional
   `--context=...` after the plugin name; readiness is its own stderr line,
