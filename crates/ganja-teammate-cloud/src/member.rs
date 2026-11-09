@@ -364,8 +364,8 @@ impl CloudMember {
                     connected.head.clone()
                 };
                 self.gate.open_rest();
-                if self.recover_gap(&head, None).await?.is_some() {
-                    return Err("terminal state requires recovery");
+                if let Some(pending) = self.recover_gap(&head, None).await? {
+                    self.wait_for_terminal(None, Some(pending), true).await?;
                 }
                 self.needs_resync.store(false, Ordering::SeqCst);
             }
@@ -641,10 +641,19 @@ impl CloudMember {
                 return Err("prompt acceptance is ambiguous; no prompt was resent");
             }
         }
+        self.wait_for_terminal(last, None, false).await
+    }
+
+    async fn wait_for_terminal(
+        &self,
+        last: Option<MessageId>,
+        mut current: Option<MessageId>,
+        mut gap: bool,
+    ) -> Result<(), &'static str> {
         self.set_phase(Phase::Turning);
-        let mut current = None;
+        let client = self.client()?;
+        let session = self.session()?;
         let mut streamed = BTreeMap::<MessageId, Message>::new();
-        let mut gap = false;
         let mut deadline = Instant::now() + self.runtime.deadlines.terminal;
         loop {
             let item = timeout_at(deadline, self.events()?.next())

@@ -171,7 +171,11 @@ impl Fixture {
             },
             provisioner: provisioner.clone(),
             password: None,
-            deadlines: Deadlines { quiesce: Duration::from_millis(30), ..Deadlines::default() },
+            deadlines: Deadlines {
+                quiesce: Duration::from_millis(30),
+                terminal: Duration::from_millis(30),
+                ..Deadlines::default()
+            },
         });
         let spec = SpawnSpec {
             name,
@@ -213,6 +217,19 @@ impl Fixture {
     fn suspends(&self) -> usize {
         self.provisioner.suspended.load(Ordering::SeqCst)
     }
+}
+
+#[tokio::test]
+async fn an_absent_initial_envelope_does_not_wait_forever_or_claim_idle() {
+    let fixture = Fixture::new().await;
+    *fixture.member.session.lock().expect("session") = Some(SessionId::ascending());
+    let result =
+        timeout(Duration::from_secs(1), fixture.member.wait_for_terminal(None, None, false))
+            .await
+            .expect("terminal reconciliation is bounded");
+    assert_eq!(result, Err("terminal state unavailable"));
+    assert!(fixture.member.terminal.lock().expect("terminal decisions").is_empty());
+    assert!(!fixture.member.lent.lead_inbox.exists(), "no idle notification was written");
 }
 
 #[tokio::test]
