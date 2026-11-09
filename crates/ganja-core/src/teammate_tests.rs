@@ -803,6 +803,40 @@ impl Spawned for RecordedPane {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn slow_backend_cleanup_finishes_before_local_state_is_released() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let release_kill = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(Recording {
+        refuse_launch: true,
+        hold_kill: Some(release_kill.clone()),
+        ..Recording::default()
+    });
+    let task = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("slow-cleanup", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    while backend.killed().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(45)).await;
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished(), "core must wait for backend cleanup");
+    release_kill.notify_one();
+    assert!(task.await.expect("spawn task").is_err());
+    assert_eq!(backend.killed().len(), 1);
+    assert!(!reserved(&registry).contains("slow-cleanup"));
+    assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("slow-cleanup").expect("name"));
+    assert!(mailbox::read(&inbox).expect("inbox").valid.is_empty());
+    registry.shutdown().await;
+}
+
 #[tokio::test]
 async fn abandoning_record_or_launch_unwinds_once_and_shutdown_joins_it() {
     for phase in ["record", "launch", "unwind"] {

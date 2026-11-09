@@ -932,7 +932,9 @@ pub trait Spawned: fmt::Debug + Send + Sync {
     /// **D503**'s ring: what this member most recently did, newest last.
     fn recent(&self) -> Vec<String>;
 
-    /// Ends it. Idempotent: a member that has already gone is nothing to end.
+    /// Ends it within the backend's own cleanup bound. Idempotent: a member
+    /// that has already gone is nothing to end. Callers await completion rather
+    /// than cancelling cleanup with an additional deadline.
     async fn kill(&self);
 
     /// Tells this member it is waiting on the lead's answer to `request_id`,
@@ -1690,29 +1692,19 @@ impl PendingSpawn {
     }
 
     async fn unwind(mut self, recorded: bool) {
-        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-            self.spawned.kill().await;
-            if let Some(recording) = &mut self.recording {
-                let _ = recording.await;
-            }
-            if recorded && let Err(error) = self.registry.unrecord(self.spec.name.as_str()).await {
-                tracing::warn!(
-                    teammate = self.spec.name.as_str(),
-                    %error,
-                    "a refused launch left its record in the team file"
-                );
-            }
-            unseed_inbox(self.spec.inbox(), self.seeded.take(), self.spec.name.as_str()).await;
-            self.registry.release(&self.spec.name);
-        })
-        .await;
-        if outcome.is_err() {
-            if let Some(recording) = self.recording.take() {
-                recording.abort();
-                let _ = recording.await;
-            }
-            tracing::warn!(teammate = self.spec.name.as_str(), "teammate launch cleanup timed out");
+        self.spawned.kill().await;
+        if let Some(recording) = &mut self.recording {
+            let _ = recording.await;
         }
+        if recorded && let Err(error) = self.registry.unrecord(self.spec.name.as_str()).await {
+            tracing::warn!(
+                teammate = self.spec.name.as_str(),
+                %error,
+                "a refused launch left its record in the team file"
+            );
+        }
+        unseed_inbox(self.spec.inbox(), self.seeded.take(), self.spec.name.as_str()).await;
+        self.registry.release(&self.spec.name);
     }
 }
 
