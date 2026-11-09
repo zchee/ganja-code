@@ -1653,6 +1653,7 @@ dependencies = [
  "ganja-client",
  "ganja-core",
  "ganja-protocol",
+ "ganja-serve",
  "ganja-team",
  "ganja-testkit",
  "http",

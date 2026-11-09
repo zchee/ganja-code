@@ -8,6 +8,9 @@ use crate::gate::Permit;
 use crate::provisioner::{Author, Endpoint, Provisioner, WorkerSpec};
 use crate::state::Deadlines;
 
+#[path = "member_recovery_tests.rs"]
+mod recovery;
+
 // A unit-test target is a different crate instance from the library linked by
 // testkit's dev-only cycle. This local double must implement this instance's trait.
 #[derive(Debug)]

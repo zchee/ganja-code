@@ -32,6 +32,8 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Terminal reconciliation tests drive the real persisted HTTP projections.
+ganja-serve.workspace = true
 # The fake implements this contract; the reverse edge is confined to tests.
 ganja-testkit.workspace = true
 tempfile.workspace = true
