@@ -33,11 +33,47 @@ Owner-reported reverts and contradictory lifecycle observations invalidate the
 held cursor before reconnect. An unannounced revert with no such observation is
 unsupported; snapshot fields and cursor ordering cannot identify one.
 
+## The Substrate provisioner
+
+`src/provisioner/substrate/` talks to the installed Agent Substrate release.
+
+- The wire is checked in: a verbatim v1.0.0 `ateapi.proto` plus the Rust that
+  `buf.gen.yaml`'s pinned plugins generate from it. Hash and regenerate-and-
+  compare tests refuse drift; `buf generate` rewrites, hands never do.
+- Separate credential boundaries: the `ate-users/ganja` TokenRequest bearer
+  (audience `api.ate-system.svc`) goes only to ateapi; a locally keyed
+  PodCertificateRequest certificate for `atenet-client` admits the router
+  mTLS CONNECT hop. Neither the control bearer nor the router client key
+  enters an Actor. The worker Basic password is deliberately installed by
+  its template in the Actor and travels inside the established tunnel.
+  Credentials stay out of ganja's own logs, mail and errors under the shipped
+  `info` and `info,ganja=debug` filters. Enabling debug for third-party HTTP or
+  Kubernetes client targets is unsupported: those targets can print remote
+  response bodies containing credentials.
+- Settings are `<config home>/cloud/substrate.toml`, strict against
+  `schema/ganja-cloud-substrate.schema.json` (one shared fixture corpus keeps
+  loader and schema classifying identically). The serve password is
+  `GANJA_CLOUD_PASSWORD` only, never a file key.
+- Both tunnels sit behind one seam: in-process kube port-forwards, or the
+  released `kubectl ate proxy actor` child whose readiness is its own stderr
+  line — never a probe connection, which would wake a suspended actor.
+- Mutations are reconciled by reads (`GetActor`, `GetActorEgressPolicy`),
+  never blindly resent; deletion carries the known Actor UID and succeeds
+  only on a confirmed `NOT_FOUND`. A cancelled policy installation schedules
+  bounded, UID-guarded cleanup independently of the cancelled caller.
+- Live cases in `tests/substrate_live.rs` are `#[ignore]` and inert without
+  `GANJA_LIVE_TEST=1`; with it set, missing `GANJA_SUBSTRATE_CONFIG_HOME`
+  (or `GANJA_CLOUD_PASSWORD` for `actor_lifecycle`) fails naming the variable.
+  `control_plane_authorized_reads` requires the complete strict settings file
+  but never looks up its named template or reads a worker password; it proves
+  control reads and trust, not a spawned-actor proxy connection.
+
 ## Code and tests
 
 - `src/provisioner.rs`: lifecycle types and trait.
 - `src/gate.rs`: request admission and completion accounting.
 - Unit tests are sibling `*_tests.rs` files; socket/process fixtures live in `tests/`.
-- Credentials never enter `Debug`, `Display`, ring rows, traces or mail.
+- Credentials never enter ganja's `Debug`, `Display`, ring rows, mail or own
+  tracing fields; the shipped filters keep third-party debug bodies disabled.
 - Commands run from the repository root; never create operational directories in
   this member.
