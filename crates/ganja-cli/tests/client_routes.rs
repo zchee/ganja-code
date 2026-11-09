@@ -11,6 +11,45 @@ use ganja_core::tool::Registry;
 use ganja_permission::Permissions;
 use ganja_protocol::{Event, PartBody, ToolState};
 
+#[tokio::test]
+async fn client_owned_headers_override_fixed_headers_for_fresh_and_resumed_connections() {
+    let directory = ganja_testkit::temp_dir();
+    let engine = Arc::new(Engine::new(
+        Arc::new(FakeProvider::new("reply", Duration::ZERO)),
+        "canned",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    ));
+    let mut config = ganja_serve::ServeConfig::in_directory(directory.path().to_path_buf());
+    config.credentials = Some(ganja_serve::Credentials {
+        username: "ganja".into(),
+        password: "header-precedence-test".into(),
+    });
+    config.listen = ganja_serve::Listen::Tcp { hostname: "127.0.0.1".into(), port: Some(0) };
+    let handle = ganja_serve::serve(engine, config).await.expect("serve");
+    let mut headers = ganja_client::HeaderMap::new();
+    headers.append("authorization", ganja_client::HeaderValue::from_static("Basic stale"));
+    headers.append("authorization", ganja_client::HeaderValue::from_static("Basic also-stale"));
+    headers.append("last-event-id", ganja_client::HeaderValue::from_static("stale-cursor"));
+    headers.append("last-event-id", ganja_client::HeaderValue::from_static("another-stale-cursor"));
+    let client = Client::new(
+        &format!("http://{}", handle.address().tcp().expect("tcp address")),
+        Some(ganja_client::Credentials::new("ganja", "header-precedence-test")),
+    )
+    .expect("client")
+    .with_headers(headers);
+    client.health().await.expect("explicit credentials override every fixed authorization value");
+    let fresh = client.events().await.expect("fixed cursor does not change a fresh connection");
+    assert_eq!(fresh.connected().replay, ganja_client::sse::Replay::Fresh);
+    let cursor = fresh.cursor().expect("fresh head").clone();
+    drop(fresh);
+    let resumed = client.events_from(Some(cursor.clone())).await.expect("explicit cursor wins");
+    assert_eq!(resumed.connected().replay, ganja_client::sse::Replay::From);
+    assert_eq!(resumed.cursor(), Some(&cursor));
+    drop(resumed);
+    handle.shutdown().await.expect("server stops");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn typed_routes_read_the_real_abort_shell_messages_and_bootstrap_shapes() {
     let directory = ganja_testkit::temp_dir();

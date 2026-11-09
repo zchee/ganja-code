@@ -195,6 +195,29 @@ async fn a_reply_names_the_dialog_and_the_decision() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn fixed_headers_do_not_override_json_or_stream_protocol_headers() {
+    let stub = Stub::answering(|request| {
+        if request.path == "/event" {
+            assert_eq!(request.headers["accept"], "text/event-stream");
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Stream { chunks: vec![connected(0, 0, "fresh")] }
+        } else {
+            assert_eq!(request.headers["content-type"], "application/json");
+            Reply::Accepted
+        }
+    })
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("accept", HeaderValue::from_static("text/plain"));
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    headers.insert("last-event-id", HeaderValue::from_static("stale"));
+    let client = stub.client().with_headers(headers);
+    client.prompt(&session(), &Prompt::new("hello")).await.expect("JSON prompt");
+    client.events().await.expect("fresh stream");
+    assert_eq!(stub.received().len(), 2);
+}
+
+#[tokio::test]
 async fn a_configured_credential_travels_as_basic_auth_on_every_route() {
     let stub = Stub::always(Reply::ok(HEALTHY)).await;
     let client = Client::new(stub.address(), Some(Credentials::new("ganja", "hunter2")))
