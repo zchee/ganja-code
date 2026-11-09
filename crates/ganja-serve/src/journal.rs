@@ -179,7 +179,11 @@ impl EventJournal {
         let history = self.0.state.lock().expect("the journal is never poisoned");
         let head = format!("{}-{}", self.0.epoch, history.head);
         let parsed = cursor.and_then(|id| {
-            let (epoch, seq) = id.rsplit_once('-')?;
+            let (epoch, seq) = id.split_at_checked(36)?;
+            let seq = seq.strip_prefix('-')?;
+            if !seq.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
             let seq = seq.parse::<u64>().ok()?;
             (epoch == self.0.epoch && retained(&history, seq)).then_some(seq)
         });

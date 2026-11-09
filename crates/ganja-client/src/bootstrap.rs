@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Client, ClientError};
 
 /// Repository and branch prepared before the served engine starts.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bootstrap {
     /// Repository URL to clone.
@@ -18,6 +18,18 @@ pub struct Bootstrap {
     pub branch: String,
     /// Identity written to the clone's local git configuration.
     pub author: BootstrapAuthor,
+}
+
+impl std::fmt::Debug for Bootstrap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Bootstrap")
+            .field("repository", &"<redacted>")
+            .field("reference", &self.reference)
+            .field("branch", &self.branch)
+            .field("author", &self.author)
+            .finish()
+    }
 }
 
 /// Git author for the initialized checkout.
@@ -244,3 +256,7 @@ impl Client {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_tests.rs"]
+mod tests;

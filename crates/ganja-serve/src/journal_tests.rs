@@ -49,6 +49,20 @@ fn an_epoch_mismatch_and_future_sequence_declare_gaps() {
 }
 
 #[test]
+fn malformed_sequences_cannot_extend_or_replace_the_uuid_prefix() {
+    let journal = EventJournal::new();
+    let epoch = journal.epoch();
+    for suffix in ["", "-", "-0-0", "--0", "-+0", "-no-sequence", "-18446744073709551616", "-０"] {
+        let cursor = format!("{epoch}{suffix}");
+        assert_eq!(journal.register(Some(&cursor)).replay, "gap", "malformed cursor {cursor:?}");
+    }
+    for cursor in ["short-0", "界".repeat(13).as_str()] {
+        assert_eq!(journal.register(Some(cursor)).replay, "gap", "invalid prefix {cursor:?}");
+    }
+    assert_eq!(journal.register(Some(&format!("{epoch}-0"))).replay, "from");
+}
+
+#[test]
 fn permission_projection_is_complete_before_the_head_is_observable() {
     let journal = EventJournal::new();
     let id = ganja_protocol::PermissionId::ascending();

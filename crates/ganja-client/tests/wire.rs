@@ -195,6 +195,29 @@ async fn a_reply_names_the_dialog_and_the_decision() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn fixed_headers_do_not_override_json_or_stream_protocol_headers() {
+    let stub = Stub::answering(|request| {
+        if request.path == "/event" {
+            assert_eq!(request.headers["accept"], "text/event-stream");
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Stream { chunks: vec![connected(0, 0, "fresh")] }
+        } else {
+            assert_eq!(request.headers["content-type"], "application/json");
+            Reply::Accepted
+        }
+    })
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("accept", HeaderValue::from_static("text/plain"));
+    headers.insert("content-type", HeaderValue::from_static("text/plain"));
+    headers.insert("last-event-id", HeaderValue::from_static("stale"));
+    let client = stub.client().with_headers(headers);
+    client.prompt(&session(), &Prompt::new("hello")).await.expect("JSON prompt");
+    client.events().await.expect("fresh stream");
+    assert_eq!(stub.received().len(), 2);
+}
+
+#[tokio::test]
 async fn a_configured_credential_travels_as_basic_auth_on_every_route() {
     let stub = Stub::always(Reply::ok(HEALTHY)).await;
     let client = Client::new(stub.address(), Some(Credentials::new("ganja", "hunter2")))
@@ -784,6 +807,82 @@ impl ganja_client::ConnectPolicy for TestConnectPolicy {
     fn observe(&self, outcome: ganja_client::AttemptOutcome) {
         self.outcomes.lock().expect("outcome mutex").push(outcome);
     }
+}
+
+#[tokio::test]
+async fn live_eviction_reconnects_through_admission_and_yields_one_gap_before_fresh_events() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = AtomicUsize::new(0);
+    let (event, json) = started();
+    let stub = Stub::answering(move |request| match calls.fetch_add(1, Ordering::SeqCst) {
+        0 => Reply::Stream {
+            chunks: vec![
+                connected(0, 0, "fresh"),
+                frame_at("message", &json, 1),
+                frame_at(
+                    "evicted",
+                    r#"{"type":"evicted","message":"journal history overflow"}"#,
+                    1,
+                ),
+            ],
+        },
+        1 => {
+            assert_eq!(request.headers["last-event-id"], format!("{EPOCH}-1"));
+            Reply::Stream { chunks: vec![connected(1, 10, "gap")] }
+        }
+        2 => {
+            assert!(!request.headers.contains_key("last-event-id"));
+            Reply::Held {
+                chunks: vec![
+                    (Duration::ZERO, connected(10, 10, "fresh")),
+                    (Duration::ZERO, frame_at("message", &json, 11)),
+                ],
+            }
+        }
+        count => panic!("unexpected connection {count}"),
+    })
+    .await;
+    let policy = TestConnectPolicy::new(true);
+    let resumable = Resumable::new(stub.client()).with_policy(policy.clone());
+    assert_eq!(
+        resumable.next().await.expect("item").expect("event"),
+        Resumed::Event(Box::new(event.clone()))
+    );
+    assert_eq!(resumable.cursor().await, Some(id(1)));
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, resumable.next())
+            .await
+            .expect("reconnect")
+            .expect("item")
+            .expect("gap"),
+        Resumed::Gap { head: id(10) }
+    );
+    assert_eq!(resumable.cursor().await, None, "a gap discards the old cursor");
+    assert_eq!(
+        resumable.next().await.expect("item").expect("event"),
+        Resumed::Event(Box::new(event))
+    );
+    assert_eq!(resumable.cursor().await, Some(id(11)));
+    let replays = policy
+        .outcomes()
+        .into_iter()
+        .map(|outcome| {
+            let ganja_client::AttemptOutcome::Connected(ack) = outcome else {
+                panic!("every attempt receives a typed acknowledgement")
+            };
+            ack.replay
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replays,
+        vec![
+            ganja_client::sse::Replay::Fresh,
+            ganja_client::sse::Replay::Gap,
+            ganja_client::sse::Replay::Fresh
+        ]
+    );
+    assert_eq!(policy.released.load(Ordering::SeqCst), 2, "evicted and gap permits are released");
 }
 
 #[tokio::test]

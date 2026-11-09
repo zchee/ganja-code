@@ -105,7 +105,7 @@ async fn a_server_deadline_returns_without_cancelling_cleanup_or_admitting_anoth
     assert_eq!(entered.load(Ordering::SeqCst), 1, "cleanup retains admission");
     release.add_permits(1);
     tokio::time::timeout(DEADLINE, async {
-        while status(&client, &base).await["detail"] != "cleanup finished" {
+        while status(&client, &base).await["cleanup_in_progress"] != false {
             tokio::task::yield_now().await;
         }
     })
