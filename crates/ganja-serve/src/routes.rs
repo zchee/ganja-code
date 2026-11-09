@@ -69,6 +69,9 @@ use crate::state::{AppState, Transport};
 /// this build's name the way every `GANJA_` variable is.
 pub const DIRECTORY_HEADER: &str = "x-ganja-directory";
 
+/// Identifies an HTTP answer from this server incarnation rather than a proxy.
+pub const EPOCH_HEADER: &str = "ganja-serve-epoch";
+
 pub(crate) fn router(state: AppState) -> axum::Router {
     let router = match state.transport {
         Transport::Tcp => tcp_routes(),
@@ -82,6 +85,7 @@ pub(crate) fn router(state: AppState) -> axum::Router {
 /// additions to it — behind the credential the transport asks for.
 fn tcp_routes() -> axum::Router<AppState> {
     axum::Router::new()
+        .route("/readyz", get(ready))
         .route("/global/health", get(health))
         .route("/config", get(config))
         .route("/path", get(path))
@@ -200,6 +204,18 @@ fn socket_routes() -> axum::Router<AppState> {
 /// session's socket. A credential configured on a socket-bound server is
 /// therefore carried and never consulted, which is what AC-26 pins.
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let journal = state.journal.clone();
+    stamp_epoch(guarded(state, request, next).await, journal.epoch())
+}
+
+pub(crate) fn stamp_epoch(mut response: Response, epoch: &str) -> Response {
+    response
+        .headers_mut()
+        .insert(EPOCH_HEADER, epoch.parse().expect("a UUID is a valid header value"));
+    response
+}
+
+async fn guarded(state: AppState, request: Request, next: Next) -> Response {
     tracing::debug!(
         method = %request.method(),
         path = request.uri().path(),
@@ -207,6 +223,7 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
     );
 
     if state.transport == Transport::Tcp
+        && !(request.method() == axum::http::Method::GET && request.uri().path() == "/readyz")
         && let Some(credentials) = &state.credentials
         && !auth::authorized(request.headers(), request.uri().query(), credentials)
     {
@@ -272,6 +289,17 @@ async fn ensure_session(state: &AppState, id: &str) -> Result<SessionId, ApiErro
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Readiness is deliberately empty and GET-only, including when axum routes HEAD.
+pub(crate) async fn ready(method: axum::http::Method, body: Bytes) -> StatusCode {
+    if method != axum::http::Method::GET {
+        return StatusCode::METHOD_NOT_ALLOWED;
+    }
+    if !body.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    StatusCode::OK
 }
 
 /// `GET /global/health` (`groups/global.ts:76`), plus one field upstream's

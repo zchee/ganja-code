@@ -62,6 +62,58 @@ use crate::tool::{
     shell, skill,
 };
 
+/// Temporarily fails only completed-envelope writes for one session in debug builds.
+///
+/// Storage saves the completed envelope before publishing `MessageFinished`. Tests
+/// of recovery after a stream gap need to distinguish a missing completion stamp
+/// from a turn still running, without changing the success of part writes. The
+/// guard is opt-in, session-scoped and removed on drop; release builds omit it.
+#[cfg(debug_assertions)]
+#[derive(Debug)]
+pub struct CompletedEnvelopeFailure {
+    session: SessionId,
+}
+
+#[cfg(debug_assertions)]
+static COMPLETED_ENVELOPE_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<SessionId, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(debug_assertions)]
+impl CompletedEnvelopeFailure {
+    /// Fails completed-envelope writes for `session` until every matching guard drops.
+    #[must_use]
+    pub fn new(session: SessionId) -> Self {
+        *COMPLETED_ENVELOPE_FAILURES
+            .lock()
+            .expect("fault registry is never poisoned")
+            .entry(session.clone())
+            .or_default() += 1;
+        Self { session }
+    }
+
+    fn active(session: &SessionId) -> bool {
+        COMPLETED_ENVELOPE_FAILURES
+            .lock()
+            .expect("fault registry is never poisoned")
+            .contains_key(session)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for CompletedEnvelopeFailure {
+    fn drop(&mut self) {
+        let mut failures =
+            COMPLETED_ENVELOPE_FAILURES.lock().expect("fault registry is never poisoned");
+        if let Some(count) = failures.get_mut(&self.session) {
+            *count -= 1;
+            if *count == 0 {
+                failures.remove(&self.session);
+            }
+        }
+    }
+}
+
 /// What the model reads when a rule refuses a call before anyone is asked.
 ///
 /// The sentence's own bytes are [`ganja_tool::permission_text::DENIED_PREFIX`];
@@ -657,6 +709,17 @@ impl Persist {
         self.locked().summary_usage = usage;
     }
 
+    fn save_completed_envelope(&self, assistant: &Message) -> Result<(), StorageError> {
+        #[cfg(debug_assertions)]
+        if CompletedEnvelopeFailure::active(&self.session) {
+            return Err(StorageError::Io {
+                path: PathBuf::from("completed-envelope"),
+                source: std::io::Error::other("injected completed-envelope write failure"),
+            });
+        }
+        self.state.storage.save_message(&self.session, assistant)
+    }
+
     /// The turn's closing writes: the assistant envelope again — now carrying
     /// its usage and completion stamp — then the session record with the
     /// turn's spend summed in, `context_tokens` moved to what the last
@@ -669,9 +732,7 @@ impl Persist {
             (inner.assistant_saved, inner.last_input, inner.summary_usage)
         };
 
-        if assistant_saved
-            && let Err(error) = self.state.storage.save_message(&self.session, assistant)
-        {
+        if assistant_saved && let Err(error) = self.save_completed_envelope(assistant) {
             self.complain("the finished assistant envelope", &error);
         }
 

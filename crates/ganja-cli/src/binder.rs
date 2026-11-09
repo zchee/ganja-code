@@ -65,6 +65,7 @@ impl Binder for SocketBinder {
             storage: served.storage,
             config: served.config,
             heartbeat: ganja_serve::HEARTBEAT,
+            journal: ganja_serve::EventJournal::default(),
         };
 
         async move {

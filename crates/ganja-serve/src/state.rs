@@ -1,6 +1,6 @@
 //! What every handler can reach: the engine, the read-only context the
 //! informational routes answer from, and the pending-permission map the
-//! tracker keeps current.
+//! journal keeps current.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ pub(crate) struct PendingPermission {
     pub(crate) directories: Vec<String>,
 }
 
-/// The map behind `GET /permission`, shared between the tracker that writes
+/// The map behind `GET /permission`, shared between the journal that writes
 /// it and the handlers that read it. A `BTreeMap` so the listing is in
 /// request order — permission ids sort in creation order.
 #[derive(Clone, Default)]
@@ -95,7 +95,7 @@ pub(crate) struct ServedDirectory {
 }
 
 impl ServedDirectory {
-    fn new(given: PathBuf) -> Self {
+    pub(crate) fn new(given: PathBuf) -> Self {
         // A directory that cannot canonicalize still serves: the guard then
         // matches on the spelling alone, which is all there is to match.
         let canonical = given.canonicalize().unwrap_or_else(|_| given.clone());
@@ -136,6 +136,7 @@ pub(crate) struct AppState {
     pub(crate) config: Option<Arc<Config>>,
     pub(crate) pending: Pending,
     pub(crate) heartbeat: Duration,
+    pub(crate) journal: crate::EventJournal,
     /// Flipped once when the server is asked to stop. An SSE stream is
     /// otherwise endless, and a graceful shutdown that waited for one would
     /// wait forever — upstream force-closes its open connections for exactly
@@ -162,6 +163,7 @@ impl AppState {
             config: config.config.map(Arc::new),
             pending,
             heartbeat: config.heartbeat,
+            journal: config.journal,
             shutdown,
         }
     }
