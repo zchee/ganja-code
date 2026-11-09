@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/zchee/ganja-code/main/schema/ganja-cloud-substrate.schema.json",
+  "title": "Substrate provisioner settings",
+  "description": "Strict TOML configuration for cloud/substrate.toml. The serve password comes only from GANJA_CLOUD_PASSWORD; it is not a file setting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kubeconfig", "template", "git_credential_uri"],
+  "properties": {
+    "kubeconfig": {"$ref": "#/$defs/AbsolutePath", "description": "Operator-owned kubeconfig; never copied into a worker."},
+    "context": {"type": "string", "pattern": "\\S", "description": "Optional kubeconfig context."},
+    "atespace": {"$ref": "#/$defs/Name", "default": "ganja"},
+    "template": {"$ref": "#/$defs/Name", "description": "Existing template whose golden snapshot must be ready."},
+    "worker_selector": {"type": "object", "maxProperties": 10, "propertyNames": {"minLength": 1, "not": {"pattern": "\\s"}}, "additionalProperties": {"type": "string", "not": {"pattern": "\\s"}}, "default": {}},
+    "service_account": {"const": "ganja", "default": "ganja", "description": "API identity in the fixed ate-users namespace."},
+    "api_service": {"$ref": "#/$defs/Name", "default": "api", "description": "Service route in ate-system; serving identity remains api.ate-system.svc."},
+    "router_service": {"$ref": "#/$defs/Name", "default": "atenet-router", "description": "Service route in ate-system; serving identity remains atenet-router.ate-system.svc."},
+    "git_credential_uri": {"type": "string", "pattern": "^ate-secret://[^/@?#\\s:]+/(?:[^/?#\\s]+/)+[^/?#\\s]+$", "not": {"pattern": "\\s"}, "description": "Gateway credential reference containing a provider name and provider-specific tail."},
+    "git_credential_prefix": {"type": "string", "pattern": "^[ -~]*$", "not": {"pattern": "[^ -~]"}, "default": ""},
+    "tunnel": {"type": "string", "enum": ["in_process", "kubectl"], "default": "in_process"},
+    "kubectl": {"$ref": "#/$defs/AbsolutePath", "description": "Absolute path to the released kubectl executable, required for the command tunnel."}
+  },
+  "allOf": [{"if": {"properties": {"tunnel": {"const": "kubectl"}}, "required": ["tunnel"]}, "then": {"required": ["kubectl"], "properties": {"router_service": {"const": "atenet-router"}}}}],
+  "$defs": {
+    "Name": {"type": "string", "pattern": "^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$", "not": {"pattern": "[^a-z0-9-]"}},
+    "AbsolutePath": {"type": "string", "pattern": "^/"}
+  }
+}

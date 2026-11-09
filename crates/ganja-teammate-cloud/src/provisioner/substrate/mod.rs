@@ -6,6 +6,11 @@
 mod certificate;
 /// Renewable control-plane bearer credentials, separate from router identity.
 pub mod identity;
+mod runtime;
+/// Strict provisioner-local settings and transport selection.
+pub mod settings;
+/// The Substrate implementation of the vendor-neutral provisioner.
+pub use runtime::SubstrateProvisioner;
 /// In-process Kubernetes control and actor forwarding.
 pub mod kube;
 /// Explicit released-plugin tunnel fallback.

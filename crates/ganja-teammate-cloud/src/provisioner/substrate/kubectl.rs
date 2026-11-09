@@ -47,12 +47,13 @@ impl KubectlTunnel {
         executable: PathBuf,
         kubeconfig: PathBuf,
         context: Option<String>,
+        api_service: &str,
     ) -> Result<Self, ProvisionError> {
         if !executable.is_absolute() || !kubeconfig.is_absolute() {
             return Err(failure("proxy configuration", ProvisionErrorKind::Refused));
         }
         let trust = serving_trust(&client).await?;
-        let channel = control_channel(client, &trust).await?;
+        let channel = control_channel(client, &trust, api_service).await?;
         Ok(Self { channel, executable, kubeconfig, context, proxies: Mutex::new(BTreeMap::new()) })
     }
 }

@@ -1,0 +1,32 @@
+{
+  "base": {"kubeconfig":"/operator/config","template":"worker","git_credential_uri":"ate-secret://kubernetes/ganja-cloud/git/token"},
+  "cases": [
+    {"name":"minimal settings", "patch":{}, "valid":true},
+    {"name":"explicit services and selector", "patch":{"context":"test","atespace":"custom","service_account":"ganja","api_service":"api-alias","router_service":"router-alias","worker_selector":{"pool":"microvm","empty":""},"git_credential_prefix":"Bearer ","tunnel":"in_process"}, "valid":true},
+    {"name":"explicit command tunnel", "patch":{"tunnel":"kubectl","kubectl":"/tools/kubectl"}, "valid":true},
+    {"name":"missing kubeconfig", "patch":{"kubeconfig":null}, "valid":false},
+    {"name":"relative kubeconfig", "patch":{"kubeconfig":"config"}, "valid":false},
+    {"name":"unknown field", "patch":{"password":"synthetic-password-canary"}, "valid":false},
+    {"name":"empty template", "patch":{"template":""}, "valid":false},
+    {"name":"uppercase template", "patch":{"template":"Worker"}, "valid":false},
+    {"name":"trailing newline template", "patch":{"template":"worker\n"}, "valid":false},
+    {"name":"blank context", "patch":{"context":" \t"}, "valid":false},
+    {"name":"unsupported identity", "patch":{"service_account":"admin"}, "valid":false},
+    {"name":"invalid service", "patch":{"api_service":"api/service"}, "valid":false},
+    {"name":"invalid selector key", "patch":{"worker_selector":{"pool name":"worker"}}, "valid":false},
+    {"name":"nested selector", "patch":{"worker_selector":{"pool":{"name":"worker"}}}, "valid":false},
+    {"name":"too many selector labels", "patch":{"worker_selector":{"a":"v","b":"v","c":"v","d":"v","e":"v","f":"v","g":"v","h":"v","i":"v","j":"v","k":"v"}}, "valid":false},
+    {"name":"plaintext credential URI", "patch":{"git_credential_uri":"http://provider/name/value"}, "valid":false},
+    {"name":"uppercase credential scheme", "patch":{"git_credential_uri":"ATE-SECRET://provider/name/value"}, "valid":false},
+    {"name":"short credential URI", "patch":{"git_credential_uri":"ate-secret://provider/name"}, "valid":false},
+    {"name":"empty credential component", "patch":{"git_credential_uri":"ate-secret://provider/name//value"}, "valid":false},
+    {"name":"credential URI userinfo", "patch":{"git_credential_uri":"ate-secret://user@provider/name/value"}, "valid":false},
+    {"name":"credential URI port", "patch":{"git_credential_uri":"ate-secret://provider:80/name/value"}, "valid":false},
+    {"name":"credential URI query", "patch":{"git_credential_uri":"ate-secret://provider/name/value?secret=value"}, "valid":false},
+    {"name":"control character prefix", "patch":{"git_credential_prefix":"Bearer \n"}, "valid":false},
+    {"name":"unknown tunnel", "patch":{"tunnel":"automatic"}, "valid":false},
+    {"name":"command tunnel without binary", "patch":{"tunnel":"kubectl"}, "valid":false},
+    {"name":"relative command binary", "patch":{"tunnel":"kubectl","kubectl":"kubectl"}, "valid":false},
+    {"name":"unsupported command router override", "patch":{"tunnel":"kubectl","kubectl":"/tools/kubectl","router_service":"other"}, "valid":false}
+  ]
+}

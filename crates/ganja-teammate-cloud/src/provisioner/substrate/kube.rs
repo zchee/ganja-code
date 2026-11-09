@@ -44,6 +44,7 @@ pub struct KubeTunnel {
     client: Client,
     channel: Channel,
     identity: RouterIdentity,
+    router_service: String,
 }
 
 impl fmt::Debug for KubeTunnel {
@@ -58,10 +59,23 @@ impl KubeTunnel {
     /// # Errors
     /// Refuses missing trust or router identity; never falls back to plaintext.
     pub async fn connect(client: Client) -> Result<Self, ProvisionError> {
+        Self::with_services(client, "api", "atenet-router").await
+    }
+
+    /// Uses explicit Service routes while retaining the installed serving identities.
+    ///
+    /// # Errors
+    /// Refuses missing serving trust or unavailable router certificate issuance.
+    pub async fn with_services(
+        client: Client,
+        api_service: &str,
+        router_service: &str,
+    ) -> Result<Self, ProvisionError> {
+        super::tunnel::parse_actor(&format!("{api_service}/{router_service}"))?;
         let trust = serving_trust(&client).await?;
-        let channel = control_channel(client.clone(), &trust).await?;
+        let channel = control_channel(client.clone(), &trust, api_service).await?;
         let identity = RouterIdentity::new(client.clone(), trust).await?;
-        Ok(Self { client, channel, identity })
+        Ok(Self { client, channel, identity, router_service: router_service.to_owned() })
     }
 }
 
@@ -73,7 +87,7 @@ impl Tunnel for KubeTunnel {
 
     async fn actor(&self, actor: &ObjectRef) -> Result<TunnelIo, ProvisionError> {
         let config = self.identity.config().await?;
-        let stream = forward_service(self.client.clone(), "atenet-router", 8444).await?;
+        let stream = forward_service(self.client.clone(), &self.router_service, 8444).await?;
         let tls = tokio_rustls::TlsConnector::from(config)
             .connect(
                 ServerName::try_from(ROUTER_NAME)
@@ -89,6 +103,7 @@ impl Tunnel for KubeTunnel {
 pub(super) async fn control_channel(
     client: Client,
     trust: &[u8],
+    api_service: &str,
 ) -> Result<Channel, ProvisionError> {
     let endpoint = Endpoint::from_static("https://api.ate-system.svc")
         .connect_timeout(Duration::from_secs(30))
@@ -99,11 +114,11 @@ pub(super) async fn control_channel(
                 .ca_certificate(Certificate::from_pem(trust)),
         )
         .map_err(|_| failure("control TLS", ProvisionErrorKind::Refused))?;
-    Ok(endpoint.connect_with_connector_lazy(KubeConnector(client)))
+    Ok(endpoint.connect_with_connector_lazy(KubeConnector(client, api_service.to_owned())))
 }
 
 #[derive(Clone)]
-struct KubeConnector(Client);
+struct KubeConnector(Client, String);
 
 impl TowerService<http::Uri> for KubeConnector {
     type Response = TokioIo<TunnelIo>;
@@ -116,7 +131,8 @@ impl TowerService<http::Uri> for KubeConnector {
 
     fn call(&mut self, _uri: http::Uri) -> Self::Future {
         let client = self.0.clone();
-        Box::pin(async move { forward_service(client, "api", 443).await.map(TokioIo::new) })
+        let service = self.1.clone();
+        Box::pin(async move { forward_service(client, &service, 443).await.map(TokioIo::new) })
     }
 }
 
