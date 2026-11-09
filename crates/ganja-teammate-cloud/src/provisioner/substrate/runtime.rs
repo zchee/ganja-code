@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderMap, HeaderValue};
@@ -37,10 +38,61 @@ use crate::provisioner::{
 pub struct SubstrateProvisioner {
     settings: Settings,
     control: ControlClient<Channel>,
-    identity: AteapiIdentity,
+    identity: Arc<AteapiIdentity>,
     proxy: ActorProxy,
     username: String,
     password: SecretString,
+}
+
+struct SpawnCleanup {
+    control: ControlClient<Channel>,
+    identity: Arc<AteapiIdentity>,
+    actor: Option<ObjectRef>,
+    uid: String,
+}
+
+impl SpawnCleanup {
+    fn disarm(&mut self) {
+        self.actor = None;
+    }
+
+    async fn cleanup(mut self) -> Result<(), ProvisionError> {
+        match self.start() {
+            Some(task) => task
+                .await
+                .map_err(|_| failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous))?,
+            None => Ok(()),
+        }
+    }
+
+    fn start(&mut self) -> Option<tokio::task::JoinHandle<Result<(), ProvisionError>>> {
+        let actor = self.actor.take()?;
+        let control = self.control.clone();
+        let identity = Arc::clone(&self.identity);
+        let uid = self.uid.clone();
+        // Tokio owns the bounded cleanup because Drop cannot await; a cancelled caller
+        // must not drop the deletion future along with the policy-installation future.
+        Some(tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                delete_actor(control, &identity, &actor, &uid),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous))
+            });
+            if result.is_err() {
+                tracing::warn!(atespace = %actor.atespace, actor = %actor.name, "spawn cleanup unconfirmed");
+            }
+            result
+        }))
+    }
+}
+
+impl Drop for SpawnCleanup {
+    fn drop(&mut self) {
+        self.start();
+    }
 }
 
 impl fmt::Debug for SubstrateProvisioner {
@@ -115,7 +167,7 @@ impl SubstrateProvisioner {
         }
         let control = ControlClient::new(tunnel.control().await?);
         let proxy = ActorProxy::bind(tunnel).await?;
-        Ok(Self { settings, control, identity, proxy, username, password })
+        Ok(Self { settings, control, identity: Arc::new(identity), proxy, username, password })
     }
 
     /// Reads the provisioner's atespace without requiring global-owner permission.
@@ -341,19 +393,7 @@ impl SubstrateProvisioner {
     }
 
     async fn delete_actor(&self, actor: &ObjectRef, uid: &str) -> Result<(), ProvisionError> {
-        let request = DeleteActorRequest {
-            actor: Some(actor.clone()),
-            options: Some(DeleteOptions { uid: uid.to_owned(), version: 0 }),
-        };
-        let response =
-            self.control.clone().delete_actor(self.identity.authorize(request).await?).await;
-        match self.read_actor(actor).await {
-            Err(error) if error.kind == ProvisionErrorKind::Gone => Ok(()),
-            _ => Err(response.err().map_or_else(
-                || failure("delete", ProvisionErrorKind::Ambiguous),
-                |status| rpc_error("delete", &status, true),
-            )),
-        }
+        delete_actor(self.control.clone(), &self.identity, actor, uid).await
     }
 
     fn initial_policy(&self, git_host: &str) -> Result<EgressPolicy, ProvisionError> {
@@ -445,17 +485,23 @@ impl Provisioner for SubstrateProvisioner {
         }
         let uid =
             created.metadata.as_ref().map(|metadata| metadata.uid.clone()).unwrap_or_default();
+        let mut cleanup = SpawnCleanup {
+            control: self.control.clone(),
+            identity: Arc::clone(&self.identity),
+            actor: Some(actor_ref.clone()),
+            uid,
+        };
         let worker = match self.worker(&created) {
             Ok(worker) => worker,
             Err(error) => {
-                self.delete_actor(&actor_ref, &uid).await.map_err(|_| {
+                cleanup.cleanup().await.map_err(|_| {
                     failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous)
                 })?;
                 return Err(error);
             }
         };
         if actor_state(&created) != WorkerState::Suspended {
-            self.delete_actor(&actor_ref, &uid).await?;
+            cleanup.cleanup().await?;
             return Err(failure("created state", ProvisionErrorKind::Ambiguous));
         }
         let request = match self
@@ -468,7 +514,7 @@ impl Provisioner for SubstrateProvisioner {
         {
             Ok(request) => request,
             Err(error) => {
-                self.delete_actor(&actor_ref, &uid).await.map_err(|_| {
+                cleanup.cleanup().await.map_err(|_| {
                     failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous)
                 })?;
                 return Err(error);
@@ -477,13 +523,16 @@ impl Provisioner for SubstrateProvisioner {
         let result = self.control.clone().create_actor_egress_policy(request).await;
         if let Err(status) = result {
             if self.read_policy(&actor_ref).await.is_ok_and(|value| value.rules == policy.rules) {
+                cleanup.disarm();
                 return Ok(worker);
             }
-            self.delete_actor(&actor_ref, &uid)
+            cleanup
+                .cleanup()
                 .await
                 .map_err(|_| failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous))?;
             return Err(rpc_error("create policy", &status, true));
         }
+        cleanup.disarm();
         Ok(worker)
     }
 
@@ -577,6 +626,29 @@ impl Provisioner for SubstrateProvisioner {
             |_| "Substrate Actor (<invalid identity>)".to_owned(),
             |(actor, _)| format!("Substrate Actor {}/{}", actor.atespace, actor.name),
         )
+    }
+}
+
+async fn delete_actor(
+    mut control: ControlClient<Channel>,
+    identity: &AteapiIdentity,
+    actor: &ObjectRef,
+    uid: &str,
+) -> Result<(), ProvisionError> {
+    let request = DeleteActorRequest {
+        actor: Some(actor.clone()),
+        options: Some(DeleteOptions { uid: uid.to_owned(), version: 0 }),
+    };
+    let response = control.delete_actor(identity.authorize(request).await?).await;
+    let observed = control
+        .get_actor(identity.authorize(GetActorRequest { actor: Some(actor.clone()) }).await?)
+        .await;
+    match observed {
+        Err(status) if status.code() == Code::NotFound => Ok(()),
+        _ => Err(response.err().map_or_else(
+            || failure("delete", ProvisionErrorKind::Ambiguous),
+            |status| rpc_error("delete", &status, true),
+        )),
     }
 }
 

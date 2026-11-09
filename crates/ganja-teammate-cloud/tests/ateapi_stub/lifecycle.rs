@@ -20,6 +20,7 @@ use ganja_teammate_cloud::provisioner::{
 };
 use secrecy::SecretString;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tonic::body::Body;
 use tonic::transport::Channel;
@@ -39,6 +40,7 @@ struct ControlState {
     template_ready: bool,
     deny_policy: bool,
     deny_delete: bool,
+    held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 #[derive(Clone)]
@@ -69,8 +71,16 @@ impl<I: Send + 'static, O: Send + 'static> tonic::server::UnaryService<I> for Un
                     .expect("ASCII bearer"),
                 format!("Bearer {TOKEN_CANARY}-1")
             );
+            let held = {
+                let mut state = state.lock().expect("control lock");
+                state.calls.push(operation);
+                (operation == "create policy").then(|| state.held_policy.clone()).flatten()
+            };
+            if let Some((entered, release)) = held {
+                entered.notify_one();
+                release.notified().await;
+            }
             let mut state = state.lock().expect("control lock");
-            state.calls.push(operation);
             let response = handler(&mut state, request.into_inner())?;
             if state.lost.remove(operation) {
                 return Err(Status::unavailable(ERROR_CANARY));
@@ -457,6 +467,35 @@ async fn template_readiness_and_policy_failure_prevent_an_unreported_worker() {
     assert_eq!(error.kind, ProvisionErrorKind::Refused);
     assert!(control.state.lock().expect("state lock").actors.is_empty());
     assert!(!format!("{error:?} {error}").contains(ERROR_CANARY));
+}
+
+#[tokio::test]
+async fn cancelling_policy_installation_deletes_the_created_actor_by_uid() {
+    let (_kube, control, provisioner) = fixture().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    control.state.lock().expect("state lock").held_policy =
+        Some((Arc::clone(&entered), Arc::clone(&release)));
+    let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("policy request entered");
+    assert_eq!(control.state.lock().expect("state lock").actors.len(), 1);
+    spawn.abort();
+    assert!(spawn.await.expect_err("cancelled spawn").is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if control.state.lock().expect("state lock").actors.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned cleanup deletes actor");
+    let state = control.state.lock().expect("state lock");
+    assert_eq!(state.calls.iter().filter(|call| **call == "delete").count(), 1);
+    release.notify_one();
 }
 
 #[tokio::test]
