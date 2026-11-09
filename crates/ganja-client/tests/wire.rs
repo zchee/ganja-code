@@ -937,7 +937,10 @@ async fn hold_cancels_waiting_admission_without_needing_the_stream_door() {
 async fn http_refusal_and_invalid_response_are_each_observed_once() {
     use ganja_client::AttemptOutcome;
     for (reply, expected) in [
-        (Reply::Json { status: 401, body: String::new() }, AttemptOutcome::Http { status: 401 }),
+        (
+            Reply::Json { status: 401, body: String::new() },
+            AttemptOutcome::Http { status: 401, from_serve: false },
+        ),
         (
             Reply::Stream { chunks: vec![frame_at("unknown", "{}", 0)] },
             AttemptOutcome::InvalidResponse,
@@ -949,6 +952,63 @@ async fn http_refusal_and_invalid_response_are_each_observed_once() {
         assert!(resumable.connect().await.is_err());
         assert_eq!(policy.outcomes(), vec![expected]);
         assert_eq!(policy.released.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn http_errors_and_attempts_preserve_valid_server_provenance() {
+    use ganja_client::AttemptOutcome;
+    for (status, epoch, expected) in [
+        (409, Some(EPOCH), true),
+        (503, None, false),
+        (404, None, false),
+        (409, Some("malformed"), false),
+        (409, Some("01998ad0-0000-4000-8000-00000000d505"), false),
+        (503, Some(EPOCH), true),
+        (401, Some(EPOCH), true),
+    ] {
+        let headers = epoch
+            .map(|epoch| vec![("ganja-serve-epoch".to_owned(), epoch.to_owned())])
+            .unwrap_or_default();
+        let stub = Stub::always(Reply::JsonWithHeaders {
+            status,
+            body: r#"{"message":"refused"}"#.to_owned(),
+            headers,
+        })
+        .await;
+        let error = stub.client().abort(&session()).await.expect_err("refusal");
+        match error {
+            ClientError::Refused { from_serve, .. }
+            | ClientError::Unauthorized { from_serve, .. } => assert_eq!(from_serve, expected),
+            other => panic!("unexpected error {other:?}"),
+        }
+        let policy = TestConnectPolicy::new(true);
+        let resumed = Resumable::new(stub.client()).with_policy(policy.clone());
+        assert!(resumed.connect().await.is_err());
+        let outcome = if status == 503 && !expected {
+            AttemptOutcome::Shed
+        } else {
+            AttemptOutcome::Http { status, from_serve: expected }
+        };
+        assert_eq!(policy.outcomes(), vec![outcome]);
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_failures_preserve_cleanup_in_progress_and_default_it_when_absent() {
+    for cleanup in [None, Some(false), Some(true)] {
+        let mut body =
+            serde_json::json!({"status":"failed","stage":"deadline","detail":"budget expired"});
+        if let Some(cleanup) = cleanup {
+            body["cleanup_in_progress"] = cleanup.into();
+        }
+        let stub = Stub::always(Reply::Json { status: 409, body: body.to_string() }).await;
+        assert!(
+            matches!(stub.client().bootstrap_status().await.expect("status"), BootstrapStatus::Failed { cleanup_in_progress, .. } if cleanup_in_progress == cleanup.unwrap_or(false))
+        );
+        assert!(
+            matches!(stub.client().bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("outcome"), BootstrapOutcome::Failed { cleanup_in_progress, .. } if cleanup_in_progress == cleanup.unwrap_or(false))
+        );
     }
 }
 

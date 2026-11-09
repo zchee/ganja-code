@@ -22,6 +22,8 @@ pub enum AttemptOutcome {
     Http {
         /// HTTP response status.
         status: u16,
+        /// Whether the response carried a well-formed server epoch.
+        from_serve: bool,
     },
     /// A 503 shed the request before a registration acknowledgement.
     Shed,
@@ -209,9 +211,15 @@ impl Resumable {
             Err(ClientError::Transport { .. } | ClientError::Disconnected { .. }) => {
                 AttemptOutcome::Transport
             }
-            Err(ClientError::Refused { status: 503, .. }) => AttemptOutcome::Shed,
-            Err(ClientError::Refused { status, .. }) => AttemptOutcome::Http { status: *status },
-            Err(ClientError::Unauthorized { .. }) => AttemptOutcome::Http { status: 401 },
+            Err(ClientError::Refused { status: 503, from_serve: false, .. }) => {
+                AttemptOutcome::Shed
+            }
+            Err(ClientError::Refused { status, from_serve, .. }) => {
+                AttemptOutcome::Http { status: *status, from_serve: *from_serve }
+            }
+            Err(ClientError::Unauthorized { from_serve, .. }) => {
+                AttemptOutcome::Http { status: 401, from_serve: *from_serve }
+            }
             Err(_) => AttemptOutcome::InvalidResponse,
         };
         attempt.finish(outcome);

@@ -44,6 +44,8 @@ pub struct Recorded {
 pub enum Reply {
     /// A JSON document, with the status it carries.
     Json { status: u16, body: String },
+    /// A JSON answer with explicit response headers.
+    JsonWithHeaders { status: u16, body: String, headers: Vec<(String, String)> },
     /// `204`, the way every accepting route here answers.
     Accepted,
     /// An event stream: the chunks are written in order, and the connection
@@ -225,6 +227,16 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     match reply {
         Reply::Json { status, body } => {
             let _ = socket.write_all(json_head(status, body.len()).as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        }
+        Reply::JsonWithHeaders { status, body, headers } => {
+            let mut head = json_head(status, body.len());
+            head.truncate(head.len() - 2);
+            for (name, value) in headers {
+                head.push_str(&format!("{name}: {value}\r\n"));
+            }
+            head.push_str("\r\n");
+            let _ = socket.write_all(head.as_bytes()).await;
             let _ = socket.write_all(body.as_bytes()).await;
         }
         Reply::Accepted => {

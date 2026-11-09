@@ -210,6 +210,8 @@ pub enum ClientError {
     Unauthorized {
         /// The server that refused.
         address: String,
+        /// Whether the response carried a well-formed server epoch.
+        from_serve: bool,
     },
     /// The server answered, and the answer was a refusal.
     #[error("the ganja server refused {method} {path} with {status}: {body}")]
@@ -220,6 +222,8 @@ pub enum ClientError {
         path: String,
         /// The status it carried.
         status: u16,
+        /// Whether the response carried a well-formed server epoch.
+        from_serve: bool,
         /// What the server said, which for this server is a JSON message.
         body: String,
     },
@@ -957,14 +961,27 @@ impl Client {
         path: &str,
         response: reqwest::Response,
     ) -> Result<reqwest::Response, ClientError> {
+        let from_serve = response
+            .headers()
+            .get("ganja-serve-epoch")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|epoch| {
+                epoch.len() == 36 && format!("{epoch}-0").parse::<EventId>().is_ok()
+            });
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized { address: self.address.clone() });
+            return Err(ClientError::Unauthorized { address: self.address.clone(), from_serve });
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = self.bounded(method, path, response).await?;
 
-            return Err(ClientError::Refused { method, path: path.to_owned(), status, body });
+            return Err(ClientError::Refused {
+                method,
+                path: path.to_owned(),
+                status,
+                from_serve,
+                body,
+            });
         }
 
         Ok(response)

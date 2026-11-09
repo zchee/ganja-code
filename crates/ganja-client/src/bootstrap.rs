@@ -68,6 +68,8 @@ pub enum BootstrapStatus {
         stage: BootstrapStage,
         /// Bounded diagnostic from the initializer.
         detail: String,
+        /// The executor is still stopping or cleaning its partial checkout.
+        cleanup_in_progress: bool,
     },
     /// The initializer has handed off to the served engine.
     AlreadyServing,
@@ -82,14 +84,24 @@ impl<'de> Deserialize<'de> for BootstrapStatus {
         enum Wire {
             Idle {},
             InProgress {},
-            Cloned { head: String, branch: String },
-            Failed { stage: BootstrapStage, detail: String },
+            Cloned {
+                head: String,
+                branch: String,
+            },
+            Failed {
+                stage: BootstrapStage,
+                detail: String,
+                #[serde(default)]
+                cleanup_in_progress: bool,
+            },
         }
         Ok(match Wire::deserialize(deserializer)? {
             Wire::Idle {} => Self::Idle,
             Wire::InProgress {} => Self::InProgress,
             Wire::Cloned { head, branch } => Self::Cloned { head, branch },
-            Wire::Failed { stage, detail } => Self::Failed { stage, detail },
+            Wire::Failed { stage, detail, cleanup_in_progress } => {
+                Self::Failed { stage, detail, cleanup_in_progress }
+            }
         })
     }
 }
@@ -110,6 +122,8 @@ pub enum BootstrapOutcome {
         stage: BootstrapStage,
         /// Bounded diagnostic from the initializer.
         detail: String,
+        /// The executor is still stopping or cleaning its partial checkout.
+        cleanup_in_progress: bool,
     },
     /// Another request is still initializing.
     InProgress,
@@ -127,7 +141,9 @@ impl BootstrapStatus {
             Self::Idle => None,
             Self::InProgress => Some(BootstrapOutcome::InProgress),
             Self::Cloned { head, branch } => Some(BootstrapOutcome::Cloned { head, branch }),
-            Self::Failed { stage, detail } => Some(BootstrapOutcome::Failed { stage, detail }),
+            Self::Failed { stage, detail, cleanup_in_progress } => {
+                Some(BootstrapOutcome::Failed { stage, detail, cleanup_in_progress })
+            }
             Self::AlreadyServing => Some(BootstrapOutcome::AlreadyServing),
         }
     }
