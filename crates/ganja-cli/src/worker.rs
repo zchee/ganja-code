@@ -15,6 +15,23 @@ use tokio_util::sync::CancellationToken;
 
 use crate::worker_git;
 
+// The worker image/template supplies binary lookup and home, mandatory server
+// authentication, the engine configuration/data homes and trust bundle, plus
+// its scripted provider selection and noninteractive startup switches.
+const SERVE_ENVIRONMENT: [&str; 11] = [
+    "PATH",
+    "HOME",
+    "GANJA_SERVER_PASSWORD",
+    "GANJA_SERVER_USERNAME",
+    "GANJA_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "SSL_CERT_FILE",
+    "GANJA_PROVIDER",
+    "GANJA_FAKE_SCRIPT",
+    "GANJA_DISABLE_MODELS_FETCH",
+    "GANJA_DISABLE_TERM_PROBE",
+];
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Action {
     /// Listen for a bounded checkout request, then replace this process with serve.
@@ -32,6 +49,9 @@ pub(crate) async fn run(action: Action) -> Result<()> {
     let Action::Init(args) = action;
     let credentials = ganja_serve::Credentials::from_env()
         .context("ganja worker init requires GANJA_SERVER_PASSWORD")?;
+    // These are trusted image/platform inputs. Projected bundle paths are
+    // symlinks by construction, so follow them rather than imposing ownership
+    // or mode restrictions on the projection.
     for variable in ["GIT_CONFIG_GLOBAL", "GIT_SSL_CAINFO"] {
         let Some(path) = std::env::var_os(variable).filter(|path| !path.is_empty()) else {
             bail!("ganja worker init requires {variable}");
@@ -69,10 +89,12 @@ pub(crate) async fn run(action: Action) -> Result<()> {
     let error = std::process::Command::new(std::env::current_exe().context("cannot locate ganja")?)
         .env_clear()
         .envs(
-            worker_git::CHILD_ENVIRONMENT
+            SERVE_ENVIRONMENT
                 .into_iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
         )
+        // The platform router reaches the pod address, so serve binds all
+        // interfaces; isolation relies on one tenant per sandbox and Basic auth.
         .args(["serve", "--hostname", "0.0.0.0", "--port", &port.to_string()])
         .current_dir(directory)
         .exec();

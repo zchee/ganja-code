@@ -152,6 +152,50 @@ async fn git_children_do_not_inherit_unlisted_environment() {
 }
 
 #[tokio::test]
+async fn git_children_receive_neither_server_auth_nor_unlisted_settings() {
+    const CHILD: &str = "GANJA_GIT_ENV_TEST_CHILD";
+    const BLOCKED: [&str; 8] = [
+        "GANJA_SERVER_PASSWORD",
+        "GANJA_SERVER_USERNAME",
+        "GIT_SSL_NO_VERIFY",
+        "HTTPS_PROXY",
+        "ANTHROPIC_API_KEY",
+        "GANJA_CONFIG",
+        "GANJA_WORKER_ENV_CANARY",
+        "GANJA_PROVIDER",
+    ];
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "worker_git::tests::git_children_receive_neither_server_auth_nor_unlisted_settings",
+            ])
+            .env(CHILD, "1")
+            .envs(BLOCKED.map(|name| (name, "synthetic-worker-setting")))
+            .output()
+            .expect("isolated environment test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let root = tempfile::tempdir().expect("git directory");
+    let output = git(
+        root.path(),
+        &["-c", "alias.inspect=!env", "inspect"],
+        Instant::now() + Duration::from_secs(5),
+        Stage::Config,
+    )
+    .await
+    .expect("git environment probe");
+    let output = String::from_utf8(output).expect("environment UTF-8");
+    for name in BLOCKED {
+        assert!(
+            !output.lines().any(|line| line.starts_with(&format!("{name}="))),
+            "git inherited {name}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn git_output_is_bounded_and_command_failures_are_typed() {
     let root = tempfile::tempdir().expect("worker root");
     let version =

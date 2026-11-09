@@ -11,14 +11,10 @@ use tokio::process::Command;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const CHILD_ENVIRONMENT: [&str; 6] = [
-    "PATH",
-    "HOME",
-    "GANJA_SERVER_PASSWORD",
-    "GANJA_SERVER_USERNAME",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_SSL_CAINFO",
-];
+// The worker image supplies binary lookup, its home, global Git policy and
+// the projected CA bundle. Git needs no server authentication or engine config;
+// noninteractive and system-config overrides are set explicitly on each child.
+const GIT_ENVIRONMENT: [&str; 4] = ["PATH", "HOME", "GIT_CONFIG_GLOBAL", "GIT_SSL_CAINFO"];
 
 const OUTPUT_CAP: usize = 4096;
 const REAP_BOUND: Duration = Duration::from_secs(5);
@@ -252,7 +248,7 @@ async fn git(
     command
         .env_clear()
         .envs(
-            CHILD_ENVIRONMENT
+            GIT_ENVIRONMENT
                 .into_iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
         )

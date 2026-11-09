@@ -146,6 +146,99 @@ async fn the_served_worker_does_not_inherit_host_config_overrides() {
 }
 
 #[tokio::test]
+async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider() {
+    let server = GitServer::start(false).await;
+    let template = tempfile::tempdir().expect("worker template");
+    let config = template.path().join("engine-config");
+    let data = template.path().join("engine-data");
+    let script = template.path().join("turns.json");
+    std::fs::create_dir(&config).expect("config directory");
+    std::fs::write(config.join("ganja.toml"), "model = \"fake/worker-template-model\"\n")
+        .expect("template configuration");
+    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}${GIT_CONFIG_GLOBAL+x}${GIT_SSL_CAINFO+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
+    std::fs::write(&script, serde_json::json!({"turns": [
+        {"text": "checking environment", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
+        {"text": "worker-template-script-finished"}
+    ]}).to_string()).expect("template script");
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[
+            ("GANJA_CONFIG_HOME", config.to_str().expect("config path")),
+            ("XDG_DATA_HOME", data.to_str().expect("data path")),
+            ("SSL_CERT_FILE", server.ca.to_str().expect("CA path")),
+            ("GANJA_PROVIDER", "fake"),
+            ("GANJA_FAKE_SCRIPT", script.to_str().expect("script path")),
+            ("GIT_SSL_NO_VERIFY", "1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("ANTHROPIC_API_KEY", "synthetic-provider-value"),
+            ("GANJA_CONFIG", "/missing-synthetic-host-config.toml"),
+            ("GANJA_WORKER_ENV_CANARY", "synthetic-unlisted-value"),
+        ],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/template-env".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    let health = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(health) = worker.client.health().await {
+                break health;
+            }
+            assert!(worker.is_alive(), "served worker remains alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("served worker health");
+    let mut events = worker.client.events().await.expect("events");
+    worker
+        .client
+        .prompt(&health.session_id, &Prompt::new("check template environment"))
+        .await
+        .expect("prompt");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(
+                events.next().await.expect("stream open").expect("event"),
+                Event::MessageFinished { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("scripted turn finishes");
+    assert_eq!(
+        std::fs::read_to_string(worker.work.join("environment.txt"))
+            .expect("script ran with clean environment"),
+        "template-environment"
+    );
+    let messages = worker.client.messages(&health.session_id).await.expect("messages");
+    assert!(
+        messages.iter().any(|message| message.model.as_deref() == Some("worker-template-model")),
+        "model from template ganja.toml was used"
+    );
+    assert!(
+        serde_json::to_string(&messages)
+            .expect("messages serialize")
+            .contains("worker-template-script-finished")
+    );
+    assert!(data.join("ganja").is_dir(), "template data home was used");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
 async fn terminating_init_reaps_a_running_clone_before_exit() {
     let server = GitServer::start(true).await;
     let mut worker = worker_support::WorkerProcess::start(&server).await;
