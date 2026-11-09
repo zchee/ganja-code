@@ -44,6 +44,7 @@ struct ControlState {
     wrong_read_identity: bool,
     replace_on_revert: bool,
     held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
+    held_create_reply: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 #[derive(Clone)]
@@ -83,9 +84,19 @@ impl<I: Send + 'static, O: Send + 'static> tonic::server::UnaryService<I> for Un
                 entered.notify_one();
                 release.notified().await;
             }
-            let mut state = state.lock().expect("control lock");
-            let response = handler(&mut state, request.into_inner())?;
-            if state.lost.remove(operation) {
+            let (response, lost, held_reply) = {
+                let mut state = state.lock().expect("control lock");
+                let response = handler(&mut state, request.into_inner())?;
+                let lost = state.lost.remove(operation);
+                let held =
+                    (operation == "create").then(|| state.held_create_reply.clone()).flatten();
+                (response, lost, held)
+            };
+            if let Some((entered, release)) = held_reply {
+                entered.notify_one();
+                release.notified().await;
+            }
+            if lost {
                 return Err(Status::unavailable(ERROR_CANARY));
             }
             Ok(Response::new(response))
@@ -485,6 +496,79 @@ async fn template_readiness_and_policy_failure_prevent_an_unreported_worker() {
     assert_eq!(error.kind, ProvisionErrorKind::Refused);
     assert!(control.state.lock().expect("state lock").actors.is_empty());
     assert!(!format!("{error:?} {error}").contains(ERROR_CANARY));
+}
+
+#[tokio::test]
+async fn cancelling_a_committed_create_cleans_up_only_the_created_uid() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("cleanup log capture");
+    for replace_uid in [false, true] {
+        let (_kube, control, provisioner) = fixture().await;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        control.state.lock().expect("state lock").held_create_reply =
+            Some((Arc::clone(&entered), Arc::clone(&release)));
+        let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("create committed");
+        spawn.abort();
+        assert!(spawn.await.expect_err("cancelled caller").is_cancelled());
+        if replace_uid {
+            control
+                .state
+                .lock()
+                .expect("state lock")
+                .actors
+                .values_mut()
+                .next()
+                .expect("actor")
+                .metadata
+                .as_mut()
+                .expect("metadata")
+                .uid = "replacement-uid".to_owned();
+        }
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let reconciled = control
+                    .state
+                    .lock()
+                    .expect("state lock")
+                    .calls
+                    .windows(2)
+                    .any(|calls| calls == ["delete", "get"]);
+                if reconciled
+                    && (!replace_uid || capture.logged().contains("spawn cleanup unconfirmed"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned creation cleanup attempted");
+        let state = control.state.lock().expect("state lock");
+        assert_eq!(state.calls.iter().filter(|call| **call == "delete").count(), 1);
+        assert_eq!(state.actors.len(), usize::from(replace_uid));
+        if replace_uid {
+            assert_eq!(
+                state
+                    .actors
+                    .values()
+                    .next()
+                    .expect("replacement")
+                    .metadata
+                    .as_ref()
+                    .expect("metadata")
+                    .uid,
+                "replacement-uid"
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -69,18 +69,31 @@ impl SpawnCleanup {
         let actor = self.actor.take()?;
         let control = self.control.clone();
         let identity = Arc::clone(&self.identity);
-        let uid = self.uid.clone();
-        // Tokio owns the bounded cleanup because Drop cannot await; a cancelled caller
-        // must not drop the deletion future along with the policy-installation future.
+        let mut uid = self.uid.clone();
+        // Tokio owns the bounded cleanup because Drop cannot await; cancellation
+        // must not discard either an in-flight creation or its later deletion.
         Some(tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                Duration::from_secs(30),
-                delete_actor(control, &identity, &actor, &uid),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous))
-            });
+            let operation = async {
+                if uid.is_empty() {
+                    let observed = read_actor(control.clone(), &identity, &actor).await?;
+                    uid = observed
+                        .metadata
+                        .filter(|metadata| {
+                            metadata.atespace == actor.atespace
+                                && metadata.name == actor.name
+                                && !metadata.uid.is_empty()
+                        })
+                        .map(|metadata| metadata.uid)
+                        .ok_or_else(|| {
+                            failure("created identity", ProvisionErrorKind::Ambiguous)
+                        })?;
+                }
+                delete_actor(control, &identity, &actor, &uid).await
+            };
+            let result =
+                tokio::time::timeout(Duration::from_secs(30), operation).await.unwrap_or_else(
+                    |_| Err(failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous)),
+                );
             if result.is_err() {
                 tracing::warn!(atespace = %actor.atespace, actor = %actor.name, "spawn cleanup unconfirmed");
             }
@@ -359,14 +372,7 @@ impl SubstrateProvisioner {
     }
 
     async fn read_actor(&self, actor: &ObjectRef) -> Result<Actor, ProvisionError> {
-        self.control
-            .clone()
-            .get_actor(
-                self.identity.authorize(GetActorRequest { actor: Some(actor.clone()) }).await?,
-            )
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|status| rpc_error("state", &status, false))
+        read_actor(self.control.clone(), &self.identity, actor).await
     }
 
     async fn checked_actor(&self, actor: &ObjectRef, uid: &str) -> Result<Actor, ProvisionError> {
@@ -462,45 +468,21 @@ impl Provisioner for SubstrateProvisioner {
             }),
             ..Default::default()
         };
-        let created = self
-            .control
-            .clone()
-            .create_actor(self.identity.authorize(CreateActorRequest { actor: Some(actor) }).await?)
-            .await;
-        let mut created = match created {
-            Ok(response) => response.into_inner(),
-            Err(status) => match self.read_actor(&actor_ref).await {
-                Ok(actor) => actor,
-                Err(_) => return Err(rpc_error("create", &status, true)),
-            },
-        };
-        let expected_identity = |value: &Actor| {
-            value.metadata.as_ref().is_some_and(|metadata| {
-                metadata.atespace == actor_ref.atespace
-                    && metadata.name == actor_ref.name
-                    && !metadata.uid.is_empty()
-            })
-        };
-        if !expected_identity(&created) {
-            created = self
-                .read_actor(&actor_ref)
-                .await
-                .map_err(|_| failure("created identity", ProvisionErrorKind::Ambiguous))?;
-        }
-        if !expected_identity(&created) {
-            // No trustworthy UID was returned; never delete a possibly replaced actor
-            // without its identity precondition. Leave the name for owner reconciliation.
-            tracing::warn!(atespace = %actor_ref.atespace, actor = %actor_ref.name, "created identity unconfirmed");
-            return Err(failure("created identity", ProvisionErrorKind::Ambiguous));
-        }
-        let uid =
-            created.metadata.as_ref().map(|metadata| metadata.uid.clone()).unwrap_or_default();
-        let mut cleanup = SpawnCleanup {
-            control: self.control.clone(),
-            identity: Arc::clone(&self.identity),
-            actor: Some(actor_ref.clone()),
-            uid,
-        };
+        let creation_control = self.control.clone();
+        let creation_identity = Arc::clone(&self.identity);
+        let creation_ref = actor_ref.clone();
+        // The task's result owns the armed guard. If the caller disappears before
+        // receiving it, Tokio drops that result and the guard schedules cleanup.
+        let (created, mut cleanup) = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                create_actor(creation_control, creation_identity, actor, creation_ref),
+            )
+            .await
+            .map_err(|_| failure("create", ProvisionErrorKind::Ambiguous))?
+        })
+        .await
+        .map_err(|_| failure("create", ProvisionErrorKind::Ambiguous))??;
         let worker = match self.worker(&created) {
             Ok(worker) => worker,
             Err(error) => {
@@ -637,6 +619,57 @@ impl Provisioner for SubstrateProvisioner {
             |(actor, _)| format!("Substrate Actor {}/{}", actor.atespace, actor.name),
         )
     }
+}
+
+async fn create_actor(
+    mut control: ControlClient<Channel>,
+    identity: Arc<AteapiIdentity>,
+    actor: Actor,
+    actor_ref: ObjectRef,
+) -> Result<(Actor, SpawnCleanup), ProvisionError> {
+    let mut cleanup = SpawnCleanup {
+        control: control.clone(),
+        identity: Arc::clone(&identity),
+        actor: Some(actor_ref.clone()),
+        uid: String::new(),
+    };
+    let response = control
+        .create_actor(identity.authorize(CreateActorRequest { actor: Some(actor) }).await?)
+        .await;
+    let mut created = match response {
+        Ok(response) => response.into_inner(),
+        Err(status) => read_actor(control.clone(), &identity, &actor_ref)
+            .await
+            .map_err(|_| rpc_error("create", &status, true))?,
+    };
+    let expected_identity = |value: &Actor| {
+        value.metadata.as_ref().is_some_and(|metadata| {
+            metadata.atespace == actor_ref.atespace
+                && metadata.name == actor_ref.name
+                && !metadata.uid.is_empty()
+        })
+    };
+    if !expected_identity(&created) {
+        created = read_actor(control, &identity, &actor_ref).await?;
+    }
+    if !expected_identity(&created) {
+        return Err(failure("created identity", ProvisionErrorKind::Ambiguous));
+    }
+    cleanup.uid =
+        created.metadata.as_ref().map(|metadata| metadata.uid.clone()).unwrap_or_default();
+    Ok((created, cleanup))
+}
+
+async fn read_actor(
+    mut control: ControlClient<Channel>,
+    identity: &AteapiIdentity,
+    actor: &ObjectRef,
+) -> Result<Actor, ProvisionError> {
+    control
+        .get_actor(identity.authorize(GetActorRequest { actor: Some(actor.clone()) }).await?)
+        .await
+        .map(tonic::Response::into_inner)
+        .map_err(|status| rpc_error("state", &status, false))
 }
 
 async fn delete_actor(
