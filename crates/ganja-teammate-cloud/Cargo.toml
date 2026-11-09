@@ -32,6 +32,9 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Search captured diagnostics for both raw and wire-encoded synthetic secrets.
+base64.workspace = true
+tracing-subscriber.workspace = true
 # Terminal reconciliation tests drive the real persisted HTTP projections.
 ganja-serve.workspace = true
 # The fake implements this contract; the reverse edge is confined to tests.
