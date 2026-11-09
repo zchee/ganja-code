@@ -39,7 +39,7 @@ impl fmt::Debug for WorkerHandle {
 pub struct Endpoint {
     /// Validated by the client before any request is made.
     pub base_url: String,
-    /// Provider-owned routing headers, not HTTP authorization.
+    /// Provider-owned routing and local-ingress credentials, separate from worker Basic auth.
     pub headers: HeaderMap,
     /// Basic-auth username configured in the worker template.
     pub username: String,

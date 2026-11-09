@@ -5,13 +5,26 @@ use super::*;
 #[test]
 fn routing_consumes_outer_headers_and_preserves_the_inner_password_and_body() {
     let input = b"POST /session HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\nAuthorization: Basic secret-canary\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nbody";
-    let (actor, request) = route_request(
+    let (actor, request, remaining) = route_request(
         input,
         &HeaderValue::from_static("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
     )
     .expect("route a valid worker request");
+    assert_eq!(remaining, 0);
     assert_eq!(actor, ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() });
     assert_eq!(request, b"POST /session HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic secret-canary\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
+}
+
+#[test]
+fn a_pipelined_followup_is_not_forwarded_with_the_first_request() {
+    let input = b"POST /session HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\nbodyGET /other HTTP/1.1\r\nate-target-actor: ganja/other\r\nx-ganja-proxy-token: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n";
+    let (_, request, remaining) = route_request(
+        input,
+        &HeaderValue::from_static("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    )
+    .expect("first request");
+    assert_eq!(remaining, 0);
+    assert_eq!(request, b"POST /session HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody");
 }
 
 #[test]
@@ -27,6 +40,137 @@ fn ambiguous_or_absent_routing_is_refused_before_opening_an_actor() {
             ProvisionErrorKind::Refused
         );
     }
+}
+
+#[derive(Debug)]
+struct SocketTunnel {
+    address: std::net::SocketAddr,
+    opens: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Tunnel for SocketTunnel {
+    async fn control(&self) -> Result<Channel, ProvisionError> {
+        Ok(tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+    }
+
+    async fn actor(&self, _actor: &ObjectRef) -> Result<TunnelIo, ProvisionError> {
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(TcpStream::connect(self.address).await.expect("upstream")))
+    }
+}
+
+async fn socket_proxy() -> (ActorProxy, TcpListener, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("upstream listener");
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tunnel = Arc::new(SocketTunnel {
+        address: listener.local_addr().expect("address"),
+        opens: Arc::clone(&opens),
+    });
+    let proxy = ActorProxy::bind("ganja", tunnel).await.expect("proxy");
+    proxy
+        .admit(&ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() })
+        .expect("admit");
+    (proxy, listener, opens)
+}
+
+#[tokio::test]
+async fn neither_buffered_nor_late_followup_bytes_reach_the_worker() {
+    for late in [false, true] {
+        let (proxy, listener, _) = socket_proxy().await;
+        let token = proxy.token_header();
+        let token = token.to_str().expect("token");
+        let first = format!(
+            "POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {token}\r\n\r\nbody"
+        );
+        let followup = format!(
+            "GET /second HTTP/1.1\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {token}\r\n\r\n"
+        );
+        let mut client = TcpStream::connect(proxy.address).await.expect("local connection");
+        let request = if late {
+            first.strip_suffix("body").expect("body suffix").to_owned()
+        } else {
+            format!("{first}{followup}")
+        };
+        client.write_all(request.as_bytes()).await.expect("first request");
+        let (mut upstream, _) = listener.accept().await.expect("upstream connection");
+        let mut received = read_head(&mut upstream).await.expect("upstream head");
+        if late {
+            client.write_all(b"body").await.expect("stream first body");
+        }
+        let end = received.windows(4).position(|bytes| bytes == b"\r\n\r\n").expect("head end") + 4;
+        while received.len() < end + 4 {
+            received.push(upstream.read_u8().await.expect("body byte"));
+        }
+        assert_eq!(&received[end..], b"body");
+        assert!(!String::from_utf8_lossy(&received).contains("x-ganja-proxy-token"));
+        if late {
+            client.write_all(followup.as_bytes()).await.expect("late followup");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), upstream.read_u8()).await.is_err(),
+            "no followup may reach upstream"
+        );
+        upstream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("response");
+        upstream.shutdown().await.expect("close response");
+        let mut response = Vec::new();
+        if let Err(error) = client.read_to_end(&mut response).await {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(response.ends_with(b"ok"));
+    }
+}
+
+#[tokio::test]
+async fn pooled_clients_use_two_admitted_connections_for_two_requests() {
+    let (proxy, listener, opens) = socket_proxy().await;
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("connection");
+            let head = read_head(&mut socket).await.expect("request");
+            let head = String::from_utf8(head).expect("HTTP head");
+            assert!(!head.contains("x-ganja-proxy-token"));
+            assert!(!head.contains("ate-target-actor"));
+            assert!(head.contains("Connection: close"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+                .await
+                .expect("response");
+        }
+    });
+    let mut headers = http::HeaderMap::new();
+    headers.insert(TOKEN_HEADER, proxy.token_header());
+    headers.insert("ate-target-actor", HeaderValue::from_static("ganja/worker"));
+    let client = ganja_client::Client::new(&proxy.base_url(), None)
+        .expect("typed client")
+        .with_headers(headers);
+    assert!(client.sessions().await.expect("first request").is_empty());
+    assert!(client.sessions().await.expect("second request").is_empty());
+    server.await.expect("server");
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn upgrades_and_transfer_encoded_requests_are_refused_without_an_upstream() {
+    let (proxy, _listener, opens) = socket_proxy().await;
+    for header in
+        ["Upgrade: websocket", "Connection: keep-alive, Upgrade", "Transfer-Encoding: chunked"]
+    {
+        let token = proxy.token_header();
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\n{header}\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {}\r\n\r\n",
+            token.to_str().expect("token")
+        );
+        let mut client = TcpStream::connect(proxy.address).await.expect("client");
+        client.write_all(request.as_bytes()).await.expect("request");
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.expect("refusal");
+        assert!(response.starts_with(b"HTTP/1.1 502"));
+    }
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -170,7 +170,7 @@ async fn forward_worker(
 ) -> Result<(), ProvisionError> {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let bytes = read_head(&mut socket).await?;
-        let (actor, request) = route_request(&bytes, token)?;
+        let (actor, request, remaining_body) = route_request(&bytes, token)?;
         if actor.atespace != atespace {
             return Err(failure("proxy admission", ProvisionErrorKind::Refused));
         }
@@ -189,6 +189,12 @@ async fn forward_worker(
                     .write_all(&request)
                     .await
                     .map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
+                // Relay only the declared first body, never another request head.
+                let copied = tokio::io::copy(&mut (&mut socket).take(remaining_body), &mut remote)
+                    .await.map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
+                if copied != remaining_body {
+                    return Err(failure("proxy body", ProvisionErrorKind::Refused));
+                }
                 Ok::<_, ProvisionError>(remote)
             } => result,
         }?;
@@ -200,7 +206,7 @@ async fn forward_worker(
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => {},
-                result = tokio::io::copy_bidirectional(&mut socket, &mut remote) => {
+                result = tokio::io::copy(&mut remote, &mut socket) => {
                     result.map_err(|_| failure("proxy stream", ProvisionErrorKind::Transient))?;
                 }
             }
@@ -242,7 +248,7 @@ async fn read_head(io: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, Provisi
 fn route_request(
     bytes: &[u8],
     token: &HeaderValue,
-) -> Result<(ObjectRef, Vec<u8>), ProvisionError> {
+) -> Result<(ObjectRef, Vec<u8>, u64), ProvisionError> {
     let refused = || failure("proxy routing", ProvisionErrorKind::Refused);
     let mut expected = [0_u8; 32];
     if !matches!(
@@ -263,6 +269,7 @@ fn route_request(
     }
     let mut target = None;
     let mut authenticated = false;
+    let mut content_length = None;
     let mut result = Vec::with_capacity(bytes.len());
     let method = request.method.ok_or_else(refused)?;
     let path = request.path.ok_or_else(refused)?;
@@ -271,6 +278,26 @@ fn route_request(
     }
     result.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
     for header in request.headers {
+        if header.name.eq_ignore_ascii_case("upgrade")
+            || header.name.eq_ignore_ascii_case("transfer-encoding")
+            || (header.name.eq_ignore_ascii_case("connection")
+                && header
+                    .value
+                    .split(|byte| *byte == b',')
+                    .any(|value| value.trim_ascii().eq_ignore_ascii_case(b"upgrade")))
+        {
+            return Err(refused());
+        }
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let text = std::str::from_utf8(header.value).map_err(|_| refused())?;
+            if text.is_empty()
+                || !text.bytes().all(|byte| byte.is_ascii_digit())
+                || content_length.is_some()
+            {
+                return Err(refused());
+            }
+            content_length = Some(text.parse::<u64>().map_err(|_| refused())?);
+        }
         if header.name.eq_ignore_ascii_case("ate-target-actor") {
             if target.is_some() {
                 return Err(refused());
@@ -299,11 +326,14 @@ fn route_request(
     if !authenticated {
         return Err(refused());
     }
-    // A shared origin must not reuse an actor's tunnel for another actor. The
-    // connection closes after this response; an SSE connection remains open.
+    // One request per connection: buffered or later follow-up bytes are never
+    // forwarded. Only the declared first body and its streamed response survive.
     result.extend_from_slice(b"Connection: close\r\n\r\n");
-    result.extend_from_slice(&bytes[head_length..]);
-    Ok((target.ok_or_else(refused)?, result))
+    let body_length = content_length.unwrap_or(0);
+    let buffered =
+        (bytes.len() - head_length).min(usize::try_from(body_length).unwrap_or(usize::MAX));
+    result.extend_from_slice(&bytes[head_length..head_length + buffered]);
+    Ok((target.ok_or_else(refused)?, result, body_length - buffered as u64))
 }
 
 pub(super) fn parse_actor(value: &str) -> Result<ObjectRef, ProvisionError> {

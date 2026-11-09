@@ -65,7 +65,9 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   trusted operator paths, so pinning kubectl does not pin plugin resolution.
   The shared ingress requires a sensitive process-local token and admits only
   issued, unretired actors in the configured atespace. It consumes the token
-  before forwarding. The plugin owns its separate unauthenticated socket and
+  before forwarding one request per connection, bounded by `Content-Length`
+  (or no body); upgrades and transfer-encoded request bodies are refused.
+  Responses, including event streams, remain streaming. The plugin owns its separate unauthenticated socket and
   has no header-authentication hook; it is bound explicitly to `127.0.0.1`,
   targets only its fixed actor, and still requires the worker's Basic auth.
   Other local processes can reach that plugin socket; use in-process mode
@@ -75,6 +77,8 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   Actor UID and succeeds only on a confirmed `NOT_FOUND`. Creation ownership
   requires a matching successful create reply: an unknown UID leaves the name
   logged for owner reconciliation and is never adopted from a later read.
+  After that warning, the owner must look up the named actor in the logged
+  atespace and delete it if it exists.
   A cancelled policy installation schedules bounded, UID-guarded cleanup
   independently of the cancelled caller.
 - Live cases in `tests/substrate_live.rs` are `#[ignore]` and inert without
