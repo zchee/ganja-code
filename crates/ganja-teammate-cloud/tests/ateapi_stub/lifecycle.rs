@@ -43,6 +43,8 @@ struct ControlState {
     wrong_created_identity: bool,
     wrong_read_identity: bool,
     replace_on_revert: bool,
+    deny_revert: bool,
+    noop_revert: bool,
     held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
     held_create_reply: Option<(Arc<Notify>, Arc<Notify>)>,
 }
@@ -277,10 +279,16 @@ impl Service<http::Request<Body>> for ControlStub {
             ),
             "/substrate.ateapi.v1.Control/RevertActor" => {
                 method!(RevertActorRequest, RevertActorResponse, "revert", |state, request| {
+                    if state.deny_revert {
+                        return Err(Status::permission_denied(ERROR_CANARY));
+                    }
                     let actor = state
                         .actors
                         .get_mut(&request.actor.expect("actor reference").name)
                         .ok_or_else(|| Status::not_found(ERROR_CANARY))?;
+                    if state.noop_revert {
+                        return Ok(RevertActorResponse { actor: Some(actor.clone()) });
+                    }
                     if state.replace_on_revert {
                         actor.metadata.as_mut().expect("metadata").uid =
                             uuid::Uuid::now_v7().to_string();
@@ -288,6 +296,7 @@ impl Service<http::Request<Body>> for ControlStub {
                     let status = actor.status.as_mut().expect("status");
                     status.state = ActorState::Suspended.into();
                     status.crash = None;
+                    status.assigned_node.clear();
                     Ok(RevertActorResponse { actor: Some(actor.clone()) })
                 })
             }
@@ -642,6 +651,90 @@ async fn creation_reconciles_identity_but_never_returns_an_unrelated_worker() {
     let error = provisioner.spawn(&spec()).await.expect_err("reject mismatched reconciliation");
     assert_eq!(error.kind, ProvisionErrorKind::Ambiguous);
     assert!(control.state.lock().expect("state lock").policies.is_empty());
+}
+
+#[tokio::test]
+async fn reverts_do_not_claim_success_for_refusal_noop_or_lost_responses() {
+    for (case, expected) in [
+        ("refused", ProvisionErrorKind::Refused),
+        ("noop", ProvisionErrorKind::Ambiguous),
+        ("lost-before-apply", ProvisionErrorKind::Ambiguous),
+        ("lost-after-apply", ProvisionErrorKind::Ambiguous),
+    ] {
+        let (_kube, control, provisioner) = fixture().await;
+        let worker = provisioner.spawn(&spec()).await.expect("spawn");
+        {
+            let mut state = control.state.lock().expect("state lock");
+            state.deny_revert = case == "refused";
+            state.noop_revert = matches!(case, "noop" | "lost-before-apply");
+            if case.starts_with("lost") {
+                state.lost.insert("revert");
+            }
+            if case == "lost-after-apply" {
+                state
+                    .actors
+                    .values_mut()
+                    .next()
+                    .expect("actor")
+                    .status
+                    .as_mut()
+                    .expect("status")
+                    .assigned_node = "worker-node".to_owned();
+            }
+        }
+        let error = provisioner.revert(&worker).await.expect_err(case);
+        assert_eq!(error.kind, expected, "{case}");
+        let state = control.state.lock().expect("state lock");
+        assert_eq!(state.calls.iter().filter(|call| **call == "revert").count(), 1);
+        if case == "lost-after-apply" {
+            assert!(
+                state
+                    .actors
+                    .values()
+                    .next()
+                    .expect("actor")
+                    .status
+                    .as_ref()
+                    .expect("status")
+                    .assigned_node
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn reverting_a_suspended_local_snapshot_requires_a_changed_status() {
+    let (_kube, control, provisioner) = fixture().await;
+    let worker = provisioner.spawn(&spec()).await.expect("spawn");
+    control
+        .state
+        .lock()
+        .expect("state lock")
+        .actors
+        .values_mut()
+        .next()
+        .expect("actor")
+        .status
+        .as_mut()
+        .expect("status")
+        .assigned_node = "worker-node".to_owned();
+    provisioner.revert(&worker).await.expect("local snapshot reverted");
+    assert!(
+        control
+            .state
+            .lock()
+            .expect("state lock")
+            .actors
+            .values()
+            .next()
+            .expect("actor")
+            .status
+            .as_ref()
+            .expect("status")
+            .assigned_node
+            .is_empty()
+    );
 }
 
 #[tokio::test]

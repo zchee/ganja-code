@@ -274,25 +274,27 @@ impl SubstrateProvisioner {
     /// Returns an unconfirmed mutation rather than retrying a revert.
     pub async fn revert(&self, worker: &Worker) -> Result<(), ProvisionError> {
         let (actor, uid) = self.worker_ref(worker)?;
-        self.checked_actor(&actor, &uid).await?;
+        let before = self.checked_actor(&actor, &uid).await?;
         let response = self
             .control
             .clone()
             .revert_actor(
                 self.identity.authorize(RevertActorRequest { actor: Some(actor.clone()) }).await?,
             )
-            .await;
-        let confirmed =
-            response.ok().and_then(|response| response.into_inner().actor).is_some_and(|value| {
-                actor_state(&value) == WorkerState::Suspended
-                    && value.metadata.as_ref().is_some_and(|metadata| metadata.uid == uid)
-            });
-        if confirmed
-            || self
-                .checked_actor(&actor, &uid)
-                .await
-                .is_ok_and(|value| actor_state(&value) == WorkerState::Suspended)
-        {
+            .await
+            // The wire carries no revert operation ID. An unchanged suspended
+            // read cannot establish that a lost response applied this mutation.
+            .map_err(|status| rpc_error("revert", &status, true))?
+            .into_inner();
+        if response.actor.is_some_and(|value| {
+            actor_state(&value) == WorkerState::Suspended
+                && value.status != before.status
+                && value.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.uid == uid
+                        && metadata.atespace == actor.atespace
+                        && metadata.name == actor.name
+                })
+        }) {
             Ok(())
         } else {
             Err(failure("revert", ProvisionErrorKind::Ambiguous))
