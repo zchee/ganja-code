@@ -672,6 +672,32 @@ async fn template_readiness_and_policy_failure_prevent_an_unreported_worker() {
 }
 
 #[tokio::test]
+async fn an_already_existing_create_is_ambiguous_and_logs_only_its_status_code() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("log capture");
+    let (_kube, control, provisioner) = fixture().await;
+    control.state.lock().expect("state").create_status = Some(tonic::Code::AlreadyExists);
+    let error = provisioner.spawn(&spec()).await.expect_err("possibly duplicated create");
+    assert_eq!(error.kind, ProvisionErrorKind::Ambiguous);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !capture.logged().contains("spawn cleanup unconfirmed") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one ownership warning");
+    let logs = capture.logged();
+    assert_eq!(logs.matches("spawn cleanup unconfirmed").count(), 1);
+    assert!(logs.contains("code=AlreadyExists"));
+    assert!(!logs.contains(ERROR_CANARY));
+    let state = control.state.lock().expect("state");
+    assert_eq!(state.calls, ["get template", "create"]);
+}
+
+#[tokio::test]
 async fn definitive_create_refusals_do_not_report_unconfirmed_ownership() {
     let capture = ganja_testkit::LogCapture::default();
     tracing::subscriber::set_global_default(
@@ -681,7 +707,6 @@ async fn definitive_create_refusals_do_not_report_unconfirmed_ownership() {
     for code in [
         tonic::Code::PermissionDenied,
         tonic::Code::InvalidArgument,
-        tonic::Code::AlreadyExists,
         tonic::Code::Unauthenticated,
         tonic::Code::Unimplemented,
     ] {
@@ -712,6 +737,9 @@ async fn definitive_create_refusals_do_not_report_unconfirmed_ownership() {
     let logs = capture.logged();
     assert_eq!(logs.matches("spawn cleanup unconfirmed").count(), 1);
     assert!(logs.contains("Ambiguous"));
+    assert!(logs.contains("code=Unavailable"));
+    assert!(logs.contains("transport"));
+    assert!(!logs.contains(ERROR_CANARY));
     assert_eq!(control.state.lock().expect("state").actors.len(), 1);
 }
 
@@ -792,6 +820,7 @@ async fn an_unknown_creation_uid_never_deletes_a_replacement() {
     assert_eq!(state.actors[&name].metadata.as_ref().expect("replacement").uid, "replacement-uid");
     assert_eq!(state.retired.as_slice(), std::slice::from_ref(&name));
     assert_eq!(capture.logged().matches(&name).count(), 1);
+    assert!(capture.logged().contains("deadline"));
     release.notify_one();
 }
 

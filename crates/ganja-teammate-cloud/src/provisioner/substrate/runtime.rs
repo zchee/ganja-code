@@ -50,6 +50,8 @@ struct SpawnCleanup {
     proxy: Arc<ActorProxy>,
     actor: Option<ObjectRef>,
     uid: String,
+    cause: &'static str,
+    code: Option<Code>,
 }
 
 impl SpawnCleanup {
@@ -58,6 +60,7 @@ impl SpawnCleanup {
     }
 
     async fn cleanup(mut self) -> Result<(), ProvisionError> {
+        self.cause = "cleanup";
         match self.start() {
             Some(task) => task
                 .await
@@ -72,6 +75,8 @@ impl SpawnCleanup {
         let identity = Arc::clone(&self.identity);
         let proxy = Arc::clone(&self.proxy);
         let uid = self.uid.clone();
+        let cause = self.cause;
+        let code = self.code;
         // Tokio owns the bounded cleanup because Drop cannot await; cancellation
         // must not discard either an in-flight creation or its later deletion.
         Some(tokio::spawn(async move {
@@ -91,7 +96,11 @@ impl SpawnCleanup {
                     |_| Err(failure("spawn cleanup unconfirmed", ProvisionErrorKind::Ambiguous)),
                 );
             if let Err(error) = &result {
-                tracing::warn!(atespace = %actor.atespace, actor = %actor.name, outcome = ?error.kind, "spawn cleanup unconfirmed");
+                if let Some(code) = code {
+                    tracing::warn!(atespace = %actor.atespace, actor = %actor.name, outcome = ?error.kind, cause, code = ?code, "spawn cleanup unconfirmed");
+                } else {
+                    tracing::warn!(atespace = %actor.atespace, actor = %actor.name, outcome = ?error.kind, cause, "spawn cleanup unconfirmed");
+                }
             }
             result
         }))
@@ -480,18 +489,8 @@ impl Provisioner for SubstrateProvisioner {
         // The task's result owns the armed guard. If the caller disappears before
         // receiving it, Tokio drops that result and the guard schedules cleanup.
         let (created, mut cleanup) = tokio::spawn(async move {
-            tokio::time::timeout(
-                Duration::from_secs(30),
-                create_actor(
-                    creation_control,
-                    creation_identity,
-                    actor,
-                    creation_ref,
-                    creation_proxy,
-                ),
-            )
-            .await
-            .map_err(|_| failure("create", ProvisionErrorKind::Ambiguous))?
+            create_actor(creation_control, creation_identity, actor, creation_ref, creation_proxy)
+                .await
         })
         .await
         .map_err(|_| failure("create", ProvisionErrorKind::Ambiguous))??;
@@ -643,32 +642,52 @@ async fn create_actor(
     actor_ref: ObjectRef,
     proxy: Arc<ActorProxy>,
 ) -> Result<(Actor, SpawnCleanup), ProvisionError> {
-    let request = identity.authorize(CreateActorRequest { actor: Some(actor) }).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let request = tokio::time::timeout_at(
+        deadline,
+        identity.authorize(CreateActorRequest { actor: Some(actor) }),
+    )
+    .await
+    .map_err(|_| failure("create authorization", ProvisionErrorKind::Transient))??;
     let mut cleanup = SpawnCleanup {
         control: control.clone(),
         identity: Arc::clone(&identity),
         proxy,
         actor: Some(actor_ref.clone()),
         uid: String::new(),
+        cause: "cancelled",
+        code: None,
     };
-    let created = match control.create_actor(request).await {
+    let response = match tokio::time::timeout_at(deadline, control.create_actor(request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            cleanup.cause = "deadline";
+            return Err(failure("create", ProvisionErrorKind::Ambiguous));
+        }
+    };
+    let created = match response {
         Ok(response) => response.into_inner(),
         Err(status) => {
             // PermissionDenied/Unauthenticated reject access, InvalidArgument
-            // rejects input, AlreadyExists preserves an existing object, and
-            // Unimplemented has no handler. Only these prove no creation;
-            // other statuses may follow partially executed work.
+            // rejects input, and Unimplemented has no handler. Only these
+            // prove no creation; AlreadyExists can follow duplicate delivery.
             if matches!(
                 status.code(),
                 Code::PermissionDenied
                     | Code::Unauthenticated
                     | Code::InvalidArgument
-                    | Code::AlreadyExists
                     | Code::Unimplemented
             ) {
                 cleanup.disarm();
                 return Err(rpc_error("create", &status, true));
             }
+            cleanup.code = Some(status.code());
+            cleanup.cause = match status.code() {
+                Code::Unavailable | Code::Unknown | Code::Cancelled | Code::DeadlineExceeded => {
+                    "transport"
+                }
+                _ => "rpc",
+            };
             return Err(failure("create", ProvisionErrorKind::Ambiguous));
         }
     };
@@ -681,6 +700,7 @@ async fn create_actor(
     };
     // The wire has no create-operation identifier for a later ownership read.
     if !expected_identity(&created) {
+        cleanup.cause = "malformed_reply";
         return Err(failure("created identity", ProvisionErrorKind::Ambiguous));
     }
     cleanup.uid =
