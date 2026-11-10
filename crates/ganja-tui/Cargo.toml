@@ -41,6 +41,8 @@ ganja-permission.workspace = true
 # the engine to render a transcript, and depending on it that way is what keeps
 # that true.
 ganja-protocol.workspace = true
+# Hosted teammate backends are assembled by the terminal frontend, not the engine.
+ganja-teammate-cloud.workspace = true
 # The machine-bound teammate backends this frontend assembles (**D539**): a
 # pane needs a tmux server and the shell to split into, which is a property of
 # the terminal this crate owns and not of the engine it drives. Named here

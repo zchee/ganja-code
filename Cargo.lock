@@ -1814,6 +1814,7 @@ dependencies = [
  "ganja-core",
  "ganja-permission",
  "ganja-protocol",
+ "ganja-teammate-cloud",
  "ganja-teammate-local",
  "ganja-testkit",
  "ganja-tool",
