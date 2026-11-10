@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!.dockerignore
+!ganja
+!ganja.toml
+!gitconfig
+!acceptance-script.json
