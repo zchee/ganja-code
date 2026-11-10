@@ -378,7 +378,47 @@ async fn an_action_in_transition_finishes_within_its_budget_and_is_joined_by_kil
     fixture.member.kill().await;
     assert!(start.elapsed() <= Duration::from_millis(100));
     assert_eq!(operation.wait().await, ControlOutcome::Unsupported);
-    assert!(fixture.member.control_task.lock().expect("owner action").is_none());
+    assert!(fixture.member.control_task.lock().await.is_none());
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+}
+
+#[tokio::test]
+async fn a_cancelled_cleanup_wait_keeps_the_owner_action_for_the_next_cleanup() {
+    let fixture = Fixture::new().await;
+    let release = Arc::new(Notify::new());
+    *fixture.source.hold_release.lock().expect("hold release") = Some(Arc::clone(&release));
+    let control = CloudControl(Arc::clone(&fixture.member));
+    let mut operation =
+        control.admit(ControlAction::ReportExternalRevert).expect("report admitted");
+    fixture.source.hold_started.notified().await;
+    {
+        let cleanup = fixture.member.cleanup();
+        tokio::pin!(cleanup);
+        tokio::select! {
+            biased;
+            () = &mut cleanup => panic!("cleanup must join the held owner action"),
+            () = tokio::task::yield_now() => {}
+        }
+        assert!(matches!(
+            control.admit(ControlAction::Retire),
+            Err(ControlAdmissionError::Busy | ControlAdmissionError::Cancelled)
+        ));
+    }
+    assert!(
+        fixture.member.control_task.try_lock().expect("cleanup released the slot").is_some(),
+        "cancelling cleanup must not remove the owner's task"
+    );
+    let cleanup = fixture.member.cleanup();
+    tokio::pin!(cleanup);
+    tokio::select! {
+        biased;
+        () = &mut cleanup => panic!("the later cleanup must still join the owner action"),
+        () = tokio::task::yield_now() => {}
+    }
+    release.notify_one();
+    cleanup.await;
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+    assert!(fixture.member.control_task.try_lock().expect("cleanup released the slot").is_none());
     assert_eq!(fixture.member.phase(), Phase::Gone);
 }
 

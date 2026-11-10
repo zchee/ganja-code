@@ -167,7 +167,7 @@ impl CloudControl {
     /// Returns a typed refusal when another action is unfinished, shutdown has
     /// started, or there is no asynchronous runtime to own the task.
     pub fn admit(&self, action: ControlAction) -> Result<ControlOperation, ControlAdmissionError> {
-        let mut task = self.0.control_task.lock().expect("owner action lock");
+        let mut task = self.0.control_task.try_lock().map_err(|_| ControlAdmissionError::Busy)?;
         if task.as_ref().is_some_and(|task| !task.is_finished()) {
             return Err(ControlAdmissionError::Busy);
         }
@@ -235,7 +235,7 @@ pub struct CloudMember {
     events: Option<Arc<dyn EventSource>>,
     gate: Arc<WorkerGate>,
     transition: AsyncMutex<()>,
-    control_task: Mutex<Option<JoinHandle<()>>>,
+    control_task: AsyncMutex<Option<JoinHandle<()>>>,
     phase: Mutex<Phase>,
     session: Mutex<Option<SessionId>>,
     recent: Mutex<VecDeque<String>>,
@@ -324,7 +324,7 @@ impl CloudMember {
             events,
             gate,
             transition: AsyncMutex::new(()),
-            control_task: Mutex::new(None),
+            control_task: AsyncMutex::new(None),
             phase: Mutex::new(Phase::Creating),
             session: Mutex::new(None),
             recent: Mutex::new(VecDeque::new()),
@@ -729,9 +729,13 @@ impl CloudMember {
 
     async fn cleanup(&self) {
         self.lent.cancel.cancel();
-        let task = self.control_task.lock().expect("owner action lock").take();
-        if let Some(task) = task {
-            let _ = task.await;
+        {
+            let mut task = self.control_task.lock().await;
+            // Keep ownership in the member if this cleanup wait is cancelled.
+            if let Some(task) = task.as_mut() {
+                let _ = task.await;
+            }
+            *task = None;
         }
         let _transition = self.transition.lock().await;
         self.cleanup_locked().await;
