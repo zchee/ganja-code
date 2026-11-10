@@ -10369,7 +10369,7 @@ async fn snapshot_hosted_retirement_confirmation() {
     let mut app = app();
     let mut dialog = hosted_dialog();
     dialog.submit();
-    dialog.move_selection(1);
+    dialog.move_selection(3);
     dialog.submit();
     app.team_dialog = Some(dialog);
     let mut terminal = terminal(80, 24);
@@ -10382,7 +10382,7 @@ async fn snapshot_hosted_external_revert_confirmation() {
     let mut app = app();
     let mut dialog = hosted_dialog();
     dialog.submit();
-    dialog.move_selection(2);
+    dialog.move_selection(4);
     dialog.submit();
     app.team_dialog = Some(dialog);
     let mut terminal = terminal(80, 24);

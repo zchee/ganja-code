@@ -552,7 +552,11 @@ impl Team {
         if row.is_lead {
             &[]
         } else if row.backend == MemberBackend::Cloud {
+            // Message and Shutdown keep their meaning on every backend; the
+            // owner actions are additional and cloud-only.
             &[
+                RowAction::Message,
+                RowAction::Shutdown,
                 RowAction::Cloud(CloudAction::Inspect),
                 RowAction::Cloud(CloudAction::Retire),
                 RowAction::Cloud(CloudAction::ReportRevert),

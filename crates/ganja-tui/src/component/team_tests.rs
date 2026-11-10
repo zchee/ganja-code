@@ -50,15 +50,41 @@ fn dialog() -> Team {
 }
 
 #[test]
-fn a_cloud_row_offers_inspect_retire_and_reported_revert() {
+fn a_cloud_row_offers_message_shutdown_and_the_three_owner_actions() {
     let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
     assert_eq!(dialog.submit(), None);
     let screen = rendered(&dialog, AREA);
-    for label in ["Resume for inspection", "Retire", "Report external revert"] {
+    for label in
+        ["Message", "Shutdown", "Resume for inspection", "Retire", "Report external revert"]
+    {
         assert!(screen.contains(label), "missing {label:?}:\n{screen}");
     }
-    assert!(!screen.contains("Message"), "{screen}");
-    assert!(!screen.contains("Shutdown"), "{screen}");
+    // The shared actions come first, in the order every local row taught.
+    assert!(
+        column_of(&screen, "Message") == column_of(&screen, "Shutdown")
+            && screen.find("Message") < screen.find("Shutdown")
+            && screen.find("Shutdown") < screen.find("Resume for inspection")
+            && screen.find("Resume for inspection") < screen.find("Retire")
+            && screen.find("Retire") < screen.find("Report external revert"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn message_and_shutdown_on_a_hosted_row_match_a_local_rows_effects() {
+    for backend in [MemberBackend::InProcess, MemberBackend::Cloud] {
+        let mut dialog = Team::new(vec![row("member", backend, &[])], Vec::new());
+        dialog.submit();
+        assert_eq!(dialog.submit(), None, "Message opens the free-text step");
+        type_in(&mut dialog, "status?");
+        assert_eq!(
+            dialog.submit(),
+            Some(Effect::Message { to: "member".into(), text: "status?".into() })
+        );
+        dialog.submit();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), Some(Effect::Shutdown("member".into())));
+    }
 }
 
 #[test]
@@ -87,8 +113,8 @@ fn local_rows_never_offer_cloud_controls() {
 #[test]
 fn hosted_retirement_and_revert_have_distinct_cancel_first_confirmations() {
     for (index, action, text) in [
-        (1, CloudAction::Retire, "Delete this hosted worker?"),
-        (2, CloudAction::ReportRevert, "ALREADY reverted"),
+        (3, CloudAction::Retire, "Delete this hosted worker?"),
+        (4, CloudAction::ReportRevert, "ALREADY reverted"),
     ] {
         let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
         dialog.submit();
@@ -109,7 +135,7 @@ fn hosted_retirement_and_revert_have_distinct_cancel_first_confirmations() {
 fn cancelling_a_hosted_confirmation_never_dispatches() {
     let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
     dialog.submit();
-    dialog.move_selection(2);
+    dialog.move_selection(4);
     dialog.submit();
     assert!(dialog.cancel());
     assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("hosted"));
@@ -124,11 +150,13 @@ fn a_busy_hosted_row_refuses_another_action_without_blocking_other_rows() {
     );
     dialog.set_control_busy("first", true);
     dialog.submit();
+    dialog.move_selection(2);
     assert_eq!(dialog.submit(), None);
     assert!(rendered(&dialog, AREA).contains("already running"));
     dialog.step = super::Step::Members;
     dialog.move_selection(1);
     dialog.submit();
+    dialog.move_selection(2);
     assert_eq!(
         dialog.submit(),
         Some(Effect::Cloud { member: "second".into(), action: CloudAction::Inspect })
@@ -149,6 +177,7 @@ fn a_mouse_click_uses_the_visible_roster_offset_not_the_unscrolled_row() {
         screen.lines().position(|line| line.contains("hosted-9 ")).expect("preceding visible row");
     let column = column_of(&screen, "hosted-9 ");
     assert_eq!(dialog.click(AREA, column as u16, line as u16), None);
+    dialog.move_selection(2);
     assert_eq!(
         dialog.submit(),
         Some(Effect::Cloud { member: "hosted-9".into(), action: CloudAction::Inspect })

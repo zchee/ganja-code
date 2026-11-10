@@ -6,16 +6,16 @@ expression: screen(&terminal)
                                                                                 
                                                                                 
                                                                                 
-                                                                                
   ┌ teammate ────────────────────────────────────────────────────────────────┐  
   │hosted                                                                    │  
-  │> Resume for inspection                                                   │  
+  │> Message…                                                                │  
+  │  Shutdown                                                                │  
+  │  Resume for inspection                                                   │  
   │  Retire                                                                  │  
   │  Report external revert                                                  │  
   │                                                                          │  
   │[j/k] [up/down] move   [Enter] run   [Esc] close                          │  
   └──────────────────────────────────────────────────────────────────────────┘  
-                                                                                
                                                                                 
                                                                                 
                                                                                 
