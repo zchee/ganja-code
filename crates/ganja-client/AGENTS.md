@@ -29,7 +29,7 @@ cargo nextest run -p ganja-cli --test attach   # one turn in-process and attache
 cargo depgate check --config depgate.toml
 ```
 
-The `frames`, `client_routes`, `attach_resume`, and `attach` tests live in `ganja-cli/tests/`, which links both the client and the server.
+The `frames`, `client_routes`, `attach_resume`, and `attach` tests live in `ganja-cli/tests/`, which links both the client and the server. `ganja-testkit` also links the server for its hosted-worker fixture, used by `ganja-teammate-cloud` tests; the cloud crate links the server only as a dev-dependency.
 
 ## Conventions
 

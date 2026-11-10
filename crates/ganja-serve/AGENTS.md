@@ -5,7 +5,7 @@ The engine over HTTP: REST routes and an SSE event stream over `ganja-core`, on 
 
 ## Boundary
 
-- `depgate.toml` `[rules."ganja-serve"]`: `deny = ["ratatui*", "ganja-teammate-local"]`. The `ganja serve` dependency closure never contains the terminal or the pane backends.
+- `depgate.toml` `[rules."ganja-serve"]`: `deny = ["ratatui*", "ganja-teammate-local", "ganja-teammate-cloud"]`. The `ganja serve` dependency closure never contains the terminal, pane backends or cloud provisioners.
 - `ganja-core`'s rule denies `axum*`, and so do the `ganja-tui` and `ganja-client` rules; this crate is the only member manifest that names `axum`.
 - The socket scheme (directory, names, modes) belongs to `ganja_core::tool::socket`; `src/socket.rs` re-exports it and owns only the binding.
 

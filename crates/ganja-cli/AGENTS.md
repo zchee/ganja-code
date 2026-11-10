@@ -24,6 +24,7 @@ Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`sr
 | `plugin` | `list`, `marketplace add\|list\|remove\|update`, `install`, `enable`, `disable`, `remove`, `details`. | Positional names only. |
 | `run [MESSAGE]` | One headless turn, then exit. | `--command`, `-c/--continue`, `-s/--session`, `--fork` (always refused), `--model`, `--agent`, `--effort`, `--deadline DURATION\|HH:MM`, `--json-schema FILE\|JSON`, `--config`, `--attach <URL>`, `--format default\|json`, `--auto`. |
 | `serve` | The engine over HTTP + SSE until SIGINT or SIGTERM. | `--port` (absent: 4096, else any free port), `--hostname` (default `127.0.0.1`; a non-loopback host requires `GANJA_SERVER_PASSWORD`). |
+| `worker init` | Bootstrap listener; replaces itself with `serve` after checkout. | `--port` (default 80, shared with the engine); requires `GANJA_SERVER_PASSWORD`, `GIT_CONFIG_GLOBAL`, and `GIT_SSL_CAINFO`. |
 | `sessions` | Stored root sessions of this project. | `--live`: sessions answering on a socket now, every project. Hidden `--socket-dir`. |
 | `skills` | The skill roster a session can load. | None. |
 
@@ -36,6 +37,7 @@ Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`sr
 | `src/main.rs` | Clap types, `auth`, `models`, `mcp` list and login, `sessions`, logging, the no-echo key prompt. |
 | `src/assemble.rs` | The engine assembly `run` and `serve` share; its `Judging` parameter says whether it builds the judge (`Build` for `run`, `Withhold` for `serve`). |
 | `src/run.rs` / `src/serve.rs` | The headless turn; the HTTP server. |
+| `src/worker.rs` / `src/worker_git.rs` | The bootstrap listener and its checkout executor. |
 | `src/login.rs` | Browser and device logins, method selection, Copilot deployment. |
 | `src/import.rs`, `src/migrate.rs`, `src/claude_hooks.rs` | The three `config` writers. |
 | `src/report.rs`, `src/staging.rs`, `src/position.rs` | The mapped/skipped table, the staged file write, and source positions the config writers share. |
