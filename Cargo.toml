@@ -71,6 +71,9 @@ ganja-team = { path = "crates/ganja-team" }
 # `ganja-serve` never links it, because the closure `ganja serve` ships is the
 # closure a worker will ship.
 ganja-teammate-local = { path = "crates/ganja-teammate-local" }
+# Hosted teammates depend on the engine and remote client, never the HTTP
+# server; provisioners stay replaceable without changing the engine.
+ganja-teammate-cloud = { path = "crates/ganja-teammate-cloud" }
 # Dev-only: the scripted-provider/recorder-tool/storage-seeding scaffolding
 # `ganja-core`'s own `tests/*.rs` binaries pulled in as a path dev-dependency,
 # so the duplication across those files has one place to live instead of
@@ -122,6 +125,10 @@ async-trait = "0.1.92"
 # extractors are the idiomatic Rust for exactly that shape; it rides the tokio
 # and tower stacks already in the tree.
 axum = "0.8.9"
+# Dev-only HTTPS git fixtures exercise the worker against a real TLS listener.
+axum-server = { version = "0.9.0", features = ["tls-rustls"] }
+# Dev-only self-signed certificates prove the worker honors its projected CA.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 # The mailbox lock's retry schedule, and only that. Claude holds the inbox
 # through npm proper-lockfile with `{retries: 10, minTimeout: 5, maxTimeout:
 # 100}` — npm `retry`'s factor-2, no-jitter ladder of 5, 10, 20, 40, 80 and

@@ -3,7 +3,7 @@
 # its released tag there). It replaces the seventeen shell steps — nineteen assertions —
 # that stood at .github/workflows/ci.yaml L176-355 as of commit 382763f.
 #
-# 7 internal + 5 deny + 3 leaf + 2 direct + 1 sealed + 1 manifest = 19 rules.
+# 8 internal + 6 deny + 3 leaf + 2 direct + 1 sealed + 1 manifest = 21 rules.
 # Each rule carries, directly above it, the retired step it replaces and that
 # step's reasoning; read the comment before editing the rule. Two shapes recur:
 #
@@ -122,6 +122,13 @@ internal = ["ganja-permission", "ganja-protocol"]
 deny = ["axum*"]
 internal = ["ganja-protocol"]
 
+# A hosted teammate controls an engine through the client, but never carries
+# an HTTP server or terminal. The exact set includes the engine's six lower
+# crates so vendor transports cannot quietly introduce an upward edge.
+[rules."ganja-teammate-cloud"]
+internal = ["ganja-client", "ganja-core", "ganja-permission", "ganja-protocol", "ganja-provider", "ganja-storage", "ganja-team", "ganja-tool"]
+deny = ["axum*", "ratatui*"]
+
 # Retired: "ganja-teammate-local's internal dependencies are exactly the seven
 # beneath it". This crate sits *above* the engine the way a frontend does
 # (D539): every backend in it needs a tmux server, a shell to split into, or
@@ -143,7 +150,7 @@ deny = ["axum*"]
 # the closure a cloud worker will ship, so the machine-bound backends (tmux
 # panes, foreign-CLI shims) must be provably unable to enter it.
 [rules."ganja-serve"]
-deny = ["ratatui*", "ganja-teammate-local"]
+deny = ["ratatui*", "ganja-teammate-local", "ganja-teammate-cloud"]
 
 # Retired: "tmux consumes no ganja crate" (leaf), "no workspace member
 # consumes tmux" (sealed), and "tmux's direct dependencies are exactly

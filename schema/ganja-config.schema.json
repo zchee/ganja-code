@@ -69,6 +69,10 @@
       "description": "How this session runs the agents it has, as opposed to what they are (`agent`). Its own settings object beside the `agent` map rather than a key inside it, so a `concurrency` setting cannot collide with an agent actually named that.",
       "default": {}
     },
+    "cloud": {
+      "$ref": "#/$defs/CloudConfig",
+      "description": "Cloud worker settings. Only trusted tiers — the global config and the file GANJA_CONFIG or --config names — may set this table; a project file is refused. The table replaces whole between trusted tiers."
+    },
     "teammates": {
       "$ref": "#/$defs/TeammateConfig",
       "description": "How this session runs the teammates it spawns, as opposed to what they are. Plural for `agents`' reason: the singular is what a later per-name teammate map will want.",
@@ -300,6 +304,28 @@
     }
   },
   "$defs": {
+    "CloudConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provisioner", "username", "no_reply_email", "git_host", "bootstrap"],
+      "properties": {
+        "provisioner": {"type": "string", "description": "Provisioner whose own file supplies vendor settings."},
+        "username": {"type": "string", "description": "Human-readable owner of worker commits."},
+        "no_reply_email": {"type": "string", "description": "No-reply git author and committer address."},
+        "git_host": {"type": "string", "description": "Host whose git authorization is injected outside the worker."},
+        "bootstrap": {"$ref": "#/$defs/CloudBootstrap"}
+      }
+    },
+    "CloudBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "reference", "branch_prefix"],
+      "properties": {
+        "repository": {"type": "string", "description": "HTTPS repository URL without credentials."},
+        "reference": {"type": "string", "description": "Commit or ref from which the worker starts."},
+        "branch_prefix": {"type": "string", "description": "Prefix for the worker's distinct branch."}
+      }
+    },
     "AgentConfig": {
       "title": "Agent definition",
       "description": "One agent, as a config file describes it. Deliberately open to unknown keys: upstream's definitions carry `temperature`, `top_p`, `steps`, `variant`, `options` and `color`, which this build has no use for and will not fail on.",

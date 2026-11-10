@@ -16,6 +16,14 @@ use crate::permission::Permissions;
 use crate::provider::FakeProvider;
 use crate::tool::Registry as Tools;
 
+#[test]
+fn cloud_is_a_named_backend_with_no_foreign_cli_posture() {
+    assert_eq!(super::parse_backend("cloud").expect("cloud backend"), MemberBackend::Cloud);
+    assert_eq!(super::backend_name(MemberBackend::Cloud), "cloud");
+    assert!(super::BACKENDS.contains(&"cloud"));
+    assert_eq!(super::posture_line(MemberBackend::Cloud), None);
+}
+
 /// Why [`Never`] refuses.
 pub(crate) const NEVER: &str = "this door spawns nothing";
 
@@ -678,8 +686,15 @@ struct Recording {
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// `(name, whether the team file named it at launch time)`.
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    launch_span: Arc<std::sync::Mutex<Option<tracing::Id>>>,
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
+    owns_inbox: bool,
+    allocated: Option<Arc<tokio::sync::Notify>>,
+    hold_allocation: Option<Arc<tokio::sync::Notify>>,
+    hold_launch: Option<Arc<tokio::sync::Notify>>,
+    hold_kill: Option<Arc<tokio::sync::Notify>>,
+    publication: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
 }
 
 /// Why a refusing [`Recording`] refuses.
@@ -697,6 +712,10 @@ impl Recording {
 
 #[async_trait::async_trait]
 impl TeammateBackend for Recording {
+    fn owns_inbox(&self) -> bool {
+        self.owns_inbox
+    }
+
     fn backend(&self) -> MemberBackend {
         MemberBackend::Ganja
     }
@@ -708,17 +727,32 @@ impl TeammateBackend for Recording {
     }
 
     async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        if let Some(allocated) = &self.allocated {
+            allocated.notify_one();
+        }
+        if let Some(hold) = &self.hold_allocation {
+            hold.notified().await;
+        }
         Ok(Arc::new(RecordedPane {
             id: "%7".to_owned(),
             birth: "48213".to_owned(),
             spec: spec.clone(),
             refuse_launch: self.refuse_launch,
+            owns_inbox: self.owns_inbox,
+            owned_seed: std::sync::Mutex::new(None),
             launched: Arc::clone(&self.launched),
+            launch_span: Arc::clone(&self.launch_span),
             killed: Arc::clone(&self.killed),
+            hold_launch: self.hold_launch.clone(),
+            hold_kill: self.hold_kill.clone(),
         }))
     }
 
     fn delivery(&self) -> Delivery {
+        if let Some(publication) = &self.publication {
+            publication.0.wait();
+            publication.1.wait();
+        }
         Delivery::Acknowledged
     }
 }
@@ -731,8 +765,13 @@ struct RecordedPane {
     birth: String,
     spec: SpawnSpec,
     refuse_launch: bool,
+    owns_inbox: bool,
+    owned_seed: std::sync::Mutex<Option<mailbox::Identity>>,
     launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    launch_span: Arc<std::sync::Mutex<Option<tracing::Id>>>,
     killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    hold_launch: Option<Arc<tokio::sync::Notify>>,
+    hold_kill: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[async_trait::async_trait]
@@ -742,13 +781,27 @@ impl Spawned for RecordedPane {
     }
 
     async fn launch(&self) -> Result<(), Unsupported> {
+        *self.launch_span.lock().expect("launch span lock") = tracing::Span::current().id();
         let spec = &self.spec;
+        if self.owns_inbox {
+            let seed =
+                super::seed_inbox(spec.inbox(), spec.lead.as_str().to_owned(), spec.prompt.clone())
+                    .await
+                    .map_err(|error| Unsupported {
+                        backend: spec.backend,
+                        reason: error.to_string(),
+                    })?;
+            *self.owned_seed.lock().expect("owned seed lock") = Some(seed);
+        }
         let recorded = std::fs::read_to_string(spec.root.config_path(&spec.team))
             .is_ok_and(|document| document.contains(&format!("\"{}\"", spec.name)));
         self.launched
             .lock()
             .expect("the launch log is never poisoned")
             .push((spec.name.as_str().to_owned(), recorded));
+        if let Some(hold) = &self.hold_launch {
+            hold.notified().await;
+        }
         if self.refuse_launch {
             return Err(Unsupported {
                 backend: MemberBackend::Ganja,
@@ -776,6 +829,337 @@ impl Spawned for RecordedPane {
             .lock()
             .expect("the kill log is never poisoned")
             .push((self.id.clone(), self.birth.clone()));
+        if let Some(hold) = &self.hold_kill {
+            hold.notified().await;
+        }
+        let seeded = self.owned_seed.lock().expect("owned seed lock").take();
+        super::unseed_inbox(self.spec.inbox(), seeded, self.spec.name.as_str()).await;
+    }
+}
+
+#[tokio::test]
+async fn repeated_failed_spawns_keep_only_unfinished_task_handles() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let waiter = release.clone();
+    registry.tasks.lock().expect("task list").push(tokio::spawn(async move {
+        waiter.notified().await;
+    }));
+    let backend = Arc::new(Recording { refuse_launch: true, ..Recording::default() });
+    for _ in 0..32 {
+        assert!(
+            registry
+                .spawn(backend.clone(), request("retry", MemberBackend::Ganja, home.path()))
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        registry.tasks.lock().expect("task list").len() <= 2,
+        "completed attempts must be reaped"
+    );
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!shutdown.is_finished(), "the unfinished task must remain tracked");
+    release.notify_one();
+    shutdown.await.expect("shutdown joined retained task");
+}
+
+#[tokio::test]
+async fn pending_launch_keeps_the_callers_tracing_span() {
+    use tracing::Instrument as _;
+
+    let subscriber = tracing_subscriber::Registry::default();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let span = tracing::info_span!("spawn caller");
+    let expected = span.id().expect("enabled span");
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let backend = Arc::new(Recording::default());
+    registry
+        .spawn(backend.clone(), request("traced", MemberBackend::Ganja, home.path()))
+        .instrument(span)
+        .await
+        .expect("member spawned");
+    assert_eq!(*backend.launch_span.lock().expect("launch span"), Some(expected));
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancellation_calls_the_backend_to_remove_its_owned_inbox_seed() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let backend = Arc::new(Recording {
+        owns_inbox: true,
+        hold_launch: Some(Arc::new(tokio::sync::Notify::new())),
+        ..Recording::default()
+    });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("owned-inbox", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    while backend.launched().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("owned-inbox").expect("name"));
+    assert_eq!(mailbox::read(&inbox).expect("seeded inbox").valid.len(), 1);
+    spawn.abort();
+    assert!(spawn.await.expect_err("cancelled caller").is_cancelled());
+    registry.shutdown().await;
+    assert_eq!(backend.killed().len(), 1);
+    assert!(mailbox::read(&inbox).expect("clean inbox").valid.is_empty());
+    assert!(!reserved(&registry).contains("owned-inbox"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_allocation_does_not_delay_published_member_cleanup() {
+    for release_before_bound in [false, true] {
+        let home = tempfile::tempdir().expect("temporary home");
+        let registry = registry(home.path());
+        let published = [Arc::new(Recording::default()), Arc::new(Recording::default())];
+        for (index, backend) in published.iter().enumerate() {
+            registry
+                .spawn(
+                    backend.clone(),
+                    request(&format!("published-{index}"), MemberBackend::Ganja, home.path()),
+                )
+                .await
+                .expect("published member");
+        }
+        let allocated = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let pending = Arc::new(Recording {
+            allocated: Some(allocated.clone()),
+            hold_allocation: Some(release.clone()),
+            ..Recording::default()
+        });
+        let spawn = {
+            let registry = registry.clone();
+            let backend = pending.clone();
+            let request = request("pending-allocation", MemberBackend::Ganja, home.path());
+            tokio::spawn(async move { registry.spawn(backend, request).await })
+        };
+        allocated.notified().await;
+        let started = tokio::time::Instant::now();
+        let mut shutdown = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.shutdown().await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while published.iter().any(|backend| backend.killed().is_empty()) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("published cleanup must not wait for allocation admission");
+        for backend in &published {
+            assert_eq!(backend.killed().len(), 1);
+        }
+        if release_before_bound {
+            release.notify_one();
+        }
+        tokio::time::timeout(super::SETTLE + Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("registry bounds the admission wait")
+            .expect("shutdown task");
+        if !release_before_bound {
+            assert!(started.elapsed() >= super::SETTLE);
+            release.notify_one();
+        }
+        assert!(spawn.await.expect("pending spawn task").is_err());
+        assert_eq!(pending.killed().len(), 1);
+        assert!(!reserved(&registry).contains("pending-allocation"));
+        assert!(!registry.members().contains_key("pending-allocation"));
+        if release_before_bound {
+            assert!(
+                registry.tasks.lock().expect("task list").is_empty(),
+                "shutdown joined the registered unwind task"
+            );
+        }
+        for backend in &published {
+            assert_eq!(backend.killed().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_admitted_allocations_to_register_cleanup() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let allocated = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(Recording {
+        allocated: Some(allocated.clone()),
+        hold_allocation: Some(release.clone()),
+        ..Recording::default()
+    });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("late-allocation", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    allocated.notified().await;
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    assert!(!shutdown.is_finished());
+    release.notify_one();
+    shutdown.await.expect("shutdown completes");
+    assert!(spawn.await.expect("spawn task").is_err());
+    assert_eq!(backend.killed().len(), 1);
+    assert!(registry.members().is_empty());
+    assert!(!reserved(&registry).contains("late-allocation"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_rejects_a_member_held_just_before_publication() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let publication = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
+    let backend =
+        Arc::new(Recording { publication: Some(publication.clone()), ..Recording::default() });
+    let spawn = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("late-member", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    let barrier = publication.clone();
+    tokio::task::spawn_blocking(move || barrier.0.wait()).await.expect("publication reached");
+    let shutdown = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.shutdown().await })
+    };
+    while !registry.cancel.is_cancelled() {
+        tokio::task::yield_now().await;
+    }
+    tokio::task::spawn_blocking(move || publication.1.wait()).await.expect("publication released");
+    shutdown.await.expect("shutdown completes");
+    assert!(spawn.await.expect("spawn task").is_err(), "closed registry rejects publication");
+    assert_eq!(backend.killed().len(), 1, "the unpublished allocation is killed once");
+    assert!(registry.members().is_empty());
+    assert!(!reserved(&registry).contains("late-member"));
+    assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_backend_cleanup_finishes_before_local_state_is_released() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let registry = registry(home.path());
+    let release_kill = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(Recording {
+        refuse_launch: true,
+        hold_kill: Some(release_kill.clone()),
+        ..Recording::default()
+    });
+    let task = {
+        let registry = registry.clone();
+        let backend = backend.clone();
+        let request = request("slow-cleanup", MemberBackend::Ganja, home.path());
+        tokio::spawn(async move { registry.spawn(backend, request).await })
+    };
+    while backend.killed().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(45)).await;
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished(), "core must wait for backend cleanup");
+    release_kill.notify_one();
+    assert!(task.await.expect("spawn task").is_err());
+    assert_eq!(backend.killed().len(), 1);
+    assert!(!reserved(&registry).contains("slow-cleanup"));
+    assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("slow-cleanup").expect("name"));
+    assert!(mailbox::read(&inbox).expect("inbox").valid.is_empty());
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn abandoning_record_or_launch_unwinds_once_and_shutdown_joins_it() {
+    for phase in ["record", "launch", "unwind"] {
+        let while_recording = phase == "record";
+        let home = tempfile::tempdir().expect("temporary home");
+        let registry = registry(home.path());
+        let allocated = Arc::new(tokio::sync::Notify::new());
+        let release_kill = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(Recording {
+            allocated: Some(allocated.clone()),
+            refuse_launch: phase == "unwind",
+            hold_launch: (phase != "unwind").then(|| Arc::new(tokio::sync::Notify::new())),
+            hold_kill: Some(release_kill.clone()),
+            ..Recording::default()
+        });
+        let record_hold =
+            if while_recording { Some(registry.team_file.lock().await) } else { None };
+        let registry_task = registry.clone();
+        let backend_task = backend.clone();
+        let request = request("abandoned", MemberBackend::Ganja, home.path());
+        let task = tokio::spawn(async move { registry_task.spawn(backend_task, request).await });
+        tokio::time::timeout(Duration::from_secs(2), allocated.notified())
+            .await
+            .expect("allocated");
+        if !while_recording {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while backend.launched().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("launch held");
+        }
+        if phase == "unwind" {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while backend.killed().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("inline unwind has started");
+        }
+        task.abort();
+        assert!(task.await.expect_err("caller was cancelled").is_cancelled());
+        drop(record_hold);
+        let shutting_down = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.shutdown().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while backend.killed().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abandoned allocation is killed");
+        assert!(!shutting_down.is_finished(), "shutdown must join the pending unwind");
+        release_kill.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), shutting_down)
+            .await
+            .expect("shutdown joins cleanup")
+            .expect("shutdown task");
+        assert_eq!(backend.killed().len(), 1);
+        assert!(!reserved(&registry).contains("abandoned"));
+        assert!(ganja_testkit::teammates_recorded(registry.root(), registry.team()).is_empty());
+        let inbox = registry
+            .root()
+            .inbox_path(registry.team(), &MemberName::parse("abandoned").expect("name"));
+        assert!(mailbox::read(&inbox).expect("inbox").valid.is_empty());
     }
 }
 

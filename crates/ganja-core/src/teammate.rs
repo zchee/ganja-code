@@ -139,6 +139,7 @@ use ganja_team::{
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::engine::Evicted;
 use crate::permission::Permissions;
@@ -359,7 +360,7 @@ impl Teammate {
 /// lists these six. An alias would have been a second spelling of one surface
 /// living in the grammar forever, where a refusal that names the list teaches
 /// the new word once.
-pub const BACKENDS: [&str; 6] = ["in-process", "ganja", "claude", "codex", "agy", "grok"];
+pub const BACKENDS: [&str; 7] = ["in-process", "ganja", "claude", "codex", "agy", "grok", "cloud"];
 
 /// What a door spawns when nobody named a backend (**D501**, amended by
 /// **Dv-1**).
@@ -564,6 +565,7 @@ pub fn parse_backend(value: &str) -> Result<MemberBackend, UnknownBackend> {
         "codex" => Ok(MemberBackend::Codex),
         "agy" => Ok(MemberBackend::Agy),
         "grok" => Ok(MemberBackend::Grok),
+        "cloud" => Ok(MemberBackend::Cloud),
         other => Err(UnknownBackend { value: other.to_owned() }),
     }
 }
@@ -581,6 +583,7 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
         MemberBackend::Codex => BACKENDS[3],
         MemberBackend::Agy => BACKENDS[4],
         MemberBackend::Grok => BACKENDS[5],
+        MemberBackend::Cloud => BACKENDS[6],
     }
 }
 
@@ -620,7 +623,10 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 #[must_use]
 pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
     match backend {
-        MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => None,
+        MemberBackend::InProcess
+        | MemberBackend::Ganja
+        | MemberBackend::Claude
+        | MemberBackend::Cloud => None,
         MemberBackend::Agy => Some(POSTURE_AGY),
         MemberBackend::Codex => Some(POSTURE_CODEX),
         MemberBackend::Grok => Some(POSTURE_GROK),
@@ -927,7 +933,10 @@ pub trait Spawned: fmt::Debug + Send + Sync {
     /// **D503**'s ring: what this member most recently did, newest last.
     fn recent(&self) -> Vec<String>;
 
-    /// Ends it. Idempotent: a member that has already gone is nothing to end.
+    /// Backends must make cleanup idempotent and provide their own bound.
+    /// Callers await it rather than interrupting it with another deadline.
+    /// The tmux-driving backends currently rely on tmux returning, so this
+    /// requirement does not imply a total shutdown bound for those backends.
     async fn kill(&self);
 
     /// Tells this member it is waiting on the lead's answer to `request_id`,
@@ -1604,6 +1613,117 @@ pub enum SpawnError {
     Lost(#[from] tokio::task::JoinError),
 }
 
+/// Owns an allocation until it is registered or its complete rollback has finished.
+struct PendingSpawn {
+    registry: Arc<TeammateRegistry>,
+    spec: SpawnSpec,
+    spawned: Arc<dyn Spawned>,
+    seeded: Option<mailbox::Identity>,
+    recording: Option<JoinHandle<Result<(), SpawnError>>>,
+}
+
+impl PendingSpawn {
+    async fn finish(
+        mut self,
+        backend: Arc<dyn TeammateBackend>,
+        cancelled: CancellationToken,
+    ) -> Result<SpawnReport, SpawnError> {
+        let kind = self.spec.backend;
+        let interrupted = || Unsupported {
+            backend: kind,
+            reason: "the teammate launch was cancelled".to_owned(),
+        };
+        let registry = Arc::clone(&self.registry);
+        let spec = self.spec.clone();
+        let surface = self.spawned.surface();
+        // Keep the write owned even if the caller disappears while blocking I/O
+        // is running, so rollback cannot race a late record insertion.
+        self.recording = Some(tokio::spawn(async move { registry.record(&spec, surface).await }));
+        let recorded = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => None,
+            result = self.recording.as_mut().expect("pending record task") => Some(result),
+        };
+        let Some(recorded) = recorded else {
+            self.unwind(true).await;
+            return Err(interrupted().into());
+        };
+        self.recording.take();
+        let recorded = recorded.map_err(SpawnError::from).and_then(|result| result);
+        if let Err(error) = recorded {
+            self.unwind(false).await;
+            return Err(error);
+        }
+        let launched = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(interrupted()),
+            result = self.spawned.launch() => result,
+        };
+        if let Err(error) = launched {
+            self.unwind(true).await;
+            return Err(error.into());
+        }
+        if cancelled.is_cancelled() {
+            self.unwind(true).await;
+            return Err(interrupted().into());
+        }
+        let report = SpawnReport {
+            name: self.spec.name.clone(),
+            agent_id: self.spec.agent_id(),
+            backend: kind,
+            delivery: backend.delivery(),
+            note: SPAWNED,
+        };
+        let published = {
+            // Shutdown closes publication under this same lock, so a member is
+            // either in its kill snapshot or remains owned by this unwind.
+            let mut members = self.registry.members();
+            if cancelled.is_cancelled() {
+                false
+            } else {
+                self.registry
+                    .tasks
+                    .lock()
+                    .expect("the task list is never poisoned")
+                    .extend(Arc::clone(&self.spawned).start());
+                members.insert(
+                    self.spec.name.as_str().to_owned(),
+                    Arc::new(Member {
+                        name: self.spec.name.clone(),
+                        agent_id: self.spec.agent_id(),
+                        backend: kind,
+                        color: self.spec.color.clone(),
+                        spawned: Arc::clone(&self.spawned),
+                        surface: backend,
+                    }),
+                );
+                true
+            }
+        };
+        if !published {
+            self.unwind(true).await;
+            return Err(interrupted().into());
+        }
+        Ok(report)
+    }
+
+    async fn unwind(mut self, recorded: bool) {
+        self.spawned.kill().await;
+        if let Some(recording) = &mut self.recording {
+            let _ = recording.await;
+        }
+        if recorded && let Err(error) = self.registry.unrecord(self.spec.name.as_str()).await {
+            tracing::warn!(
+                teammate = self.spec.name.as_str(),
+                %error,
+                "a refused launch left its record in the team file"
+            );
+        }
+        unseed_inbox(self.spec.inbox(), self.seeded.take(), self.spec.name.as_str()).await;
+        self.registry.release(&self.spec.name);
+    }
+}
+
 /// Every teammate this session started, and the lifetime none of its turns
 /// owns.
 ///
@@ -1687,6 +1807,10 @@ pub struct TeammateRegistry {
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Shutdown gives admitted allocations a grace interval to register cleanup.
+    spawning: tokio::sync::RwLock<()>,
+    /// Each pending admission owns a clone until its cleanup task is registered.
+    admissions: Arc<()>,
     /// Where a member whose surface stopped running posts the fact, and where
     /// [`TeammateRegistry::take_exited`] drains it from ([`Exited`], **D512**
     /// as amended for bead g9u).
@@ -1779,6 +1903,8 @@ impl TeammateRegistry {
             team_file: tokio::sync::Mutex::new(()),
             next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
+            spawning: tokio::sync::RwLock::new(()),
+            admissions: Arc::new(()),
             exits,
             exited: Mutex::new(exited),
             dialogs: Mutex::new(None),
@@ -2339,6 +2465,14 @@ impl TeammateRegistry {
         backend: Arc<dyn TeammateBackend>,
         request: SpawnRequest,
     ) -> Result<SpawnReport, SpawnError> {
+        let admission = (Arc::clone(&self.admissions), self.spawning.read().await);
+        if self.cancel.is_cancelled() {
+            return Err(Unsupported {
+                backend: request.backend,
+                reason: "the teammate registry is shutting down".to_owned(),
+            }
+            .into());
+        }
         let name = self.claim(&request.name).await?;
         let color = request.color.clone().unwrap_or_else(|| self.color_for());
         let spec = SpawnSpec {
@@ -2384,61 +2518,29 @@ impl TeammateRegistry {
                 return Err(SpawnError::Unsupported(unsupported));
             }
         };
-        if let Err(error) = self.record(&spec, spawned.surface()).await {
-            spawned.kill().await;
-            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
-            self.release(&spec.name);
-            return Err(error);
-        }
-        if let Err(unsupported) = spawned.launch().await {
-            spawned.kill().await;
-            match self.unrecord(spec.name.as_str()).await {
-                Ok(_) => {}
-                // Not fatal to the unwind and not retried: what is left is a
-                // stale row naming a surface that has already been ended,
-                // which the next lead's startup sweep is what drops.
-                Err(error) => tracing::warn!(
-                    teammate = spec.name.as_str(),
-                    %error,
-                    "a refused launch left its record in the team file"
-                ),
+        let cancelled = self.cancel.child_token();
+        let guard = cancelled.clone().drop_guard();
+        let pending =
+            PendingSpawn { registry: Arc::clone(self), spec, spawned, seeded, recording: None };
+        let (finished, result) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(
+            async move {
+                let _ = finished.send(pending.finish(backend, cancelled).await);
             }
-            unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
-            self.release(&spec.name);
-            return Err(SpawnError::Unsupported(unsupported));
-        }
-
-        let report = SpawnReport {
-            name: spec.name.clone(),
-            agent_id: spec.agent_id(),
-            backend: request.backend,
-            delivery: backend.delivery(),
-            note: SPAWNED,
-        };
-        // Every task the member started is registered here, which is what makes
-        // `shutdown()` correct: it cancels, `join_all`s every kill, **and then
-        // drains this list**. A task that was never pushed would leave a child
-        // being reaped after the process it belonged to had returned.
-        self.tasks
-            .lock()
-            .expect("the task list is never poisoned")
-            .extend(Arc::clone(&spawned).start());
-        // Registered, and never given back: a spent name stays reserved for
-        // the life of the registry. Why that is the fix rather than an
-        // oversight is on [`TeammateRegistry::reserved`].
-        self.members().insert(
-            spec.name.as_str().to_owned(),
-            Arc::new(Member {
-                name: spec.name.clone(),
-                agent_id: spec.agent_id(),
-                backend: spec.backend,
-                color: spec.color.clone(),
-                spawned,
-                surface: backend,
-            }),
+            .in_current_span(),
         );
-
-        Ok(report)
+        {
+            let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
+            tasks.retain(|task| !task.is_finished());
+            tasks.push(task);
+        }
+        drop(admission);
+        let outcome = result.await.map_err(|_| Unsupported {
+            backend: request.backend,
+            reason: "the teammate launch task stopped".to_owned(),
+        });
+        guard.disarm();
+        outcome?
     }
 
     /// Resolves a free name and holds it until the spawn is registered.
@@ -2480,7 +2582,10 @@ impl TeammateRegistry {
         self.reserved.lock().expect("the reserved names are never poisoned").remove(name.as_str());
     }
 
-    /// Ends every teammate and waits for each one to really be gone.
+    /// Ends published teammates and waits for registered cleanup tasks.
+    ///
+    /// In-flight allocations get one [`SETTLE`] interval to register cleanup;
+    /// a backend still allocating afterwards may unwind after this returns.
     ///
     /// The order is the one the lead's own exit path already keeps: the runners
     /// are told to stop, each teammate's turn is settled and its background
@@ -2496,10 +2601,21 @@ impl TeammateRegistry {
     /// process open for half a minute, where nothing about the waits makes
     /// them owe each other an order.
     pub async fn shutdown(&self) {
-        self.cancel.cancel();
-
-        let members: Vec<Arc<Member>> = self.members().values().map(Arc::clone).collect();
+        let members: Vec<Arc<Member>> = {
+            let members = self.members();
+            self.cancel.cancel();
+            members.values().map(Arc::clone).collect()
+        };
         futures::future::join_all(members.iter().map(|member| member.spawned.kill())).await;
+        // Use the ordinary teammate grace interval only after existing members
+        // are killed. A late allocation still schedules its cancelled unwind;
+        // recovery if the process exits first remains backend-specific.
+        if tokio::time::timeout(SETTLE, self.spawning.write()).await.is_err() {
+            tracing::warn!(
+                pending_admissions = Arc::strong_count(&self.admissions).saturating_sub(1),
+                "teammate allocations did not settle before shutdown"
+            );
+        }
 
         let tasks =
             std::mem::take(&mut *self.tasks.lock().expect("the task list is never poisoned"));

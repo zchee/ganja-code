@@ -1,0 +1,54 @@
+[package]
+name = "ganja-teammate-cloud"
+description = "Cloud-hosted teammate lifecycle and vendor-neutral provisioner contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Internal workspace component, never published independently.
+publish = false
+
+[dependencies]
+# Provisioners are selected at runtime and held as trait objects.
+async-trait.workspace = true
+# The reconnect admission hook returns the client's boxed future type.
+futures.workspace = true
+# Worker REST calls and reconnecting event streams use the typed transport.
+ganja-client.workspace = true
+# Hosted members implement the engine's teammate backend and lifecycle traits.
+ganja-core.workspace = true
+# Members reconcile wire events, messages and team notification frames.
+ganja-protocol.workspace = true
+# Member records and lead notifications use the shared team store.
+ganja-team.workspace = true
+# Endpoints carry validated header names and values, not vendor-specific fields.
+http.workspace = true
+# Passwords cannot enter derived Debug output and are wiped on drop.
+secrecy.workspace = true
+# Lifecycle state and value-free trace rows have strict serialized shapes.
+serde.workspace = true
+# Trace files and typed team notifications are JSON documents.
+serde_json.workspace = true
+# Provisioning and trace failures expose stable typed errors.
+thiserror.workspace = true
+# Lifecycle deadlines, request drains and member tasks share the async runtime.
+tokio.workspace = true
+# Cancellation belongs to the registry's lifetime, not a single model turn.
+tokio-util = { workspace = true, features = ["rt"] }
+# Optional trace failures and lifecycle diagnostics need structured reporting.
+tracing.workspace = true
+# Repository and worker endpoint validation inspect parsed URL components.
+url.workspace = true
+
+[dev-dependencies]
+# Search captured diagnostics for both raw and wire-encoded synthetic secrets.
+base64.workspace = true
+# Redaction tests capture emitted diagnostics without changing production logging.
+tracing-subscriber.workspace = true
+# Terminal reconciliation tests drive the real persisted HTTP projections.
+ganja-serve.workspace = true
+# The fake implements this contract; the reverse edge is confined to tests.
+ganja-testkit.workspace = true
+# Filesystem and persistence fixtures must not write into the user's state.
+tempfile.workspace = true

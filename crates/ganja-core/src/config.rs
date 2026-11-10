@@ -1299,6 +1299,38 @@ impl Default for CompactThreshold {
     }
 }
 
+/// Vendor-neutral settings for teammates hosted outside the lead's machine.
+///
+/// Provisioner-specific settings live in the provisioner's own file. This table is
+/// replaced whole between trusted tiers so a partial overlay cannot accidentally
+/// combine a repository and identity from different deployments.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudConfig {
+    /// Which provisioner reads its settings from the cloud configuration directory.
+    pub provisioner: String,
+    /// Human-readable owner of the worker's git commits.
+    pub username: String,
+    /// No-reply address used for the worker's git author and committer identity.
+    pub no_reply_email: String,
+    /// Host whose git authorization header is injected outside the worker.
+    pub git_host: String,
+    /// Repository and branch settings sent to the worker before the engine starts.
+    pub bootstrap: CloudBootstrap,
+}
+
+/// Repository checkout settings shared by cloud provisioners.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudBootstrap {
+    /// HTTPS repository URL without credentials.
+    pub repository: String,
+    /// Commit or ref from which the worker starts.
+    pub reference: String,
+    /// Prefix under which each worker creates its own branch.
+    pub branch_prefix: String,
+}
+
 /// Everything the config files asked for, merged.
 ///
 /// The curated posture — an unknown key is refused **by name** — was
@@ -1389,6 +1421,8 @@ pub struct Config {
     /// they are; see [`TeammateConfig`] (**D509**).
     #[serde(default)]
     pub teammates: TeammateConfig,
+    /// Cloud worker settings, accepted only from the global or explicit config tier.
+    pub cloud: Option<CloudConfig>,
     /// What this session, leading a team, does with a peer message arriving
     /// from **outside** that team, before anything is delivered (**D523**):
     /// `"accept"` delivers it, `"hold"` parks it for a person's review,
@@ -2872,6 +2906,7 @@ impl Config {
         overlay(&mut self.tool_defer_threshold, other.tool_defer_threshold);
         overlay(&mut self.auto_compact_threshold, other.auto_compact_threshold);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
+        overlay(&mut self.cloud, other.cloud);
         overlay(&mut self.teammates.shim_turn_timeout, other.teammates.shim_turn_timeout);
         overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
@@ -2987,6 +3022,14 @@ impl Config {
     /// [`ConfigError::Parse`] naming `dialog_expiry` and the file when the
     /// file sets it.
     fn merge_project(&mut self, mut other: Self, path: &Path) -> Result<(), ConfigError> {
+        if other.cloud.is_some() {
+            return Err(ConfigError::Parse {
+                path: path.to_owned(),
+                message: "cloud is set by trusted tiers only — the global config, or the file \
+                          GANJA_CONFIG or --config names — never by a project file"
+                    .to_owned(),
+            });
+        }
         if other.dialog_expiry.is_some() {
             return Err(ConfigError::Parse {
                 path: path.to_owned(),

@@ -34,6 +34,8 @@ pub mod fake_claude;
 mod fs;
 mod log;
 mod provider;
+/// Scripted hosted-worker lifecycle and delayed router tasks.
+pub mod provisioner;
 // A module rather than a re-export: a loopback endpoint's whole vocabulary —
 // what it serves, what it recorded, how a phase resets it — only makes sense
 // together.

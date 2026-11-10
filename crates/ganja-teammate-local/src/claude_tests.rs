@@ -233,6 +233,74 @@ async fn a_refused_launch_takes_the_seeded_prompt_back_out() {
     assert!(inbox.exists(), "the inbox itself is left where it was");
 }
 
+#[tokio::test]
+async fn cancelling_the_claude_launch_removes_its_owned_prompt() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ganja_core::teammate::{Lent, Spawned as _};
+    use ganja_testkit::tmux::PrivateServer;
+
+    let home = tempfile::tempdir().expect("temporary home");
+    let root = TeamsRoot::new(home.path().join("claude-teams"));
+    let private = PrivateServer::start(&["/bin/sh", "-s"], &[], &[]);
+    let pane_id = private.split(None, &[], &["/bin/sh", "-s"]);
+    let server = crate::tmux::Server::at(private.socket(), None);
+    let pane = server
+        .panes()
+        .await
+        .expect("panes")
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("test pane");
+    private.run(&["set-hook", "-g", "after-send-keys", "wait-for release-launch"]);
+    let spec = spec();
+    let (exits, _) = tokio::sync::mpsc::unbounded_channel();
+    let lent = Lent {
+        lead_inbox: root.inbox_path(&spec.team, &spec.lead),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        dialogs: None,
+        exits,
+        registry: std::sync::Weak::new(),
+    };
+    let member = Arc::new(super::ClaudeMember {
+        pane: Arc::new(crate::pane::PaneMember::new(
+            pane,
+            "test claude",
+            server.clone(),
+            &spec,
+            &lent,
+        )),
+        spec: spec.clone(),
+        inbox: tokio::sync::Mutex::default(),
+    });
+    let launch = {
+        let member = member.clone();
+        let root = root.clone();
+        tokio::spawn(async move {
+            member.launch_on(&server, &root, std::path::Path::new("/bin/true")).await
+        })
+    };
+    let inbox = root.inbox_path(&spec.team, &spec.name);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if mailbox::read(&inbox).is_ok_and(|read| !read.valid.is_empty()) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned prompt was seeded");
+    assert!(!launch.is_finished(), "launch is held before submitting Enter");
+    launch.abort();
+    assert!(launch.await.expect_err("cancelled launch").is_cancelled());
+    member.kill().await;
+    member.kill().await;
+    assert!(mailbox::read(&inbox).expect("inbox").valid.is_empty());
+    assert!(!private.panes().contains(&pane_id));
+}
+
 /// The `PATH` search returns the first runnable file, skips directories and
 /// candidates this process cannot execute, and never interprets an empty
 /// entry as the working directory.

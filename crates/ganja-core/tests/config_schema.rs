@@ -275,6 +275,7 @@ fn the_schema_matches_what_the_real_loader_accepts() {
         &home.path().join("evaluate"),
         &schema,
     );
+    the_cloud_table_is_strict_and_trusted(&home.path().join("cloud"), &schema);
     the_kitchen_sink_document_loads_through_the_real_loader(&home.path().join("kitchen-sink"));
     the_loader_refuses_a_non_loopback_mcp_url_that_the_schema_alone_would_accept(
         &home.path().join("non-loopback"),
@@ -283,6 +284,45 @@ fn the_schema_matches_what_the_real_loader_accepts() {
         &home.path().join("per-id"),
     );
     the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(&home.path().join("excluded"));
+}
+
+fn the_cloud_table_is_strict_and_trusted(project: &Path, schema: &Value) {
+    let document = r#"
+[cloud]
+provisioner = "example"
+username = "worker-owner"
+no_reply_email = "worker@example.invalid"
+git_host = "example.invalid"
+[cloud.bootstrap]
+repository = "https://example.invalid/repository.git"
+reference = "main"
+branch_prefix = "workers"
+"#;
+    let config: Config = toml::from_str(document).expect("the complete cloud table decodes");
+    assert_eq!(
+        config.cloud.as_ref().expect("cloud settings").no_reply_email,
+        "worker@example.invalid"
+    );
+    let validator = jsonschema::validator_for(schema).expect("the schema compiles");
+    let value: toml::Value = toml::from_str(document).expect("valid TOML");
+    let value = serde_json::to_value(value).expect("JSON-compatible config");
+    assert!(validator.is_valid(&value), "the cloud schema accepts its complete table");
+
+    for (table, definition) in [("cloud", "CloudConfig"), ("cloud.bootstrap", "CloudBootstrap")] {
+        let message = bogus_key_error(project, &format!("[{table}]\nzzz_schema_probe = 1\n"));
+        assert_eq!(expected_fields(&message), schema_keys(schema, Some(definition)));
+    }
+    let message = bogus_key_error(project, document);
+    assert!(message.contains("cloud") && message.contains("trusted tiers"), "{message}");
+
+    let explicit = project.join("trusted.toml");
+    fs::write(&explicit, document).expect("write trusted config");
+    fs::remove_file(project.join("ganja.toml")).expect("remove project config");
+    let loaded = Config::load_with(
+        project,
+        &Overrides { config_file: Some(explicit), ..Overrides::default() },
+    );
+    assert!(loaded.is_ok(), "an explicit config is trusted: {loaded:?}");
 }
 
 /// Code → schema, for [`Config`] itself: a bogus top-level key makes serde

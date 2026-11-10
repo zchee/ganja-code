@@ -6,7 +6,7 @@ Upstream's TypeScript is the specification, not source to translate: write idiom
 
 ## Workspace map
 
-Fourteen members under `crates/`, each with its own `AGENTS.md`. Dependency direction is one-way and gated by `depgate.toml`; `crates/AGENTS.md` states the graph.
+Fifteen members under `crates/`, each with its own `AGENTS.md`. Dependency direction is one-way and gated by `depgate.toml`; `crates/AGENTS.md` states the graph.
 
 | Crate | Role |
 |---|---|
@@ -17,7 +17,7 @@ Fourteen members under `crates/`, each with its own `AGENTS.md`. Dependency dire
 | `ganja-provider` | Vendor wires, credentials and logins, the model catalog. |
 | `ganja-storage` | The SQLite session store and working-tree snapshots for `/undo` and `/rewind`. |
 | `ganja-core` | The engine: sessions, the agent loop, config, hooks, MCP, LSP, plugins, teammates. No terminal or HTTP-server dependency. |
-| `ganja-teammate-local` | tmux-pane and foreign-CLI teammate backends. Above the engine; `ganja-serve` never links it. |
+| `ganja-teammate-cloud`, `ganja-teammate-local` | Hosted teammate lifecycle and vendor-neutral provisioners; tmux-pane and foreign-CLI backends. Both are above the engine; `ganja-serve` links neither. |
 | `ganja-tui` | The ratatui frontend. Every pixel, no engine logic. |
 | `ganja-serve` | The engine over HTTP + SSE, plus the per-session Unix socket. |
 | `ganja-client` | The typed client for `ganja-serve`. |
@@ -35,7 +35,7 @@ cargo clippy --locked --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps   # intra-doc links must resolve
 cargo nextest run --locked --workspace --profile ci           # one process per test; profiles in .config/nextest.toml
 cargo test --workspace --doc                                  # nextest skips doctests
-cargo depgate check --config depgate.toml                     # 19 dependency-boundary rules
+cargo depgate check --config depgate.toml                     # 21 dependency-boundary rules
 cargo deny check                                              # advisories, licenses, bans, sources (deny.toml)
 ```
 
@@ -81,7 +81,7 @@ dist build                                  # local archive under target/distrib
 | `GANJA_DISABLE_TERM_PROBE` | Truthy skips the kitty keyboard probe. Every pty test sets it. |
 | `GANJA_DISABLE_MODELS_FETCH`, `GANJA_MODELS_URL`, `GANJA_MODELS_PATH` | Catalog fetching off; fetch base URL; read-only cache path override. |
 | `GANJA_AUTH_ISSUER` | Login endpoint origin for tests. Loopback only; anything else is refused. |
-| `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME` | `serve` Basic auth. Without the password `serve` refuses a non-loopback `--hostname`. |
+| `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`, `GANJA_CLOUD_PASSWORD` | `serve` Basic auth: without the server password, a non-loopback `--hostname` is refused. The cloud backend reads `GANJA_CLOUD_PASSWORD` once for worker Basic auth; unset or empty makes cloud spawn fail. |
 | `GANJA_CLAUDE_BIN` | Absolute path of the `claude` binary the `claude-code` provider spawns. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY` | Credentials; they outrank the stored `auth.json`. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Endpoint overrides; https or loopback only. |
@@ -117,7 +117,7 @@ dist build                                  # local archive under target/distrib
 
 | File | Purpose |
 |---|---|
-| `Cargo.toml`, `depgate.toml`, `deny.toml`, `.config/nextest.toml` | Every dependency version with its reason; the 19 dependency rules with theirs; cargo-deny policy; nextest profiles. |
+| `Cargo.toml`, `depgate.toml`, `deny.toml`, `.config/nextest.toml` | Every dependency version with its reason; the 21 dependency rules with theirs; cargo-deny policy; nextest profiles. |
 | `schema/ganja-config.schema.json` | JSON Schema for `ganja.toml`; taplo reads it through a `#:schema` line. |
 | `CONTEXT.md` | Glossary: the canonical term for each concept and the words to avoid. |
 | `PRACTICE.md` | Rust exercises for the owner, mapped to the port's phases. |

@@ -48,6 +48,10 @@ mod run;
 mod serve;
 mod skills;
 mod staging;
+#[cfg(unix)]
+mod worker;
+#[cfg(unix)]
+mod worker_git;
 
 // A plain comment, and above the doc comment rather than below it: clap
 // renders a doc comment as the help a person reads — every line of it — and
@@ -385,6 +389,12 @@ enum Command {
     /// stream instead of a screen. Loopback by default; binding anything
     /// else requires GANJA_SERVER_PASSWORD, and every route then asks for it.
     Serve(serve::ServeArgs),
+    /// Prepare a hosted worker before starting its engine.
+    #[cfg(unix)]
+    Worker {
+        #[command(subcommand)]
+        action: worker::Action,
+    },
     /// List the stored sessions of the project this was run in.
     Sessions(SessionsArgs),
     /// List the skills a session can load — the roster `$name` invokes.
@@ -907,6 +917,8 @@ async fn main() -> Result<ExitCode> {
         Some(Command::Plugin { action }) => plugin::plugin_command(action).map(succeeded),
         Some(Command::Run(args)) => run::run(args).await.map(succeeded),
         Some(Command::Serve(args)) => serve::serve(args).await.map(succeeded),
+        #[cfg(unix)]
+        Some(Command::Worker { action }) => worker::run(action).await.map(succeeded),
         Some(Command::Sessions(args)) => sessions_command(args).await.map(succeeded),
         Some(Command::Skills) => {
             let cwd = std::env::current_dir().context("failed to read the working directory")?;
