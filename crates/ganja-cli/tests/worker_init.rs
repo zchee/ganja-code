@@ -274,7 +274,7 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
     std::fs::create_dir(&config).expect("config directory");
     std::fs::write(config.join("ganja.toml"), "model = \"fake/worker-template-model\"\n")
         .expect("template configuration");
-    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
+    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}${GANJA_SERVER_PASSWORD+x}${GANJA_SERVER_USERNAME+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
     std::fs::write(&script, serde_json::json!({"turns": [
         {"text": "checking environment", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
         {"text": "worker-template-script-finished"}
@@ -292,6 +292,7 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
             ("ANTHROPIC_API_KEY", "synthetic-provider-value"),
             ("GANJA_CONFIG", "/missing-synthetic-host-config.toml"),
             ("GANJA_WORKER_ENV_CANARY", "synthetic-unlisted-value"),
+            ("GANJA_SERVER_USERNAME", "ganja"),
         ],
     )
     .await;

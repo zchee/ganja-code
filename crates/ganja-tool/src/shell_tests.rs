@@ -58,6 +58,37 @@ fn posix(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
+#[test]
+fn shell_children_do_not_receive_server_credentials() {
+    const CHILD: &str = "GANJA_TEST_SHELL_ENV_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "shell::tests::shell_children_do_not_receive_server_credentials"])
+            .env(CHILD, "1")
+            .env("GANJA_SERVER_PASSWORD", "synthetic-server-password")
+            .env("GANJA_SERVER_USERNAME", "synthetic-server-username")
+            .env("GANJA_CLOUD_PASSWORD", "synthetic-cloud-password")
+            .output()
+            .expect("isolated test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    tokio::runtime::Runtime::new().expect("runtime").block_on(async {
+        let directory = tempfile::tempdir().expect("working directory");
+        let output = ShellTool::new()
+            .spawn(
+                "printf '%s' \"${GANJA_SERVER_PASSWORD+x}${GANJA_SERVER_USERNAME+x}${GANJA_CLOUD_PASSWORD+x}\"",
+                directory.path(),
+            )
+            .expect("shell")
+            .wait_with_output()
+            .await
+            .expect("shell output");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty(), "server credentials reached the shell");
+    });
+}
+
 /// A context rooted at `cwd`, with a cancel nobody has pulled.
 fn ctx(cwd: PathBuf) -> ToolCtx {
     ToolCtx::fixture(cwd)
