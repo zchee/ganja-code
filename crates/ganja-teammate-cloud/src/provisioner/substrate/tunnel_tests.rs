@@ -174,6 +174,70 @@ async fn upgrades_and_transfer_encoded_requests_are_refused_without_an_upstream(
 }
 
 #[tokio::test]
+async fn an_interim_continue_response_flows_before_the_request_body() {
+    let (proxy, listener, _) = socket_proxy().await;
+    let token = proxy.token_header();
+    let mut client = TcpStream::connect(proxy.address).await.expect("client");
+    let head = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nExpect: 100-continue\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {}\r\n\r\n",
+        token.to_str().expect("token")
+    );
+    client.write_all(head.as_bytes()).await.expect("request head");
+    let (mut upstream, _) = listener.accept().await.expect("upstream");
+    let request = read_head(&mut upstream).await.expect("forwarded head");
+    assert!(String::from_utf8_lossy(&request).contains("Expect: 100-continue"));
+    upstream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await.expect("interim response");
+    let mut interim = [0; 25];
+    tokio::time::timeout(Duration::from_millis(500), client.read_exact(&mut interim))
+        .await
+        .expect("interim response before upload")
+        .expect("read interim");
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+    client.write_all(b"body").await.expect("upload body");
+    let mut body = [0; 4];
+    upstream.read_exact(&mut body).await.expect("forwarded body");
+    assert_eq!(&body, b"body");
+    upstream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .expect("final response");
+    upstream.shutdown().await.expect("response end");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+        .await
+        .expect("response deadline")
+        .expect("response");
+    assert!(response.ends_with(b"ok"));
+}
+
+#[tokio::test]
+async fn an_early_final_response_ends_an_incomplete_large_upload() {
+    let (proxy, listener, _) = socket_proxy().await;
+    let token = proxy.token_header();
+    let mut client = TcpStream::connect(proxy.address).await.expect("client");
+    let head = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10485760\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {}\r\n\r\npartial body",
+        token.to_str().expect("token")
+    );
+    client.write_all(head.as_bytes()).await.expect("partial upload");
+    let (mut upstream, _) = listener.accept().await.expect("upstream");
+    read_head(&mut upstream).await.expect("request head");
+    upstream
+        .write_all(
+            b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .expect("early final response");
+    upstream.shutdown().await.expect("response end");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_millis(500), client.read_to_end(&mut response))
+        .await
+        .expect("early final response must not wait for upload")
+        .expect("response");
+    assert!(response.starts_with(b"HTTP/1.1 413"));
+}
+
+#[tokio::test]
 async fn connect_sends_routing_outside_worker_auth_and_preserves_buffered_bytes() {
     let (client, mut server) = tokio::io::duplex(4096);
     let fixture = tokio::spawn(async move {

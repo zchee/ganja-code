@@ -168,7 +168,8 @@ async fn forward_worker(
     atespace: &str,
     token: &HeaderValue,
 ) -> Result<(), ProvisionError> {
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let result = tokio::time::timeout_at(deadline, async {
         let bytes = read_head(&mut socket).await?;
         let (actor, request, remaining_body) = route_request(&bytes, token)?;
         if actor.atespace != atespace {
@@ -189,28 +190,61 @@ async fn forward_worker(
                     .write_all(&request)
                     .await
                     .map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
-                // Relay only the declared first body, never another request head.
-                let copied = tokio::io::copy(&mut (&mut socket).take(remaining_body), &mut remote)
-                    .await.map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
-                if copied != remaining_body {
-                    return Err(failure("proxy body", ProvisionErrorKind::Refused));
-                }
+                remote.flush().await.map_err(|_| failure("proxy request", ProvisionErrorKind::Transient))?;
                 Ok::<_, ProvisionError>(remote)
             } => result,
         }?;
-        Ok::<_, ProvisionError>((remote, cancel))
+        Ok::<_, ProvisionError>((remote, cancel, remaining_body))
     })
     .await;
     match result {
-        Ok(Ok((mut remote, cancel))) => {
+        Ok(Ok((remote, cancel, remaining_body))) => {
+            let (local_read, mut local_write) = socket.split();
+            let (mut remote_read, mut remote_write) = tokio::io::split(remote);
+            let upload = async {
+                tokio::time::timeout_at(deadline, async {
+                    // Read exactly the first body's remainder, never a new head.
+                    let copied =
+                        tokio::io::copy(&mut local_read.take(remaining_body), &mut remote_write)
+                            .await
+                            .map_err(|_| failure("proxy body", ProvisionErrorKind::Transient))?;
+                    if copied != remaining_body {
+                        return Err(failure("proxy body", ProvisionErrorKind::Refused));
+                    }
+                    remote_write
+                        .flush()
+                        .await
+                        .map_err(|_| failure("proxy body", ProvisionErrorKind::Transient))
+                })
+                .await
+                .map_err(|_| failure("proxy body", ProvisionErrorKind::Transient))?
+            };
+            let download = async {
+                tokio::io::copy(&mut remote_read, &mut local_write)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| failure("proxy stream", ProvisionErrorKind::Transient))
+            };
+            tokio::pin!(upload, download);
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => {},
-                result = tokio::io::copy(&mut remote, &mut socket) => {
-                    result.map_err(|_| failure("proxy stream", ProvisionErrorKind::Transient))?;
+                () = cancel.cancelled() => Ok(()),
+                result = &mut download => result,
+                result = &mut upload => {
+                    if let Err(error) = result {
+                        // An early final response can race an upload write error.
+                        return tokio::select! {
+                            () = cancel.cancelled() => Ok(()),
+                            result = tokio::time::timeout_at(deadline, &mut download) => result.unwrap_or(Err(error)),
+                        };
+                    }
+                    // A complete upload is not the end of a streamed response.
+                    tokio::select! {
+                        () = cancel.cancelled() => Ok(()),
+                        result = &mut download => result,
+                    }
                 }
             }
-            Ok(())
         }
         _ => {
             // Remote bodies and certificate failures never reach a worker or a log.
