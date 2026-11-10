@@ -93,3 +93,37 @@ async fn mcp_children_do_not_receive_server_credentials() {
     servers.shutdown().await;
     assert_eq!(std::fs::read_to_string(observed).expect("MCP child ran"), "|||retained");
 }
+
+#[tokio::test]
+async fn lsp_children_do_not_receive_server_credentials() {
+    if !isolated("lsp_children_do_not_receive_server_credentials") {
+        return;
+    }
+    let root = tempfile::tempdir().expect("LSP root");
+    let observed = root.path().join("environment");
+    let source = root.path().join("source.fixture");
+    std::fs::write(&source, "fixture").expect("source file");
+    let config = ganja_core::config::LspConfig::Servers(BTreeMap::from([(
+        "environment-probe".to_owned(),
+        ganja_core::config::LspEntry {
+            command: Some(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!("{PROBE} > \"$1\""),
+                "probe".to_owned(),
+                observed.to_str().expect("fixture path").to_owned(),
+            ]),
+            extensions: Some(vec![".fixture".to_owned()]),
+            disabled: false,
+            env: BTreeMap::from([
+                ("GANJA_SERVER_PASSWORD".to_owned(), "configured-password".to_owned()),
+                ("GANJA_SERVER_USERNAME".to_owned(), "configured-username".to_owned()),
+                ("GANJA_CLOUD_PASSWORD".to_owned(), "configured-cloud-password".to_owned()),
+            ]),
+            initialization: None,
+        },
+    )]));
+    let lsp = ganja_core::lsp::Lsp::new(Some(&config), root.path()).expect("LSP config");
+    lsp.touch(&source, false).await;
+    assert_eq!(std::fs::read_to_string(observed).expect("LSP child ran"), "|||retained");
+}
