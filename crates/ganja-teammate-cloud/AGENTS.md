@@ -110,6 +110,31 @@ address; this relies on one tenant per worker sandbox and mandatory Basic auth.
 The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
 `GIT_SSL_CAINFO`; these trusted paths are followed, including projection symlinks.
 
+### Acceptance image
+
+`worker/Dockerfile` and its adjacent inputs define an acceptance-only image using
+`GANJA_PROVIDER=fake`, not a production worker for a real provider. The owner still
+has to build and push this image; these files are not evidence of a live run.
+
+- The build context requires a Linux `ganja` executable alongside `ganja.toml`,
+  `gitconfig`, and `acceptance-script.json`; `.dockerignore` excludes unrelated
+  build-context files. The image starts `ganja worker init --port 80` in empty
+  `/work`. Its explicit environment variables all belong to the served-engine
+  allowlist below. The runtime template supplies the Basic password, never the image.
+- `GANJA_SERVER_USERNAME=ganja` is the image default and must match `[cloud].username`.
+  Build argument `GIT_HOST` scopes a placeholder Git authorization header to that
+  HTTPS host only. The platform supplies the real authorization outside the image;
+  `gitconfig` disables commit signing.
+- The platform must project its trust bundle at
+  `/run/ate/egress-trust-bundle/trust-bundle.pem`, used by both `SSL_CERT_FILE` and
+  `GIT_SSL_CAINFO`.
+- `acceptance-script.json` consumes two model requests for the first message: a Bash
+  tool call that appends to `NOTES.md`, commits, and pushes, then a final response.
+  One further model request answers the second message after resume.
+- Init's `/readyz` only confirms the bootstrap listener. It does not establish that
+  checkout and handoff finished; the backend separately awaits authenticated engine
+  health before opening a session.
+
 ### Child environments
 
 `ganja worker init` clears inherited environment for both child types and copies
