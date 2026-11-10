@@ -121,7 +121,7 @@ async fn an_unknown_provisioner_fails_before_any_connection() {
         |_, _| async { panic!("unknown provisioner must not connect") },
     )
     .await;
-    assert_eq!(result.err().unwrap().to_string(), "cloud configuration failed");
+    assert_eq!(result.err().unwrap().to_string(), "unsupported cloud provisioner; use substrate");
 }
 
 #[tokio::test]
@@ -134,7 +134,10 @@ async fn a_missing_cloud_home_reports_a_sanitized_configuration_error() {
         |_, _| async { panic!("missing cloud home must fail before connection") },
     )
     .await;
-    assert_eq!(result.err().unwrap().to_string(), "cloud configuration failed");
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "cloud configuration home not found; check GANJA_CONFIG_HOME and HOME"
+    );
 }
 
 #[tokio::test]
@@ -148,7 +151,10 @@ async fn a_failed_cloud_connector_reports_no_private_details() {
     )
     .await;
     let error = result.err().unwrap();
-    assert_eq!(format!("{error:#}"), "cloud connection failed");
+    assert_eq!(
+        format!("{error:#}"),
+        "cloud connection failed; check the log and Substrate settings"
+    );
     assert!(!format!("{error:?}").contains("canary"));
 }
 
@@ -172,7 +178,10 @@ async fn a_stalled_cloud_connector_does_not_hold_startup_forever() {
     )
     .await
     .expect("assembly must enforce its own connection budget");
-    assert_eq!(result.err().unwrap().to_string(), "cloud connection timed out");
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "cloud connection timed out; check Substrate connectivity"
+    );
     assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert!(dropped.load(Ordering::SeqCst), "expiry must drop the connector");
 }
@@ -189,7 +198,7 @@ impl Drop for Dropped {
 async fn an_interrupt_between_startup_stages_is_not_lost() {
     let mut interrupt: Option<Interrupt> = Some(async { Ok(()) }.boxed());
     let result = during_startup(&mut interrupt, async { 7 }).await;
-    assert_eq!(result.unwrap_err().to_string(), "cloud connection interrupted");
+    assert_eq!(result.unwrap_err().to_string(), "cloud connection interrupted; retry when ready");
 }
 
 #[tokio::test]
@@ -211,7 +220,7 @@ async fn the_same_interrupt_survives_a_completed_startup_stage() {
         std::future::pending::<()>().await;
     })
     .await;
-    assert_eq!(result.unwrap_err().to_string(), "cloud connection interrupted");
+    assert_eq!(result.unwrap_err().to_string(), "cloud connection interrupted; retry when ready");
     assert!(dropped.load(Ordering::SeqCst), "interruption must drop the startup operation");
 }
 

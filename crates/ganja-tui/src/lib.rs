@@ -489,7 +489,10 @@ pub async fn run(
                         &home,
                         &cloud.username,
                     )
-                    .await?;
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(%error, "cloud provisioner connection failed");
+                    })?;
                 Ok(Arc::new(ganja_teammate_cloud::CloudBackend::new(cloud, Arc::new(provisioner)))
                     as Arc<dyn ganja_core::teammate::TeammateBackend>)
             },

@@ -37,13 +37,17 @@ where
         return Ok(backends);
     };
     if cloud.provisioner != "substrate" {
-        anyhow::bail!("cloud configuration failed");
+        anyhow::bail!("unsupported cloud provisioner; use substrate");
     }
-    let home = home().ok_or_else(|| anyhow::anyhow!("cloud configuration failed"))?;
+    let home = home().ok_or_else(|| {
+        anyhow::anyhow!("cloud configuration home not found; check GANJA_CONFIG_HOME and HOME")
+    })?;
     let backend = tokio::time::timeout(budget, connect(cloud.clone(), home))
         .await
-        .map_err(|_| anyhow::anyhow!("cloud connection timed out"))?
-        .map_err(|_| anyhow::anyhow!("cloud connection failed"))?;
+        .map_err(|_| anyhow::anyhow!("cloud connection timed out; check Substrate connectivity"))?
+        .map_err(|_| {
+            anyhow::anyhow!("cloud connection failed; check the log and Substrate settings")
+        })?;
     Ok(backends.with(backend))
 }
 
@@ -58,7 +62,7 @@ pub(crate) async fn during_startup<T>(
     };
     tokio::select! {
         biased;
-        _ = interrupt => anyhow::bail!("cloud connection interrupted"),
+        _ = interrupt => anyhow::bail!("cloud connection interrupted; retry when ready"),
         value = work => Ok(value),
     }
 }
