@@ -1,6 +1,7 @@
 //! Environment policy shared by engine and editor child processes.
 //!
-//! New spawn sites must call [`isolate`] after applying configured environment overrides.
+//! New spawn sites must call [`isolate`] after applying configured environment overrides,
+//! or clear the environment with `env_clear` and rebuild it from an explicit allowlist.
 //! Real-spawn regressions cover shell children in `ganja-tool/src/shell_tests.rs`, hooks,
 //! MCP, language servers and plugin git in `ganja-core/tests/child_environment.rs`,
 //! provider subprocesses in `ganja-provider/tests/child_environment.rs`, snapshot git in

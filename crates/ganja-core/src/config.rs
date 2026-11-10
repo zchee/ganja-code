@@ -539,9 +539,9 @@ pub struct ProviderConfig {
     /// is moved with its own base-URL variable.
     pub base_url: Option<String>,
     /// The environment variable holding the endpoint's key, consulted before
-    /// the credential store. `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`,
-    /// and `GANJA_CLOUD_PASSWORD` are reserved and refused, including when
-    /// surrounded by whitespace.
+    /// the credential store. Names must match `[A-Za-z_][A-Za-z0-9_]*`, with no
+    /// whitespace. `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`, and
+    /// `GANJA_CLOUD_PASSWORD` are reserved in every ASCII letter case.
     ///
     /// Absent means the store alone answers, under this entry's own id —
     /// `ganja auth login <id>` writes exactly there.
@@ -3758,12 +3758,23 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
             ));
         }
 
-        if let Some(name) = entry.key_env.as_deref().map(str::trim)
-            && ganja_permission::child_process::PRIVATE_ENV.contains(&name)
-        {
-            return Err(format!(
-                "provider \"{id}\" cannot use reserved server variable `{name}` as its `key_env`"
-            ));
+        if let Some(name) = entry.key_env.as_deref() {
+            if !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+            }) {
+                return Err(format!(
+                    "provider \"{id}\" has a `key_env` that is not an environment variable name; \
+                     use [A-Za-z_][A-Za-z0-9_]* with no whitespace"
+                ));
+            }
+            if ganja_permission::child_process::PRIVATE_ENV
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            {
+                return Err(format!(
+                    "provider \"{id}\" cannot use reserved server variable `{name}` as its `key_env`"
+                ));
+            }
         }
 
         let parsed = Url::parse(base_url)
