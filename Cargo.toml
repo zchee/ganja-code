@@ -288,6 +288,7 @@ percent-encoding = "2.3.2"
 png = "0.18.1"
 # Agent Substrate's published protobuf wire and its well-known timestamp types.
 prost = "0.14.4"
+# Generated Substrate messages carry protobuf Timestamp fields.
 prost-types = "0.14.4"
 # Client-only gRPC; server is enabled only by the cloud crate's test dependency.
 # In particular, router stays off so axum never enters a provisioner's closure.
