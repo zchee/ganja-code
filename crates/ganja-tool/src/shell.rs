@@ -693,6 +693,8 @@ impl ShellTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        crate::child_process::isolate(spawner.as_std_mut());
+
         // The group is what makes the tree killable. `0` asks for a new group
         // led by the child, so its pid doubles as the group id and a negative
         // pid signals everything the command forked.
@@ -798,7 +800,9 @@ pub fn signal_group(pid: u32, signal: libc::c_int) {
 #[cfg(not(unix))]
 pub async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
-        let _ = Command::new("taskkill")
+        let mut command = Command::new("taskkill");
+        crate::child_process::isolate(command.as_std_mut());
+        let _ = command
             .args(["/pid", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

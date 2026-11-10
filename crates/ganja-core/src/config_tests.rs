@@ -1966,6 +1966,63 @@ fn a_provider_entry_carries_every_field_it_may_hold() {
     );
 }
 
+#[test]
+fn provider_keys_cannot_name_reserved_server_variables() {
+    for name in ["GANJA_SERVER_PASSWORD", "GANJA_SERVER_USERNAME", "GANJA_CLOUD_PASSWORD"] {
+        for configured in
+            [name.to_owned(), name.to_ascii_lowercase(), name.replace("GANJA", "Ganja")]
+        {
+            let text = format!(
+                "[provider.fixture]\ndialect = \"openai-chat-completions\"\nbase_url = \"https://provider.invalid\"\nkey_env = {configured:?}\n"
+            );
+            let error = parse(&text).expect_err("server variables cannot be provider keys");
+            let ConfigError::Parse { message, .. } = error else {
+                panic!("expected a config refusal, got {error:?}");
+            };
+            assert!(message.contains("fixture"), "{message}");
+            assert!(message.contains(&configured), "{message}");
+            assert!(message.contains("reserved"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn provider_key_variable_names_must_be_portable() {
+    for configured in [
+        "GANJA_SERVER_PASSWORD=",
+        "GANJA_SERVER_PASSWORD=x",
+        "GANJA_SERVER_USERNAME=",
+        "GANJA_SERVER_USERNAME=x",
+        "GANJA_CLOUD_PASSWORD=",
+        "GANJA_CLOUD_PASSWORD=x",
+        "FOO KEY",
+        "1FOO",
+        " FOO_KEY",
+        "FOO_KEY ",
+        "FOO\0KEY",
+    ] {
+        let text = toml::to_string(&serde_json::json!({"provider": {"fixture": {
+            "dialect": "openai-chat-completions", "base_url": "https://provider.invalid",
+            "key_env": configured,
+        }}}))
+        .expect("config serializes");
+        let error = parse(&text).expect_err("malformed variable names are refused");
+        let ConfigError::Parse { message, .. } = error else {
+            panic!("expected a config refusal, got {error:?}");
+        };
+        assert!(message.contains("fixture"), "{message}");
+        assert!(message.contains("is not an environment variable name"), "{message}");
+        assert!(!message.contains(configured), "malformed names must not be echoed: {message}");
+    }
+    for configured in ["FOO_KEY", "_x1"] {
+        let text = format!(
+            "[provider.fixture]\ndialect = \"openai-chat-completions\"\nbase_url = \"https://provider.invalid\"\nkey_env = {configured:?}\n"
+        );
+        let config = parse(&text).expect("ordinary provider key variables remain valid");
+        assert_eq!(config.provider["fixture"].key_env.as_deref(), Some(configured));
+    }
+}
+
 /// Every one of these is a config that would otherwise have described an
 /// endpoint no session could reach — or, in the first case, one that would
 /// have been written, loaded and then never consulted.

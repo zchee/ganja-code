@@ -469,6 +469,7 @@ impl Client {
             command.process_group(0);
         }
 
+        ganja_tool::child_process::isolate(command.as_std_mut());
         let mut child =
             command.spawn().map_err(|source| ClientError::Spawn { id: spec.id.clone(), source })?;
 

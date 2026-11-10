@@ -189,6 +189,7 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
     .await
     .expect("tool turn completes");
     assert_eq!(reason, FinishReason::Completed);
+    worker.assert_provider_key();
     assert_eq!(
         std::fs::read_to_string(worker.work.join("note.txt")).expect("updated file"),
         "after\n"
@@ -224,6 +225,51 @@ async fn a_flushed_bootstrap_becomes_a_real_project_with_working_undo() {
         .output()
         .expect("author config");
     assert_eq!(String::from_utf8(author.stdout).expect("author").trim(), "http@example.invalid");
+    drop(worker);
+    server.close().await;
+}
+
+#[tokio::test]
+async fn a_worker_config_cannot_use_server_authentication_as_a_provider_key() {
+    let server = GitServer::start(false).await;
+    let config = tempfile::tempdir().expect("worker configuration");
+    std::fs::write(
+        config.path().join("ganja.toml"),
+        "model = \"worker-fixture/test\"\n[provider.worker-fixture]\ndialect = \"openai-chat-completions\"\nbase_url = \"https://provider.invalid\"\nkey_env = \"GANJA_SERVER_PASSWORD\"\n",
+    )
+    .expect("reserved provider variable config");
+    let mut worker = worker_support::WorkerProcess::start_with_environment(
+        &server,
+        &[("GANJA_CONFIG_HOME", config.path().to_str().expect("configuration path"))],
+    )
+    .await;
+    let bootstrap = Bootstrap {
+        repository: server.url.clone(),
+        reference: "main".to_owned(),
+        branch: "workers/reserved-key".to_owned(),
+        author: BootstrapAuthor {
+            name: "fixture".to_owned(),
+            email: "fixture@example.invalid".to_owned(),
+        },
+    };
+    assert!(matches!(
+        worker.client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap"),
+        BootstrapOutcome::Cloned { .. }
+    ));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while worker.is_alive() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("server refuses the reserved provider variable");
+    assert!(
+        worker.stderr().contains(
+            "provider \"worker-fixture\" cannot use reserved server variable `GANJA_SERVER_PASSWORD` as its `key_env`"
+        ),
+        "{}",
+        worker.stderr()
+    );
     drop(worker);
     server.close().await;
 }
@@ -274,7 +320,7 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
     std::fs::create_dir(&config).expect("config directory");
     std::fs::write(config.join("ganja.toml"), "model = \"fake/worker-template-model\"\n")
         .expect("template configuration");
-    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
+    let command = "test -z \"${GIT_SSL_NO_VERIFY+x}${HTTPS_PROXY+x}${ANTHROPIC_API_KEY+x}${GANJA_CONFIG+x}${GANJA_WORKER_ENV_CANARY+x}${GANJA_SERVER_PASSWORD+x}${GANJA_SERVER_USERNAME+x}\" && test \"$GANJA_DISABLE_MODELS_FETCH\" = 1 && test \"$GANJA_DISABLE_TERM_PROBE\" = 1 && test -n \"$SSL_CERT_FILE\" && printf template-environment > environment.txt";
     std::fs::write(&script, serde_json::json!({"turns": [
         {"text": "checking environment", "tool_calls": [{"name": "bash", "args": {"command": command}}]},
         {"text": "worker-template-script-finished"}
@@ -292,6 +338,7 @@ async fn the_served_worker_loads_template_config_and_runs_its_scripted_provider(
             ("ANTHROPIC_API_KEY", "synthetic-provider-value"),
             ("GANJA_CONFIG", "/missing-synthetic-host-config.toml"),
             ("GANJA_WORKER_ENV_CANARY", "synthetic-unlisted-value"),
+            ("GANJA_SERVER_USERNAME", "ganja"),
         ],
     )
     .await;

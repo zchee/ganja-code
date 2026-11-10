@@ -1150,7 +1150,9 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    ganja_tool::child_process::isolate(&mut command);
+    let output = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

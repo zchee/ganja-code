@@ -118,6 +118,8 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# The logger canary emits events under third-party client target names.
+tracing.workspace = true
 # The worker's git peer is a real TLS server, with a generated test-only trust root.
 axum.workspace = true
 axum-server.workspace = true

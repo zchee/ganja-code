@@ -382,6 +382,64 @@ fn rust_log_outranks_the_verbose_flag_and_the_flag_outranks_the_default() {
 }
 
 #[test]
+fn client_debug_logs_never_write_credentials_even_under_explicit_filters() {
+    const CHILD: &str = "GANJA_TEST_CLIENT_LOG_CHILD";
+    const CANARY: &str = "synthetic-credential-must-not-be-logged";
+    if std::env::var_os(CHILD).is_some() {
+        let guard = super::install_logging(false).expect("file logger");
+        macro_rules! client_events {
+            ($($target:literal),+ $(,)?) => {
+                $(
+                    tracing::debug!(target: $target, canary = CANARY, "client debug");
+                    tracing::debug!(target: concat!($target, "::client"), canary = CANARY, "client debug");
+                    tracing::trace!(target: concat!($target, "::client"), canary = CANARY, "client trace");
+                )+
+            };
+        }
+        client_events!("kube_client", "hyper", "tonic", "h2", "reqwest", "rustls");
+        tracing::info!(target: "reqwest::client", "client-info-retained");
+        tracing::debug!(target: "ganja_cli", "ganja-debug-retained");
+        drop(guard);
+        return;
+    }
+
+    for (filter, enabled) in [
+        ("debug", true),
+        (
+            "debug,kube_client::client=trace,hyper::client=trace,tonic::client=trace,h2::client=trace,reqwest::client=trace,rustls::client=trace",
+            true,
+        ),
+        ("off", false),
+    ] {
+        let home = tempfile::tempdir().expect("isolated log directory");
+        let output = ProcessCommand::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "tests::client_debug_logs_never_write_credentials_even_under_explicit_filters",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_LOG", filter)
+            .env("XDG_DATA_HOME", home.path())
+            .output()
+            .expect("isolated logger process");
+        assert!(
+            output.status.success(),
+            "logger process failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let mut logged = String::new();
+        for file in std::fs::read_dir(home.path().join("ganja/log")).expect("log directory") {
+            logged
+                .push_str(&std::fs::read_to_string(file.expect("log entry").path()).expect("log"));
+        }
+        assert!(!logged.contains(CANARY), "client credential was logged under {filter}");
+        assert_eq!(logged.contains("ganja-debug-retained"), enabled, "filter: {filter}");
+        assert_eq!(logged.contains("client-info-retained"), enabled, "filter: {filter}");
+    }
+}
+
+#[test]
 fn the_models_arguments_parse_as_a_filter_and_a_forced_fetch() {
     let cli = Cli::parse_from(["ganja", "models", "anthropic", "--refresh"]);
 

@@ -1617,8 +1617,14 @@ fn require_key(provider_id: &str, variable: &str) -> Result<Presented, ProviderE
 ///
 /// Returns [`ProviderError::Auth`] when neither place has one — naming both,
 /// because which one is missing is the whole of what the reader has to fix —
-/// or when the store exists and could not be read.
+/// or when the store exists and could not be read. Names containing `=` or NUL
+/// are refused before either source is consulted, without echoing the name.
 pub fn configured_key(id: &str, key_env: Option<&str>) -> Result<Presented, ProviderError> {
+    if key_env.is_some_and(|variable| variable.contains(['=', '\0'])) {
+        return Err(ProviderError::Auth(format!(
+            "the key_env for configured provider `{id}` is not an environment variable name"
+        )));
+    }
     if let Some(variable) = key_env
         && let Some(exported) = setting(variable)
         && let Some(key) = Presented::new(exported)
@@ -1714,8 +1720,12 @@ pub fn serves(provider_id: &str, model: &str) -> bool {
 /// Public because selection reads the same variables under the same rule: an
 /// exported-but-empty `GANJA_MODEL` names no model, exactly as an
 /// exported-but-empty `ANTHROPIC_BASE_URL` names no endpoint. One reader keeps
-/// the two halves from disagreeing about what blank means.
+/// the two halves from disagreeing about what blank means. Names containing
+/// `=` or NUL are refused before lookup and return [`None`].
 pub fn setting(variable: &str) -> Option<String> {
+    if variable.contains(['=', '\0']) {
+        return None;
+    }
     env::var(variable).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 

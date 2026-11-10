@@ -284,6 +284,42 @@ fn the_schema_matches_what_the_real_loader_accepts() {
         &home.path().join("per-id"),
     );
     the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(&home.path().join("excluded"));
+    the_loader_and_schema_agree_on_provider_variable_names(&home.path().join("provider-variables"));
+}
+
+fn the_loader_and_schema_agree_on_provider_variable_names(project: &Path) {
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+    let mut cases = Vec::new();
+    for name in ["GANJA_SERVER_PASSWORD", "GANJA_SERVER_USERNAME", "GANJA_CLOUD_PASSWORD"] {
+        for configured in [
+            name.to_owned(),
+            name.to_ascii_lowercase(),
+            name.replace("GANJA", "Ganja"),
+            format!("{name}="),
+            format!("{name}=x"),
+        ] {
+            cases.push((configured, false));
+        }
+    }
+    for name in ["FOO KEY", "1FOO", " FOO_KEY", "FOO_KEY ", "FOO\0KEY", ""] {
+        cases.push((name.to_owned(), false));
+    }
+    cases.extend([("FOO_KEY".to_owned(), true), ("_x1".to_owned(), true)]);
+    fs::create_dir_all(project.join(".git")).expect("fixture repository");
+    for (name, expected) in cases {
+        let instance = json!({"provider": {"fixture": {
+            "dialect": "openai-chat-completions", "base_url": "https://provider.invalid",
+            "key_env": name,
+        }}});
+        let document = toml::to_string(&instance).expect("config serializes");
+        fs::write(project.join("ganja.toml"), document).expect("config file");
+        assert_eq!(
+            Config::load_with(project, &Overrides::default()).is_ok(),
+            expected,
+            "loader acceptance of {name:?}"
+        );
+        assert_eq!(validator.is_valid(&instance), expected, "schema acceptance of {name:?}");
+    }
 }
 
 fn the_cloud_table_is_strict_and_trusted(project: &Path, schema: &Value) {

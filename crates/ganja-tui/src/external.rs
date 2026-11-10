@@ -99,6 +99,7 @@ pub fn read_back(path: &Path) -> io::Result<String> {
 pub fn command(shell: &Path, program: &str, path: &Path) -> Command {
     let mut command = Command::new(shell);
     command.arg("-c").arg(format!("{program} \"$@\"")).arg(program).arg(path);
+    ganja_tool::child_process::isolate(&mut command);
 
     command
 }

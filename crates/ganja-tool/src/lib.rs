@@ -17,6 +17,7 @@
 /// third-party tool has any business addressing files through.
 mod anchor;
 pub mod bash_output;
+pub mod child_process;
 /// Deferred tool schemas and the resident `tool_search` door back in —
 /// ganja's take on Claude Code's ToolSearch, minted **D492** where the
 /// engine filters (a direct call to a deferred tool executes).

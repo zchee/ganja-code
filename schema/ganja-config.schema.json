@@ -591,7 +591,7 @@
         },
         "environment": {
           "type": "object",
-          "description": "Variables layered over the ones this process already has.",
+          "description": "Variables layered over the ones this process already has. GANJA_SERVER_PASSWORD, GANJA_SERVER_USERNAME and GANJA_CLOUD_PASSWORD are reserved and removed from the child even when explicitly configured.",
           "default": {},
           "additionalProperties": {
             "type": "string"
@@ -694,8 +694,11 @@
         },
         "key_env": {
           "type": "string",
-          "description": "The environment variable holding the endpoint's key, consulted before the credential store. Absent means the store alone answers, under this entry's own id. A blank or whitespace-only value is refused, because it names no variable.",
-          "pattern": "\\S"
+          "description": "The environment variable holding the endpoint's key, consulted before the credential store. Absent means the store alone answers, under this entry's own id. Names must match [A-Za-z_][A-Za-z0-9_]* with no whitespace. GANJA_SERVER_PASSWORD, GANJA_SERVER_USERNAME and GANJA_CLOUD_PASSWORD are reserved in every ASCII letter case.",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "not": {
+            "pattern": "^[Gg][Aa][Nn][Jj][Aa]_([Ss][Ee][Rr][Vv][Ee][Rr]_([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Uu][Ss][Ee][Rr][Nn][Aa][Mm][Ee])|[Cc][Ll][Oo][Uu][Dd]_[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])$"
+          }
         },
         "headers": {
           "type": "object",
@@ -779,7 +782,7 @@
         },
         "env": {
           "type": "object",
-          "description": "Variables layered over the ones this process already has.",
+          "description": "Variables layered over the ones this process already has. GANJA_SERVER_PASSWORD, GANJA_SERVER_USERNAME and GANJA_CLOUD_PASSWORD are reserved and removed from the child even when explicitly configured.",
           "default": {},
           "additionalProperties": {
             "type": "string"

@@ -967,6 +967,10 @@ fn config_command(action: Config) -> Result<()> {
 /// The returned guard flushes the appender's worker thread when it drops.
 #[must_use]
 fn install_logging(verbose: bool) -> Option<WorkerGuard> {
+    use tracing_subscriber::filter::{LevelFilter, Targets};
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let directory = match log_directory() {
         Ok(directory) => directory,
         Err(error) => return declined(&format!("{error:#}")),
@@ -986,12 +990,22 @@ fn install_logging(verbose: bool) -> Option<WorkerGuard> {
         std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok().as_deref(),
         verbose,
     );
-    let installed = tracing_subscriber::fmt()
-        .with_writer(writer)
-        // A file is not a terminal, so colour codes in it are noise every
-        // reader has to filter back out.
-        .with_ansi(false)
-        .with_env_filter(filter)
+    // Independent of the user's filter: a more-specific directive must not
+    // enable client debug events that can contain headers or response bodies.
+    // Filtering before formatting avoids having to recognize every secret.
+    let client_levels = Targets::new().with_default(LevelFilter::TRACE).with_targets(
+        ["kube_client", "hyper", "tonic", "h2", "reqwest", "rustls"]
+            .map(|target| (target, LevelFilter::INFO)),
+    );
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(client_levels)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                // A file is not a terminal, so colour codes in it are noise.
+                .with_ansi(false),
+        )
         .try_init();
 
     match installed {
