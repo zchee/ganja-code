@@ -4,8 +4,8 @@ expression: screen(&terminal)
 ---
                                                                                 
   ┌ teammate ────────────────────────────────────────────────────────────────┐  
+  │hosted                                                                    │  
   │... +2 lines not shown                                                    │  
-  │Deletion is final; absence must still be confirmed.                       │  
   │> Cancel                                                                  │  
   │  Retire                                                                  │  
   └──────────────────────────────────────────────────────────────────────────┘  

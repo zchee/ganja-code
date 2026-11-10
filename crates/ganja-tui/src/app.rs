@@ -2861,7 +2861,7 @@ impl App {
         match drive_two_step(dialog, key) {
             Driven::Close => self.team_dialog = None,
             Driven::Run(effect) => self.run_team_effect(effect).await,
-            Driven::Stay => {}
+            Driven::Stay => dialog.clamp_selection(self.team_area),
         }
     }
 

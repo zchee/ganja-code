@@ -10425,10 +10425,16 @@ async fn an_undrawn_affirmative_cannot_execute_after_a_resize() {
     hosted.app.team_dialog = Some(dialog);
     let mut display = terminal(80, 24);
     hosted.app.draw(&mut display).expect("a frame draws");
-    display.backend_mut().resize(80, 4);
-    hosted.app.draw(&mut display).expect("the tiny frame draws");
-    assert!(!screen(&display).contains("Retire"), "the choice must be off screen");
+    display.backend_mut().resize(80, 12);
+    hosted.app.draw(&mut display).expect("the compact frame draws");
+    let compact = screen(&display);
+    assert!(compact.contains("hosted"), "the target must stay visible:\n{compact}");
+    assert!(compact.contains("Cancel"), "Cancel must stay visible:\n{compact}");
+    assert!(!compact.contains("Retire"), "the choice must be off screen:\n{compact}");
     hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
+    hosted.app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("Down is handled");
+    hosted.app.draw(&mut display).expect("the compact selection draws");
+    assert!(screen(&display).contains("> Cancel"), "the next key must restore a visible selection");
     let mut restored = terminal(80, 24);
     hosted.app.draw(&mut restored).expect("the full frame draws");
     let screen = screen(&restored);
@@ -10446,6 +10452,37 @@ async fn an_undrawn_affirmative_cannot_execute_after_a_resize() {
         "an invisible option must not delete the worker"
     );
     hosted.close().await;
+}
+
+#[tokio::test]
+async fn down_keeps_cancel_selected_when_confirmation_cannot_show_consent() {
+    for action in [3, 4] {
+        for notice in [false, true] {
+            for body in [1, 2] {
+                let mut app = app();
+                let mut dialog = hosted_dialog();
+                dialog.submit();
+                dialog.move_selection(action);
+                dialog.submit();
+                if notice {
+                    dialog.set_notice("A prior operation finished.");
+                }
+                app.team_dialog = Some(dialog);
+                let mut display = terminal(80, body + 10);
+                app.draw(&mut display).expect("the compact confirmation draws");
+                app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("Down is handled");
+                app.draw(&mut display).expect("the selection draws");
+                let drawn = screen(&display);
+                assert!(drawn.contains("> Cancel"), "body {body}, notice {notice}:\n{drawn}");
+                assert!(
+                    app.team_dialog
+                        .as_ref()
+                        .expect("dialog stays open")
+                        .selection_visible(app.team_area)
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

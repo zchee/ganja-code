@@ -366,11 +366,68 @@ fn a_short_action_window_follows_selection_and_maps_the_drawn_row() {
 }
 
 #[test]
-fn a_short_confirmation_keeps_both_options_and_counts_hidden_text() {
-    let screen = rendered(&retirement_dialog(), Rect::new(0, 0, 80, 8));
-    assert!(screen.contains("Cancel"), "{screen}");
-    assert!(screen.contains("Retire"), "{screen}");
-    assert!(screen.contains("... +2 lines not shown"), "{screen}");
+fn short_confirmations_keep_the_target_visible_before_offering_consent() {
+    for action in [CloudAction::Retire, CloudAction::ReportRevert] {
+        for notice in [false, true] {
+            for body in 1..=4 {
+                let mut dialog = retirement_dialog();
+                dialog.step =
+                    super::Step::Confirm { member: "hosted".to_owned(), action, option: 0 };
+                if notice {
+                    dialog.set_notice("A prior operation finished.");
+                }
+                let area = Rect::new(0, 0, 80, body + 4 + u16::from(notice && body == 4));
+                let layout = dialog.visible_layout(area, &Theme::default());
+                let screen = rendered(&dialog, area);
+                assert!(
+                    screen.contains("Cancel"),
+                    "{action:?}, body {body}, notice {notice}:\n{screen}"
+                );
+                assert_eq!(screen.contains("hosted"), body >= 2, "{screen}");
+                assert_eq!(screen.contains(action.label()), body >= 3, "{screen}");
+                assert_eq!(layout.rows.iter().any(|row| row.option == Some(1)), body >= 3);
+                if body >= 2 {
+                    assert!(layout.rows[0].line.to_string().contains("hosted"), "{screen}");
+                }
+                if (2..=3).contains(&body) {
+                    assert!(layout.rows[0].line.to_string().ends_with('\u{2026}'), "{screen}");
+                }
+                if body == 4 {
+                    assert!(layout.rows[1].line.to_string().contains("not shown"), "{screen}");
+                }
+                if body < 3 {
+                    let inner = layout.popup.inner(ratatui::layout::Margin::new(1, 1));
+                    for (index, row) in layout.rows.iter().enumerate() {
+                        if row.option != Some(0) {
+                            assert_eq!(dialog.click(area, inner.x, inner.y + index as u16), None);
+                            assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+                        }
+                    }
+                    dialog.step =
+                        super::Step::Confirm { member: "hosted".to_owned(), action, option: 1 };
+                    assert!(!dialog.selection_visible(area), "{screen}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_long_confirmation_target_yields_to_the_omission_cue() {
+    let mut dialog = retirement_dialog();
+    dialog.step = super::Step::Confirm {
+        member: "a-very-long-hosted-member-name".repeat(8),
+        action: CloudAction::Retire,
+        option: 0,
+    };
+    for width in [16, 40] {
+        let layout = dialog.visible_layout(Rect::new(0, 0, width, 7), &Theme::default());
+        let name = layout.rows[0].line.to_string();
+        assert!(name.starts_with("a-very"), "{name}");
+        assert!(name.ends_with('\u{2026}'), "{name}");
+        assert_eq!(name.width(), usize::from(layout.popup.width - 2));
+        assert!(layout.rows.iter().any(|row| row.option == Some(1)));
+    }
 }
 
 /// Whether a rendered line *is* the Tasks heading, once the dialog's border

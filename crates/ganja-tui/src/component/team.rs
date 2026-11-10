@@ -815,6 +815,19 @@ impl Team {
             .any(|row| row.option == Some(selected))
     }
 
+    /// Keeps confirmation selection on a control drawn in the current viewport.
+    pub(crate) fn clamp_selection(&mut self, area: Rect) {
+        if !matches!(self.step, Step::Confirm { .. }) {
+            return;
+        }
+        let layout = self.visible_layout(area, &Theme::default());
+        if let Step::Confirm { option, .. } = &mut self.step
+            && !layout.rows.iter().any(|row| row.option == Some(*option))
+        {
+            *option = layout.rows.iter().find_map(|row| row.option).unwrap_or(0);
+        }
+    }
+
     /// Draws the modal centered over `area`.
     pub fn render(&self, area: Rect, buffer: &mut Buffer, theme: &Theme) {
         if area.is_empty() {
@@ -836,9 +849,9 @@ impl Team {
         if width == 0 || room == 0 {
             return VisibleLayout { popup, rows: Vec::new() };
         }
-        // Explanations may yield to controls; first drop the blank/footer pair,
-        // then the notice. A one-row confirmation shows only Cancel, never an
-        // affirmative without room for both choices.
+        // A confirmation reserves three body rows for its target and choices.
+        // Footer and notice rows fit only beyond that minimum; remaining body
+        // space holds the omission marker and explanation.
         let minimum = if matches!(self.step, Step::Confirm { .. }) { 3 } else { 1 };
         let footer =
             usize::from(room >= minimum + CHROME + usize::from(self.notice.is_some())) * CHROME;
@@ -897,20 +910,44 @@ impl Team {
                 VisibleRow { line, option }
             })
             .collect();
-        if matches!(self.step, Step::Confirm { .. }) {
-            if budget < 2 {
-                rows = vec![VisibleRow {
-                    line: action_row(0, 0, "Cancel", width, theme),
-                    option: Some(0),
-                }];
-            } else if first > 0 && budget > 2 {
-                rows[0] = VisibleRow {
-                    line: Line::styled(
-                        clip(&super::permission::overflow_marker(first + 1), width),
-                        theme.dim,
-                    ),
-                    option: None,
+        if let Step::Confirm { member, action, option } = &self.step
+            && budget < len
+        {
+            rows.clear();
+            if budget >= 2 {
+                let explanation_rows = budget.saturating_sub(3);
+                let name = if explanation_rows == 0 {
+                    let cue = "\u{2026}";
+                    format!("{}{cue}", clip(member, width.saturating_sub(cue.width())))
+                } else {
+                    clip(member, width)
                 };
+                rows.push(VisibleRow { line: Line::styled(name, theme.fg), option: None });
+                if explanation_rows > 0 {
+                    let explanation = action.confirmation();
+                    let hidden = explanation.len() - (explanation_rows - 1);
+                    rows.push(VisibleRow {
+                        line: Line::styled(
+                            clip(&super::permission::overflow_marker(hidden), width),
+                            theme.dim,
+                        ),
+                        option: None,
+                    });
+                    rows.extend(explanation.iter().skip(hidden).map(|line| VisibleRow {
+                        line: Line::styled(clip(line, width), theme.fg),
+                        option: None,
+                    }));
+                }
+            }
+            rows.push(VisibleRow {
+                line: action_row(0, if budget < 3 { 0 } else { *option }, "Cancel", width, theme),
+                option: Some(0),
+            });
+            if budget >= 3 {
+                rows.push(VisibleRow {
+                    line: action_row(1, *option, action.label(), width, theme),
+                    option: Some(1),
+                });
             }
         }
         if notice > 0
