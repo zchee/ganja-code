@@ -777,7 +777,9 @@ impl Team {
         lines + usize::from(index == self.rows.len()) + usize::from(self.rows.is_empty())
     }
 
-    /// Selects the clicked visible row and submits it, ignoring borders and hints.
+    /// Selects a visible row, ignoring borders and hints. Confirmation
+    /// affirmatives only highlight: requiring Enter prevents repeated clicks
+    /// at the action's former position from confirming it before a redraw.
     pub fn click(&mut self, area: Rect, column: u16, row: u16) -> Option<Effect> {
         let layout = self.visible_layout(area, &Theme::default());
         let inner = layout.popup.inner(ratatui::layout::Margin::new(1, 1));
@@ -787,8 +789,12 @@ impl Team {
         let option = layout.rows.get(usize::from(row - inner.y))?.option?;
         match &mut self.step {
             Step::Members => self.selected = option,
-            Step::Actions { option: selected, .. } | Step::Confirm { option: selected, .. } => {
+            Step::Actions { option: selected, .. } => *selected = option,
+            Step::Confirm { option: selected, .. } => {
                 *selected = option;
+                if option == 1 {
+                    return None;
+                }
             }
             Step::Input { .. } => return None,
         }

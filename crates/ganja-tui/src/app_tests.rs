@@ -10449,17 +10449,39 @@ async fn an_undrawn_affirmative_cannot_execute_after_a_resize() {
 }
 
 #[tokio::test]
-async fn a_drawn_affirmative_executes_on_enter() {
+async fn a_drawn_affirmative_click_selects_and_enter_executes() {
     use ganja_testkit::provisioner::ProvisionOperation;
     let mut hosted = HostedApp::new().await;
     let mut dialog = hosted_dialog();
     dialog.submit();
     dialog.move_selection(3);
     dialog.submit();
-    dialog.move_selection(1);
     hosted.app.team_dialog = Some(dialog);
     let mut display = terminal(80, 24);
     hosted.app.draw(&mut display).expect("a frame draws");
+    let before = screen(&display);
+    let row = before.lines().position(|line| line.contains("Retire")).expect("affirmative");
+    hosted
+        .app
+        .handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await
+        .expect("click is handled");
+    assert!(hosted.app.cloud_controls.is_empty(), "the click only selects");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "the click must not delete the worker"
+    );
+    hosted.app.draw(&mut display).expect("the highlighted choice draws");
+    assert!(screen(&display).contains("> Retire"));
     hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
     hosted.settled().await;
     assert_eq!(
@@ -10473,6 +10495,75 @@ async fn a_drawn_affirmative_executes_on_enter() {
         "a visible affirmative deletes the worker exactly once"
     );
     hosted.close().await;
+}
+
+async fn repeated_retirement_clicks(clicks: usize) {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let dialog = if clicks == 2 {
+        let mut dialog = hosted_dialog();
+        dialog.submit();
+        dialog.move_selection(3);
+        dialog
+    } else {
+        let mut rows: Vec<_> = (0..4)
+            .map(|index| {
+                team_row(
+                    &format!("local-{index}"),
+                    ganja_protocol::MemberBackend::InProcess,
+                    false,
+                    &[],
+                )
+            })
+            .collect();
+        rows.push(team_row("hosted", ganja_protocol::MemberBackend::Cloud, false, &[]));
+        component::team::Team::new(rows, Vec::new())
+    };
+    // The setup is intentionally not redrawn between the consecutive mouse events.
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 17);
+    hosted.app.draw(&mut display).expect("the initial dialog draws");
+    let before = screen(&display);
+    let needle = if clicks == 2 { "Retire" } else { "hosted" };
+    let row = before.lines().position(|line| line.contains(needle)).expect("click target");
+    for _ in 0..clicks {
+        hosted
+            .app
+            .handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row: row as u16,
+                modifiers: KeyModifiers::NONE,
+            })))
+            .await
+            .expect("click is handled");
+    }
+    assert!(hosted.app.cloud_controls.is_empty(), "repeated clicks must not dispatch retirement");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "repeated clicks must not delete the worker"
+    );
+    hosted.app.draw(&mut display).expect("the confirmation draws");
+    assert!(
+        screen(&display).contains("> Retire"),
+        "the affirmative is only highlighted: {}",
+        screen(&display)
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn a_double_click_cannot_delete_a_hosted_worker() {
+    repeated_retirement_clicks(2).await;
+}
+
+#[tokio::test]
+async fn a_triple_click_cannot_delete_a_hosted_worker() {
+    repeated_retirement_clicks(3).await;
 }
 
 #[tokio::test]

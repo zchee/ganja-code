@@ -208,25 +208,69 @@ fn a_mouse_click_uses_the_visible_roster_offset_not_the_unscrolled_row() {
 }
 
 #[test]
-fn a_mouse_click_on_a_confirmation_dispatches_only_its_selected_action() {
-    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
-    dialog.submit();
-    let screen = rendered(&dialog, AREA);
-    let line = screen
-        .lines()
-        .position(|line| line.contains("Report external revert"))
-        .expect("revert row");
-    assert_eq!(dialog.click(AREA, 8, line as u16), None);
-    let screen = rendered(&dialog, AREA);
-    assert!(screen.contains("does not revert or resume"), "{screen}");
-    let line = screen
-        .lines()
-        .position(|line| line.contains("Report external revert"))
-        .expect("confirm row");
-    assert_eq!(
-        dialog.click(AREA, 8, line as u16),
-        Some(Effect::Cloud { member: "hosted".into(), action: CloudAction::ReportRevert })
-    );
+fn a_confirmation_click_selects_the_affirmative_and_enter_executes_it() {
+    for (index, action) in [(3, CloudAction::Retire), (4, CloudAction::ReportRevert)] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(index);
+        dialog.submit();
+        let screen = rendered(&dialog, AREA);
+        let line =
+            screen.lines().position(|line| line.contains(action.label())).expect("affirmative row");
+        assert_eq!(dialog.click(AREA, 8, line as u16), None);
+        assert!(matches!(dialog.step, super::Step::Confirm { option: 1, .. }));
+        assert_eq!(dialog.submit(), Some(Effect::Cloud { member: "hosted".into(), action }));
+    }
+}
+
+#[test]
+fn repeated_clicks_at_one_position_never_confirm_a_hosted_action() {
+    for (index, action, height) in
+        [(3, CloudAction::Retire, 11), (4, CloudAction::ReportRevert, 12)]
+    {
+        for clicks in [2, 3] {
+            let area = Rect::new(0, 0, 80, height);
+            let mut members: Vec<_> = (0..index + 1)
+                .map(|number| row(&format!("local-{number}"), MemberBackend::InProcess, &[]))
+                .collect();
+            members.push(row("hosted", MemberBackend::Cloud, &[]));
+            let mut dialog = Team::new(members, Vec::new());
+            let needle = if clicks == 2 {
+                dialog.move_selection(index + 1);
+                dialog.submit();
+                dialog.move_selection(index);
+                action.label()
+            } else {
+                "hosted"
+            };
+            let screen = rendered(&dialog, area);
+            let line = screen.lines().position(|line| line.contains(needle)).expect("clicked row");
+            for click in 0..clicks {
+                assert_eq!(
+                    dialog.click(area, 4, line as u16),
+                    None,
+                    "{action:?}, click {click} of {clicks}"
+                );
+            }
+            assert!(
+                matches!(dialog.step, super::Step::Confirm { action: selected, option: 1, .. } if selected == action)
+            );
+        }
+    }
+}
+
+#[test]
+fn clicking_cancel_on_a_confirmation_returns_to_the_roster() {
+    for index in [3, 4] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(index);
+        dialog.submit();
+        let screen = rendered(&dialog, AREA);
+        let line = screen.lines().position(|line| line.contains("Cancel")).expect("cancel row");
+        assert_eq!(dialog.click(AREA, 8, line as u16), None);
+        assert!(matches!(dialog.step, super::Step::Members));
+    }
 }
 
 #[test]
