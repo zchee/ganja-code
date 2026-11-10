@@ -25,7 +25,11 @@ pub(crate) async fn until<T>(
     match tokio::time::timeout_at(deadline, work).await {
         Ok(result) => Some(result),
         Err(_) => {
-            tracing::warn!(teammate, step, "teammate cleanup timed out; completion is unconfirmed");
+            tracing::warn!(
+                cleanup_target = teammate,
+                step,
+                "teammate cleanup timed out; completion is unconfirmed"
+            );
             None
         }
     }
