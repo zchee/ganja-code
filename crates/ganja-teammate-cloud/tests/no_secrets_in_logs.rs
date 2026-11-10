@@ -59,6 +59,237 @@ fn wrapper_formatting_is_redacted() {
     }
 }
 
+/// A Kubernetes control plane whose every credential and failure body is a canary.
+async fn canary_kubernetes(
+    deny_token: bool,
+) -> (kube::Client, tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::extract::{Request, State};
+
+    let ca_key = rcgen::KeyPair::generate().expect("fixture CA key");
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_pem = ca_params.self_signed(&ca_key).expect("fixture CA").pem();
+
+    async fn answer(
+        State((ca_pem, deny_token, denied_reads)): State<(
+            String,
+            bool,
+            Arc<std::sync::atomic::AtomicUsize>,
+        )>,
+        request: Request,
+    ) -> (http::StatusCode, axum::Json<serde_json::Value>) {
+        let path = request.uri().path().to_owned();
+        let body = |value| (http::StatusCode::OK, axum::Json(value));
+        if path == "/apis/certificates.k8s.io/v1" {
+            return body(
+                serde_json::json!({"apiVersion":"v1","kind":"APIResourceList","groupVersion":"certificates.k8s.io/v1","resources":[
+                    {"name":"clustertrustbundles","kind":"ClusterTrustBundle","namespaced":false,"verbs":["list"]},
+                    {"name":"podcertificaterequests","kind":"PodCertificateRequest","namespaced":true,"verbs":["create","get","delete"]}
+                ]}),
+            );
+        }
+        if path == "/api/v1/namespaces/ate-users/serviceaccounts/ganja/token" {
+            if deny_token {
+                return (
+                    http::StatusCode::FORBIDDEN,
+                    axum::Json(
+                        serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":TOKEN}),
+                    ),
+                );
+            }
+            let expiry = jiff::Timestamp::now()
+                .checked_add(std::time::Duration::from_secs(3600))
+                .expect("expiry")
+                .to_string();
+            return (
+                http::StatusCode::CREATED,
+                axum::Json(
+                    serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","metadata":{},"status":{"token":TOKEN,"expirationTimestamp":expiry}}),
+                ),
+            );
+        }
+        if path.ends_with("/clustertrustbundles") {
+            return body(
+                serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"ClusterTrustBundleList","metadata":{},"items":[
+                    {"apiVersion":"certificates.k8s.io/v1","kind":"ClusterTrustBundle","metadata":{"name":"serving"},"spec":{"signerName":"servicedns.podcert.ate.dev/identity","trustBundle":ca_pem}}
+                ]}),
+            );
+        }
+        if path.contains("/podcertificaterequests") {
+            if request.method() == http::Method::POST {
+                let bytes = axum::body::to_bytes(request.into_body(), 65536)
+                    .await
+                    .expect("certificate request body");
+                let object: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("certificate request JSON");
+                return (http::StatusCode::CREATED, axum::Json(object));
+            }
+            if request.method() == http::Method::GET {
+                denied_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let name = path.rsplit('/').next().expect("requested certificate name");
+                return body(
+                    serde_json::json!({"apiVersion":"certificates.k8s.io/v1","kind":"PodCertificateRequest","metadata":{"name":name,"namespace":"ate-system"},"status":{"conditions":[{"type":"Denied","status":"True","message":KEY,"reason":TOKEN}]}}),
+                );
+            }
+            return body(serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Success"}));
+        }
+        (
+            http::StatusCode::NOT_FOUND,
+            axum::Json(
+                serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":KEY}),
+            ),
+        )
+    }
+
+    let listener =
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("fake Kubernetes listener");
+    let address = listener.local_addr().expect("fake Kubernetes address");
+    let denied_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let router = axum::Router::new().fallback(answer).with_state((
+        ca_pem,
+        deny_token,
+        Arc::clone(&denied_reads),
+    ));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve fake Kubernetes");
+    });
+    let config = kube::Config::new(format!("http://{address}").parse().expect("loopback URI"));
+    let client = ganja_teammate_cloud::provisioner::substrate::kube::client_from_config(config)
+        .expect("fixture client");
+    (client, server, denied_reads)
+}
+
+#[derive(Debug)]
+struct RefusingTunnel;
+
+#[async_trait::async_trait]
+impl ganja_teammate_cloud::provisioner::substrate::tunnel::Tunnel for RefusingTunnel {
+    async fn control(&self) -> Result<tonic::transport::Channel, ProvisionError> {
+        Err(ProvisionError { operation: "unused control", kind: ProvisionErrorKind::Refused })
+    }
+
+    async fn actor(
+        &self,
+        _actor: &ganja_teammate_cloud::provisioner::substrate::ateapi_v1::ObjectRef,
+    ) -> Result<ganja_teammate_cloud::provisioner::substrate::tunnel::TunnelIo, ProvisionError>
+    {
+        Err(ProvisionError { operation: "canary actor", kind: ProvisionErrorKind::Refused })
+    }
+}
+
+/// The kube/ateapi half: ganja's formatting and shipped filters redact credentials.
+async fn substrate_credentials_are_redacted() -> String {
+    use ganja_teammate_cloud::provisioner::substrate::identity::AteapiIdentity;
+    use ganja_teammate_cloud::provisioner::substrate::kube::KubeTunnel;
+
+    let (client, server, denied_reads) = canary_kubernetes(false).await;
+    let identity = AteapiIdentity::new(client.clone()).await.expect("canary bearer issued");
+    let request = identity.authorize(()).await.expect("authorized control request");
+    assert_redacted(&format!("{identity:?} {:?}", request.metadata()));
+
+    // Denied router issuance carries the key canary in its condition message.
+    let denied = tokio::time::timeout(Duration::from_secs(2), KubeTunnel::connect(client))
+        .await
+        .expect("the denial condition fails immediately")
+        .expect_err("denied router identity");
+    assert_eq!(denied.kind, ProvisionErrorKind::Refused);
+    assert_eq!(denied.operation, "router certificate");
+    assert_eq!(
+        denied_reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the canary-bearing Denied condition was fetched"
+    );
+    assert_redacted(&format!("{denied:?} {denied}"));
+    server.abort();
+
+    let (client, server, _) = canary_kubernetes(true).await;
+    let refused = AteapiIdentity::new(client).await.expect_err("denied bearer issuance");
+    assert_redacted(&format!("{refused:?} {refused}"));
+    server.abort();
+
+    let settings = ganja_teammate_cloud::provisioner::substrate::settings::Settings::parse(&format!(
+        "kubeconfig = '/operator/{KEY}'\ntemplate = 'worker'\ngit_credential_uri = 'ate-secret://kubernetes/ganja-cloud/git/token'\n"
+    ))
+    .expect("settings with canary path");
+    assert_redacted(&format!("{settings:?}"));
+    let invalid = ganja_teammate_cloud::provisioner::substrate::settings::Settings::parse(&format!(
+        "kubeconfig = '/operator/config'\ntemplate = 'worker'\ngit_credential_uri = 'ate-secret://kubernetes/ganja-cloud/git/token'\npassword = '{PASSWORD}'\n"
+    ))
+    .expect_err("unknown key refused");
+    assert_redacted(&format!("{invalid:?} {invalid}"));
+
+    use ganja_teammate_cloud::provisioner::substrate::ateapi_v1::ObjectRef;
+    use ganja_teammate_cloud::provisioner::substrate::tunnel::ActorProxy;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let proxy = ActorProxy::bind("ganja", Arc::new(RefusingTunnel)).await.expect("local proxy");
+    proxy
+        .admit(&ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() })
+        .expect("admit worker");
+    let token = proxy.token_header();
+    assert!(token.is_sensitive());
+    let token = token.to_str().expect("ASCII proxy token").to_owned();
+    let rendered = format!("{proxy:?}");
+    assert!(!rendered.contains(&token));
+    tracing::debug!(target: "ganja_teammate_cloud", ?proxy, "local proxy canary");
+    let address = proxy.base_url();
+    let mut socket = tokio::net::TcpStream::connect(address.trim_start_matches("http://"))
+        .await
+        .expect("local proxy socket");
+    socket.write_all(format!("GET / HTTP/1.1\r\nHost: localhost\r\nate-target-actor: ganja/worker\r\nx-ganja-proxy-token: {token}\r\n\r\n").as_bytes()).await.expect("proxy request");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
+        .await
+        .expect("proxy refusal deadline")
+        .expect("proxy refusal");
+    assert!(response.starts_with(b"HTTP/1.1 502"));
+    assert!(!String::from_utf8_lossy(&response).contains(&token));
+    token
+}
+
+#[test]
+fn substrate_credentials_stay_redacted_with_both_shipped_log_filters() {
+    const FILTER_ENV: &str = "GANJA_TEST_SUBSTRATE_LOG_FILTER";
+    if let Ok(filter) = std::env::var(FILTER_ENV) {
+        let capture = ganja_testkit::LogCapture::default();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(capture.clone())
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+                .finish(),
+        )
+        .expect("isolated child subscriber");
+        let token = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("canary runtime")
+            .block_on(substrate_credentials_are_redacted());
+        assert!(!capture.logged().contains(&token));
+        assert_redacted(&capture.logged());
+        return;
+    }
+    // Each subscriber is process-wide, so isolate filter variants from one another
+    // and from the member/serve canary test in this binary.
+    for filter in ["info", "info,ganja=debug"] {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "substrate_credentials_stay_redacted_with_both_shipped_log_filters",
+                "--nocapture",
+            ])
+            .env(FILTER_ENV, filter)
+            .output()
+            .expect("run filter canary child");
+        assert!(
+            output.status.success(),
+            "filter {filter}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_redacted(&String::from_utf8_lossy(&output.stdout));
+        assert_redacted(&String::from_utf8_lossy(&output.stderr));
+    }
+}
+
 struct EchoFailure;
 
 impl ganja_serve::bootstrap::Executor for EchoFailure {
@@ -86,12 +317,16 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
         tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
+            // The shipped verbose filter keeps dependency targets at info.
+            // Enabling third-party HTTP/Kubernetes debug targets is unsupported:
+            // kube_client can print raw remote Status bodies at that level.
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info,ganja=debug"))
             .finish(),
     )
     .expect("one subscriber in this test binary");
     tracing::info!("cloud runtime canary capture is active");
     wrapper_formatting_is_redacted();
+    let proxy_token = substrate_credentials_are_redacted().await;
 
     let home = tempfile::tempdir().expect("home");
     let bootstrap = ganja_serve::bootstrap::Service::new(
@@ -243,5 +478,6 @@ async fn credential_content_is_absent_from_runtime_errors_mail_and_logs() {
     server.close().await.expect("server closed");
     let logs = capture.logged();
     assert!(logs.contains("cloud runtime canary capture is active"));
+    assert!(!logs.contains(&proxy_token));
     assert_redacted(&logs);
 }

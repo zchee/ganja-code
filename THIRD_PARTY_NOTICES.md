@@ -85,6 +85,25 @@ No vendor conversation log, transcript or credential is committed. Where a probe
 
 ---
 
+## Agent Substrate
+
+`crates/ganja-teammate-cloud/src/provisioner/substrate/proto/api/ateapi/v1/ateapi.proto`
+is copied verbatim from [Agent Substrate](https://github.com/agent-substrate/substrate),
+tag **v1.0.0**, commit `b34fbee742906494b5eb4f1f36987176bf8770a4`.
+Copyright 2026 The Agent Substrate Authors.
+Licensed under the
+[Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+The source retains its copyright and license header. Its SHA-256 is
+`b5bb348f04b8f8d9f24c4c880e1f4176771e1556cfd0cff95a97ca8bee079722`.
+
+The Rust files below `src/provisioner/substrate/ateapi_v1/` in that crate are
+generated from this proto by the pinned community Prost and Tonic plugins in
+`buf.gen.yaml`. The proto imports `google/protobuf/descriptor.proto` and
+`google/protobuf/timestamp.proto`; their generated Rust types come from the
+`prost-types` dependency rather than vendored Google protobuf sources.
+
+---
+
 ## Scope of this file
 
 These notices cover material **incorporated into this repository's own sources**: ported behavior, prompt texts, theme definitions, and the captured documents committed as interop test data.

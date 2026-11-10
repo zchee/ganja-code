@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 # Provisioners are selected at runtime and held as trait objects.
 async-trait.workspace = true
-# The reconnect admission hook returns the client's boxed future type.
+# Certificate renewal and reconnect admission use shared and boxed futures.
 futures.workspace = true
 # Worker REST calls and reconnecting event streams use the typed transport.
 ganja-client.workspace = true
@@ -24,6 +24,40 @@ ganja-protocol.workspace = true
 ganja-team.workspace = true
 # Endpoints carry validated header names and values, not vendor-specific fields.
 http.workspace = true
+# CSRs and process-local ingress tokens use base64 wire encodings.
+base64.workspace = true
+# The loopback proxy token gets fresh entropy directly from the operating system.
+getrandom.workspace = true
+# Local proxy credentials are compared as fixed-size arrays in constant time.
+subtle.workspace = true
+# Parse local HTTP request framing and the router's CONNECT response.
+httparse.workspace = true
+# Adapt Kubernetes forward streams to the gRPC connector's IO contract.
+hyper-util.workspace = true
+# Typed Pods, Services and TokenRequests define the Kubernetes control seam.
+k8s-openapi.workspace = true
+# Kubernetes discovery and port-forwarding reach the Substrate services.
+kube.workspace = true
+# Generate local router keys and certificate signing requests.
+rcgen.workspace = true
+# Validate router serving identities and configure mutual TLS trust.
+rustls.workspace = true
+# Drive mutual TLS over asynchronous Kubernetes port-forward streams.
+tokio-rustls.workspace = true
+# Check issued certificates' SPIFFE identity and validity periods.
+x509-parser.workspace = true
+# Implement the transport connector trait used by the gRPC channel.
+tower-service.workspace = true
+# Give each actor and certificate request a fresh resource name.
+uuid.workspace = true
+# Generated Substrate messages use the protobuf encoding runtime.
+prost.workspace = true
+# Generated Substrate messages contain protobuf Timestamp fields.
+prost-types.workspace = true
+# The Substrate control client uses authenticated gRPC channels.
+tonic.workspace = true
+# Generated gRPC methods encode and decode messages through the prost codec.
+tonic-prost.workspace = true
 # Passwords cannot enter derived Debug output and are wiped on drop.
 secrecy.workspace = true
 # Lifecycle state and value-free trace rows have strict serialized shapes.
@@ -38,10 +72,26 @@ tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 # Optional trace failures and lifecycle diagnostics need structured reporting.
 tracing.workspace = true
+# Provisioner-owned settings retain the application's TOML dialect.
+toml.workspace = true
 # Repository and worker endpoint validation inspect parsed URL components.
 url.workspace = true
 
 [dev-dependencies]
+# Pause the clock to prove certificate renewal and connection deadline ownership.
+tokio = { workspace = true, features = ["test-util"] }
+# Real loopback HTTP fixtures exercise Kubernetes discovery and issuance.
+axum = { workspace = true, features = ["ws"] }
+# Kubernetes token fixtures return RFC3339 expiration timestamps.
+jiff.workspace = true
+# Keep settings parsing aligned with the published configuration schema.
+jsonschema.workspace = true
+# Loopback signers parse CSRs before issuing test router certificates.
+rcgen = { workspace = true, features = ["x509-parser"] }
+# Hashes pin both the published proto and the checked-in generated artifacts.
+sha2.workspace = true
+# The ateapi fixture serves gRPC without enabling tonic's axum router.
+tonic = { workspace = true, features = ["server"] }
 # Search captured diagnostics for both raw and wire-encoded synthetic secrets.
 base64.workspace = true
 # Redaction tests capture emitted diagnostics without changing production logging.

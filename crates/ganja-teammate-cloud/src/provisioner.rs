@@ -9,6 +9,9 @@ use http::HeaderMap;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+/// Agent Substrate's lifecycle and tunnel implementation.
+pub mod substrate;
+
 /// A worker identity opaque to the member and interpreted only by its provisioner.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkerHandle(String);
@@ -36,7 +39,7 @@ impl fmt::Debug for WorkerHandle {
 pub struct Endpoint {
     /// Validated by the client before any request is made.
     pub base_url: String,
-    /// Provider-owned routing headers, not HTTP authorization.
+    /// Provider-owned routing and local-ingress credentials, separate from worker Basic auth.
     pub headers: HeaderMap,
     /// Basic-auth username configured in the worker template.
     pub username: String,

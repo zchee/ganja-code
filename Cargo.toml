@@ -127,7 +127,7 @@ async-trait = "0.1.92"
 axum = "0.8.9"
 # Dev-only HTTPS git fixtures exercise the worker against a real TLS listener.
 axum-server = { version = "0.9.0", features = ["tls-rustls"] }
-# Dev-only self-signed certificates prove the worker honors its projected CA.
+# Local router-identity CSRs and self-signed certificates for HTTPS fixtures.
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 # The mailbox lock's retry schedule, and only that. Claude holds the inbox
 # through npm proper-lockfile with `{retries: 10, minTimeout: 5, maxTimeout:
@@ -199,6 +199,14 @@ htmd = "0.5.6"
 # also refuses a base URL `http::Uri` does not parse. Already in the lock
 # beneath hyper and reqwest.
 http = "1.5.0"
+# Parse only the proxy headers; actor response bodies stay as byte streams.
+httparse = "1.10.1"
+# Adapts Kubernetes port-forward streams to tonic's hyper IO contract.
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+# Typed Kubernetes resources and in-process port-forwarding; no controller runtime.
+k8s-openapi = { version = "0.29.0", features = ["v1_37"] }
+# Match reqwest's AWS-LC choice so the workspace has one rustls provider.
+kube = { version = "5.0.0", default-features = false, features = ["client", "config", "rustls-tls", "aws-lc-rs", "ws"] }
 # `Retry-After` can be an IMF-fixdate; the exact-purpose parser for it,
 # zero-dependency and already in the lock through hyper. The one form it may
 # not share with the hand parser it replaces — a leap-second `:60` — is
@@ -278,6 +286,16 @@ percent-encoding = "2.3.2"
 # encoding still needs a crate of its own, and this one is the encoder alone
 # rather than the whole `image` stack a second time.
 png = "0.18.1"
+# Agent Substrate's published protobuf wire and its well-known timestamp types.
+prost = "0.14.4"
+# Generated Substrate messages carry protobuf Timestamp fields.
+prost-types = "0.14.4"
+# Client-only gRPC; server is enabled only by the cloud crate's test dependency.
+# In particular, router stays off so axum never enters a provisioner's closure.
+# AWS-LC matches reqwest so client/server tests share one rustls provider.
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen", "tls-aws-lc"] }
+# The generated Substrate services use prost messages, not the cursor codec.
+tonic-prost = "0.14.9"
 # Markdown parsed into block events the chat renderer styles; the default
 # `html` renderer and the example binary's `getopts` stay off — parsing is
 # the only piece the TUI consumes.
@@ -356,6 +374,13 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 # through unmodified, checked in the vendored source before any code moves,
 # and this declaration is inert if that gate fails.
 rustix = { version = "1.1.6", features = ["fs"] }
+# Router CONNECT has a distinct mutual-TLS identity from the ateapi bearer,
+# but uses the same AWS-LC rustls provider as reqwest throughout the workspace.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# Connect the router's TLS stream with the workspace's single crypto provider.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+# Verify the issued router certificate's key, SPIFFE URI and lifetime.
+x509-parser = { version = "0.18.1", default-features = false }
 schemars = "1.2.3"
 # Key material is held in `SecretString` so that it is wiped on drop and cannot
 # reach a `Debug` rendering; `serde` is what lets `auth.json` decode into one.
@@ -391,6 +416,9 @@ serde_with = { version = "3.24.0", default-features = false, features = ["alloc"
 # 43-byte string needs neither); rmcp enables both through feature
 # unification in the workspace build anyway.
 sha2 = { version = "0.11.1", default-features = false }
+# Compare fixed-size local proxy credentials without content-dependent exits.
+# Already resolved by rustls; this adds no additional version to the workspace.
+subtle = "2.6.1"
 # One shell word at a time, for the launch line a pane teammate is typed in
 # with: bare when every byte is safe, quoted when one is not. Chosen over the
 # hand-rolled `'\''` idiom because the idle shell reading that line is the

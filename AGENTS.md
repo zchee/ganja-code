@@ -88,7 +88,7 @@ dist build                                  # local archive under target/distrib
 | `EXA_API_KEY`, `PARALLEL_API_KEY`, `GANJA_WEBSEARCH_PROVIDER` | `websearch` credentials and which service (`exa` or `parallel`). Without a key the search is refused, not sent. |
 | `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL` | The `evaluate` tool and, when a trusted tier lists `[evaluate] screen`, the judge that marks screened tool results (experimental, D567). Without the key the tool is not registered and no judge is built. A base URL that is not https or loopback, carries userinfo, a query or a fragment, has a host an HTTP request cannot carry or is over 2,048 bytes once parsed, and a key the `decision-model-sdk` client will not send (D569) are refused the same way; `ganja evaluate` exits 3 on each. |
 | `EDITOR` | What `/editor` opens; default `vi`. |
-| `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS` | Test opt-ins and paths; see Gates. |
+| `GANJA_LIVE_TEST`, `GANJA_OPENCODE_DIR`, `GANJA_MCP_SDK_DIR`, `GANJA_LSP_EDIT_BUDGET_MS`, `GANJA_SUBSTRATE_CONFIG_HOME` | Test opt-ins and paths; see Gates and the cloud crate's live-test notes. |
 
 ## Conventions
 
@@ -125,9 +125,7 @@ dist build                                  # local archive under target/distrib
 | `docs/` | `references/` (feature inventories of Claude Code, opencode and Codex; not roadmaps), `recipes/` (worked examples), `decisions/` (frozen decision ledgers), `research/` (task inventories and findings in English and Japanese; not plans), `prompts/`. |
 
 <!-- br-agent-instructions-v1 -->
-
 ---
-
 ## Beads Workflow Integration
 
 This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/` and tracked in git.

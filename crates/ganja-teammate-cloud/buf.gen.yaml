@@ -1,0 +1,17 @@
+# Regenerate from the repository root:
+# buf generate --template crates/ganja-teammate-cloud/buf.gen.yaml
+# Keep the compiler versions pinned: the checked-in output is the build input.
+version: v2
+inputs:
+  - directory: crates/ganja-teammate-cloud/src/provisioner/substrate/proto
+plugins:
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
+    out: crates/ganja-teammate-cloud/src/provisioner/substrate/ateapi_v1
+    opt:
+      - compile_well_known_types=true
+      - extern_path=.google.protobuf=::prost_types
+  - remote: buf.build/community/neoeinstein-tonic:v0.5.0
+    out: crates/ganja-teammate-cloud/src/provisioner/substrate/ateapi_v1
+    opt:
+      - compile_well_known_types=true
+      - extern_path=.google.protobuf=::prost_types
