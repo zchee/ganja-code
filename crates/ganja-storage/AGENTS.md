@@ -50,7 +50,7 @@ cargo depgate check --config depgate.toml   # the internal allowlist, from the r
 
 Unit tests live in sibling files wired through `#[path]`; no inline test module exists.
 
-Integration tests for this crate live in `crates/ganja-core/tests/` because they test the engine driving the store: `persistence.rs`, `undo.rs`, `rewind.rs`, `plan_exit_undo.rs`, and the on-disk store binaries `storage_preuuid.rs`, `storage_preuuid_wal.rs`, `storage_preuuid_inode.rs`, `storage_preuuid_tree.rs`, `reasoning_downgrade.rs`.
+Integration tests that drive storage directly live in this crate's `tests/`, including `child_environment.rs` for snapshot git isolation. Engine-driven tests live in `crates/ganja-core/tests/`: `persistence.rs`, `undo.rs`, `rewind.rs`, `plan_exit_undo.rs`, and the on-disk store binaries `storage_preuuid.rs`, `storage_preuuid_wal.rs`, `storage_preuuid_inode.rs`, `storage_preuuid_tree.rs`, `reasoning_downgrade.rs`.
 
 Four of those open SQLite directly through `rusqlite`, a `ganja-core` dev-dependency. Each binary's `//!` header states its prerequisites.
 

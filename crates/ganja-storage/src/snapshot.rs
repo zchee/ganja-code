@@ -918,7 +918,9 @@ fn dedupe(patches: &[Patch]) -> Vec<(String, String)> {
 /// first frame is cheaper than a subsystem that only reveals itself broken at
 /// the moment somebody tries to undo.
 fn git_exists() -> bool {
-    std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    ganja_permission::child_process::isolate(&mut command);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1007,6 +1009,7 @@ async fn run(
     for (key, value) in env {
         command.env(key, value);
     }
+    ganja_permission::child_process::isolate(command.as_std_mut());
 
     let failed = |error: &dyn std::fmt::Display| Output {
         code: 1,

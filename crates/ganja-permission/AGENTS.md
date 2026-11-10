@@ -14,6 +14,7 @@ Decides which tool calls ganja runs without asking, and which worktree a session
 |---|---|
 | `src/lib.rs` | Module declarations and crate-root re-exports. No logic. |
 | `src/permission.rs` | `Rule`, `Action`, `Decision`, `RuleSet`, `PermissionConfig`, `Permissions`, `CallDecision`, the wildcard `matches`, the shell arity table, the `permissions.json` store, and the constants `ASK_BY_DEFAULT`, `EXTERNAL_DIRECTORY`, `MCP_PREFIX`, `TASK`. Spec: upstream `packages/opencode/src/permission/`. |
+| `src/child_process.rs` | Parent-only environment names and the child-command isolation policy shared by tools and snapshots. |
 | `src/project.rs` | `Project` (worktree root and slug), `data_home`, `write_new`, `digest`. |
 | `src/permission_tests.rs`, `src/project_tests.rs` | Unit tests. |
 

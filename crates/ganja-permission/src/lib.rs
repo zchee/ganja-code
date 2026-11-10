@@ -15,6 +15,7 @@
 //! with one reader — buys a truer name at the cost of a manifest nobody
 //! benefits from.
 
+pub mod child_process;
 pub mod permission;
 pub mod project;
 
