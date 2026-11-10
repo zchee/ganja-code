@@ -15,7 +15,7 @@ use ganja_protocol::team::{Frame, IdleNotification, IdleReason, MemberBackend, T
 use ganja_protocol::{Event, FinishReason, Message, MessageId, PartBody, Role, SessionId};
 use ganja_team::{MailboxMessage, Surface, mailbox, record};
 use secrecy::ExposeSecret as _;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -60,6 +60,69 @@ pub fn control(registry: &teammate::TeammateRegistry, name: &str) -> Option<Clou
         .map(CloudControl)
 }
 
+/// An explicit owner action on a hosted member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlAction {
+    /// Inspect the worker state and resume through the connected acknowledgement.
+    ResumeForInspection,
+    /// Delete the worker and confirm its absence.
+    Retire,
+    /// Invalidate local history without contacting the provisioner.
+    ReportExternalRevert,
+}
+
+/// Why an owner action could not be admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ControlAdmissionError {
+    /// Another owner action is unfinished.
+    #[error("another owner action is in progress")]
+    Busy,
+    /// Member shutdown has started.
+    #[error("the member is shutting down")]
+    Cancelled,
+    /// The current runtime cannot own an action.
+    #[error("owner actions require an active asynchronous runtime")]
+    Unsupported,
+}
+
+/// A sanitized result of an admitted action; never contains remote response text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlOutcome {
+    /// The requested action completed.
+    Completed,
+    /// Deletion was attempted, but absence was not confirmed.
+    UnconfirmedDeletion,
+    /// Shutdown prevented the action from starting its transition.
+    Cancelled,
+    /// The action could not complete in the current member state.
+    Unsupported,
+}
+
+/// An observation handle, not ownership of the member's action.
+///
+/// Dropping this handle or cancelling a wait does not cancel the action. The member
+/// retains its task and joins it during cleanup. A wait can be resumed across frames.
+#[derive(Debug)]
+pub struct ControlOperation {
+    receiver: oneshot::Receiver<ControlOutcome>,
+    outcome: Option<ControlOutcome>,
+}
+
+impl ControlOperation {
+    /// Observes completion without consuming the handle.
+    ///
+    /// Cancelling this wait preserves the result for a later wait. Repeated waits
+    /// return the same outcome.
+    pub async fn wait(&mut self) -> ControlOutcome {
+        if let Some(outcome) = self.outcome {
+            return outcome;
+        }
+        let outcome = (&mut self.receiver).await.unwrap_or(ControlOutcome::Unsupported);
+        self.outcome = Some(outcome);
+        outcome
+    }
+}
+
 /// Owner controls bypass neither the request gate nor the permanent uncertain latch.
 #[derive(Clone)]
 pub struct CloudControl(Arc<CloudMember>);
@@ -76,13 +139,58 @@ impl CloudControl {
         self.0.phase()
     }
 
+    /// Admits one member-owned action without waiting for lifecycle I/O.
+    ///
+    /// Remote work is bounded by the configured budgets: launch and resume each
+    /// use `launch`, inspection uses `launch`, quiescence uses two `quiesce`
+    /// budgets, and deletion uses `cleanup`. An action can wait behind launch,
+    /// the runner's resume/quiescence, and cleanup, then spends at most two
+    /// `launch` budgets for inspection/resume, one `cleanup` for retirement,
+    /// or no remote budget for a revert report. A conservative total including
+    /// preceding holders is `4 * launch + 2 * quiesce + cleanup` for inspection,
+    /// `2 * launch + 2 * quiesce + 2 * cleanup` for retirement, and
+    /// `2 * launch + 2 * quiesce + cleanup` for a revert report. Local mailbox
+    /// writes remain ordered under the transition lock and have no deadline;
+    /// these ceilings explicitly exclude that local filesystem work.
+    ///
+    /// Event barriers are interruption-bounded: hold/invalidate notify before
+    /// waiting for the consumer's state lock. Every connection, retry sleep and
+    /// read holding that lock gives priority to that notification, dropping its
+    /// I/O without awaiting the remote peer. Adding an await under that lock
+    /// without racing the notification would break this hand-off invariant.
+    ///
+    /// Shutdown cancels an action waiting for the transition lock without side
+    /// effects. Once the lock is acquired the action finishes its own budgets;
+    /// the member's cleanup joins the task before deleting the worker.
+    ///
+    /// # Errors
+    /// Returns a typed refusal when another action is unfinished, shutdown has
+    /// started, or there is no asynchronous runtime to own the task.
+    pub fn admit(&self, action: ControlAction) -> Result<ControlOperation, ControlAdmissionError> {
+        let mut task = self.0.control_task.try_lock().map_err(|_| ControlAdmissionError::Busy)?;
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return Err(ControlAdmissionError::Busy);
+        }
+        if self.0.lent.cancel.is_cancelled() {
+            return Err(ControlAdmissionError::Cancelled);
+        }
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| ControlAdmissionError::Unsupported)?;
+        let (sender, receiver) = oneshot::channel();
+        let member = Arc::clone(&self.0);
+        *task = Some(runtime.spawn(async move {
+            let outcome = member.control_action(action).await;
+            let _ = sender.send(outcome);
+        }));
+        Ok(ControlOperation { receiver, outcome: None })
+    }
+
     /// Resumes through the ordinary connected-ack barrier for explicit inspection.
     ///
     /// # Errors
     /// Returns a sanitized lifecycle failure, never an endpoint or credential.
     pub async fn resume_for_inspection(&self) -> Result<(), Unsupported> {
-        self.0.inspect_state().await.map_err(|reason| self.0.unsupported(reason))?;
-        self.0.resume().await.map_err(|reason| self.0.unsupported(reason))
+        self.observe(ControlAction::ResumeForInspection).await
     }
 
     /// Ends the worker in any state, then confirms absence once.
@@ -90,20 +198,29 @@ impl CloudControl {
     /// # Errors
     /// Unconfirmed deletion leaves an owner-action notice and is not called gone.
     pub async fn retire(&self) -> Result<(), Unsupported> {
-        self.0.cleanup().await;
-        if self.0.phase() == Phase::Gone {
-            Ok(())
-        } else {
-            Err(self.0.unsupported("worker deletion is unconfirmed"))
-        }
+        self.observe(ControlAction::Retire).await
     }
 
     /// Invalidates a checkpointed cursor before any request follows an owner-reported revert.
+    ///
+    /// A busy or shutting-down member does not admit another report.
     pub async fn report_external_revert(&self) {
-        let _transition = self.0.transition.lock().await;
-        self.0
-            .invalidate_history(Phase::Suspended, "external revert reported; cursor invalidated")
-            .await;
+        let _ = self.observe(ControlAction::ReportExternalRevert).await;
+    }
+
+    async fn observe(&self, action: ControlAction) -> Result<(), Unsupported> {
+        let mut operation =
+            self.admit(action).map_err(|error| self.0.unsupported(error.to_string()))?;
+        match operation.wait().await {
+            ControlOutcome::Completed => Ok(()),
+            ControlOutcome::UnconfirmedDeletion => {
+                Err(self.0.unsupported("worker deletion is unconfirmed"))
+            }
+            ControlOutcome::Cancelled => Err(self.0.unsupported("owner action cancelled")),
+            ControlOutcome::Unsupported => {
+                Err(self.0.unsupported("owner action could not complete"))
+            }
+        }
     }
 }
 
@@ -118,6 +235,7 @@ pub struct CloudMember {
     events: Option<Arc<dyn EventSource>>,
     gate: Arc<WorkerGate>,
     transition: AsyncMutex<()>,
+    control_task: AsyncMutex<Option<JoinHandle<()>>>,
     phase: Mutex<Phase>,
     session: Mutex<Option<SessionId>>,
     recent: Mutex<VecDeque<String>>,
@@ -206,6 +324,7 @@ impl CloudMember {
             events,
             gate,
             transition: AsyncMutex::new(()),
+            control_task: AsyncMutex::new(None),
             phase: Mutex::new(Phase::Creating),
             session: Mutex::new(None),
             recent: Mutex::new(VecDeque::new()),
@@ -363,8 +482,44 @@ impl CloudMember {
         self.remember(reason.to_owned());
     }
 
+    async fn control_action(&self, action: ControlAction) -> ControlOutcome {
+        let _transition = tokio::select! {
+            biased;
+            () = self.lent.cancel.cancelled() => return ControlOutcome::Cancelled,
+            transition = self.transition.lock() => transition,
+        };
+        if self.lent.cancel.is_cancelled() {
+            return ControlOutcome::Cancelled;
+        }
+        match action {
+            ControlAction::ResumeForInspection => {
+                if self.inspect_state().await.is_err() || self.resume_locked().await.is_err() {
+                    ControlOutcome::Unsupported
+                } else {
+                    ControlOutcome::Completed
+                }
+            }
+            ControlAction::Retire => {
+                self.lent.cancel.cancel();
+                self.cleanup_locked().await;
+                if self.phase() == Phase::Gone {
+                    ControlOutcome::Completed
+                } else {
+                    ControlOutcome::UnconfirmedDeletion
+                }
+            }
+            ControlAction::ReportExternalRevert => {
+                self.invalidate_history(
+                    Phase::Suspended,
+                    "external revert reported; cursor invalidated",
+                )
+                .await;
+                ControlOutcome::Completed
+            }
+        }
+    }
+
     async fn inspect_state(&self) -> Result<(), &'static str> {
-        let _transition = self.transition.lock().await;
         let state =
             timeout(self.runtime.deadlines.launch, self.runtime.provisioner.state(&self.worker))
                 .await
@@ -407,6 +562,10 @@ impl CloudMember {
 
     async fn resume(&self) -> Result<(), &'static str> {
         let _transition = self.transition.lock().await;
+        self.resume_locked().await
+    }
+
+    async fn resume_locked(&self) -> Result<(), &'static str> {
         if !self.alive.load(Ordering::SeqCst) {
             return Err("worker is retired");
         }
@@ -570,7 +729,19 @@ impl CloudMember {
 
     async fn cleanup(&self) {
         self.lent.cancel.cancel();
+        {
+            let mut task = self.control_task.lock().await;
+            // Keep ownership in the member if this cleanup wait is cancelled.
+            if let Some(task) = task.as_mut() {
+                let _ = task.await;
+            }
+            *task = None;
+        }
         let _transition = self.transition.lock().await;
+        self.cleanup_locked().await;
+    }
+
+    async fn cleanup_locked(&self) {
         if self.cleaned.swap(true, Ordering::SeqCst) {
             return;
         }

@@ -15,4 +15,7 @@ pub mod trace;
 mod transport;
 
 pub use backend::{CloudBackend, PASSWORD_ENV};
-pub use member::{CloudControl, CloudMember, control};
+pub use member::{
+    CloudControl, CloudMember, ControlAction, ControlAdmissionError, ControlOperation,
+    ControlOutcome, control,
+};

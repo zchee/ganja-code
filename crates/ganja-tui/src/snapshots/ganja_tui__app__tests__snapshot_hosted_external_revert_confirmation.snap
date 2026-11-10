@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen(&terminal)
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
+  │hosted                                                                    │  
+  │Confirm you have ALREADY reverted this worker outside ganja.              │  
+  │This only invalidates stored history.                                     │  
+  │It does not revert or resume the worker.                                  │  
+  │> Cancel                                                                  │  
+  │  Report external revert                                                  │  
+  │                                                                          │  
+  │[j/k] [up/down] move   [Enter] run   [Esc] close                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready
