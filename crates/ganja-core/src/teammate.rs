@@ -933,10 +933,11 @@ pub trait Spawned: fmt::Debug + Send + Sync {
     /// **D503**'s ring: what this member most recently did, newest last.
     fn recent(&self) -> Vec<String>;
 
-    /// Backends must make cleanup idempotent and provide their own bound.
+    /// Backends must make cleanup idempotent and bound their own awaited work.
     /// Callers await it rather than interrupting it with another deadline.
-    /// The tmux-driving backends currently rely on tmux returning, so this
-    /// requirement does not imply a total shutdown bound for those backends.
+    /// A timed-out operation remains unconfirmed and may be retried by a later
+    /// call. Local cleanup must still run; uncancellable writes may finish in
+    /// background cleanup that does not retain the member or registry.
     async fn kill(&self);
 
     /// Tells this member it is waiting on the lead's answer to `request_id`,
@@ -2595,11 +2596,11 @@ impl TeammateRegistry {
     /// frontend that owns them, and a teammate closing them would be a second
     /// close of somebody else's servers.
     ///
-    /// The kills run **together**, and that is a bound rather than a tidy-up:
-    /// a kill waits out one teammate's [`SETTLE`], so a serial loop costs the
-    /// exit path that wait once per teammate — a team of six holding the
-    /// process open for half a minute, where nothing about the waits makes
-    /// them owe each other an order.
+    /// The kills run together so each backend's cleanup budget is not paid
+    /// once per member in sequence. Those budgets may contain several bounded
+    /// operations; they are not all one [`SETTLE`] interval. Registered tasks
+    /// are then joined without a registry-wide deadline, so these per-backend
+    /// bounds do not promise a total shutdown deadline.
     pub async fn shutdown(&self) {
         let members: Vec<Arc<Member>> = {
             let members = self.members();

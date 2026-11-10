@@ -772,11 +772,10 @@ pub struct TuiPane {
     server: Server,
     readiness: Readiness,
     cancel: CancellationToken,
-    /// Set once the pane has been ended, so a second `end` — the runner's
-    /// `shutdown_request` teardown followed by the lead's retire — looks and
-    /// signals nothing.
+    /// Prevent concurrent cleanup and retain confirmed outcomes. Unconfirmed
+    /// attempts clear the flag so a later kill can retry the same identity.
     ended: AtomicBool,
-    /// What the first `end` found, for every later one to answer.
+    /// The confirmed terminal outcome, if any.
     fate: std::sync::OnceLock<PaneFate>,
 }
 
@@ -851,29 +850,40 @@ impl TuiPane {
     /// the module doc gives: TERM the group while the pane pins the pid, wait,
     /// KILL, then close the dead pane — and says what it left.
     ///
-    /// Idempotent: the first call does the work and the answer is kept, so a
-    /// second call (the registry's kill after a loop's own exit path, say)
-    /// touches nothing and answers what the first found — or
-    /// [`PaneFate::Left`] while the first is still at it, which is the
-    /// honest "not known closed".
+    /// At most five bounded operations: the initial listing, two signal-grace
+    /// phases, closing a dead pane, and the fallback identity-checked kill.
+    /// Each uses the five-second teammate grace interval, for a ceiling of
+    /// twenty-five seconds. A timeout is [`PaneFate::Left`], never confirmation.
+    /// Confirmed outcomes are retained; an unconfirmed outcome may be retried.
     pub async fn end(&self) -> PaneFate {
+        self.end_for(&self.pane.id).await
+    }
+
+    async fn end_for(&self, teammate: &str) -> PaneFate {
         self.cancel.cancel();
         if self.ended.swap(true, Ordering::AcqRel) {
             return self.fate.get().copied().unwrap_or(PaneFate::Left);
         }
-        let fate = self.end_once().await;
-        // Set exactly once, by the one caller that got past the swap above.
-        let _ = self.fate.set(fate);
-
+        let fate = self.end_once(teammate).await;
+        if fate == PaneFate::Left {
+            self.ended.store(false, Ordering::Release);
+        } else {
+            let _ = self.fate.set(fate);
+        }
         fate
     }
 
-    /// The body of [`TuiPane::end`], run by its first caller only.
-    async fn end_once(&self) -> PaneFate {
+    /// The body of [`TuiPane::end`], run by one caller at a time.
+    async fn end_once(&self, teammate: &str) -> PaneFate {
         let cli = backend_name(self.backend);
         let pane = &self.pane;
 
-        let live = match self.server.panes().await {
+        let Some(listed) =
+            crate::teardown::wait(teammate, "list TUI pane", self.server.panes()).await
+        else {
+            return PaneFate::Left;
+        };
+        let live = match listed {
             Ok(live) => live,
             Err(error) => {
                 // Nothing can be identity-checked against a listing that will
@@ -886,7 +896,7 @@ impl TuiPane {
         match live.iter().find(|listed| listed.id == pane.id) {
             // Not running: dead and kept, or already closed. The corpse, if
             // there is one, is closed through the dead-only door.
-            None => return self.close_corpse().await,
+            None => return self.close_corpse(teammate).await,
             Some(listed) if !pane.is(listed) => {
                 tracing::warn!(
                     cli,
@@ -904,10 +914,11 @@ impl TuiPane {
         let Ok(group) = pane.birth.parse::<i32>() else {
             // A birth the listing accepted is digits; this arm is the type
             // system's. The identity-checked kill is the honest fallback.
-            return self.kill_pane().await;
+            return self.kill_pane(teammate).await;
         };
         shim::signal_group(group, libc::SIGTERM);
-        if !self.gone_within(SETTLE).await {
+        let gone = self.gone_within(teammate, "wait after SIGTERM", SETTLE).await.unwrap_or(false);
+        if !gone {
             tracing::warn!(
                 cli,
                 pane = pane.id,
@@ -915,41 +926,54 @@ impl TuiPane {
                 "a TUI teammate did not end on SIGTERM, so its process group was killed"
             );
             shim::signal_group(group, libc::SIGKILL);
-            if !self.gone_within(SETTLE).await {
+            let gone =
+                self.gone_within(teammate, "wait after SIGKILL", SETTLE).await.unwrap_or(false);
+            if !gone {
                 // A group KILL cannot take is not a thing a user process sees
                 // outside a wedged kernel; what is left is to end the pane
                 // itself, identity-checked.
-                return self.kill_pane().await;
+                return self.kill_pane(teammate).await;
             }
         }
         tracing::info!(cli, pane = pane.id, "a TUI teammate's process group was ended");
 
-        self.close_corpse().await
+        self.close_corpse(teammate).await
     }
 
     /// Whether the pane stops listing live inside `limit`.
-    async fn gone_within(&self, limit: Duration) -> bool {
+    async fn gone_within(&self, teammate: &str, step: &str, limit: Duration) -> Option<bool> {
         let deadline = tokio::time::Instant::now() + limit;
-        loop {
-            match self.server.panes().await {
-                Ok(live) if !live.iter().any(|listed| listed.id == self.pane.id) => return true,
+        while tokio::time::Instant::now() < deadline {
+            let listed =
+                crate::teardown::until(teammate, step, deadline, self.server.panes()).await?;
+            match listed {
+                Ok(live) if !live.iter().any(|listed| listed.id == self.pane.id) => {
+                    return Some(true);
+                }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::debug!(pane = self.pane.id, %error, "a liveness listing failed while waiting");
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(GONE_POLL).await;
+            tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + GONE_POLL)).await;
         }
+        Some(false)
     }
 
     /// Closes the pane if its process has ended, through the dead-only door,
     /// and says what it left.
-    async fn close_corpse(&self) -> PaneFate {
+    async fn close_corpse(&self, teammate: &str) -> PaneFate {
         let cli = backend_name(self.backend);
-        match self.server.close_dead(&self.pane.id).await {
+        let Some(result) = crate::teardown::wait(
+            teammate,
+            "close dead TUI pane",
+            self.server.close_dead(&self.pane.id),
+        )
+        .await
+        else {
+            return PaneFate::Left;
+        };
+        match result {
             Ok(Closed::Yes) => {
                 tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was closed");
                 PaneFate::Closed
@@ -961,7 +985,7 @@ impl TuiPane {
             Ok(Closed::Alive) => {
                 // Live again — respawned by a person into the same id, or the
                 // process outlived a KILL. The identity check decides.
-                self.kill_pane().await
+                self.kill_pane(teammate).await
             }
             Ok(Closed::Refused) => {
                 // Dead, the kill sent, and still there: a corpse tmux would
@@ -983,9 +1007,14 @@ impl TuiPane {
 
     /// The identity-checked `kill-pane`, for the paths where the group could
     /// not be signalled or the pane came back live; says what it left.
-    async fn kill_pane(&self) -> PaneFate {
+    async fn kill_pane(&self, teammate: &str) -> PaneFate {
         let cli = backend_name(self.backend);
-        match self.server.kill(&self.pane).await {
+        let Some(result) =
+            crate::teardown::wait(teammate, "kill TUI pane", self.server.kill(&self.pane)).await
+        else {
+            return PaneFate::Left;
+        };
+        match result {
             Ok(Killed::Yes) => {
                 tracing::info!(cli, pane = self.pane.id, "a TUI teammate's pane was ended");
                 PaneFate::Closed
@@ -1430,8 +1459,11 @@ impl Spawned for TuiMember {
         self.recent.lock().expect("the call ring is never poisoned").iter().cloned().collect()
     }
 
+    /// Five bounded operations at most, with a twenty-five-second ceiling;
+    /// see [`TuiPane::end`]. Local cancellation always precedes tmux cleanup.
     async fn kill(&self) {
-        self.pane.end().await;
+        self.alive.store(false, Ordering::Relaxed);
+        self.pane.end_for(self.spec.name.as_str()).await;
     }
 }
 
@@ -1699,7 +1731,7 @@ impl TuiRunner {
             None => RING_EXITED.to_owned(),
         });
         self.answer_left_behind().await;
-        let fate = self.handle.end().await;
+        let fate = self.handle.end_for(self.spec.name.as_str()).await;
         let exited = Exited {
             name: name.to_owned(),
             cli: Some(self.handle.cli()),
@@ -2103,7 +2135,7 @@ impl TuiRunner {
     /// Ends this member and tells the lead it is done, as this member's own
     /// name.
     async fn tear_down(&self, request: &ShutdownRequest) {
-        self.handle.end().await;
+        self.handle.end_for(self.spec.name.as_str()).await;
         let surface =
             Surface::Shim { cli: self.handle.cli(), pane: Some(self.handle.pane().id.clone()) };
         let approved = Frame::ShutdownApproved(ShutdownApproved {

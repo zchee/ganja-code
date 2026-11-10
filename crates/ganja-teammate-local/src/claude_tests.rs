@@ -301,6 +301,114 @@ async fn cancelling_the_claude_launch_removes_its_owned_prompt() {
     assert!(!private.panes().contains(&pane_id));
 }
 
+#[tokio::test]
+async fn a_stalled_pane_kill_still_removes_the_claude_seed() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ganja_core::teammate::{SETTLE, Spawned as _};
+
+    let fixture = crate::teardown_tests::Fixture::new().await;
+    let home = tempfile::tempdir().expect("temporary home");
+    let root = TeamsRoot::new(home.path());
+    let seeded = ClaudePane::seed(&fixture.spec, &root).await.expect("seed lands");
+    let path = root.inbox_path(&fixture.spec.team, &fixture.spec.name);
+    let member = super::ClaudeMember {
+        pane: Arc::new(crate::pane::PaneMember::new(
+            fixture.pane.clone(),
+            "test claude",
+            fixture.server.clone(),
+            &fixture.spec,
+            &fixture.lent,
+        )),
+        spec: fixture.spec.clone(),
+        inbox: tokio::sync::Mutex::new(super::LaunchInbox::Seeded {
+            path: path.clone(),
+            identity: seeded,
+        }),
+    };
+    let frozen = fixture.freeze();
+
+    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+        .await
+        .expect("a held tmux call does not skip inbox cleanup");
+    assert!(mailbox::read(&path).expect("inbox").valid.is_empty());
+    drop(frozen);
+    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+        .await
+        .expect("a second kill retries the unconfirmed pane");
+    assert!(!fixture.private.panes().contains(&fixture.pane.id));
+}
+
+#[tokio::test]
+async fn a_stalled_claude_seed_does_not_hold_kill_and_is_removed_when_it_finishes() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ganja_core::teammate::{SETTLE, Spawned as _};
+
+    let fixture = crate::teardown_tests::Fixture::new().await;
+    let home = tempfile::tempdir().expect("temporary home");
+    let root = TeamsRoot::new(home.path());
+    let path = root.inbox_path(&fixture.spec.team, &fixture.spec.name);
+    let (release, held) = tokio::sync::oneshot::channel();
+    let (written, writing) = tokio::sync::oneshot::channel();
+    let spec = fixture.spec.clone();
+    let task = tokio::spawn(async move {
+        held.await.expect("test releases seed");
+        let identity = ClaudePane::seed(&spec, &root).await?;
+        written.send(()).expect("test waits for the completed write");
+        Ok(identity)
+    });
+    let member = super::ClaudeMember {
+        pane: Arc::new(crate::pane::PaneMember::new(
+            fixture.pane.clone(),
+            "test claude",
+            fixture.server.clone(),
+            &fixture.spec,
+            &fixture.lent,
+        )),
+        spec: fixture.spec.clone(),
+        inbox: tokio::sync::Mutex::new(super::LaunchInbox::Writing { path: path.clone(), task }),
+    };
+
+    let frozen = fixture.freeze();
+    let state = member.inbox.lock().await;
+    let unlock = async {
+        // Hold the state through the pane deadline and most of its own deadline.
+        tokio::time::sleep(SETTLE * 2 - Duration::from_millis(200)).await;
+        drop(state);
+    };
+    let kill = tokio::time::timeout(SETTLE * 3 + Duration::from_secs(1), member.kill());
+    let (result, ()) = tokio::join!(kill, unlock);
+    result.expect("held pane, inbox lock, and seed join fit the fifteen-second ceiling");
+    assert!(!member.alive(), "local state is retired even when the pane kill is unconfirmed");
+    drop(frozen);
+    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+        .await
+        .expect("a second kill retries the pane without joining the same write again");
+    assert!(!fixture.private.panes().contains(&fixture.pane.id), "pane cleanup completed");
+    mailbox::seed(&path).expect("inbox exists before late write");
+    let unrelated =
+        ganja_team::MailboxMessage::new("other", "keep this entry", "2020-01-01T00:00:00Z");
+    let unrelated_id = mailbox::identity(&unrelated);
+    mailbox::write(&path, unrelated).expect("unrelated entry lands");
+    release.send(()).expect("the pending seed is retained for exact cleanup");
+    tokio::time::timeout(SETTLE, writing).await.expect("seed is released").expect("seed completes");
+    tokio::time::timeout(SETTLE, async {
+        loop {
+            if mailbox::read(&path).is_ok_and(|read| {
+                read.valid.len() == 1 && mailbox::identity(&read.valid[0]) == unrelated_id
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("late seed cleanup removes only the owned prompt");
+}
+
 /// The `PATH` search returns the first runnable file, skips directories and
 /// candidates this process cannot execute, and never interprets an empty
 /// entry as the working directory.

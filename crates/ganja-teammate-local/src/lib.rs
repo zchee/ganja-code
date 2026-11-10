@@ -64,6 +64,8 @@ pub mod shim_tui;
 /// The tmux calls the two pane backends are built on (P25b).
 pub mod tmux;
 
+mod teardown;
+
 use std::sync::Arc;
 
 use ganja_core::Backends;
@@ -108,3 +110,6 @@ pub fn backends(shell: PaneShell, share: PaneShare) -> Backends {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod teardown_tests;
