@@ -310,8 +310,8 @@
       "required": ["provisioner", "username", "no_reply_email", "git_host", "bootstrap"],
       "properties": {
         "provisioner": {"type": "string", "description": "Provisioner whose own file supplies vendor settings."},
-        "username": {"type": "string", "description": "Human-readable owner of worker commits."},
-        "no_reply_email": {"type": "string", "description": "No-reply git author and committer address."},
+        "username": {"type": "string", "description": "Basic-auth user sent to the worker; must match the worker's GANJA_SERVER_USERNAME (serve defaults to ganja). Not the git author name."},
+        "no_reply_email": {"type": "string", "description": "No-reply git author and committer email for the ganja-cloud-<member> identity."},
         "git_host": {"type": "string", "description": "Host whose git authorization is injected outside the worker."},
         "bootstrap": {"$ref": "#/$defs/CloudBootstrap"}
       }
@@ -323,7 +323,7 @@
       "properties": {
         "repository": {"type": "string", "description": "HTTPS repository URL without credentials."},
         "reference": {"type": "string", "description": "Commit or ref from which the worker starts."},
-        "branch_prefix": {"type": "string", "description": "Prefix for the worker's distinct branch."}
+        "branch_prefix": {"type": "string", "description": "Prefix for <prefix>/<member>-<epoch milliseconds>; trailing slashes in the prefix are removed."}
       }
     },
     "AgentConfig": {

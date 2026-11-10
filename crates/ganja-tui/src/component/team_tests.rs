@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
+use super::{BUSY, CloudAction, Effect, Row, Spawned, Team, rows, spawn_request};
 use crate::command;
 use crate::theme::Theme;
 
@@ -47,6 +47,387 @@ fn members() -> Vec<Row> {
 
 fn dialog() -> Team {
     Team::new(members(), Vec::new())
+}
+
+#[test]
+fn a_cloud_row_offers_message_shutdown_and_the_three_owner_actions() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    assert_eq!(dialog.submit(), None);
+    let screen = rendered(&dialog, AREA);
+    for label in
+        ["Message", "Shutdown", "Resume for inspection", "Retire", "Report external revert"]
+    {
+        assert!(screen.contains(label), "missing {label:?}:\n{screen}");
+    }
+    // The shared actions come first, in the order every local row taught.
+    assert!(
+        column_of(&screen, "Message") == column_of(&screen, "Shutdown")
+            && screen.find("Message") < screen.find("Shutdown")
+            && screen.find("Shutdown") < screen.find("Resume for inspection")
+            && screen.find("Resume for inspection") < screen.find("Retire")
+            && screen.find("Retire") < screen.find("Report external revert"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn hosted_actions_explain_shutdown_and_retirement_without_clipping() {
+    let hint = "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
+    for width in [40, 76] {
+        let area = Rect { width, height: 24, ..AREA };
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        let screen = rendered(&dialog, area);
+        let text = screen
+            .lines()
+            .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '│'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains(hint), "hint was clipped at width {width}:\n{screen}");
+        assert!(screen.contains("[Enter] run"), "keyboard hints were clipped:\n{screen}");
+        let hint_row =
+            screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+        assert_eq!(dialog.click(area, 4, hint_row as u16), None);
+        assert!(dialog.is_choosing_action(), "clicking the hint must not submit an action");
+    }
+}
+
+#[test]
+fn message_and_shutdown_on_a_hosted_row_match_a_local_rows_effects() {
+    for backend in [MemberBackend::InProcess, MemberBackend::Cloud] {
+        let mut dialog = Team::new(vec![row("member", backend, &[])], Vec::new());
+        dialog.submit();
+        assert_eq!(dialog.submit(), None, "Message opens the free-text step");
+        type_in(&mut dialog, "status?");
+        assert_eq!(
+            dialog.submit(),
+            Some(Effect::Message { to: "member".into(), text: "status?".into() })
+        );
+        dialog.submit();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), Some(Effect::Shutdown("member".into())));
+    }
+}
+
+#[test]
+fn local_rows_never_offer_cloud_controls() {
+    for backend in [
+        MemberBackend::InProcess,
+        MemberBackend::Ganja,
+        MemberBackend::Claude,
+        MemberBackend::Codex,
+        MemberBackend::Agy,
+        MemberBackend::Grok,
+    ] {
+        let mut dialog = Team::new(vec![row("local", backend, &[])], Vec::new());
+        dialog.submit();
+        let screen = rendered(&dialog, AREA);
+        assert!(screen.contains("Message") && screen.contains("Shutdown"), "{screen}");
+        assert!(
+            !screen.contains("inspection")
+                && !screen.contains("Retire")
+                && !screen.contains("revert")
+                && !screen.contains("Shutdown asks"),
+            "{screen}"
+        );
+    }
+}
+
+#[test]
+fn hosted_retirement_and_revert_have_distinct_cancel_first_confirmations() {
+    for (index, action, text) in [
+        (3, CloudAction::Retire, "Delete this hosted worker?"),
+        (4, CloudAction::ReportRevert, "ALREADY reverted"),
+    ] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(index);
+        assert_eq!(dialog.submit(), None, "opening a confirmation does not dispatch");
+        let screen = rendered(&dialog, AREA);
+        assert!(screen.contains(text), "{screen}");
+        assert_eq!(dialog.submit(), None, "Enter defaults to cancel");
+        dialog.submit();
+        dialog.move_selection(index);
+        dialog.submit();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), Some(Effect::Cloud { member: "hosted".into(), action }));
+    }
+}
+
+#[test]
+fn cancelling_a_hosted_confirmation_never_dispatches() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    dialog.move_selection(4);
+    dialog.submit();
+    assert!(dialog.cancel());
+    assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("hosted"));
+    assert!(!dialog.cancel(), "Esc on the roster dismisses the dialog");
+}
+
+#[test]
+fn a_busy_hosted_row_refuses_another_action_without_blocking_other_rows() {
+    let mut dialog = Team::new(
+        vec![row("first", MemberBackend::Cloud, &[]), row("second", MemberBackend::Cloud, &[])],
+        Vec::new(),
+    );
+    dialog.set_control_busy("first", true);
+    dialog.submit();
+    dialog.move_selection(2);
+    assert_eq!(dialog.submit(), None);
+    assert!(rendered(&dialog, AREA).contains("already running"));
+    dialog.step = super::Step::Members;
+    dialog.move_selection(1);
+    dialog.submit();
+    dialog.move_selection(2);
+    assert_eq!(
+        dialog.submit(),
+        Some(Effect::Cloud { member: "second".into(), action: CloudAction::Inspect })
+    );
+}
+
+#[test]
+fn a_mouse_click_uses_the_visible_roster_offset_not_the_unscrolled_row() {
+    let mut dialog = Team::new(
+        (0..12)
+            .map(|index| row(&format!("hosted-{index}"), MemberBackend::Cloud, &["read", "write"]))
+            .collect(),
+        Vec::new(),
+    );
+    dialog.move_selection(10);
+    let screen = rendered(&dialog, AREA);
+    let line =
+        screen.lines().position(|line| line.contains("hosted-9 ")).expect("preceding visible row");
+    let column = column_of(&screen, "hosted-9 ");
+    assert_eq!(dialog.click(AREA, column as u16, line as u16), None);
+    dialog.move_selection(2);
+    assert_eq!(
+        dialog.submit(),
+        Some(Effect::Cloud { member: "hosted-9".into(), action: CloudAction::Inspect })
+    );
+}
+
+#[test]
+fn a_confirmation_click_selects_the_affirmative_and_enter_executes_it() {
+    for (index, action) in [(3, CloudAction::Retire), (4, CloudAction::ReportRevert)] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(index);
+        dialog.submit();
+        let screen = rendered(&dialog, AREA);
+        let line =
+            screen.lines().position(|line| line.contains(action.label())).expect("affirmative row");
+        assert_eq!(dialog.click(AREA, 8, line as u16), None);
+        assert!(matches!(dialog.step, super::Step::Confirm { option: 1, .. }));
+        assert_eq!(dialog.submit(), Some(Effect::Cloud { member: "hosted".into(), action }));
+    }
+}
+
+#[test]
+fn repeated_clicks_at_one_position_never_confirm_a_hosted_action() {
+    for (index, action, height) in
+        [(3, CloudAction::Retire, 11), (4, CloudAction::ReportRevert, 12)]
+    {
+        for clicks in [2, 3] {
+            let area = Rect::new(0, 0, 80, height);
+            let mut members: Vec<_> = (0..index + 1)
+                .map(|number| row(&format!("local-{number}"), MemberBackend::InProcess, &[]))
+                .collect();
+            members.push(row("hosted", MemberBackend::Cloud, &[]));
+            let mut dialog = Team::new(members, Vec::new());
+            let needle = if clicks == 2 {
+                dialog.move_selection(index + 1);
+                dialog.submit();
+                dialog.move_selection(index);
+                action.label()
+            } else {
+                "hosted"
+            };
+            let screen = rendered(&dialog, area);
+            let line = screen.lines().position(|line| line.contains(needle)).expect("clicked row");
+            for click in 0..clicks {
+                assert_eq!(
+                    dialog.click(area, 4, line as u16),
+                    None,
+                    "{action:?}, click {click} of {clicks}"
+                );
+            }
+            assert!(
+                matches!(dialog.step, super::Step::Confirm { action: selected, option: 1, .. } if selected == action)
+            );
+        }
+    }
+}
+
+#[test]
+fn clicking_cancel_on_a_confirmation_returns_to_the_roster() {
+    for index in [3, 4] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(index);
+        dialog.submit();
+        let screen = rendered(&dialog, AREA);
+        let line = screen.lines().position(|line| line.contains("Cancel")).expect("cancel row");
+        assert_eq!(dialog.click(AREA, 8, line as u16), None);
+        assert!(matches!(dialog.step, super::Step::Members));
+    }
+}
+
+#[test]
+fn empty_viewports_never_have_a_visible_selection() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.move_selection(3);
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.move_selection(1);
+    assert!(!dialog.selection_visible(Rect::new(0, 0, 80, 5)));
+    assert!(dialog.selection_visible(AREA));
+}
+
+#[test]
+fn input_can_submit_only_when_its_text_row_is_visible() {
+    let mut dialog = Team::new(Vec::new(), Vec::new());
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    assert!(!dialog.selection_visible(Rect::new(0, 0, 80, 5)));
+    assert!(dialog.selection_visible(AREA));
+}
+
+fn retirement_dialog() -> Team {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    dialog
+}
+
+#[test]
+fn a_bottom_border_click_cannot_confirm_a_clipped_retirement() {
+    let mut dialog = retirement_dialog();
+    let area = Rect::new(0, 0, 80, 8);
+    assert_eq!(dialog.click(area, 3, 6), None);
+    assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+}
+
+#[test]
+fn every_border_ignores_clicks_without_changing_confirmation() {
+    let dialog = retirement_dialog();
+    let popup = dialog.popup(AREA);
+    for (column, row) in [
+        (popup.x + 1, popup.y),
+        (popup.x + 1, popup.bottom() - 1),
+        (popup.x, popup.y + 1),
+        (popup.right() - 1, popup.y + 1),
+    ] {
+        let mut dialog = dialog.clone();
+        assert_eq!(dialog.click(AREA, column, row), None, "at {column},{row}");
+        assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+    }
+}
+
+#[test]
+fn hint_blank_and_footer_rows_never_select_an_action() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    let screen = rendered(&dialog, AREA);
+    let hint = screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+    let footer = screen.lines().position(|line| line.contains("[Enter] run")).expect("footer");
+    for row in [hint, footer - 1, footer] {
+        assert_eq!(dialog.click(AREA, 4, row as u16), None);
+        assert!(matches!(dialog.step, super::Step::Actions { option: 0, .. }));
+    }
+}
+
+#[test]
+fn a_short_action_window_follows_selection_and_maps_the_drawn_row() {
+    let area = Rect::new(0, 0, 80, 9);
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    for label in
+        ["Message", "Shutdown", "Resume for inspection", "Retire", "Report external revert"]
+    {
+        let screen = rendered(&dialog, area);
+        assert!(
+            screen.lines().any(|line| line.contains(label) && line.contains(super::MARKER)),
+            "selected {label}:\n{screen}"
+        );
+        dialog.move_selection(1);
+    }
+    let screen = rendered(&dialog, area);
+    let row = screen
+        .lines()
+        .position(|line| line.contains("Report external revert"))
+        .expect("selected row");
+    assert_eq!(dialog.click(area, 4, row as u16), None);
+    assert!(matches!(dialog.step, super::Step::Confirm { action: CloudAction::ReportRevert, .. }));
+}
+
+#[test]
+fn short_confirmations_keep_the_target_visible_before_offering_consent() {
+    for action in [CloudAction::Retire, CloudAction::ReportRevert] {
+        for notice in [false, true] {
+            for body in 1..=4 {
+                let mut dialog = retirement_dialog();
+                dialog.step =
+                    super::Step::Confirm { member: "hosted".to_owned(), action, option: 0 };
+                if notice {
+                    dialog.set_notice("A prior operation finished.");
+                }
+                let area = Rect::new(0, 0, 80, body + 4 + u16::from(notice && body == 4));
+                let layout = dialog.visible_layout(area, &Theme::default());
+                let screen = rendered(&dialog, area);
+                assert!(
+                    screen.contains("Cancel"),
+                    "{action:?}, body {body}, notice {notice}:\n{screen}"
+                );
+                assert_eq!(screen.contains("hosted"), body >= 2, "{screen}");
+                assert_eq!(screen.contains(action.label()), body >= 3, "{screen}");
+                assert_eq!(layout.rows.iter().any(|row| row.option == Some(1)), body >= 3);
+                if body >= 2 {
+                    assert!(layout.rows[0].line.to_string().contains("hosted"), "{screen}");
+                }
+                if (2..=3).contains(&body) {
+                    assert!(layout.rows[0].line.to_string().ends_with('\u{2026}'), "{screen}");
+                }
+                if body == 4 {
+                    assert!(layout.rows[1].line.to_string().contains("not shown"), "{screen}");
+                }
+                if body < 3 {
+                    let inner = layout.popup.inner(ratatui::layout::Margin::new(1, 1));
+                    for (index, row) in layout.rows.iter().enumerate() {
+                        if row.option != Some(0) {
+                            assert_eq!(dialog.click(area, inner.x, inner.y + index as u16), None);
+                            assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+                        }
+                    }
+                    dialog.step =
+                        super::Step::Confirm { member: "hosted".to_owned(), action, option: 1 };
+                    assert!(!dialog.selection_visible(area), "{screen}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_long_confirmation_target_yields_to_the_omission_cue() {
+    let mut dialog = retirement_dialog();
+    dialog.step = super::Step::Confirm {
+        member: "a-very-long-hosted-member-name".repeat(8),
+        action: CloudAction::Retire,
+        option: 0,
+    };
+    for width in [16, 40] {
+        let layout = dialog.visible_layout(Rect::new(0, 0, width, 7), &Theme::default());
+        let name = layout.rows[0].line.to_string();
+        assert!(name.starts_with("a-very"), "{name}");
+        assert!(name.ends_with('\u{2026}'), "{name}");
+        assert_eq!(name.width(), usize::from(layout.popup.width - 2));
+        assert!(layout.rows.iter().any(|row| row.option == Some(1)));
+    }
 }
 
 /// Whether a rendered line *is* the Tasks heading, once the dialog's border

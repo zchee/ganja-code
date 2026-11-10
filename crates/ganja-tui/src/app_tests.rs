@@ -10075,6 +10075,577 @@ fn team_dialog_with_tasks() -> component::team::Team {
     component::team::Team::new(team_members(), tasks)
 }
 
+struct HostedApp {
+    app: App,
+    provisioner: Arc<ganja_testkit::provisioner::FakeProvisioner>,
+    server: ganja_testkit::provisioner::FakeServer,
+    _home: TempDir,
+}
+
+impl HostedApp {
+    async fn new() -> Self {
+        let home = TempDir::new().expect("fixture home");
+        let storage = Storage::open(home.path().join("worker-storage"));
+        let session = ganja_testkit::seed_session(&storage, 0);
+        let (provider, _) = ganja_testkit::ScriptedProvider::new(vec![
+            ganja_testkit::says("ready"),
+            ganja_testkit::says("inspected"),
+        ]);
+        let worker = Arc::new(Engine::persistent(
+            provider,
+            "fake",
+            Arc::new(ganja_tool::Registry::new(Vec::new())),
+            ganja_permission::Permissions::default(),
+            storage.clone(),
+        ));
+        worker.resume(&session).await.expect("worker session");
+        let mut serve =
+            ganja_testkit::provisioner::ServeConfig::in_directory(home.path().to_owned());
+        serve.storage = Some(storage);
+        let (provisioner, server) = ganja_testkit::provisioner::FakeProvisioner::serving(
+            worker,
+            serve,
+            "ganja",
+            "fixture-password",
+        )
+        .await
+        .expect("in-process worker");
+        let provisioner = Arc::new(provisioner);
+        let registry = Arc::new(ganja_core::teammate::TeammateRegistry::for_session(
+            home.path(),
+            "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
+            home.path(),
+        ));
+        let cloud = ganja_teammate_cloud::CloudBackend::configured(
+            ganja_core::config::CloudConfig {
+                provisioner: "fake".into(),
+                username: "ganja".into(),
+                no_reply_email: "fixture@example.invalid".into(),
+                git_host: "example.invalid".into(),
+                bootstrap: ganja_core::config::CloudBootstrap {
+                    repository: "https://example.invalid/repo.git".into(),
+                    reference: "main".into(),
+                    branch_prefix: "workers".into(),
+                },
+            },
+            provisioner.clone(),
+            Some("fixture-password".to_owned().into()),
+            ganja_teammate_cloud::state::Deadlines {
+                launch: Duration::from_secs(5),
+                bootstrap: Duration::from_secs(5),
+                health: Duration::from_secs(3),
+                quiesce: Duration::from_millis(100),
+                cleanup: Duration::from_millis(400),
+                terminal: Duration::from_secs(2),
+            },
+        );
+        let engine = engine().with_teammates(
+            Arc::clone(&registry),
+            ganja_core::Backends::new().with(Arc::new(cloud)),
+        );
+        engine
+            .teammates()
+            .expect("team")
+            .start(
+                ganja_testkit::spawn_with_prompt("hosted", Some("cloud"), "hello"),
+                &ganja_testkit::caller(home.path()),
+                &ganja_testkit::AllowSpawn,
+            )
+            .await
+            .expect("hosted member starts");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if ganja_teammate_cloud::control(&registry, "hosted").is_some_and(|control| {
+                    control.phase() == ganja_teammate_cloud::state::Phase::Suspended
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("member settles");
+        let mut app = App::new(engine, None, Themes::builtin());
+        app.open_team();
+        Self { app, provisioner, server, _home: home }
+    }
+
+    async fn close(self) {
+        self.app.engine.teammates().expect("team").registry().shutdown().await;
+        self.server.close().await.expect("server closes");
+    }
+
+    async fn dispatch(&mut self, action: component::team::CloudAction) {
+        self.app
+            .run_team_effect(component::team::Effect::Cloud { member: "hosted".into(), action })
+            .await;
+    }
+
+    async fn settled(&mut self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !self.app.cloud_controls.is_empty() {
+                self.app.poll_cloud_controls();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("owner action settles");
+    }
+}
+
+#[tokio::test]
+async fn closing_the_dialog_does_not_cancel_an_admitted_retirement() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let release = hosted.provisioner.hold_next(ProvisionOperation::Kill);
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.app.team_dialog = None;
+    assert_eq!(hosted.app.cloud_controls.len(), 1);
+    release.notify_one();
+    hosted.settled().await;
+    let mut terminal = terminal(100, 24);
+    hosted.app.draw(&mut terminal).expect("draw");
+    assert!(screen(&terminal).contains("retirement confirmed"), "{}", screen(&terminal));
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn a_busy_cloud_action_cannot_be_submitted_twice() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let release = hosted.provisioner.hold_next(ProvisionOperation::Kill);
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    assert_eq!(hosted.app.cloud_controls.len(), 1);
+    release.notify_one();
+    hosted.settled().await;
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation == ProvisionOperation::Kill)
+            .count(),
+        1
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn changing_selection_does_not_retarget_an_inflight_action() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let release = hosted.provisioner.hold_next(ProvisionOperation::Kill);
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.app.team_dialog.as_mut().expect("open").move_selection(isize::MAX);
+    assert_eq!(hosted.app.cloud_controls[0].member, "hosted");
+    release.notify_one();
+    hosted.settled().await;
+    assert!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, name)| *operation == ProvisionOperation::Kill && name == "hosted")
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn two_teams_with_the_same_member_name_act_only_on_the_selected_team() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let first = HostedApp::new().await;
+    let mut second = HostedApp::new().await;
+    second.dispatch(component::team::CloudAction::Retire).await;
+    second.settled().await;
+    assert!(
+        !first
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill)
+    );
+    assert!(
+        second
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill)
+    );
+    first.close().await;
+    second.close().await;
+}
+
+#[tokio::test]
+async fn an_unconfirmed_retirement_never_renders_gone() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    hosted.provisioner.fail_next(
+        ProvisionOperation::Kill,
+        ganja_teammate_cloud::provisioner::ProvisionErrorKind::Transient,
+    );
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.settled().await;
+    let mut terminal = terminal(110, 24);
+    hosted.app.team_dialog = None;
+    hosted.app.draw(&mut terminal).expect("draw");
+    let screen = screen(&terminal);
+    assert!(screen.contains("deletion is unconfirmed"), "{screen}");
+    assert!(!screen.contains("gone") && !screen.contains("retirement confirmed"), "{screen}");
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn a_reported_revert_invalidates_before_a_later_inspection_reconnects() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let resumes = hosted
+        .provisioner
+        .calls()
+        .iter()
+        .filter(|(operation, _)| *operation == ProvisionOperation::Resume)
+        .count();
+    let requests = hosted.server.requests().len();
+    hosted.dispatch(component::team::CloudAction::ReportRevert).await;
+    hosted.settled().await;
+    assert_eq!(hosted.server.requests().len(), requests, "report-only sends no worker request");
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation == ProvisionOperation::Resume)
+            .count(),
+        resumes
+    );
+    hosted.dispatch(component::team::CloudAction::Inspect).await;
+    hosted.settled().await;
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation == ProvisionOperation::Resume)
+            .count(),
+        resumes + 1
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn quitting_during_a_control_action_remains_bounded() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let _release = hosted.provisioner.hold_next(ProvisionOperation::Kill);
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.app.team_dialog = None;
+    hosted.app.handle(key(KeyCode::Char('q'), KeyModifiers::CONTROL)).await.expect("quit key");
+    assert!(hosted.app.quit);
+    tokio::time::timeout(Duration::from_secs(3), hosted.close())
+        .await
+        .expect("member-owned action is joined within the cleanup budget");
+}
+
+fn hosted_dialog() -> component::team::Team {
+    component::team::Team::new(
+        vec![team_row("hosted", ganja_protocol::MemberBackend::Cloud, false, &[])],
+        Vec::new(),
+    )
+}
+
+#[tokio::test]
+async fn snapshot_hosted_team_actions() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn snapshot_hosted_team_actions_narrow() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(40, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn snapshot_hosted_retirement_confirmation() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn snapshot_hosted_team_actions_short() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(4);
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 15);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn snapshot_hosted_retirement_confirmation_short() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 14);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn an_undrawn_affirmative_cannot_execute_after_a_resize() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    dialog.move_selection(1);
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 24);
+    hosted.app.draw(&mut display).expect("a frame draws");
+    display.backend_mut().resize(80, 12);
+    hosted.app.draw(&mut display).expect("the compact frame draws");
+    let compact = screen(&display);
+    assert!(compact.contains("hosted"), "the target must stay visible:\n{compact}");
+    assert!(compact.contains("Cancel"), "Cancel must stay visible:\n{compact}");
+    assert!(!compact.contains("Retire"), "the choice must be off screen:\n{compact}");
+    hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
+    hosted.app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("Down is handled");
+    hosted.app.draw(&mut display).expect("the compact selection draws");
+    assert!(screen(&display).contains("> Cancel"), "the next key must restore a visible selection");
+    let mut restored = terminal(80, 24);
+    hosted.app.draw(&mut restored).expect("the full frame draws");
+    let screen = screen(&restored);
+    assert!(
+        screen.contains("Delete this hosted worker?"),
+        "confirmation must stay open:\n{screen}"
+    );
+    assert!(hosted.app.cloud_controls.is_empty(), "an invisible option must not dispatch");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "an invisible option must not delete the worker"
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn down_keeps_cancel_selected_when_confirmation_cannot_show_consent() {
+    for action in [3, 4] {
+        for notice in [false, true] {
+            for body in [1, 2] {
+                let mut app = app();
+                let mut dialog = hosted_dialog();
+                dialog.submit();
+                dialog.move_selection(action);
+                dialog.submit();
+                if notice {
+                    dialog.set_notice("A prior operation finished.");
+                }
+                app.team_dialog = Some(dialog);
+                let mut display = terminal(80, body + 10);
+                app.draw(&mut display).expect("the compact confirmation draws");
+                app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("Down is handled");
+                app.draw(&mut display).expect("the selection draws");
+                let drawn = screen(&display);
+                assert!(drawn.contains("> Cancel"), "body {body}, notice {notice}:\n{drawn}");
+                assert!(
+                    app.team_dialog
+                        .as_ref()
+                        .expect("dialog stays open")
+                        .selection_visible(app.team_area)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_drawn_affirmative_click_selects_and_enter_executes() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 24);
+    hosted.app.draw(&mut display).expect("a frame draws");
+    let before = screen(&display);
+    let row = before.lines().position(|line| line.contains("Retire")).expect("affirmative");
+    hosted
+        .app
+        .handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: row as u16,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await
+        .expect("click is handled");
+    assert!(hosted.app.cloud_controls.is_empty(), "the click only selects");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "the click must not delete the worker"
+    );
+    hosted.app.draw(&mut display).expect("the highlighted choice draws");
+    assert!(screen(&display).contains("> Retire"));
+    hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
+    hosted.settled().await;
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation == ProvisionOperation::Kill)
+            .count(),
+        1,
+        "a visible affirmative deletes the worker exactly once"
+    );
+    hosted.close().await;
+}
+
+async fn repeated_retirement_clicks(clicks: usize) {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let dialog = if clicks == 2 {
+        let mut dialog = hosted_dialog();
+        dialog.submit();
+        dialog.move_selection(3);
+        dialog
+    } else {
+        let mut rows: Vec<_> = (0..4)
+            .map(|index| {
+                team_row(
+                    &format!("local-{index}"),
+                    ganja_protocol::MemberBackend::InProcess,
+                    false,
+                    &[],
+                )
+            })
+            .collect();
+        rows.push(team_row("hosted", ganja_protocol::MemberBackend::Cloud, false, &[]));
+        component::team::Team::new(rows, Vec::new())
+    };
+    // The setup is intentionally not redrawn between the consecutive mouse events.
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 17);
+    hosted.app.draw(&mut display).expect("the initial dialog draws");
+    let before = screen(&display);
+    let needle = if clicks == 2 { "Retire" } else { "hosted" };
+    let row = before.lines().position(|line| line.contains(needle)).expect("click target");
+    for _ in 0..clicks {
+        hosted
+            .app
+            .handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row: row as u16,
+                modifiers: KeyModifiers::NONE,
+            })))
+            .await
+            .expect("click is handled");
+    }
+    assert!(hosted.app.cloud_controls.is_empty(), "repeated clicks must not dispatch retirement");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "repeated clicks must not delete the worker"
+    );
+    hosted.app.draw(&mut display).expect("the confirmation draws");
+    assert!(
+        screen(&display).contains("> Retire"),
+        "the affirmative is only highlighted: {}",
+        screen(&display)
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn a_double_click_cannot_delete_a_hosted_worker() {
+    repeated_retirement_clicks(2).await;
+}
+
+#[tokio::test]
+async fn a_triple_click_cannot_delete_a_hosted_worker() {
+    repeated_retirement_clicks(3).await;
+}
+
+#[tokio::test]
+async fn snapshot_hosted_external_revert_confirmation() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(4);
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn a_mouse_selects_a_team_row_and_dismisses_the_dialog_outside_it() {
+    let mut app = app();
+    app.team_dialog = Some(team_dialog());
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    let before = screen(&terminal);
+    let line = before.lines().position(|line| line.contains("w2")).expect("member row");
+    app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: line as u16,
+        modifiers: KeyModifiers::NONE,
+    })))
+    .await
+    .expect("click is handled");
+    assert!(app.team_dialog.as_ref().expect("dialog stays").is_choosing_action());
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("w2"));
+    app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })))
+    .await
+    .expect("outside click is handled");
+    assert!(app.team_dialog.is_none());
+}
+
 /// The `/teammate` dialog's members step: every member with its backend and
 /// its ring, the lead marked, the Spawn row after them.
 #[tokio::test]
@@ -10609,6 +11180,8 @@ async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
     dialog.move_selection(1);
     dialog.submit();
     app.team_dialog = Some(dialog);
+    let mut terminal = terminal(90, 24);
+    app.draw(&mut terminal).expect("the action menu draws");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(
         app.team_dialog.as_ref().is_some_and(component::team::Team::is_typing),
@@ -10618,9 +11191,9 @@ async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
         app.handle(event).await.expect("typing is handled");
     }
 
+    app.draw(&mut terminal).expect("the input row draws");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
 
-    let mut terminal = terminal(90, 24);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
     assert!(screen.contains("nobody on this team answers to that name"), "{screen}");

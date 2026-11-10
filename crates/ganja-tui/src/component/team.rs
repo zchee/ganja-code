@@ -36,6 +36,8 @@
 //! dialog here keeps. What this component owns is its own state and its own
 //! notice line.
 
+use std::collections::BTreeSet;
+
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_tool::task::TeammateSpawn;
 // `UNOWNED` is the word `task_list` answers a model with for a task nobody
@@ -50,7 +52,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::command::TeamSpawn;
-use crate::component::chat::{RESULT, clip, pad};
+use crate::component::chat::{RESULT, clip, pad, wrap};
 use crate::component::{
     ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
     action_row, body_rows, clamped, first_visible,
@@ -68,6 +70,9 @@ const EMPTY: &str = "no team members";
 
 /// The label of the action that belongs to the team rather than to a row.
 const SPAWN_LABEL: &str = "Spawn teammate\u{2026}";
+
+const HOSTED_ACTION_HINT: &str =
+    "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
 
 /// What a spawn is refused with while another one is still starting.
 ///
@@ -270,6 +275,49 @@ pub enum Effect {
     },
     /// Ask the named member to shut down.
     Shutdown(String),
+    /// An explicitly requested hosted lifecycle operation.
+    Cloud {
+        /// Member selected before opening the action menu.
+        member: String,
+        /// Operation confirmed by the owner.
+        action: CloudAction,
+    },
+}
+
+/// Owner operations offered only for hosted teammates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudAction {
+    /// Reconnect for inspection without clearing uncertainty.
+    Inspect,
+    /// Delete the worker and confirm absence.
+    Retire,
+    /// Invalidate history after the owner has reverted externally.
+    ReportRevert,
+}
+
+impl CloudAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inspect => "Resume for inspection",
+            Self::Retire => "Retire",
+            Self::ReportRevert => "Report external revert",
+        }
+    }
+
+    fn confirmation(self) -> &'static [&'static str] {
+        match self {
+            Self::Inspect => &[],
+            Self::Retire => &[
+                "Delete this hosted worker?",
+                "Deletion is final; absence must still be confirmed.",
+            ],
+            Self::ReportRevert => &[
+                "Confirm you have ALREADY reverted this worker outside ganja.",
+                "This only invalidates stored history.",
+                "It does not revert or resume the worker.",
+            ],
+        }
+    }
 }
 
 /// What Enter on a member row offers.
@@ -279,6 +327,8 @@ enum RowAction {
     Message,
     /// Ask it to shut down.
     Shutdown,
+    /// Run a hosted owner operation.
+    Cloud(CloudAction),
 }
 
 impl RowAction {
@@ -287,6 +337,7 @@ impl RowAction {
         match self {
             Self::Message => "Message\u{2026}",
             Self::Shutdown => "Shutdown",
+            Self::Cloud(action) => action.label(),
         }
     }
 }
@@ -319,6 +370,8 @@ enum Step {
         /// Which of them the cursor is on.
         option: usize,
     },
+    /// Confirms an owner action without making Enter alone destructive.
+    Confirm { member: String, action: CloudAction, option: usize },
     /// Typing the text a step needs.
     Input {
         /// What the text is for.
@@ -326,6 +379,18 @@ enum Step {
         /// What has been typed so far.
         buffer: String,
     },
+}
+
+/// A drawn content row and its selection index, including the free-text input row.
+struct VisibleRow {
+    line: Line<'static>,
+    option: Option<usize>,
+}
+
+/// The same viewport is used for drawing, clicking, and keyboard activation.
+struct VisibleLayout {
+    popup: Rect,
+    rows: Vec<VisibleRow>,
 }
 
 /// The team, which row the cursor is on, which step is showing, and what the
@@ -351,6 +416,8 @@ pub struct Team {
     notice: Option<String>,
     /// Whether a spawn the app started is still running off the loop.
     busy: bool,
+    /// Names whose admitted controls are still being observed by the app.
+    busy_controls: BTreeSet<String>,
 }
 
 impl Team {
@@ -364,7 +431,15 @@ impl Team {
     /// exists.
     #[must_use]
     pub fn new(rows: Vec<Row>, tasks: Vec<Summary>) -> Self {
-        Self { rows, tasks, selected: 0, step: Step::Members, notice: None, busy: false }
+        Self {
+            rows,
+            tasks,
+            selected: 0,
+            step: Step::Members,
+            notice: None,
+            busy: false,
+            busy_controls: BTreeSet::new(),
+        }
     }
 
     /// Replaces the rows and the task list with a fresh poll, keeping the
@@ -389,7 +464,9 @@ impl Team {
         self.tasks = tasks;
         self.selected = self.selected.min(self.total_rows().saturating_sub(1));
         let orphaned = match &self.step {
-            Step::Actions { member, .. } => self.row_named(member).is_none(),
+            Step::Actions { member, .. } | Step::Confirm { member, .. } => {
+                self.row_named(member).is_none()
+            }
             Step::Members | Step::Input { .. } => false,
         };
         if orphaned {
@@ -421,6 +498,15 @@ impl Team {
         self.busy = busy;
     }
 
+    /// Marks a member's admitted owner action without disabling other rows.
+    pub fn set_control_busy(&mut self, member: &str, busy: bool) {
+        if busy {
+            self.busy_controls.insert(member.to_owned());
+        } else {
+            self.busy_controls.remove(member);
+        }
+    }
+
     /// Whether such a spawn is running.
     #[cfg(test)]
     #[must_use]
@@ -447,7 +533,7 @@ impl Team {
     pub(crate) fn input(&self) -> Option<&str> {
         match &self.step {
             Step::Input { buffer, .. } => Some(buffer.as_str()),
-            Step::Members | Step::Actions { .. } => None,
+            Step::Members | Step::Actions { .. } | Step::Confirm { .. } => None,
         }
     }
 
@@ -478,7 +564,21 @@ impl Team {
     /// would be talking to oneself, so its row offers nothing and Enter on it
     /// leaves the dialog where it was.
     fn actions(row: &Row) -> &'static [RowAction] {
-        if row.is_lead { &[] } else { &[RowAction::Message, RowAction::Shutdown] }
+        if row.is_lead {
+            &[]
+        } else if row.backend == MemberBackend::Cloud {
+            // Message and Shutdown keep their meaning on every backend; the
+            // owner actions are additional and cloud-only.
+            &[
+                RowAction::Message,
+                RowAction::Shutdown,
+                RowAction::Cloud(CloudAction::Inspect),
+                RowAction::Cloud(CloudAction::Retire),
+                RowAction::Cloud(CloudAction::ReportRevert),
+            ]
+        } else {
+            &[RowAction::Message, RowAction::Shutdown]
+        }
     }
 
     /// Moves whichever list is showing by `delta` rows. The free-text step
@@ -490,6 +590,13 @@ impl Team {
                 let count = self.row_named(member).map_or(0, |row| Self::actions(row).len());
                 let moved = clamped(*option, delta, count);
                 self.step = Step::Actions { member: member.clone(), option: moved };
+            }
+            Step::Confirm { member, action, option } => {
+                self.step = Step::Confirm {
+                    member: member.clone(),
+                    action: *action,
+                    option: clamped(*option, delta, 2),
+                };
             }
             Step::Input { .. } => {}
         }
@@ -510,13 +617,10 @@ impl Team {
         }
     }
 
-    /// Esc: leaves the free-text step for the member list, keeping the dialog
-    /// open and sending nothing anywhere — the typed text is abandoned, never
-    /// submitted. Answers whether the key was consumed; `false` means the
-    /// dialog itself should close, which is what Esc means on the other two
-    /// steps, exactly as it does in the `/mcp` and `/plugin` dialogs.
+    /// Esc abandons input or confirmation and returns to the member list.
+    /// Returns `false` on the member and action lists so the app can close the dialog.
     pub fn cancel(&mut self) -> bool {
-        if self.is_typing() {
+        if self.is_typing() || matches!(self.step, Step::Confirm { .. }) {
             self.step = Step::Members;
             self.notice = None;
             return true;
@@ -528,6 +632,9 @@ impl Team {
     /// Enter, wherever the dialog is: steps forward where a step is what Enter
     /// means, and answers with the [`Effect`] the app has to run where a
     /// decision was made.
+    ///
+    /// UI callers must check [`Self::selection_visible`] first: terminal resizing
+    /// can hide the selected choice without changing the state-machine cursor.
     ///
     /// A spawn line the grammar refuses does not close the step: the refusal
     /// goes on the notice line and the text stays, because the answer to a
@@ -565,6 +672,19 @@ impl Team {
                 // `refresh` dropping this step before Enter is ever read.
                 let row = self.row_named(&member)?;
                 let effect = match *Self::actions(row).get(option)? {
+                    RowAction::Cloud(action) => {
+                        if self.busy_controls.contains(&member) {
+                            self.notice = Some(
+                                "an owner action is already running for this member".to_owned(),
+                            );
+                            return None;
+                        }
+                        if action != CloudAction::Inspect {
+                            self.step = Step::Confirm { member, action, option: 0 };
+                            return None;
+                        }
+                        Effect::Cloud { member, action }
+                    }
                     RowAction::Shutdown => Effect::Shutdown(member),
                     RowAction::Message => {
                         self.step =
@@ -578,6 +698,12 @@ impl Team {
                 self.step = Step::Members;
 
                 Some(effect)
+            }
+            Step::Confirm { member, action, option } => {
+                let effect = (*option == 1 && !self.busy_controls.contains(member))
+                    .then(|| Effect::Cloud { member: member.clone(), action: *action });
+                self.step = Step::Members;
+                effect
             }
             Step::Input { asking, buffer } => {
                 let typed = buffer.trim().to_owned();
@@ -610,75 +736,256 @@ impl Team {
         }
     }
 
+    fn popup(&self, area: Rect) -> Rect {
+        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
+        let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
+        let content = match &self.step {
+            Step::Members => {
+                return area.centered(Constraint::Length(width), Constraint::Length(available));
+            }
+            Step::Actions { member, .. } => self.row_named(member).map_or(1, |row| {
+                1 + Self::actions(row).len()
+                    + if row.backend == MemberBackend::Cloud {
+                        wrap(HOSTED_ACTION_HINT, usize::from(width.saturating_sub(2))).len()
+                    } else {
+                        0
+                    }
+            }),
+            Step::Confirm { action, .. } => 3 + action.confirmation().len(),
+            Step::Input { .. } => 2,
+        };
+        let height = u16::try_from(content + 4 + usize::from(self.notice.is_some()))
+            .unwrap_or(available)
+            .min(available);
+        area.centered(Constraint::Length(width), Constraint::Length(height))
+    }
+
+    /// Whether a click is inside the current dialog, including its border.
+    pub fn contains(&self, area: Rect, column: u16, row: u16) -> bool {
+        self.popup(area).contains((column, row).into())
+    }
+
+    fn member_line(&self, index: usize) -> usize {
+        let lines: usize = self
+            .rows
+            .iter()
+            .take(index)
+            .map(|row| {
+                1 + row.recent.len().min(RING_LINES) + usize::from(row.recent.len() > RING_LINES)
+            })
+            .sum();
+        lines + usize::from(index == self.rows.len()) + usize::from(self.rows.is_empty())
+    }
+
+    /// Selects a visible row, ignoring borders and hints. Confirmation
+    /// affirmatives only highlight: requiring Enter prevents repeated clicks
+    /// at the action's former position from confirming it before a redraw.
+    pub fn click(&mut self, area: Rect, column: u16, row: u16) -> Option<Effect> {
+        let layout = self.visible_layout(area, &Theme::default());
+        let inner = layout.popup.inner(ratatui::layout::Margin::new(1, 1));
+        if !inner.contains((column, row).into()) {
+            return None;
+        }
+        let option = layout.rows.get(usize::from(row - inner.y))?.option?;
+        match &mut self.step {
+            Step::Members => self.selected = option,
+            Step::Actions { option: selected, .. } => *selected = option,
+            Step::Confirm { option: selected, .. } => {
+                *selected = option;
+                if option == 1 {
+                    return None;
+                }
+            }
+            Step::Input { .. } => return None,
+        }
+        self.submit()
+    }
+
+    /// Whether Enter's selected option fits inside the current viewport.
+    #[must_use]
+    pub fn selection_visible(&self, area: Rect) -> bool {
+        let selected = match &self.step {
+            Step::Members => self.selected,
+            Step::Actions { option, .. } | Step::Confirm { option, .. } => *option,
+            Step::Input { .. } => 0,
+        };
+        self.visible_layout(area, &Theme::default())
+            .rows
+            .iter()
+            .any(|row| row.option == Some(selected))
+    }
+
+    /// Keeps confirmation selection on a control drawn in the current viewport.
+    pub(crate) fn clamp_selection(&mut self, area: Rect) {
+        if !matches!(self.step, Step::Confirm { .. }) {
+            return;
+        }
+        let layout = self.visible_layout(area, &Theme::default());
+        if let Step::Confirm { option, .. } = &mut self.step
+            && !layout.rows.iter().any(|row| row.option == Some(*option))
+        {
+            *option = layout.rows.iter().find_map(|row| row.option).unwrap_or(0);
+        }
+    }
+
     /// Draws the modal centered over `area`.
     pub fn render(&self, area: Rect, buffer: &mut Buffer, theme: &Theme) {
         if area.is_empty() {
             return;
         }
-
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
-        let inner_width = usize::from(width).saturating_sub(2);
-        // The notice takes a row of the list's budget when it has something to
-        // say.
-        let rows = body_rows(available, CHROME + usize::from(self.notice.is_some()));
-
-        let mut lines = match &self.step {
-            Step::Members => self.member_rows(inner_width, rows, theme),
-            Step::Actions { member, option } => {
-                self.action_rows(inner_width, member, *option, theme)
-            }
-            Step::Input { asking, buffer } => Self::input_rows(inner_width, asking, buffer, theme),
-        };
-        if let Some(notice) = &self.notice {
-            let first = notice.lines().next().unwrap_or(notice).trim();
-            lines.push(Line::styled(clip(first, inner_width), theme.dim));
-        }
-        let hints = match &self.step {
-            Step::Members => LIST_HINTS,
-            Step::Actions { .. } => ACTION_HINTS,
-            Step::Input { .. } => INPUT_HINTS,
-        };
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(clip(hints, inner_width), theme.dim));
-
-        // The member step takes the screenful it was given, since the roster
-        // is as long as the team is. The other two are a handful of rows and
-        // never grow, so they take exactly what they need — the `/mcp`
-        // dialog's own two-height scheme.
-        let height = match &self.step {
-            Step::Members => available,
-            Step::Actions { .. } | Step::Input { .. } => {
-                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
-            }
-        };
-        let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
-
-        Clear.render(popup, buffer);
-        Paragraph::new(Text::from(lines))
+        let layout = self.visible_layout(area, theme);
+        Clear.render(layout.popup, buffer);
+        Paragraph::new(Text::from(layout.rows.into_iter().map(|row| row.line).collect::<Vec<_>>()))
             .block(Block::bordered().title(" teammate "))
             .style(theme.fg.patch(theme.background_panel))
-            .render(popup, buffer);
+            .render(layout.popup, buffer);
+    }
+
+    fn visible_layout(&self, area: Rect, theme: &Theme) -> VisibleLayout {
+        let popup = self.popup(area);
+        let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
+        let width = usize::from(inner.width);
+        let room = usize::from(inner.height);
+        if width == 0 || room == 0 {
+            return VisibleLayout { popup, rows: Vec::new() };
+        }
+        // A confirmation reserves three body rows for its target and choices.
+        // Footer and notice rows fit only beyond that minimum; remaining body
+        // space holds the omission marker and explanation.
+        let minimum = if matches!(self.step, Step::Confirm { .. }) { 3 } else { 1 };
+        let footer =
+            usize::from(room >= minimum + CHROME + usize::from(self.notice.is_some())) * CHROME;
+        let notice = usize::from(self.notice.is_some() && room > minimum + footer);
+        let budget = body_rows(popup.height, footer + notice);
+        let lines = match &self.step {
+            Step::Members => self.member_rows(width, theme),
+            Step::Actions { member, option } => self.action_rows(width, member, *option, theme),
+            Step::Confirm { member, action, option } => {
+                let mut lines = vec![Line::styled(clip(member, width), theme.fg)];
+                lines.extend(
+                    action
+                        .confirmation()
+                        .iter()
+                        .map(|line| Line::styled(clip(line, width), theme.fg)),
+                );
+                lines.push(action_row(0, *option, "Cancel", width, theme));
+                lines.push(action_row(1, *option, action.label(), width, theme));
+                lines
+            }
+            Step::Input { asking, buffer } => Self::input_rows(width, asking, buffer, theme),
+        };
+        let len = lines.len();
+        let selected_line = match &self.step {
+            Step::Members => self.member_line(self.selected),
+            Step::Actions { option, .. } => 1 + option,
+            Step::Confirm { .. } => len.saturating_sub(1),
+            Step::Input { .. } => 0,
+        };
+        let first = first_visible(selected_line, budget);
+        let mut member = 0;
+        let mut member_line = self.member_line(0);
+        let mut rows: Vec<_> = lines
+            .into_iter()
+            .enumerate()
+            .skip(first)
+            .take(budget)
+            .map(|(index, line)| {
+                let option = match &self.step {
+                    Step::Members => {
+                        while member_line < index && member < self.rows.len() {
+                            let recent = self.rows[member].recent.len();
+                            member_line +=
+                                1 + recent.min(RING_LINES) + usize::from(recent > RING_LINES);
+                            member += 1;
+                            member_line += usize::from(member == self.rows.len());
+                        }
+                        (member_line == index).then_some(member)
+                    }
+                    Step::Actions { member, .. } => index.checked_sub(1).filter(|option| {
+                        *option < self.row_named(member).map_or(0, |row| Self::actions(row).len())
+                    }),
+                    Step::Confirm { .. } => index.checked_sub(len - 2),
+                    Step::Input { .. } => (index == 1).then_some(0),
+                };
+                VisibleRow { line, option }
+            })
+            .collect();
+        if let Step::Confirm { member, action, option } = &self.step
+            && budget < len
+        {
+            rows.clear();
+            if budget >= 2 {
+                let explanation_rows = budget.saturating_sub(3);
+                let name = if explanation_rows == 0 {
+                    let cue = "\u{2026}";
+                    format!("{}{cue}", clip(member, width.saturating_sub(cue.width())))
+                } else {
+                    clip(member, width)
+                };
+                rows.push(VisibleRow { line: Line::styled(name, theme.fg), option: None });
+                if explanation_rows > 0 {
+                    let explanation = action.confirmation();
+                    let hidden = explanation.len() - (explanation_rows - 1);
+                    rows.push(VisibleRow {
+                        line: Line::styled(
+                            clip(&super::permission::overflow_marker(hidden), width),
+                            theme.dim,
+                        ),
+                        option: None,
+                    });
+                    rows.extend(explanation.iter().skip(hidden).map(|line| VisibleRow {
+                        line: Line::styled(clip(line, width), theme.fg),
+                        option: None,
+                    }));
+                }
+            }
+            rows.push(VisibleRow {
+                line: action_row(0, if budget < 3 { 0 } else { *option }, "Cancel", width, theme),
+                option: Some(0),
+            });
+            if budget >= 3 {
+                rows.push(VisibleRow {
+                    line: action_row(1, *option, action.label(), width, theme),
+                    option: Some(1),
+                });
+            }
+        }
+        if notice > 0
+            && let Some(text) = &self.notice
+        {
+            let first = text.lines().next().unwrap_or(text).trim();
+            rows.push(VisibleRow {
+                line: Line::styled(clip(first, width), theme.dim),
+                option: None,
+            });
+        }
+        if footer > 0 {
+            let hints = match &self.step {
+                Step::Members => LIST_HINTS,
+                Step::Actions { .. } | Step::Confirm { .. } => ACTION_HINTS,
+                Step::Input { .. } => INPUT_HINTS,
+            };
+            rows.push(VisibleRow { line: Line::raw(""), option: None });
+            rows.push(VisibleRow {
+                line: Line::styled(clip(hints, width), theme.dim),
+                option: None,
+            });
+        }
+        VisibleLayout { popup, rows }
     }
 
     /// The member step: one line per member with its ring hanging under it,
     /// then the Spawn row.
-    fn member_rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
+    fn member_rows(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let name_width = self.rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
         let backend_width =
             self.rows.iter().map(|row| backend_label(row.backend).width()).max().unwrap_or(0);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
-        // Where the cursor's own line ends up once the rings have pushed the
-        // rows apart — what the scroll window has to keep on screen.
-        let mut selected_line = 0;
         if self.rows.is_empty() {
             lines.push(Line::styled(clip(EMPTY, width), theme.dim));
         }
         for (index, row) in self.rows.iter().enumerate() {
-            if index == self.selected {
-                selected_line = lines.len();
-            }
             let head = format!(
                 "{marker}{name}  {backend}  {lead}",
                 marker = if index == self.selected { MARKER } else { "  " },
@@ -695,9 +1002,6 @@ impl Team {
         }
         lines.push(Line::raw(""));
         let on_spawn = self.selected == self.rows.len();
-        if on_spawn {
-            selected_line = lines.len();
-        }
         // A spawn in flight dims the row that would race it, so the refusal on
         // the notice line is not the first a person hears of it.
         let style = if self.busy {
@@ -716,10 +1020,7 @@ impl Team {
         ));
 
         lines.extend(self.task_lines(width, theme));
-
-        let first = first_visible(selected_line, rows);
-
-        lines.into_iter().skip(first).take(rows).collect()
+        lines
     }
 
     /// The Tasks section: the team's shared list under the roster, one line
@@ -847,7 +1148,19 @@ impl Team {
 
         let mut lines = vec![Line::styled(clip(&row.name, width), theme.fg)];
         for (index, action) in Self::actions(row).iter().enumerate() {
-            lines.push(action_row(index, option, action.label(), width, theme));
+            let line = action_row(index, option, action.label(), width, theme);
+            lines.push(if self.busy_controls.contains(member) {
+                line.style(theme.dim)
+            } else {
+                line
+            });
+        }
+        if row.backend == MemberBackend::Cloud {
+            lines.extend(
+                wrap(HOSTED_ACTION_HINT, width)
+                    .into_iter()
+                    .map(|text| Line::styled(text, theme.dim)),
+            );
         }
 
         lines

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/zchee/ganja-code/main/schema/ganja-cloud-substrate.schema.json",
   "title": "Substrate provisioner settings",
-  "description": "Strict TOML configuration for cloud/substrate.toml. The serve password comes only from GANJA_CLOUD_PASSWORD; it is not a file setting.",
+  "description": "Strict TOML configuration for cloud/substrate.toml. The serve password comes only from GANJA_CLOUD_PASSWORD; it is not a file setting. The Basic-auth user comes from [cloud].username in ganja.toml and must match the worker's GANJA_SERVER_USERNAME (serve defaults to ganja).",
   "type": "object",
   "additionalProperties": false,
   "required": ["kubeconfig", "template", "git_credential_uri"],
@@ -18,7 +18,7 @@
     "git_credential_uri": {"type": "string", "pattern": "^ate-secret://[^/@?#\\s:]+/(?:[^/?#\\s]+/)+[^/?#\\s]+$", "not": {"pattern": "\\s"}, "description": "Gateway credential reference containing a provider name and provider-specific tail."},
     "git_credential_prefix": {"type": "string", "pattern": "^[ -~]*$", "not": {"pattern": "[^ -~]"}, "default": ""},
     "tunnel": {"type": "string", "enum": ["in_process", "kubectl"], "default": "in_process"},
-    "kubectl": {"$ref": "#/$defs/AbsolutePath", "description": "Absolute path to the released kubectl executable, required for the command tunnel."}
+    "kubectl": {"$ref": "#/$defs/AbsolutePath", "description": "Absolute path to the released kubectl executable. Used only when tunnel is explicitly kubectl, with router_service set to atenet-router; never an automatic fallback. Plugin resolution still trusts PATH and HOME, and the plugin's fixed-actor loopback socket has no proxy-token check."}
   },
   "allOf": [{"if": {"properties": {"tunnel": {"const": "kubectl"}}, "required": ["tunnel"]}, "then": {"required": ["kubectl"], "properties": {"router_service": {"const": "atenet-router"}}}}],
   "$defs": {

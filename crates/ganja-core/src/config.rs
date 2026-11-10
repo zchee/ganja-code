@@ -1315,9 +1315,10 @@ impl Default for CompactThreshold {
 pub struct CloudConfig {
     /// Which provisioner reads its settings from the cloud configuration directory.
     pub provisioner: String,
-    /// Human-readable owner of the worker's git commits.
+    /// Basic-auth user sent to the worker; must match its GANJA_SERVER_USERNAME (default: ganja).
+    /// This is not the git author name.
     pub username: String,
-    /// No-reply address used for the worker's git author and committer identity.
+    /// No-reply git author and committer email for the `ganja-cloud-<member>` identity.
     pub no_reply_email: String,
     /// Host whose git authorization header is injected outside the worker.
     pub git_host: String,
@@ -1333,7 +1334,7 @@ pub struct CloudBootstrap {
     pub repository: String,
     /// Commit or ref from which the worker starts.
     pub reference: String,
-    /// Prefix under which each worker creates its own branch.
+    /// Prefix for `<prefix>/<member>-<epoch milliseconds>`; trailing slashes are removed.
     pub branch_prefix: String,
 }
 

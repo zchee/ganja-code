@@ -22,8 +22,9 @@ received a typed answer from the worker before calling the control plane.
 
 A drain timeout defers suspend. An unclassified routed attempt permanently disables
 automatic suspend for that worker identity: a later health answer, including through
-another router, cannot fence an earlier dispatch. Only a reconciled deletion and a
-distinctly named replacement recover that identity boundary.
+another router, cannot fence an earlier dispatch. This is an independent gate latch,
+not a lifecycle phase. Only a reconciled deletion and a distinctly named
+replacement recover that identity boundary.
 
 Launch and cleanup have finite independent deadlines. A failed or ambiguous
 mutation is reconciled, never resent blindly. One terminal decision and one mail
@@ -57,9 +58,11 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
   Like the main configuration, location-only settings and the selected kubectl
   executable have no extra owner/mode check; the operator owns their permissions.
 - Both tunnels sit behind one seam: in-process kube port-forwards, or the
-  released `kubectl ate proxy actor` child, with `--kubeconfig=...` and optional
-  `--context=...` after the plugin name; readiness is its own stderr line,
-  never a probe connection, which would wake a suspended actor.
+  explicitly selected `tunnel = "kubectl"` running the released `kubectl ate proxy actor`
+  child. The latter requires an absolute executable path and `router_service = "atenet-router"`;
+  it is not an automatic fallback. `--kubeconfig=...` and optional `--context=...`
+  follow the plugin name; startup has a 120-second budget and bounded child reaping.
+  Readiness is its own stderr line, never a probe connection, which would wake a suspended actor.
   The child receives only absolute entries from operator-owned `PATH`, `HOME`,
   and the explicit settings `KUBECONFIG`, with `/` as its neutral working
   directory; credential and kubectl plugins resolve through those trusted
@@ -96,12 +99,41 @@ unsupported; snapshot fields and cursor ordering cannot identify one.
 Basic-auth password. If it is unset, empty, or not Unicode, cloud spawn is refused;
 it does not fall back to `GANJA_SERVER_PASSWORD`. The backend installs this value
 as the client's password for the worker endpoint; provisioner routing headers
-cannot override that authentication.
+cannot override that authentication. `[cloud].username` is the Basic user the
+control side sends; the worker's `GANJA_SERVER_USERNAME` must match it (serve's
+default is `ganja`). Git author and committer use `ganja-cloud-<member>` with
+`[cloud].no_reply_email`, not that username. The checkout branch is
+`<branch_prefix>/<member>-<epoch milliseconds>`, not a formatted date.
 
 The served engine binds all interfaces so the platform router can reach its pod
 address; this relies on one tenant per worker sandbox and mandatory Basic auth.
 The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
 `GIT_SSL_CAINFO`; these trusted paths are followed, including projection symlinks.
+
+### Acceptance image
+
+`worker/Dockerfile` and its adjacent inputs define an acceptance-only image using
+`GANJA_PROVIDER=fake`, not a production worker for a real provider. The owner still
+has to build and push this image; these files are not evidence of a live run.
+
+- The build context requires a Linux `ganja` executable alongside `ganja.toml`,
+  `gitconfig`, and `acceptance-script.json`; `.dockerignore` excludes unrelated
+  build-context files. The image starts `ganja worker init --port 80` in empty
+  `/work`. Its explicit environment variables all belong to the served-engine
+  allowlist below. The runtime template supplies the Basic password, never the image.
+- `GANJA_SERVER_USERNAME=ganja` is the image default and must match `[cloud].username`.
+  Build argument `GIT_HOST` scopes a placeholder Git authorization header to that
+  HTTPS host only. The platform supplies the real authorization outside the image;
+  `gitconfig` disables commit signing.
+- The platform must project its trust bundle at
+  `/run/ate/egress-trust-bundle/trust-bundle.pem`, used by both `SSL_CERT_FILE` and
+  `GIT_SSL_CAINFO`.
+- `acceptance-script.json` consumes two model requests for the first message: a Bash
+  tool call that appends to `NOTES.md`, commits, and pushes, then a final response.
+  One further model request answers the second message after resume.
+- Init's `/readyz` only confirms the bootstrap listener. It does not establish that
+  checkout and handoff finished; the backend separately awaits authenticated engine
+  health before opening a session.
 
 ### Child environments
 

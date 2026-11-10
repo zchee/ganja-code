@@ -12,7 +12,12 @@ and decisions live in `docs/decisions/` as D-numbers. Seeded from the multi-agen
 **Teammate**:
 A persistent named agent that outlives the call that started it, registered as
 a member of the session's team and addressed through mailboxes.
-_Avoid_: worker, peer agent
+_Avoid_: peer agent, worker (when naming the agent rather than its hosted resource)
+
+**Worker**:
+The hosted resource a cloud teammate runs in, with its own checkout and served
+engine. Its provisioner owns the resource lifecycle; the teammate is the named
+agent using it. Worker and Teammate are not interchangeable.
 
 **Subagent**:
 A child agent bound to a single `task` tool call; its result returns to the
@@ -34,8 +39,27 @@ teamless.
 
 **Backend**:
 The mechanism a teammate runs on: `in-process`, `ganja`, `claude`, `codex`,
-`grok`, or `agy`. Also called the teammate's *surface*.
+`grok`, `agy`, or `cloud`. Also called the teammate's *surface*.
 _Avoid_: provider (that is a model vendor), worker type, execution mode
+
+**Cursor**:
+An event journal position: a server epoch and sequence number. A reconnect
+requests events after the last committed cursor; it is not a worker snapshot.
+
+**Gap**:
+An explicit event-stream acknowledgement that a requested cursor cannot be
+replayed. The consumer discards that cursor and buffered events, then reconnects
+fresh and rebuilds its view from stored state rather than splicing deltas.
+
+**Quiesce**:
+Close a worker's stream and REST admission, hold reconnects, and drain admitted
+requests before attempting suspension. An outstanding request defers suspension.
+
+**Uncertainty latch**:
+A permanent request-accounting flag for a worker identity when a routed attempt
+has no classified completion. It disables automatic suspension even if a later
+health request succeeds. It is not a lifecycle phase; only reconciled retirement
+and a distinctly named replacement recover the identity boundary.
 
 **Agent** (persona):
 A named prompt-and-rules identity a session or teammate runs as — `build`,
