@@ -542,6 +542,8 @@ pub struct App {
     /// this for as long as it accepts. Every seam this app reaches through it
     /// takes `&self`.
     engine: Arc<Engine>,
+    /// Retains signals received between hosted connection setup and the event loop.
+    startup_interrupt: Option<crate::cloud_assembly::Interrupt>,
     /// Provider this session runs on, which is what the model list is narrowed
     /// to: switching model is same-provider only, so offering the rest of the
     /// catalog would be offering refusals.
@@ -1270,6 +1272,7 @@ impl App {
             last_draw: Instant::now(),
             session_start: Instant::now(),
             quit: false,
+            startup_interrupt: None,
         }
     }
 
@@ -1481,6 +1484,15 @@ impl App {
     #[must_use]
     pub fn with_focused(mut self, focused: bool) -> Self {
         self.focused = focused;
+        self
+    }
+
+    /// Keeps the listener registered during hosted startup until the event loop takes over.
+    pub(crate) fn with_startup_interrupt(
+        mut self,
+        interrupt: Option<crate::cloud_assembly::Interrupt>,
+    ) -> Self {
+        self.startup_interrupt = interrupt;
         self
     }
 
@@ -1905,7 +1917,12 @@ impl App {
                 }
                 // Raw mode swallows Ctrl-C, so this arm only fires for a signal
                 // raised from outside the terminal, such as `kill -INT`.
-                _ = tokio::signal::ctrl_c() => break,
+                _ = async {
+                    match self.startup_interrupt.as_mut() {
+                        Some(interrupt) => { let _ = interrupt.await; }
+                        None => { let _ = tokio::signal::ctrl_c().await; }
+                    }
+                } => break,
             };
 
             for event in events {
