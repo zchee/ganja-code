@@ -6,7 +6,7 @@ The `ganja` binary (`[[bin]] name = "ganja"`, `src/main.rs`). With no subcommand
 ## Boundary
 
 - No `depgate.toml` rule names this crate (see the comment above the depgate step in `.github/workflows/ci.yaml`).
-- `depgate.toml` denies `axum*` to `ganja-core` and `ganja-tui`, and `ganja-tui` depends on neither `ganja-serve` nor `ganja-client`. So the two trait implementations that need them live here.
+- `depgate.toml` denies `axum*` to `ganja-core` and `ganja-tui`, and `ganja-tui` never depends on `ganja-serve` (it reaches `ganja-client` only through `ganja-teammate-cloud`). So the two trait implementations that bind the socket server and probe live sessions live here.
 - `src/binder.rs` implements `ganja_tui::binder::Binder` over `ganja-serve` (the per-session Unix socket). `src/lister.rs` implements `ganja_tui::lister::Lister` over `ganja-tool`'s registry plus a `ganja-client` health probe (the `@` menu).
 
 ## Subcommands

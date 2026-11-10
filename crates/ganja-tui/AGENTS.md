@@ -7,7 +7,7 @@ The ratatui frontend. It draws the terminal and turns key and mouse input into e
 
 - `depgate.toml` `[rules."ganja-tui"]`: `deny = ["axum*"]`. The TUI never links an HTTP server; the socket server reaches it only through the `binder::Binder` trait that `ganja-cli` implements.
 - `ganja-core`'s rule denies `ratatui*`, so terminal code stays in this crate.
-- Internal dependencies are named directly in `Cargo.toml`: `ganja-core`, `ganja-protocol`, `ganja-permission`, `ganja-tool`, `ganja-teammate-local`. Each entry carries a comment with its reason.
+- Internal dependencies are named directly in `Cargo.toml`: `ganja-core`, `ganja-protocol`, `ganja-permission`, `ganja-tool`, `ganja-teammate-local`, `ganja-teammate-cloud`. Each entry carries a comment with its reason. The cloud edge pulls `ganja-client` into the closure transitively; the server crate stays out (`ganja-serve`'s own rule also denies this crate's backends).
 
 ## Layout
 
@@ -15,6 +15,7 @@ The ratatui frontend. It draws the terminal and turns key and mouse input into e
 |---|---|
 | `src/lib.rs` | `run(resume, overrides, yolo, member, binder, lister, name, socket_dir)`: startup assembly before the terminal is taken, the kitty keyboard probe, the panic hook, terminal restore. |
 | `src/app.rs` | `App`, the `tokio::select!` loop, `App::handle` (the only state mutator), key routing, `FRAME`, `ESC_CHORD`. |
+| `src/cloud_assembly.rs` | Hosted-backend assembly at startup: the lead/member and `[cloud]` gates, `CLOUD_CONNECT_BUDGET`, the interrupt-aware `during_startup` wrapper. |
 | `src/event.rs` | `AppEvent { Term, Core, Tick }`, the one enum every event source folds into. |
 | `src/escrepair.rs` | Rebuilds CSI/SS3 keys split across reads; holds a lone Esc for `HOLDOFF` (25 ms). |
 | `src/keybind.rs` | Default key table and the `keybinds` config map. |
@@ -71,6 +72,9 @@ CI runs `cargo nextest run --locked --workspace --profile ci` (`.github/workflow
 - The pushed flags are popped on every exit, including the panic hook, and popped and re-pushed around `/editor` (`src/external.rs`), because the flag stack is per screen buffer.
 - When the kitty flag is active, `EscRepair` runs in passthrough mode. Otherwise a bare Esc waits `HOLDOFF` for a `[` or `O` continuation; split SGR mouse fragments and split paste markers are dropped, not typed (`src/escrepair.rs`, pinned by `src/escrepair_tests.rs` and `ganja-cli/tests/pty_smoke.rs`).
 - Socket bind rule: every session that is not a pane member binds its socket when `ganja-cli` passes a binder. A pane member hands the binder back unused. The gate is one line in `run`, pinned by `the_bind_predicate_is_membership_alone` in `src/lib_tests.rs`.
+- Hosted startup (`src/cloud_assembly.rs`, wired in `run`): the cloud backend is assembled only for a lead session whose config carries `[cloud]` with the `substrate` provisioner; a pane member or an unconfigured run does no cloud I/O and prints nothing. Before connecting, `run` writes one fixed stderr line, `Connecting to the cloud provisioner...`. The connection runs under `CLOUD_CONNECT_BUDGET` (180 s): no shorter, because it must cover the provisioner's own 30-second token and 120-second first-certificate budgets without cutting either, with the remainder for discovery and bind.
+- A failed hosted start makes `run` return an error (the binary exits non-zero) with one of five fixed messages — `unsupported cloud provisioner; use substrate`, `cloud configuration home not found; check GANJA_CONFIG_HOME and HOME`, `cloud connection timed out; check Substrate connectivity`, `cloud connection failed; check the log and Substrate settings`, `cloud connection interrupted; retry when ready` — none of which carries settings, endpoints or server text. A connection failure's underlying cause goes to the log at error level.
+- Ctrl-C during hosted startup: the SIGINT future is registered and polled once before hosted setup. Connection, orphan cleanup, effort seeding and first focus run under `during_startup`'s biased select, preserving an interrupt across the hand-off to the interface. Known limit: synchronous work, including settings and kubeconfig reads, cannot be timed out or interrupted until that call returns.
 - Transcript glyphs (`src/component/chat.rs`): `> ` on a prompt, `● ` on replies and settled tool calls, an in-flight call cycles `POINT_GLYPHS` (`· ∙ • ●`), `  ⎿ ` on a call's result, `∴ ` on thinking, `@ <name>❯` heading a teammate message. The working line cycles `WORKING_FRAMES` (`·✢✳✶✻✽` and back); the status bar spinner is braille `SPINNER`.
 - `arboard` is built with `image-data`; `ctrl+v` reads a clipboard image and attaches it as a PNG. Every copy also writes OSC 52 (`src/clipboard.rs`).
 - Custom themes load from `<config home>/themes` via `ganja_core::config::config_home`; a theme that fails to load is skipped with a `tracing` line, not fatal.
