@@ -34,7 +34,6 @@ use ganja_core::teammate::TeammateRegistry;
 use ganja_core::{AgentRegistry, Engine, SessionId, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 use ganja_protocol::Message;
-use ganja_teammate_local::pane::{PaneShare, PaneShell};
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -474,6 +473,29 @@ pub async fn run(
     .then(|| Box::pin(tokio::signal::ctrl_c()) as cloud_assembly::Interrupt);
     // Poll once to register SIGINT before any hosted setup can begin.
     cloud_assembly::during_startup(&mut startup_interrupt, std::future::ready(())).await?;
+    let backends = cloud_assembly::during_startup(
+        &mut startup_interrupt,
+        cloud_assembly::backends(
+            &config,
+            membership.is_some(),
+            ganja_core::config::config_home,
+            cloud_assembly::CLOUD_CONNECT_BUDGET,
+            |cloud, home| async move {
+                use std::io::Write as _;
+
+                let _ = writeln!(std::io::stderr(), "Connecting to the cloud provisioner...");
+                let provisioner =
+                    ganja_teammate_cloud::provisioner::substrate::SubstrateProvisioner::connect(
+                        &home,
+                        &cloud.username,
+                    )
+                    .await?;
+                Ok(Arc::new(ganja_teammate_cloud::CloudBackend::new(cloud, Arc::new(provisioner)))
+                    as Arc<dyn ganja_core::teammate::TeammateBackend>)
+            },
+        ),
+    )
+    .await??;
     let home = ganja_core::config::config_home()
         .context("failed to locate the config home this session's team is kept in")?;
     let (engine, teammates, socket) = match &membership {
@@ -510,17 +532,6 @@ pub async fn run(
         None => {
             let id = engine.session_id();
             let registry = Arc::new(TeammateRegistry::for_session(&home, id.as_str(), &cwd));
-            // Resolved **once**, here, and handed to the backends that read
-            // them rather than to the registry (**D538**, keeping **D520**'s
-            // intent): the idle shell a pane is split into and how wide the
-            // teammates' column opens are properties of this *runtime*, and
-            // a backend must name no config type — so they cross as
-            // `ganja-core`'s own value types.
-            let shell =
-                config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
-            let share =
-                config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
-            let backends = ganja_teammate_local::backends(shell, share);
             // **D506**: panes a previous lead of this team left running,
             // before this one spawns anything of its own. Best-effort by
             // construction — it returns a `Swept` and never an error, and a

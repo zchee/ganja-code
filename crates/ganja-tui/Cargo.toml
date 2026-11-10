@@ -109,3 +109,5 @@ url.workspace = true
 # provider — the fake accepts everything by design.
 ganja-testkit.workspace = true
 insta.workspace = true
+# Startup deadline tests advance Tokio's clock without delaying the test process.
+tokio = { workspace = true, features = ["test-util"] }
