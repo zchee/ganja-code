@@ -146,9 +146,12 @@ impl CloudControl {
     /// budgets, and deletion uses `cleanup`. An action can wait behind launch,
     /// the runner's resume/quiescence, and cleanup, then spends at most two
     /// `launch` budgets for inspection/resume, one `cleanup` for retirement,
-    /// or no remote budget for a revert report. Local mailbox writes remain
-    /// ordered under the transition lock and have no deadline; these ceilings
-    /// explicitly exclude that local filesystem work.
+    /// or no remote budget for a revert report. A conservative total including
+    /// preceding holders is `4 * launch + 2 * quiesce + cleanup` for inspection,
+    /// `2 * launch + 2 * quiesce + 2 * cleanup` for retirement, and
+    /// `2 * launch + 2 * quiesce + cleanup` for a revert report. Local mailbox
+    /// writes remain ordered under the transition lock and have no deadline;
+    /// these ceilings explicitly exclude that local filesystem work.
     ///
     /// Event barriers are interruption-bounded: hold/invalidate notify before
     /// waiting for the consumer's state lock. Every connection, retry sleep and
@@ -168,7 +171,7 @@ impl CloudControl {
         if task.as_ref().is_some_and(|task| !task.is_finished()) {
             return Err(ControlAdmissionError::Busy);
         }
-        if self.0.lent.cancel.is_cancelled() || !self.0.alive.load(Ordering::SeqCst) {
+        if self.0.lent.cancel.is_cancelled() {
             return Err(ControlAdmissionError::Cancelled);
         }
         let runtime = tokio::runtime::Handle::try_current()
