@@ -80,6 +80,14 @@ CI runs `cargo nextest run --locked --workspace --profile ci` (`.github/workflow
 - Custom themes load from `<config home>/themes` via `ganja_core::config::config_home`; a theme that fails to load is skipped with a `tracing` line, not fatal.
 - A session that holds a judge (D567, experimental) says so second in its opening line: `evaluate (experimental): screening <sources> via <host> (lead and subagents)`. `App::with_disclosure` keeps that line through the first socket pass, so a name collision or a refused bind that pass reports stands after it (`set_startup_notice`), never in its place; `App::open` makes the pass and lets the disclosure go, and later notices replace the line as any other does (pinned by `src/app_tests.rs`). The judge is built once in `run`; a `/plugin` Reload rebuilds tools but not the judge, so a changed screen is a restart.
 
+## Hosted teammate controls
+
+- In `/teammate` (`src/component/team.rs`), Enter on a hosted teammate opens these actions in order: **Message…**, **Shutdown**, **Resume for inspection**, **Retire**, **Report external revert**. Non-hosted teammates offer only Message and Shutdown; the lead row offers neither.
+- The hosted action menu says: “Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.” Shutdown sends the ordinary shutdown request, not a worker deletion.
+- Resume for inspection reconnects without clearing uncertainty. Retire requires confirmation, deletes the worker and reports whether absence was confirmed; an unconfirmed deletion still needs owner action.
+- Report external revert requires the owner to confirm that the worker was already reverted outside ganja. It invalidates stored history; it does not perform a revert or resume the worker. Both confirmation screens select **Cancel** initially.
+- Owner actions resolve against the current registry and member name. While an owner action is running for a member, another owner action for that member is refused; completion or refusal appears as a notice (`src/app.rs`).
+
 ## Tests
 
 Unit tests live in sibling `*_tests.rs` files through `#[path]`; there are no inline test modules. Screen tests build an `App`, feed `AppEvent`s to `App::handle`, render into ratatui's `TestBackend`, and assert with `insta::assert_snapshot!`.
