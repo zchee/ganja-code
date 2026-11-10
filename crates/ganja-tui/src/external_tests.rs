@@ -1,5 +1,40 @@
 use super::{command, program, read_back, seed};
 
+#[cfg(unix)]
+#[test]
+fn editor_children_do_not_receive_server_credentials() {
+    const TEST: &str = "external::tests::editor_children_do_not_receive_server_credentials";
+    const CHILD: &str = "GANJA_TEST_EDITOR_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok(TEST) {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, TEST)
+            .env("GANJA_SERVER_PASSWORD", "synthetic-server-password")
+            .env("GANJA_SERVER_USERNAME", "synthetic-server-username")
+            .env("GANJA_CLOUD_PASSWORD", "synthetic-cloud-password")
+            .env("GANJA_TEST_CHILD_VISIBLE", "retained")
+            .output()
+            .expect("isolated editor test");
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let shell = ganja_tool::shell::posix_shell().expect("POSIX shell");
+    let output = command(
+        &shell,
+        "printf '%s|%s|%s|%s' \"${GANJA_SERVER_PASSWORD+present}\" \"${GANJA_SERVER_USERNAME+present}\" \"${GANJA_CLOUD_PASSWORD+present}\" \"$GANJA_TEST_CHILD_VISIBLE\"; :",
+        std::path::Path::new("unused"),
+    )
+    .output()
+    .expect("editor child runs");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "|||retained");
+}
+
 #[test]
 fn the_editor_is_whatever_the_environment_names_and_vi_when_it_names_nothing() {
     let cases = [
