@@ -111,5 +111,6 @@ pub fn backends(shell: PaneShell, share: PaneShare) -> Backends {
 #[path = "lib_tests.rs"]
 mod tests;
 
+// Kept at the crate root because Claude backend tests share its private-server fixture.
 #[cfg(test)]
 mod teardown_tests;
