@@ -537,7 +537,9 @@ pub struct ProviderConfig {
     /// is moved with its own base-URL variable.
     pub base_url: Option<String>,
     /// The environment variable holding the endpoint's key, consulted before
-    /// the credential store.
+    /// the credential store. `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME`,
+    /// and `GANJA_CLOUD_PASSWORD` are reserved and refused, including when
+    /// surrounded by whitespace.
     ///
     /// Absent means the store alone answers, under this entry's own id —
     /// `ganja auth login <id>` writes exactly there.
@@ -3749,6 +3751,14 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
         if entry.key_env.as_ref().is_some_and(|var| var.trim().is_empty()) {
             return Err(format!(
                 "provider \"{id}\" has a blank `key_env`, which names no variable"
+            ));
+        }
+
+        if let Some(name) = entry.key_env.as_deref().map(str::trim)
+            && ganja_permission::child_process::PRIVATE_ENV.contains(&name)
+        {
+            return Err(format!(
+                "provider \"{id}\" cannot use reserved server variable `{name}` as its `key_env`"
             ));
         }
 

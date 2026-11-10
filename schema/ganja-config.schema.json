@@ -694,7 +694,7 @@
         },
         "key_env": {
           "type": "string",
-          "description": "The environment variable holding the endpoint's key, consulted before the credential store. Absent means the store alone answers, under this entry's own id. A blank or whitespace-only value is refused, because it names no variable.",
+          "description": "The environment variable holding the endpoint's key, consulted before the credential store. Absent means the store alone answers, under this entry's own id. A blank or whitespace-only value is refused, because it names no variable. GANJA_SERVER_PASSWORD, GANJA_SERVER_USERNAME and GANJA_CLOUD_PASSWORD are reserved and refused, including when surrounded by whitespace.",
           "pattern": "\\S"
         },
         "headers": {

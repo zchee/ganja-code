@@ -1966,6 +1966,29 @@ fn a_provider_entry_carries_every_field_it_may_hold() {
     );
 }
 
+#[test]
+fn provider_keys_cannot_name_reserved_server_variables() {
+    for name in ["GANJA_SERVER_PASSWORD", "GANJA_SERVER_USERNAME", "GANJA_CLOUD_PASSWORD"] {
+        for configured in [name.to_owned(), format!("  {name}\t")] {
+            let text = format!(
+                "[provider.fixture]\ndialect = \"openai-chat-completions\"\nbase_url = \"https://provider.invalid\"\nkey_env = {configured:?}\n"
+            );
+            let error = parse(&text).expect_err("server variables cannot be provider keys");
+            let ConfigError::Parse { message, .. } = error else {
+                panic!("expected a config refusal, got {error:?}");
+            };
+            assert!(message.contains("fixture"), "{message}");
+            assert!(message.contains(name), "{message}");
+            assert!(message.contains("reserved"), "{message}");
+        }
+    }
+    let config = parse(
+        "[provider.fixture]\ndialect = \"openai-chat-completions\"\nbase_url = \"https://provider.invalid\"\nkey_env = \"FIXTURE_API_KEY\"\n",
+    )
+    .expect("ordinary provider key variables remain valid");
+    assert_eq!(config.provider["fixture"].key_env.as_deref(), Some("FIXTURE_API_KEY"));
+}
+
 /// Every one of these is a config that would otherwise have described an
 /// endpoint no session could reach — or, in the first case, one that would
 /// have been written, loaded and then never consulted.
