@@ -10365,6 +10365,17 @@ async fn snapshot_hosted_team_actions() {
 }
 
 #[tokio::test]
+async fn snapshot_hosted_team_actions_narrow() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(40, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
 async fn snapshot_hosted_retirement_confirmation() {
     let mut app = app();
     let mut dialog = hosted_dialog();

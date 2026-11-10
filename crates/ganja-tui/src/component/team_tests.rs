@@ -71,6 +71,28 @@ fn a_cloud_row_offers_message_shutdown_and_the_three_owner_actions() {
 }
 
 #[test]
+fn hosted_actions_explain_shutdown_and_retirement_without_clipping() {
+    let hint = "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
+    for width in [40, 76] {
+        let area = Rect { width, height: 24, ..AREA };
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        let screen = rendered(&dialog, area);
+        let text = screen
+            .lines()
+            .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '│'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains(hint), "hint was clipped at width {width}:\n{screen}");
+        assert!(screen.contains("[Enter] run"), "keyboard hints were clipped:\n{screen}");
+        let hint_row =
+            screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+        assert_eq!(dialog.click(area, 4, hint_row as u16), None);
+        assert!(dialog.is_choosing_action(), "clicking the hint must not submit an action");
+    }
+}
+
+#[test]
 fn message_and_shutdown_on_a_hosted_row_match_a_local_rows_effects() {
     for backend in [MemberBackend::InProcess, MemberBackend::Cloud] {
         let mut dialog = Team::new(vec![row("member", backend, &[])], Vec::new());
@@ -104,7 +126,8 @@ fn local_rows_never_offer_cloud_controls() {
         assert!(
             !screen.contains("inspection")
                 && !screen.contains("Retire")
-                && !screen.contains("revert"),
+                && !screen.contains("revert")
+                && !screen.contains("Shutdown asks"),
             "{screen}"
         );
     }

@@ -2511,7 +2511,8 @@ fn elapsed(started: u64, completed: u64) -> String {
 
 /// Greedily wraps `text` to `width` display columns, preserving blank lines and
 /// chopping words too wide to ever fit.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+/// The team dialog uses it to keep its hosted action hint readable at narrow widths.
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return Vec::new();
     }

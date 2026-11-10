@@ -52,7 +52,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::command::TeamSpawn;
-use crate::component::chat::{RESULT, clip, pad};
+use crate::component::chat::{RESULT, clip, pad, wrap};
 use crate::component::{
     ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
     action_row, body_rows, clamped, first_visible,
@@ -70,6 +70,9 @@ const EMPTY: &str = "no team members";
 
 /// The label of the action that belongs to the team rather than to a row.
 const SPAWN_LABEL: &str = "Spawn teammate\u{2026}";
+
+const HOSTED_ACTION_HINT: &str =
+    "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
 
 /// What a spawn is refused with while another one is still starting.
 ///
@@ -725,9 +728,14 @@ impl Team {
             Step::Members => {
                 return area.centered(Constraint::Length(width), Constraint::Length(available));
             }
-            Step::Actions { member, .. } => {
-                1 + self.row_named(member).map_or(0, |row| Self::actions(row).len())
-            }
+            Step::Actions { member, .. } => self.row_named(member).map_or(1, |row| {
+                1 + Self::actions(row).len()
+                    + if row.backend == MemberBackend::Cloud {
+                        wrap(HOSTED_ACTION_HINT, usize::from(width.saturating_sub(2))).len()
+                    } else {
+                        0
+                    }
+            }),
             Step::Confirm { action, .. } => 3 + action.confirmation().len(),
             Step::Input { .. } => 2,
         };
@@ -1040,6 +1048,13 @@ impl Team {
             } else {
                 line
             });
+        }
+        if row.backend == MemberBackend::Cloud {
+            lines.extend(
+                wrap(HOSTED_ACTION_HINT, width)
+                    .into_iter()
+                    .map(|text| Line::styled(text, theme.dim)),
+            );
         }
 
         lines

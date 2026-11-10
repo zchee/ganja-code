@@ -5,7 +5,6 @@ expression: screen(&terminal)
                                                                                 
                                                                                 
                                                                                 
-                                                                                
   ┌ teammate ────────────────────────────────────────────────────────────────┐  
   │hosted                                                                    │  
   │> Message…                                                                │  
@@ -13,10 +12,11 @@ expression: screen(&terminal)
   │  Resume for inspection                                                   │  
   │  Retire                                                                  │  
   │  Report external revert                                                  │  
+  │Shutdown asks the teammate to finish and exit. Retire deletes its worker  │  
+  │now, without asking.                                                      │  
   │                                                                          │  
   │[j/k] [up/down] move   [Enter] run   [Esc] close                          │  
   └──────────────────────────────────────────────────────────────────────────┘  
-                                                                                
                                                                                 
                                                                                 
                                                                                 
