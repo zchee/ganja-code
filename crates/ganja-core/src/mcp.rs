@@ -516,8 +516,8 @@ impl Servers {
 
         let mut command = tokio::process::Command::new(program);
         command.args(args);
-        // Layered over the environment this process already has, which is
-        // upstream's `{...process.env, ...mcp.environment}` (`index.ts:347`).
+        // Configured entries override inherited values, except the reserved
+        // server names removed below even when explicitly configured.
         command.envs(&local.environment);
         ganja_tool::child_process::isolate(command.as_std_mut());
         if let Some(cwd) = &local.cwd {

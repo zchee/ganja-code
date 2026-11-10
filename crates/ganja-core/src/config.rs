@@ -431,6 +431,8 @@ pub struct McpLocal {
     /// project root.
     pub cwd: Option<String>,
     /// Variables layered over the ones this process already has.
+    /// `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME` and `GANJA_CLOUD_PASSWORD`
+    /// are reserved and removed from the child even when explicitly configured.
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     /// A disabled server is configured and not connected.
@@ -1134,6 +1136,8 @@ pub struct LspEntry {
     #[serde(default)]
     pub disabled: bool,
     /// Variables layered over the ones this process already has.
+    /// `GANJA_SERVER_PASSWORD`, `GANJA_SERVER_USERNAME` and `GANJA_CLOUD_PASSWORD`
+    /// are reserved and removed from the child even when explicitly configured.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// `initializationOptions`, and what a `workspace/configuration` request
