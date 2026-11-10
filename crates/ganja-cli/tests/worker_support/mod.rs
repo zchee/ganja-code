@@ -1,3 +1,5 @@
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -10,6 +12,8 @@ use axum::routing::get;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+const PROVIDER_KEY: &str = "synthetic-worker-provider-key";
 
 #[derive(Clone)]
 struct Files {
@@ -229,8 +233,23 @@ impl WorkerProcess {
         });
         provider.answers_the_next_requests_with([format!("data: {calls}\n\ndata: [DONE]\n\n")]);
         provider.answers_turns_with(format!("data: {finished}\n\ndata: [DONE]\n\n"));
-        // Reuse the synthetic test password so no provider variable must survive
-        // the worker's environment boundary. Only the loopback fixture receives it.
+        // The worker passes no provider key variable across its environment
+        // boundary, so the endpoint reads a distinct key from its isolated store.
+        let data = state.path().join("data/ganja");
+        std::fs::create_dir_all(&data).expect("credential directory");
+        let mut credentials = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(data.join("auth.json"))
+            .expect("credential store");
+        credentials
+            .write_all(
+                serde_json::json!({"worker-fixture": {"type": "api", "key": PROVIDER_KEY}})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .expect("provider credential");
         std::fs::write(
             config.join("ganja.toml"),
             format!(
@@ -238,7 +257,6 @@ impl WorkerProcess {
                  [provider.worker-fixture]\n\
                  dialect = \"openai-chat-completions\"\n\
                  base_url = {:?}\n\
-                 key_env = \"GANJA_SERVER_PASSWORD\"\n\
                  [permission]\n\"*\" = \"allow\"\n",
                 provider.base_url
             ),
@@ -328,6 +346,22 @@ impl WorkerProcess {
         let output =
             std::fs::read_to_string(self._state.path().join("stdout")).expect("stdout log");
         announced_ports(&output).collect()
+    }
+
+    /// Proves the provider received its own key rather than server authentication.
+    pub fn assert_provider_key(&self) {
+        let requests = self._provider.seen();
+        assert!(!requests.is_empty(), "the worker must call the provider");
+        for request in requests {
+            let authorization = request.header("authorization");
+            assert_ne!(authorization.as_deref(), Some("Bearer synthetic-worker-password"));
+            assert_eq!(authorization, Some(format!("Bearer {PROVIDER_KEY}")));
+        }
+    }
+
+    /// Captured server errors with the synthetic server password removed.
+    pub fn stderr(&self) -> String {
+        worker_stderr(self._state.path())
     }
 
     pub fn is_alive(&mut self) -> bool {
