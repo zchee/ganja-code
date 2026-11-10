@@ -59,6 +59,7 @@ cargo run -- run "what does this crate do"  # one headless turn; --format json; 
 cargo run -- run --auto --command team "port the config loader"   # the /team pipeline headless; needs --auto
 cargo run -- run --json-schema <file|json> "…"                    # structured output; chatgpt and openai only
 cargo run -- serve --port 4096              # binds localhost; a non-loopback --hostname requires GANJA_SERVER_PASSWORD
+cargo run -- worker init --port 80          # bootstrap listener; requires server credentials and Git trust paths
 cargo run -- auth login                     # also auth list, auth logout
 cargo run -- sessions                       # stored conversations; --live lists sessions answering on a socket now
 cargo run -- models anthropic --refresh     # the catalog for one provider; `models cursor` reads the wire's roster
@@ -105,7 +106,7 @@ dist build                                  # local archive under target/distrib
 
 ## Gotchas
 
-- `ganja-core` may not depend on `ratatui*` or `axum*`; `ganja-provider` not on `ratatui*`, `crossterm*` or `arboard*`; `ganja-serve` not on `ratatui*` or `ganja-teammate-local`. Something the UI must draw becomes a serde type in `ganja-protocol`.
+- `ganja-core` may not depend on `ratatui*` or `axum*`; `ganja-provider` not on `ratatui*`, `crossterm*` or `arboard*`; `ganja-serve` not on `ratatui*`, `ganja-teammate-local` or `ganja-teammate-cloud`. Something the UI must draw becomes a serde type in `ganja-protocol`.
 - Config is TOML only (`ganja.toml`). A discovered `ganja.jsonc` or `ganja.json` is refused with a pointer to `ganja config migrate`. An unknown key is refused with an error that names it, and `schema/ganja-config.schema.json` must match the loader: `crates/ganja-core/tests/config_schema.rs` is the drift test.
 - `.omc/` is gitignored operational state on the owner's machine (plans, handoffs, the upstream reference checkout). Nothing in the tree may require it; CI checks upstream out to `upstream/`.
 - The judge behind `[evaluate] screen` is a marker, not a defense: experimental and default off, it appends one sentence to a tool result that reads as instructions to an agent and removes nothing. What it sends, what it never screens and how often it misses are D567 in `docs/decisions/ledger.md`; when it turns off, D570.

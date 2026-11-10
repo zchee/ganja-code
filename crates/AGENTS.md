@@ -14,7 +14,7 @@ ganja-cli ──► ganja-tui ──► ganja-teammate-local ──► ganja-cor
     │             └──────────────────────────────────────┤              └──► ganja-protocol                │
     ├──► ganja-serve ──► ganja-core                      ├──► ganja-storage ──► ganja-permission, ganja-protocol
     └──► ganja-client ──► ganja-protocol                 └──► ganja-team ──► ganja-protocol
-ganja-teammate-cloud ──► ganja-client, ganja-core
+ganja-tui ──► ganja-teammate-cloud ──► ganja-client, ganja-core
 tmux            (sealed leaf: no edge in either direction)
 ganja-testkit   (dev-dependency only; no shipped binary links it)
 ```
