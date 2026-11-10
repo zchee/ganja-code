@@ -42,6 +42,7 @@ struct ControlState {
     template_ready: bool,
     deny_policy: bool,
     deny_delete: bool,
+    create_status: Option<tonic::Code>,
     wrong_created_identity: bool,
     wrong_read_identity: bool,
     replace_on_revert: bool,
@@ -50,6 +51,7 @@ struct ControlState {
     held_policy: Option<(Arc<Notify>, Arc<Notify>)>,
     held_create_reply: Option<(Arc<Notify>, Arc<Notify>)>,
     held_get_reply: Option<(Arc<Notify>, Arc<Notify>)>,
+    held_template_reply: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 #[derive(Clone)]
@@ -96,6 +98,7 @@ impl<I: Send + 'static, O: Send + 'static> tonic::server::UnaryService<I> for Un
                 let held = match operation {
                     "create" => state.held_create_reply.clone(),
                     "get" => state.held_get_reply.take(),
+                    "get template" => state.held_template_reply.clone(),
                     _ => None,
                 };
                 (response, lost, held)
@@ -148,6 +151,9 @@ impl Service<http::Request<Body>> for ControlStub {
             }
             "/substrate.ateapi.v1.Control/CreateActor" => {
                 method!(CreateActorRequest, Actor, "create", |state, request| {
+                    if let Some(code) = state.create_status {
+                        return Err(Status::new(code, ERROR_CANARY));
+                    }
                     let mut actor =
                         request.actor.ok_or_else(|| Status::invalid_argument(ERROR_CANARY))?;
                     let metadata = actor.metadata.as_mut().expect("actor metadata");
@@ -398,7 +404,14 @@ impl Tunnel for ControlTunnel {
 }
 
 async fn fixture() -> (KubeFixture, ControlFixture, SubstrateProvisioner) {
+    fixture_with_token_lifetime(3600).await
+}
+
+async fn fixture_with_token_lifetime(
+    seconds: usize,
+) -> (KubeFixture, ControlFixture, SubstrateProvisioner) {
     let kube = KubeFixture::start("v1", 0).await;
+    kube.state.token_ttl.store(seconds, std::sync::atomic::Ordering::SeqCst);
     let identity = AteapiIdentity::new(kube.client.clone()).await.expect("API identity");
     let state = Arc::new(Mutex::new(ControlState { template_ready: true, ..Default::default() }));
     let service = ControlStub(Arc::clone(&state));
@@ -656,6 +669,80 @@ async fn template_readiness_and_policy_failure_prevent_an_unreported_worker() {
     assert_eq!(error.kind, ProvisionErrorKind::Refused);
     assert!(control.state.lock().expect("state lock").actors.is_empty());
     assert!(!format!("{error:?} {error}").contains(ERROR_CANARY));
+}
+
+#[tokio::test]
+async fn definitive_create_refusals_do_not_report_unconfirmed_ownership() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("log capture");
+    for code in [
+        tonic::Code::PermissionDenied,
+        tonic::Code::InvalidArgument,
+        tonic::Code::AlreadyExists,
+        tonic::Code::Unauthenticated,
+        tonic::Code::Unimplemented,
+    ] {
+        let (_kube, control, provisioner) = fixture().await;
+        control.state.lock().expect("state").create_status = Some(code);
+        let error = provisioner.spawn(&spec()).await.expect_err("definitive refusal");
+        assert_eq!(error.kind, ProvisionErrorKind::Refused);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let state = control.state.lock().expect("state");
+        assert_eq!(state.calls, ["get template", "create"]);
+        assert!(state.actors.is_empty());
+        assert!(state.retired.is_empty(), "no cleanup guard for {code:?}");
+        assert!(!capture.logged().contains("spawn cleanup unconfirmed"));
+    }
+    let (_kube, control, provisioner) = fixture().await;
+    control.state.lock().expect("state").lost.insert("create");
+    assert_eq!(
+        provisioner.spawn(&spec()).await.expect_err("lost committed reply").kind,
+        ProvisionErrorKind::Ambiguous
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !capture.logged().contains("spawn cleanup unconfirmed") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ambiguous ownership log");
+    let logs = capture.logged();
+    assert_eq!(logs.matches("spawn cleanup unconfirmed").count(), 1);
+    assert!(logs.contains("Ambiguous"));
+    assert_eq!(control.state.lock().expect("state").actors.len(), 1);
+}
+
+#[tokio::test]
+async fn create_authorization_failure_does_not_arm_cleanup() {
+    let capture = ganja_testkit::LogCapture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt().with_writer(capture.clone()).with_ansi(false).finish(),
+    )
+    .expect("log capture");
+    let (kube, control, provisioner) = fixture_with_token_lifetime(10).await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    control.state.lock().expect("state").held_template_reply =
+        Some((Arc::clone(&entered), Arc::clone(&release)));
+    let spawn = tokio::spawn(async move { provisioner.spawn(&spec()).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .expect("template response held");
+    kube.state.token_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    release.notify_one();
+    let error = spawn.await.expect("spawn task").expect_err("authorization fails before create");
+    assert_eq!(error.operation, "ateapi identity");
+    assert_eq!(error.kind, ProvisionErrorKind::Refused);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let state = control.state.lock().expect("state");
+    assert_eq!(state.calls, ["get template"]);
+    assert!(state.actors.is_empty());
+    assert!(state.retired.is_empty());
+    assert!(!capture.logged().contains("spawn cleanup unconfirmed"));
 }
 
 #[tokio::test]
