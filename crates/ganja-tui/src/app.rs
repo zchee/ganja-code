@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context as _, Result};
 use etcetera::BaseStrategy as _;
 use etcetera::base_strategy::Xdg;
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use ganja_core::{
     Engine,
     EngineError,
@@ -52,14 +52,18 @@ use ganja_protocol::{
     Mention, Message, MessageId, PartBody, PeerMessageId, PeerReceiptStatus, PermissionId,
     PermissionReply, RevertScope, Role, ToolState, Usage,
 };
+use ganja_teammate_cloud::{
+    ControlAction, ControlAdmissionError, ControlOperation, ControlOutcome,
+};
 use ganja_tool::job::Jobs as _;
 use ganja_tool::tasklist::{Status as TaskStatus, Summary};
 use ganja_tool::{Credentials, FileTimes, ToolCtx, registry};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{
-    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::{DefaultTerminal, Terminal};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -619,6 +623,10 @@ pub struct App {
     plugin_dialog: Option<plugin::Plugin>,
     /// The `/teammate` dialog, while it is open (**D504**).
     team_dialog: Option<team::Team>,
+    /// Last drawn transcript bounds, shared by the team dialog's mouse hit test.
+    team_area: Rect,
+    /// Observation handles only; the hosted member owns and drains the operations.
+    cloud_controls: Vec<PendingCloudControl>,
     /// A `/teammate spawn` while it is in flight, carrying the name it started or
     /// the sentence that refused it.
     ///
@@ -1151,6 +1159,8 @@ impl App {
             held_dialog: None,
             plugin_dialog: None,
             team_dialog: None,
+            team_area: Rect::default(),
+            cloud_controls: Vec::new(),
             team_spawn: None,
             spawn_asks,
             spawn_asker,
@@ -2279,6 +2289,7 @@ impl App {
         self.poll_tasks().await;
         self.poll_team_dialog();
         self.poll_team_spawn().await;
+        self.poll_cloud_controls();
         if self.lead_inbox.is_none() {
             return;
         }
@@ -2780,6 +2791,15 @@ impl App {
         self.tasks_polled = None;
         let mut dialog = team::Team::new(team::rows(&view), self.tasks.clone());
         dialog.set_busy(self.team_spawn.is_some());
+        for pending in &self.cloud_controls {
+            if self
+                .engine
+                .teammates()
+                .is_some_and(|team| Arc::ptr_eq(team.registry(), &pending.registry))
+            {
+                dialog.set_control_busy(&pending.member, true);
+            }
+        }
         self.team_dialog = Some(dialog);
     }
 
@@ -3110,6 +3130,86 @@ impl App {
                 self.tell_team(said.await);
             }
             team::Effect::Shutdown(member) => self.ask_shutdown(&member).await,
+            team::Effect::Cloud { member, action } => self.start_cloud_control(member, action),
+        }
+    }
+
+    fn start_cloud_control(&mut self, member: String, action: team::CloudAction) {
+        let Some(registry) = self.engine.teammates().map(|team| Arc::clone(team.registry())) else {
+            self.tell_team(NO_TEAM.to_owned());
+            return;
+        };
+        let Some(control) = ganja_teammate_cloud::control(&registry, &member) else {
+            self.tell_team(format!("{member}: hosted controls are unavailable"));
+            return;
+        };
+        let requested = match action {
+            team::CloudAction::Inspect => ControlAction::ResumeForInspection,
+            team::CloudAction::Retire => ControlAction::Retire,
+            team::CloudAction::ReportRevert => ControlAction::ReportExternalRevert,
+        };
+        match control.admit(requested) {
+            Ok(operation) => {
+                if let Some(dialog) = &mut self.team_dialog {
+                    dialog.set_control_busy(&member, true);
+                }
+                self.status.set_notice(Some(format!("{member}: owner action in progress")));
+                self.cloud_controls.push(PendingCloudControl {
+                    member,
+                    action,
+                    registry,
+                    operation,
+                });
+            }
+            Err(reason) => {
+                let reason = match reason {
+                    ControlAdmissionError::Busy => "an owner action is already running",
+                    ControlAdmissionError::Cancelled => "owner action cancelled",
+                    ControlAdmissionError::Unsupported => "owner action is unavailable",
+                };
+                self.tell_team(format!("{member}: {reason}"));
+            }
+        }
+    }
+
+    fn poll_cloud_controls(&mut self) {
+        let mut completed = Vec::new();
+        self.cloud_controls.retain_mut(|pending| {
+            let Some(outcome) = pending.operation.wait().now_or_never() else {
+                return true;
+            };
+            completed.push((
+                pending.member.clone(),
+                pending.action,
+                Arc::clone(&pending.registry),
+                outcome,
+            ));
+            false
+        });
+        for (member, action, registry, outcome) in completed {
+            if self.engine.teammates().is_some_and(|team| Arc::ptr_eq(team.registry(), &registry))
+                && let Some(dialog) = &mut self.team_dialog
+            {
+                dialog.set_control_busy(&member, false);
+            }
+            let notice = match outcome {
+                ControlOutcome::Completed => match action {
+                    team::CloudAction::Inspect => {
+                        "resumed for inspection; uncertainty is unchanged"
+                    }
+                    team::CloudAction::Retire => "retirement confirmed",
+                    team::CloudAction::ReportRevert => {
+                        "external revert reported; stored history invalidated"
+                    }
+                },
+                ControlOutcome::UnconfirmedDeletion => {
+                    "worker deletion is unconfirmed; owner action needed"
+                }
+                ControlOutcome::Cancelled => "owner action cancelled",
+                ControlOutcome::Unsupported => "owner action is unavailable",
+            };
+            self.status.set_notice(Some(format!("{member}: {notice}")));
+            self.dirty = true;
         }
     }
 
@@ -3769,6 +3869,7 @@ impl App {
                 ])
                 .areas(area);
 
+                self.team_area = transcript;
                 let buffer = frame.buffer_mut();
                 // The theme's surface goes down first and everything is drawn
                 // over it, which is how a theme reaches the cells no component
@@ -3937,6 +4038,27 @@ impl App {
         match event {
             TermEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 self.handle_key(key).await?
+            }
+            TermEvent::Mouse(mouse)
+                if self.team_dialog.is_some()
+                    && self.permission.is_none()
+                    && self.question.is_none() =>
+            {
+                let dialog = self.team_dialog.as_mut().expect("the dialog is open");
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => dialog.move_selection(-1),
+                    MouseEventKind::ScrollDown => dialog.move_selection(1),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if !dialog.contains(self.team_area, mouse.column, mouse.row) {
+                            self.team_dialog = None;
+                        } else if let Some(effect) =
+                            dialog.click(self.team_area, mouse.column, mouse.row)
+                        {
+                            self.run_team_effect(effect).await;
+                        }
+                    }
+                    _ => {}
+                }
             }
             TermEvent::Mouse(mouse) if !self.modal_open() => match mouse.kind {
                 MouseEventKind::ScrollUp => self.chat.scroll_lines(-WHEEL_LINES),
@@ -7923,6 +8045,7 @@ impl App {
             // A spawn in flight is reaped by the tick and by nothing else, and
             // while it runs it may be waiting on a dialog only the tick raises.
             || self.team_spawn.is_some()
+            || !self.cloud_controls.is_empty()
             // The last is the fallback lane: a queued message whose replay
             // lost a race has nothing else to wake the loop and try again.
             // Only while the lane could actually act — a turn in flight is
@@ -8030,6 +8153,14 @@ fn image_token_at(text: &str, offset: usize) -> Option<(usize, usize, u32)> {
     }
 
     None
+}
+
+/// An observation kept independently of the dialog and its current selection.
+struct PendingCloudControl {
+    member: String,
+    action: team::CloudAction,
+    registry: Arc<ganja_core::teammate::TeammateRegistry>,
+    operation: ControlOperation,
 }
 
 /// What one keypress did to a two-step dialog, as [`drive_two_step`] answers

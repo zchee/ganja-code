@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen(&terminal)
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
+  │hosted                                                                    │  
+  │> Resume for inspection                                                   │  
+  │  Retire                                                                  │  
+  │  Report external revert                                                  │  
+  │                                                                          │  
+  │[j/k] [up/down] move   [Enter] run   [Esc] close                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready
