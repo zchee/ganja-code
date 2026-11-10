@@ -18,6 +18,10 @@ struct TestProvisioner {
     endpoint: Endpoint,
     state: Mutex<WorkerState>,
     suspended: std::sync::atomic::AtomicUsize,
+    calls: Mutex<Vec<&'static str>>,
+    holds: Mutex<BTreeMap<&'static str, Arc<Notify>>>,
+    failures: Mutex<BTreeMap<&'static str, &'static str>>,
+    called: Notify,
 }
 
 impl TestProvisioner {
@@ -26,7 +30,29 @@ impl TestProvisioner {
             endpoint,
             state: Mutex::new(WorkerState::Suspended),
             suspended: std::sync::atomic::AtomicUsize::new(0),
+            calls: Mutex::new(Vec::new()),
+            holds: Mutex::new(BTreeMap::new()),
+            failures: Mutex::new(BTreeMap::new()),
+            called: Notify::new(),
         }
+    }
+    async fn before(
+        &self,
+        operation: &'static str,
+    ) -> Result<(), crate::provisioner::ProvisionError> {
+        self.calls.lock().expect("calls").push(operation);
+        self.called.notify_one();
+        let hold = self.holds.lock().expect("holds").remove(operation);
+        if let Some(hold) = hold {
+            hold.notified().await;
+        }
+        if let Some(operation) = self.failures.lock().expect("failures").remove(operation) {
+            return Err(crate::provisioner::ProvisionError {
+                operation,
+                kind: ProvisionErrorKind::Ambiguous,
+            });
+        }
+        Ok(())
     }
     fn current(&self, _worker: &Worker) -> WorkerState {
         self.state.lock().expect("state").clone()
@@ -48,6 +74,7 @@ impl Provisioner for TestProvisioner {
         &self,
         _worker: &Worker,
     ) -> Result<crate::provisioner::Resumed, crate::provisioner::ProvisionError> {
+        self.before("resume").await?;
         let mut state = self.state.lock().expect("state");
         let was_suspended = *state == WorkerState::Suspended;
         *state = WorkerState::Running;
@@ -57,6 +84,7 @@ impl Provisioner for TestProvisioner {
         &self,
         _worker: &Worker,
     ) -> Result<crate::provisioner::SuspendOutcome, crate::provisioner::ProvisionError> {
+        self.before("suspend").await?;
         self.suspended.fetch_add(1, Ordering::SeqCst);
         let mut state = self.state.lock().expect("state");
         let outcome = if *state == WorkerState::Suspended {
@@ -71,9 +99,11 @@ impl Provisioner for TestProvisioner {
         &self,
         worker: &Worker,
     ) -> Result<WorkerState, crate::provisioner::ProvisionError> {
+        self.before("state").await?;
         Ok(self.current(worker))
     }
     async fn kill(&self, _worker: &Worker) -> Result<(), crate::provisioner::ProvisionError> {
+        self.before("kill").await?;
         *self.state.lock().expect("state") = WorkerState::Gone;
         Ok(())
     }
@@ -287,6 +317,241 @@ async fn an_admitted_action_waiting_for_the_lock_is_cancelled_by_shutdown_withou
     assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.member.phase(), Phase::Idle);
     drop(transition);
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_control_action_has_a_finite_ceiling() {
+    for (action, stalled) in [
+        (ControlAction::ResumeForInspection, Some("state")),
+        (ControlAction::ResumeForInspection, Some("resume")),
+        (ControlAction::Retire, Some("kill")),
+        (ControlAction::Retire, Some("state")),
+        (ControlAction::ReportExternalRevert, None),
+    ] {
+        let mut fixture = Fixture::new().await;
+        let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines = Deadlines {
+            launch: Duration::from_millis(100),
+            cleanup: Duration::from_millis(100),
+            ..Deadlines::default()
+        };
+        fixture.member.set_phase(Phase::Suspended);
+        fixture.provisioner.owner_recover(&fixture.worker);
+        if let Some(stalled) = stalled {
+            fixture
+                .provisioner
+                .holds
+                .lock()
+                .expect("holds")
+                .insert(stalled, Arc::new(Notify::new()));
+        }
+        let start = Instant::now();
+        let mut operation =
+            CloudControl(Arc::clone(&fixture.member)).admit(action).expect("admitted");
+        let outcome = operation.wait().await;
+        assert!(start.elapsed() <= Duration::from_millis(100), "{action:?}/{stalled:?}");
+        let expected = match action {
+            ControlAction::ResumeForInspection => ControlOutcome::Unsupported,
+            ControlAction::Retire => ControlOutcome::UnconfirmedDeletion,
+            ControlAction::ReportExternalRevert => ControlOutcome::Completed,
+        };
+        assert_eq!(outcome, expected, "{action:?}/{stalled:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_action_in_transition_finishes_within_its_budget_and_is_joined_by_kill() {
+    let mut fixture = Fixture::new().await;
+    let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+    Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.launch =
+        Duration::from_millis(100);
+    fixture.provisioner.holds.lock().expect("holds").insert("state", Arc::new(Notify::new()));
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::ResumeForInspection)
+        .expect("inspection admitted");
+    fixture.provisioner.called.notified().await;
+    // Consume the fixture's initial resume notification, then observe the lookup.
+    while !fixture.provisioner.calls.lock().expect("calls").contains(&"state") {
+        fixture.provisioner.called.notified().await;
+    }
+    let start = Instant::now();
+    fixture.member.kill().await;
+    assert!(start.elapsed() <= Duration::from_millis(100));
+    assert_eq!(operation.wait().await, ControlOutcome::Unsupported);
+    assert!(fixture.member.control_task.lock().await.is_none());
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+}
+
+#[tokio::test]
+async fn a_cancelled_cleanup_wait_keeps_the_owner_action_for_the_next_cleanup() {
+    let fixture = Fixture::new().await;
+    let release = Arc::new(Notify::new());
+    *fixture.source.hold_release.lock().expect("hold release") = Some(Arc::clone(&release));
+    let control = CloudControl(Arc::clone(&fixture.member));
+    let mut operation =
+        control.admit(ControlAction::ReportExternalRevert).expect("report admitted");
+    fixture.source.hold_started.notified().await;
+    {
+        let cleanup = fixture.member.cleanup();
+        tokio::pin!(cleanup);
+        tokio::select! {
+            biased;
+            () = &mut cleanup => panic!("cleanup must join the held owner action"),
+            () = tokio::task::yield_now() => {}
+        }
+        assert!(matches!(
+            control.admit(ControlAction::Retire),
+            Err(ControlAdmissionError::Busy | ControlAdmissionError::Cancelled)
+        ));
+    }
+    assert!(
+        fixture.member.control_task.try_lock().expect("cleanup released the slot").is_some(),
+        "cancelling cleanup must not remove the owner's task"
+    );
+    let cleanup = fixture.member.cleanup();
+    tokio::pin!(cleanup);
+    tokio::select! {
+        biased;
+        () = &mut cleanup => panic!("the later cleanup must still join the owner action"),
+        () = tokio::task::yield_now() => {}
+    }
+    release.notify_one();
+    cleanup.await;
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+    assert!(fixture.member.control_task.try_lock().expect("cleanup released the slot").is_none());
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+}
+
+#[tokio::test]
+async fn a_reported_revert_never_calls_the_provisioner() {
+    let fixture = Fixture::new().await;
+    fixture.provisioner.calls.lock().expect("calls").clear();
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::ReportExternalRevert)
+        .expect("report admitted");
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+    assert!(fixture.provisioner.calls.lock().expect("calls").is_empty());
+    assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 1);
+    assert!(fixture.member.needs_resync.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn outcomes_never_carry_server_text() {
+    const CANARY: &str = "endpoint-header-token-server-text-canary";
+    for action in [ControlAction::ResumeForInspection, ControlAction::Retire] {
+        let fixture = Fixture::new().await;
+        fixture.provisioner.failures.lock().expect("failures").insert("state", CANARY);
+        let mut operation =
+            CloudControl(Arc::clone(&fixture.member)).admit(action).expect("admitted");
+        let outcome = operation.wait().await;
+        assert_eq!(
+            outcome,
+            if action == ControlAction::Retire {
+                ControlOutcome::UnconfirmedDeletion
+            } else {
+                ControlOutcome::Unsupported
+            }
+        );
+        assert!(!format!("{outcome:?} {operation:?}").contains(CANARY));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_mailbox_contention_is_excluded_from_the_remote_action_ceiling() {
+    let fixture = Fixture::new().await;
+    mailbox::seed(&fixture.member.lent.lead_inbox).expect("seed inbox");
+    let held = ganja_team::lock::acquire(&fixture.member.lent.lead_inbox).expect("hold inbox");
+    fixture.provisioner.failures.lock().expect("failures").insert("state", "lookup");
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::Retire)
+        .expect("retirement admitted");
+    while fixture.member.phase() != Phase::CleanupUnconfirmed {
+        tokio::task::yield_now().await;
+    }
+    tokio::select! {
+        biased;
+        outcome = operation.wait() => panic!("mailbox write must still be pending: {outcome:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    assert!(fixture.member.transition.try_lock().is_err(), "notification ordering remains locked");
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+    drop(held);
+    assert_eq!(operation.wait().await, ControlOutcome::UnconfirmedDeletion);
+    assert_eq!(fixture.member.phase(), Phase::CleanupUnconfirmed);
+}
+
+#[tokio::test]
+async fn a_cancelled_observation_wait_can_be_resumed() {
+    let fixture = Fixture::new().await;
+    let transition = fixture.member.transition.lock().await;
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::ReportExternalRevert)
+        .expect("report admitted");
+    tokio::select! {
+        biased;
+        outcome = operation.wait() => panic!("transition is still locked: {outcome:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    drop(transition);
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_owner_action_includes_the_prior_transition_remote_budget() {
+    for holder in ["launch", "resume", "quiesce"] {
+        let mut fixture = Fixture::new().await;
+        let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines = Deadlines {
+            launch: Duration::from_millis(100),
+            quiesce: Duration::from_millis(100),
+            ..Deadlines::default()
+        };
+        fixture.provisioner.calls.lock().expect("calls").clear();
+        let stalled = if holder == "quiesce" { "suspend" } else { "resume" };
+        fixture.provisioner.holds.lock().expect("holds").insert(stalled, Arc::new(Notify::new()));
+        if holder == "resume" {
+            fixture.member.set_phase(Phase::Suspended);
+            fixture.provisioner.owner_recover(&fixture.worker);
+        }
+        let transition = tokio::spawn({
+            let member = Arc::clone(&fixture.member);
+            async move {
+                match holder {
+                    "launch" => {
+                        let _ = member.launch().await;
+                    }
+                    "resume" => {
+                        let _ = member.resume().await;
+                    }
+                    "quiesce" => member.quiesce().await,
+                    _ => unreachable!(),
+                }
+            }
+        });
+        while !fixture.provisioner.calls.lock().expect("calls").contains(&stalled) {
+            fixture.provisioner.called.notified().await;
+        }
+        let start = Instant::now();
+        let mut operation = CloudControl(Arc::clone(&fixture.member))
+            .admit(ControlAction::ReportExternalRevert)
+            .expect("report admitted behind transition");
+        assert_eq!(operation.wait().await, ControlOutcome::Completed, "{holder}");
+        assert!(start.elapsed() <= Duration::from_millis(100), "{holder}");
+        transition.await.expect("transition joined");
+    }
+}
+
+#[tokio::test]
+async fn a_stopped_worker_can_still_be_retired() {
+    let fixture = Fixture::new().await;
+    fixture.member.alive.store(false, Ordering::SeqCst);
+    fixture.member.set_phase(Phase::Crashed);
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::Retire)
+        .expect("stopped worker still permits deletion");
+    assert_eq!(operation.wait().await, ControlOutcome::Completed);
+    assert_eq!(fixture.member.phase(), Phase::Gone);
 }
 
 #[tokio::test]
