@@ -229,6 +229,106 @@ fn a_mouse_click_on_a_confirmation_dispatches_only_its_selected_action() {
     );
 }
 
+#[test]
+fn empty_viewports_never_have_a_visible_selection() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.move_selection(3);
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    dialog.move_selection(1);
+    assert!(!dialog.selection_visible(Rect::new(0, 0, 80, 5)));
+    assert!(dialog.selection_visible(AREA));
+}
+
+#[test]
+fn input_can_submit_only_when_its_text_row_is_visible() {
+    let mut dialog = Team::new(Vec::new(), Vec::new());
+    dialog.submit();
+    assert!(!dialog.selection_visible(Rect::default()));
+    assert!(!dialog.selection_visible(Rect::new(0, 0, 80, 5)));
+    assert!(dialog.selection_visible(AREA));
+}
+
+fn retirement_dialog() -> Team {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    dialog
+}
+
+#[test]
+fn a_bottom_border_click_cannot_confirm_a_clipped_retirement() {
+    let mut dialog = retirement_dialog();
+    let area = Rect::new(0, 0, 80, 8);
+    assert_eq!(dialog.click(area, 3, 6), None);
+    assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+}
+
+#[test]
+fn every_border_ignores_clicks_without_changing_confirmation() {
+    let dialog = retirement_dialog();
+    let popup = dialog.popup(AREA);
+    for (column, row) in [
+        (popup.x + 1, popup.y),
+        (popup.x + 1, popup.bottom() - 1),
+        (popup.x, popup.y + 1),
+        (popup.right() - 1, popup.y + 1),
+    ] {
+        let mut dialog = dialog.clone();
+        assert_eq!(dialog.click(AREA, column, row), None, "at {column},{row}");
+        assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
+    }
+}
+
+#[test]
+fn hint_blank_and_footer_rows_never_select_an_action() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    let screen = rendered(&dialog, AREA);
+    let hint = screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+    let footer = screen.lines().position(|line| line.contains("[Enter] run")).expect("footer");
+    for row in [hint, footer - 1, footer] {
+        assert_eq!(dialog.click(AREA, 4, row as u16), None);
+        assert!(matches!(dialog.step, super::Step::Actions { option: 0, .. }));
+    }
+}
+
+#[test]
+fn a_short_action_window_follows_selection_and_maps_the_drawn_row() {
+    let area = Rect::new(0, 0, 80, 9);
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    for label in
+        ["Message", "Shutdown", "Resume for inspection", "Retire", "Report external revert"]
+    {
+        let screen = rendered(&dialog, area);
+        assert!(
+            screen.lines().any(|line| line.contains(label) && line.contains(super::MARKER)),
+            "selected {label}:\n{screen}"
+        );
+        dialog.move_selection(1);
+    }
+    let screen = rendered(&dialog, area);
+    let row = screen
+        .lines()
+        .position(|line| line.contains("Report external revert"))
+        .expect("selected row");
+    assert_eq!(dialog.click(area, 4, row as u16), None);
+    assert!(matches!(dialog.step, super::Step::Confirm { action: CloudAction::ReportRevert, .. }));
+}
+
+#[test]
+fn a_short_confirmation_keeps_both_options_and_counts_hidden_text() {
+    let screen = rendered(&retirement_dialog(), Rect::new(0, 0, 80, 8));
+    assert!(screen.contains("Cancel"), "{screen}");
+    assert!(screen.contains("Retire"), "{screen}");
+    assert!(screen.contains("... +2 lines not shown"), "{screen}");
+}
+
 /// Whether a rendered line *is* the Tasks heading, once the dialog's border
 /// and padding are off it.
 fn heading(line: &str) -> bool {

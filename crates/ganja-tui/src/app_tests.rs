@@ -10389,6 +10389,93 @@ async fn snapshot_hosted_retirement_confirmation() {
 }
 
 #[tokio::test]
+async fn snapshot_hosted_team_actions_short() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(4);
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 15);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn snapshot_hosted_retirement_confirmation_short() {
+    let mut app = app();
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    app.team_dialog = Some(dialog);
+    let mut terminal = terminal(80, 14);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+#[tokio::test]
+async fn an_undrawn_affirmative_cannot_execute_after_a_resize() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    dialog.move_selection(1);
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 24);
+    hosted.app.draw(&mut display).expect("a frame draws");
+    display.backend_mut().resize(80, 4);
+    hosted.app.draw(&mut display).expect("the tiny frame draws");
+    assert!(!screen(&display).contains("Retire"), "the choice must be off screen");
+    hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
+    let mut restored = terminal(80, 24);
+    hosted.app.draw(&mut restored).expect("the full frame draws");
+    let screen = screen(&restored);
+    assert!(
+        screen.contains("Delete this hosted worker?"),
+        "confirmation must stay open:\n{screen}"
+    );
+    assert!(hosted.app.cloud_controls.is_empty(), "an invisible option must not dispatch");
+    assert!(
+        !hosted
+            .provisioner
+            .calls()
+            .iter()
+            .any(|(operation, _)| *operation == ProvisionOperation::Kill),
+        "an invisible option must not delete the worker"
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
+async fn a_drawn_affirmative_executes_on_enter() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let mut dialog = hosted_dialog();
+    dialog.submit();
+    dialog.move_selection(3);
+    dialog.submit();
+    dialog.move_selection(1);
+    hosted.app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 24);
+    hosted.app.draw(&mut display).expect("a frame draws");
+    hosted.app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("Enter is handled");
+    hosted.settled().await;
+    assert_eq!(
+        hosted
+            .provisioner
+            .calls()
+            .iter()
+            .filter(|(operation, _)| *operation == ProvisionOperation::Kill)
+            .count(),
+        1,
+        "a visible affirmative deletes the worker exactly once"
+    );
+    hosted.close().await;
+}
+
+#[tokio::test]
 async fn snapshot_hosted_external_revert_confirmation() {
     let mut app = app();
     let mut dialog = hosted_dialog();
@@ -10965,6 +11052,8 @@ async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
     dialog.move_selection(1);
     dialog.submit();
     app.team_dialog = Some(dialog);
+    let mut terminal = terminal(90, 24);
+    app.draw(&mut terminal).expect("the action menu draws");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(
         app.team_dialog.as_ref().is_some_and(component::team::Team::is_typing),
@@ -10974,9 +11063,9 @@ async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
         app.handle(event).await.expect("typing is handled");
     }
 
+    app.draw(&mut terminal).expect("the input row draws");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
 
-    let mut terminal = terminal(90, 24);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
     assert!(screen.contains("nobody on this team answers to that name"), "{screen}");

@@ -1,0 +1,18 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen(&terminal)
+---
+                                                                                
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
+  │... +2 lines not shown                                                    │  
+  │Deletion is final; absence must still be confirmed.                       │  
+  │> Cancel                                                                  │  
+  │  Retire                                                                  │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

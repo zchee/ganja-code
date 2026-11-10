@@ -2855,6 +2855,9 @@ impl App {
         let Some(dialog) = &mut self.team_dialog else {
             return;
         };
+        if key.code == KeyCode::Enter && !dialog.selection_visible(self.team_area) {
+            return;
+        }
         match drive_two_step(dialog, key) {
             Driven::Close => self.team_dialog = None,
             Driven::Run(effect) => self.run_team_effect(effect).await,

@@ -381,6 +381,18 @@ enum Step {
     },
 }
 
+/// A drawn content row and its selection index, including the free-text input row.
+struct VisibleRow {
+    line: Line<'static>,
+    option: Option<usize>,
+}
+
+/// The same viewport is used for drawing, clicking, and keyboard activation.
+struct VisibleLayout {
+    popup: Rect,
+    rows: Vec<VisibleRow>,
+}
+
 /// The team, which row the cursor is on, which step is showing, and what the
 /// last action had to say.
 #[derive(Clone, Debug)]
@@ -621,6 +633,9 @@ impl Team {
     /// means, and answers with the [`Effect`] the app has to run where a
     /// decision was made.
     ///
+    /// UI callers must check [`Self::selection_visible`] first: terminal resizing
+    /// can hide the selected choice without changing the state-machine cursor.
+    ///
     /// A spawn line the grammar refuses does not close the step: the refusal
     /// goes on the notice line and the text stays, because the answer to a
     /// mistyped flag is to fix that word rather than to type the line again.
@@ -764,43 +779,34 @@ impl Team {
 
     /// Selects the clicked visible row and submits it, ignoring borders and hints.
     pub fn click(&mut self, area: Rect, column: u16, row: u16) -> Option<Effect> {
-        let popup = self.popup(area);
-        if !popup.contains((column, row).into())
-            || column == popup.x
-            || column + 1 == popup.right()
-            || row <= popup.y
-        {
+        let layout = self.visible_layout(area, &Theme::default());
+        let inner = layout.popup.inner(ratatui::layout::Margin::new(1, 1));
+        if !inner.contains((column, row).into()) {
             return None;
         }
-        let line = usize::from(row - popup.y - 1);
-        match &self.step {
-            Step::Members => {
-                let rows = body_rows(popup.height, CHROME + usize::from(self.notice.is_some()));
-                if line >= rows {
-                    return None;
-                }
-                let absolute = line + first_visible(self.member_line(self.selected), rows);
-                let index =
-                    (0..self.total_rows()).find(|index| self.member_line(*index) == absolute)?;
-                self.selected = index;
-            }
-            Step::Actions { member, .. } => {
-                let option = line.checked_sub(1)?;
-                if option >= self.row_named(member).map_or(0, |row| Self::actions(row).len()) {
-                    return None;
-                }
-                self.step = Step::Actions { member: member.clone(), option };
-            }
-            Step::Confirm { member, action, .. } => {
-                let option = line.checked_sub(1 + action.confirmation().len())?;
-                if option > 1 {
-                    return None;
-                }
-                self.step = Step::Confirm { member: member.clone(), action: *action, option };
+        let option = layout.rows.get(usize::from(row - inner.y))?.option?;
+        match &mut self.step {
+            Step::Members => self.selected = option,
+            Step::Actions { option: selected, .. } | Step::Confirm { option: selected, .. } => {
+                *selected = option;
             }
             Step::Input { .. } => return None,
         }
         self.submit()
+    }
+
+    /// Whether Enter's selected option fits inside the current viewport.
+    #[must_use]
+    pub fn selection_visible(&self, area: Rect) -> bool {
+        let selected = match &self.step {
+            Step::Members => self.selected,
+            Step::Actions { option, .. } | Step::Confirm { option, .. } => *option,
+            Step::Input { .. } => 0,
+        };
+        self.visible_layout(area, &Theme::default())
+            .rows
+            .iter()
+            .any(|row| row.option == Some(selected))
     }
 
     /// Draws the modal centered over `area`.
@@ -808,72 +814,135 @@ impl Team {
         if area.is_empty() {
             return;
         }
+        let layout = self.visible_layout(area, theme);
+        Clear.render(layout.popup, buffer);
+        Paragraph::new(Text::from(layout.rows.into_iter().map(|row| row.line).collect::<Vec<_>>()))
+            .block(Block::bordered().title(" teammate "))
+            .style(theme.fg.patch(theme.background_panel))
+            .render(layout.popup, buffer);
+    }
 
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
-        let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
-        let inner_width = usize::from(width).saturating_sub(2);
-        // The notice takes a row of the list's budget when it has something to
-        // say.
-        let rows = body_rows(available, CHROME + usize::from(self.notice.is_some()));
-
-        let mut lines = match &self.step {
-            Step::Members => self.member_rows(inner_width, rows, theme),
-            Step::Actions { member, option } => {
-                self.action_rows(inner_width, member, *option, theme)
-            }
+    fn visible_layout(&self, area: Rect, theme: &Theme) -> VisibleLayout {
+        let popup = self.popup(area);
+        let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
+        let width = usize::from(inner.width);
+        let room = usize::from(inner.height);
+        if width == 0 || room == 0 {
+            return VisibleLayout { popup, rows: Vec::new() };
+        }
+        // Explanations may yield to controls; first drop the blank/footer pair,
+        // then the notice. A one-row confirmation shows only Cancel, never an
+        // affirmative without room for both choices.
+        let minimum = if matches!(self.step, Step::Confirm { .. }) { 3 } else { 1 };
+        let footer =
+            usize::from(room >= minimum + CHROME + usize::from(self.notice.is_some())) * CHROME;
+        let notice = usize::from(self.notice.is_some() && room > minimum + footer);
+        let budget = body_rows(popup.height, footer + notice);
+        let lines = match &self.step {
+            Step::Members => self.member_rows(width, theme),
+            Step::Actions { member, option } => self.action_rows(width, member, *option, theme),
             Step::Confirm { member, action, option } => {
-                let mut lines = vec![Line::styled(clip(member, inner_width), theme.fg)];
+                let mut lines = vec![Line::styled(clip(member, width), theme.fg)];
                 lines.extend(
                     action
                         .confirmation()
                         .iter()
-                        .map(|line| Line::styled(clip(line, inner_width), theme.fg)),
+                        .map(|line| Line::styled(clip(line, width), theme.fg)),
                 );
-                lines.push(action_row(0, *option, "Cancel", inner_width, theme));
-                lines.push(action_row(1, *option, action.label(), inner_width, theme));
+                lines.push(action_row(0, *option, "Cancel", width, theme));
+                lines.push(action_row(1, *option, action.label(), width, theme));
                 lines
             }
-            Step::Input { asking, buffer } => Self::input_rows(inner_width, asking, buffer, theme),
+            Step::Input { asking, buffer } => Self::input_rows(width, asking, buffer, theme),
         };
-        if let Some(notice) = &self.notice {
-            let first = notice.lines().next().unwrap_or(notice).trim();
-            lines.push(Line::styled(clip(first, inner_width), theme.dim));
+        let len = lines.len();
+        let selected_line = match &self.step {
+            Step::Members => self.member_line(self.selected),
+            Step::Actions { option, .. } => 1 + option,
+            Step::Confirm { .. } => len.saturating_sub(1),
+            Step::Input { .. } => 0,
+        };
+        let first = first_visible(selected_line, budget);
+        let mut member = 0;
+        let mut member_line = self.member_line(0);
+        let mut rows: Vec<_> = lines
+            .into_iter()
+            .enumerate()
+            .skip(first)
+            .take(budget)
+            .map(|(index, line)| {
+                let option = match &self.step {
+                    Step::Members => {
+                        while member_line < index && member < self.rows.len() {
+                            let recent = self.rows[member].recent.len();
+                            member_line +=
+                                1 + recent.min(RING_LINES) + usize::from(recent > RING_LINES);
+                            member += 1;
+                            member_line += usize::from(member == self.rows.len());
+                        }
+                        (member_line == index).then_some(member)
+                    }
+                    Step::Actions { member, .. } => index.checked_sub(1).filter(|option| {
+                        *option < self.row_named(member).map_or(0, |row| Self::actions(row).len())
+                    }),
+                    Step::Confirm { .. } => index.checked_sub(len - 2),
+                    Step::Input { .. } => (index == 1).then_some(0),
+                };
+                VisibleRow { line, option }
+            })
+            .collect();
+        if matches!(self.step, Step::Confirm { .. }) {
+            if budget < 2 {
+                rows = vec![VisibleRow {
+                    line: action_row(0, 0, "Cancel", width, theme),
+                    option: Some(0),
+                }];
+            } else if first > 0 && budget > 2 {
+                rows[0] = VisibleRow {
+                    line: Line::styled(
+                        clip(&super::permission::overflow_marker(first + 1), width),
+                        theme.dim,
+                    ),
+                    option: None,
+                };
+            }
         }
-        let hints = match &self.step {
-            Step::Members => LIST_HINTS,
-            Step::Actions { .. } | Step::Confirm { .. } => ACTION_HINTS,
-            Step::Input { .. } => INPUT_HINTS,
-        };
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(clip(hints, inner_width), theme.dim));
-
-        let popup = self.popup(area);
-
-        Clear.render(popup, buffer);
-        Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" teammate "))
-            .style(theme.fg.patch(theme.background_panel))
-            .render(popup, buffer);
+        if notice > 0
+            && let Some(text) = &self.notice
+        {
+            let first = text.lines().next().unwrap_or(text).trim();
+            rows.push(VisibleRow {
+                line: Line::styled(clip(first, width), theme.dim),
+                option: None,
+            });
+        }
+        if footer > 0 {
+            let hints = match &self.step {
+                Step::Members => LIST_HINTS,
+                Step::Actions { .. } | Step::Confirm { .. } => ACTION_HINTS,
+                Step::Input { .. } => INPUT_HINTS,
+            };
+            rows.push(VisibleRow { line: Line::raw(""), option: None });
+            rows.push(VisibleRow {
+                line: Line::styled(clip(hints, width), theme.dim),
+                option: None,
+            });
+        }
+        VisibleLayout { popup, rows }
     }
 
     /// The member step: one line per member with its ring hanging under it,
     /// then the Spawn row.
-    fn member_rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
+    fn member_rows(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let name_width = self.rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
         let backend_width =
             self.rows.iter().map(|row| backend_label(row.backend).width()).max().unwrap_or(0);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
-        // Where the cursor's own line ends up once the rings have pushed the
-        // rows apart — what the scroll window has to keep on screen.
-        let mut selected_line = 0;
         if self.rows.is_empty() {
             lines.push(Line::styled(clip(EMPTY, width), theme.dim));
         }
         for (index, row) in self.rows.iter().enumerate() {
-            if index == self.selected {
-                selected_line = lines.len();
-            }
             let head = format!(
                 "{marker}{name}  {backend}  {lead}",
                 marker = if index == self.selected { MARKER } else { "  " },
@@ -890,9 +959,6 @@ impl Team {
         }
         lines.push(Line::raw(""));
         let on_spawn = self.selected == self.rows.len();
-        if on_spawn {
-            selected_line = lines.len();
-        }
         // A spawn in flight dims the row that would race it, so the refusal on
         // the notice line is not the first a person hears of it.
         let style = if self.busy {
@@ -911,10 +977,7 @@ impl Team {
         ));
 
         lines.extend(self.task_lines(width, theme));
-
-        let first = first_visible(selected_line, rows);
-
-        lines.into_iter().skip(first).take(rows).collect()
+        lines
     }
 
     /// The Tasks section: the team's shared list under the roster, one line
