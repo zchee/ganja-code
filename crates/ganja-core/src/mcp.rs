@@ -519,6 +519,7 @@ impl Servers {
         // Layered over the environment this process already has, which is
         // upstream's `{...process.env, ...mcp.environment}` (`index.ts:347`).
         command.envs(&local.environment);
+        ganja_tool::child_process::isolate(command.as_std_mut());
         if let Some(cwd) = &local.cwd {
             command.current_dir(self.root.join(cwd));
         }

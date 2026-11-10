@@ -57,3 +57,39 @@ async fn hook_children_do_not_receive_server_credentials() {
     assert!(outcome.notices.is_empty(), "{:?}", outcome.notices);
     assert_eq!(outcome.context, ["|||retained"]);
 }
+
+#[tokio::test]
+async fn mcp_children_do_not_receive_server_credentials() {
+    if !isolated("mcp_children_do_not_receive_server_credentials") {
+        return;
+    }
+    let root = tempfile::tempdir().expect("MCP root");
+    let observed = root.path().join("environment");
+    let servers = ganja_core::McpServers::new(
+        BTreeMap::from([(
+            "environment-probe".to_owned(),
+            ganja_core::config::McpServer::Local(ganja_core::config::McpLocal {
+                command: vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    format!("{PROBE} > \"$1\""),
+                    "probe".to_owned(),
+                    observed.to_str().expect("fixture path").to_owned(),
+                ],
+                cwd: None,
+                environment: BTreeMap::from([
+                    ("GANJA_SERVER_PASSWORD".to_owned(), "configured-password".to_owned()),
+                    ("GANJA_SERVER_USERNAME".to_owned(), "configured-username".to_owned()),
+                    ("GANJA_CLOUD_PASSWORD".to_owned(), "configured-cloud-password".to_owned()),
+                ]),
+                enabled: true,
+                timeout: None,
+                output_limit: None,
+            }),
+        )]),
+        root.path(),
+    );
+    servers.connect_all().await;
+    servers.shutdown().await;
+    assert_eq!(std::fs::read_to_string(observed).expect("MCP child ran"), "|||retained");
+}
