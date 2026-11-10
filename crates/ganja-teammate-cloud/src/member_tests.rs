@@ -249,6 +249,47 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn dropping_the_handle_does_not_cancel_an_admitted_retirement() {
+    let fixture = Fixture::new().await;
+    let release = Arc::new(Notify::new());
+    *fixture.source.hold_release.lock().expect("hold release") = Some(Arc::clone(&release));
+    let operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::Retire)
+        .expect("retirement admitted");
+    fixture.source.hold_started.notified().await;
+    drop(operation);
+    release.notify_one();
+    fixture.member.kill().await;
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+}
+
+#[tokio::test]
+async fn a_second_admission_is_refused_while_one_is_in_flight() {
+    let fixture = Fixture::new().await;
+    let transition = fixture.member.transition.lock().await;
+    let control = CloudControl(Arc::clone(&fixture.member));
+    let mut first = control.admit(ControlAction::ReportExternalRevert).expect("first admission");
+    assert_eq!(control.admit(ControlAction::Retire).unwrap_err(), ControlAdmissionError::Busy);
+    drop(transition);
+    assert_eq!(first.wait().await, ControlOutcome::Completed);
+}
+
+#[tokio::test]
+async fn an_admitted_action_waiting_for_the_lock_is_cancelled_by_shutdown_without_side_effects() {
+    let fixture = Fixture::new().await;
+    let transition = fixture.member.transition.lock().await;
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::ReportExternalRevert)
+        .expect("report admitted");
+    fixture.member.lent.cancel.cancel();
+    assert_eq!(operation.wait().await, ControlOutcome::Cancelled);
+    assert_eq!(fixture.source.invalidations.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.member.phase(), Phase::Idle);
+    drop(transition);
+}
+
+#[tokio::test]
 async fn a_retained_member_does_not_keep_its_dead_registry_control() {
     let mut fixture = Fixture::new().await;
     let registry = Arc::new(teammate::TeammateRegistry::new(
