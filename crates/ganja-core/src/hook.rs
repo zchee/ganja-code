@@ -656,6 +656,7 @@ enum Ran {
 /// somebody whose hook printed a lot.
 async fn run(shell: &Path, cwd: &Path, handler: &Handler, text: &str) -> Ran {
     let mut spawner = Command::new(shell);
+    ganja_tool::child_process::isolate(spawner.as_std_mut());
     spawner
         .arg("-c")
         .arg(&handler.command)
