@@ -442,8 +442,16 @@ pub(super) async fn split_idle_shell(
 /// to hold anyway: this used to re-read `$TMUX` at kill time, which asked a
 /// question the spawn had already answered and left an arm for an answer
 /// ("this lead is no longer in tmux") that no path in this build produces.
-pub(super) async fn kill_pane(server: &Server, pane: &Pane, whose: &'static str) {
-    match server.kill(pane).await {
+pub(super) async fn kill_pane(
+    server: &Server,
+    pane: &Pane,
+    whose: &'static str,
+    name: &str,
+) -> bool {
+    let Some(result) = crate::teardown::wait(name, "kill pane", server.kill(pane)).await else {
+        return false;
+    };
+    match result {
         Ok(Killed::Yes) => tracing::info!(pane = pane.id, "a {whose}'s pane was ended"),
         Ok(Killed::AlreadyGone) => {
             tracing::debug!(pane = pane.id, "a {whose}'s pane was already gone");
@@ -453,8 +461,12 @@ pub(super) async fn kill_pane(server: &Server, pane: &Pane, whose: &'static str)
             birth = pane.birth,
             "a {whose}'s pane id now names somebody else's pane; left alone"
         ),
-        Err(error) => tracing::warn!(pane = pane.id, %error, "a pane could not be ended"),
+        Err(error) => {
+            tracing::warn!(teammate = name, pane = pane.id, %error, "a pane could not be ended");
+            return false;
+        }
     }
+    true
 }
 
 /// The `ganja`-pane backend.
@@ -672,6 +684,8 @@ pub struct PaneMember {
     /// microseconds is reading a two-second poll's answer, where the lag is
     /// smaller than the question's own resolution.
     alive: AtomicBool,
+    /// Prevent concurrent kills; an unconfirmed attempt clears this for a later retry.
+    ending: AtomicBool,
 }
 
 impl PaneMember {
@@ -694,6 +708,7 @@ impl PaneMember {
             exits: lent.exits.clone(),
             cancel: lent.cancel.child_token(),
             alive: AtomicBool::new(true),
+            ending: AtomicBool::new(false),
         }
     }
 
@@ -855,9 +870,18 @@ impl Spawned for PaneMember {
     /// answers (`watch`): a listing that returns `Dead` about
     /// this kill's own pane necessarily started before the pane was ended and
     /// therefore after the cancel, which the re-read then finds.
+    /// At most one bounded operation (the identity-checked tmux kill), for a
+    /// ceiling of five seconds. Failure leaves removal unconfirmed and a later
+    /// call retries; confirmed removal or a recycled identity needs no retry.
     async fn kill(&self) {
         self.cancel.cancel();
-        kill_pane(&self.server, &self.pane, self.whose).await;
+        self.alive.store(false, Ordering::Relaxed);
+        if self.ending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if !kill_pane(&self.server, &self.pane, self.whose, &self.name).await {
+            self.ending.store(false, Ordering::Release);
+        }
     }
 }
 

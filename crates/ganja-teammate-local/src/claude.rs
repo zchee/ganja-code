@@ -499,26 +499,68 @@ impl Spawned for ClaudeMember {
         self.pane.recent()
     }
 
+    /// At most three bounded operations: pane cleanup, the inbox-state lock,
+    /// and the seed cleanup join, each using the five-second grace interval.
+    /// The ceiling is fifteen seconds. A late seed cleanup keeps only its
+    /// write task, inbox location, and member name, never the member or registry.
+    /// If the process exits first, a later launch preserves that inbox and
+    /// appends its new prompt; it does not recover this orphaned entry.
     async fn kill(&self) {
         self.pane.kill().await;
-        let mut inbox = self.inbox.lock().await;
-        let seeded = match std::mem::take(&mut *inbox) {
-            LaunchInbox::Empty => None,
-            LaunchInbox::Seeded { path, identity } => Some((path, identity)),
-            LaunchInbox::Writing { path, task } => match task.await {
-                Ok(Ok(identity)) => Some((path, identity)),
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "the cancelled teammate's inbox write failed");
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "the cancelled teammate's inbox write task failed");
-                    None
-                }
-            },
+        let name = self.spec.name.as_str();
+        let Some(mut inbox) =
+            crate::teardown::wait(name, "lock inbox state", self.inbox.lock()).await
+        else {
+            return;
         };
-        if let Some((path, identity)) = seeded {
-            ganja_core::teammate::unseed_inbox(path, Some(identity), self.spec.name.as_str()).await;
+        let pending = std::mem::take(&mut *inbox);
+        drop(inbox);
+        if matches!(pending, LaunchInbox::Empty) {
+            return;
+        }
+        let name = name.to_owned();
+        // Taking the state before spawning gives each member at most one
+        // cleanup task. Dropping a timed-out join detaches, rather than aborts,
+        // the task: a started blocking write must retain its exact identity.
+        let mut cleanup = tokio::spawn(async move {
+            let (path, identity) = match pending {
+                LaunchInbox::Empty => return,
+                LaunchInbox::Seeded { path, identity } => (path, identity),
+                LaunchInbox::Writing { path, task } => match task.await {
+                    Ok(Ok(identity)) => (path, identity),
+                    Ok(Err(error)) => {
+                        tracing::warn!(teammate = name, %error, "the cancelled teammate's inbox write failed");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(teammate = name, %error, "the cancelled teammate's inbox write task failed");
+                        return;
+                    }
+                },
+            };
+            let result = crate::teardown::wait(
+                &name,
+                "remove unused prompt",
+                ganja_core::teammate::blocking_io(move || {
+                    mailbox::prune_delivered(&path, &[identity])
+                }),
+            )
+            .await;
+            match result {
+                Some(Ok(_)) => tracing::info!(
+                    teammate = name,
+                    "the cancelled teammate's seed cleanup finished"
+                ),
+                Some(Err(error)) => {
+                    tracing::warn!(teammate = name, %error, "the cancelled teammate's seed cleanup failed")
+                }
+                None => {}
+            }
+        });
+        if let Some(Err(error)) =
+            crate::teardown::wait(self.spec.name.as_str(), "join seed cleanup", &mut cleanup).await
+        {
+            tracing::warn!(teammate = self.spec.name.as_str(), %error, "the cancelled teammate's seed cleanup task failed");
         }
     }
 }

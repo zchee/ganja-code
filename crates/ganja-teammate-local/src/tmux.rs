@@ -362,6 +362,8 @@ pub struct Server {
     socket: PathBuf,
     /// The pane this process runs in, when tmux said: what a split splits.
     pane: Option<String>,
+    #[cfg(test)]
+    binary: Option<PathBuf>,
 }
 
 impl Server {
@@ -388,7 +390,12 @@ impl Server {
         }
         let pane = std::env::var(TMUX_PANE).ok().filter(|value| !value.is_empty());
 
-        Ok(Self { socket, pane })
+        Ok(Self {
+            socket,
+            pane,
+            #[cfg(test)]
+            binary: None,
+        })
     }
 
     /// A server named by its socket, and optionally the pane to split from.
@@ -397,7 +404,18 @@ impl Server {
     /// goes through [`Server::current`].
     #[must_use]
     pub fn at(socket: impl Into<PathBuf>, pane: Option<String>) -> Self {
-        Self { socket: socket.into(), pane }
+        Self {
+            socket: socket.into(),
+            pane,
+            #[cfg(test)]
+            binary: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_binary(mut self, binary: PathBuf) -> Self {
+        self.binary = Some(binary);
+        self
     }
 
     /// The socket every call goes to.
@@ -1059,7 +1077,11 @@ impl Server {
     /// the socket, and stdin is closed because no call here is interactive —
     /// [`feed`] reopens it for the one call that hands tmux text.
     fn command(&self) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(BINARY);
+        #[cfg(test)]
+        let binary = self.binary.as_deref().unwrap_or_else(|| Path::new(BINARY));
+        #[cfg(not(test))]
+        let binary = BINARY;
+        let mut command = tokio::process::Command::new(binary);
         command
             .arg("-S")
             .arg(&self.socket)
