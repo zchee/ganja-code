@@ -7,6 +7,7 @@
 pub mod app;
 pub mod binder;
 pub mod clipboard;
+mod cloud_assembly;
 pub mod command;
 pub mod component;
 pub mod escrepair;
@@ -33,7 +34,6 @@ use ganja_core::teammate::TeammateRegistry;
 use ganja_core::{AgentRegistry, Engine, SessionId, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 use ganja_protocol::Message;
-use ganja_teammate_local::pane::{PaneShare, PaneShell};
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -468,6 +468,37 @@ pub async fn run(
     // registry rather than a flag an installer set. This crate's own
     // `docs/decisions/ganja-tui.md` states D542 in full and what D543 did next, carrying the
     // literal spellings this comment deliberately leaves to it.
+    let mut startup_interrupt: Option<cloud_assembly::Interrupt> = (config.cloud.is_some()
+        && membership.is_none())
+    .then(|| Box::pin(tokio::signal::ctrl_c()) as cloud_assembly::Interrupt);
+    // Poll once to register SIGINT before any hosted setup can begin.
+    cloud_assembly::during_startup(&mut startup_interrupt, std::future::ready(())).await?;
+    let backends = cloud_assembly::during_startup(
+        &mut startup_interrupt,
+        cloud_assembly::backends(
+            &config,
+            membership.is_some(),
+            ganja_core::config::config_home,
+            cloud_assembly::CLOUD_CONNECT_BUDGET,
+            |cloud, home| async move {
+                use std::io::Write as _;
+
+                let _ = writeln!(std::io::stderr(), "Connecting to the cloud provisioner...");
+                let provisioner =
+                    ganja_teammate_cloud::provisioner::substrate::SubstrateProvisioner::connect(
+                        &home,
+                        &cloud.username,
+                    )
+                    .await
+                    .inspect_err(|error| {
+                        tracing::error!(%error, "cloud provisioner connection failed");
+                    })?;
+                Ok(Arc::new(ganja_teammate_cloud::CloudBackend::new(cloud, Arc::new(provisioner)))
+                    as Arc<dyn ganja_core::teammate::TeammateBackend>)
+            },
+        ),
+    )
+    .await??;
     let home = ganja_core::config::config_home()
         .context("failed to locate the config home this session's team is kept in")?;
     let (engine, teammates, socket) = match &membership {
@@ -504,17 +535,6 @@ pub async fn run(
         None => {
             let id = engine.session_id();
             let registry = Arc::new(TeammateRegistry::for_session(&home, id.as_str(), &cwd));
-            // Resolved **once**, here, and handed to the backends that read
-            // them rather than to the registry (**D538**, keeping **D520**'s
-            // intent): the idle shell a pane is split into and how wide the
-            // teammates' column opens are properties of this *runtime*, and
-            // a backend must name no config type — so they cross as
-            // `ganja-core`'s own value types.
-            let shell =
-                config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
-            let share =
-                config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
-            let backends = ganja_teammate_local::backends(shell, share);
             // **D506**: panes a previous lead of this team left running,
             // before this one spawns anything of its own. Best-effort by
             // construction — it returns a `Swept` and never an error, and a
@@ -527,7 +547,11 @@ pub async fn run(
             // (AC-12), which drives `reaper::sweep_on` against a private tmux
             // server: `run` opens a real terminal, so there is no headless
             // seam in this file to assert the call from.
-            let swept = ganja_teammate_local::reaper::sweep(&registry).await;
+            let swept = cloud_assembly::during_startup(
+                &mut startup_interrupt,
+                ganja_teammate_local::reaper::sweep(&registry),
+            )
+            .await?;
             if !swept.is_empty() {
                 tracing::info!(?swept, "a previous lead's panes were swept at startup");
             }
@@ -540,11 +564,14 @@ pub async fn run(
             // asserted so at the function level by
             // `ganja-teammate-local/tests/teammate_shim_sweep.rs`; the call itself
             // has the same no-headless-seam gap the pane sweep's does.
-            let orphans = ganja_teammate_local::reaper::sweep_shims(
-                &registry,
-                ganja_teammate_local::shim::default_directory(),
+            let orphans = cloud_assembly::during_startup(
+                &mut startup_interrupt,
+                ganja_teammate_local::reaper::sweep_shims(
+                    &registry,
+                    ganja_teammate_local::shim::default_directory(),
+                ),
             )
-            .await;
+            .await?;
             if !orphans.is_empty() {
                 tracing::info!(
                     ?orphans,
@@ -622,7 +649,11 @@ pub async fn run(
     // every launch (2026-08-15; the CLI paths were never wrong, because
     // `assemble` loads the cache before either seeds). The frame this
     // announces into is still the first one the app draws.
-    engine.seed_effort(config.effort.clone()).await;
+    cloud_assembly::during_startup(
+        &mut startup_interrupt,
+        engine.seed_effort(config.effort.clone()),
+    )
+    .await?;
 
     // Spilled tool output older than a week is nobody's context any more, and
     // nothing else on this machine ever deletes it.
@@ -630,11 +661,16 @@ pub async fn run(
 
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_input() {
-        Ok(()) => {
+        Ok(()) => 'running: {
             // After `capture_input` and before the first `EventStream` poll,
             // per the probe's own ordering constraint.
             let kitty = capture_keys();
-            let focused = initial_focus().await;
+            let focused =
+                match cloud_assembly::during_startup(&mut startup_interrupt, initial_focus()).await
+                {
+                    Ok(focused) => focused,
+                    Err(error) => break 'running Err(error),
+                };
             // The model is the engine's to answer for, not the selection's:
             // the default agent may have named one of its own, and a resumed
             // session restores the one it was left on.
@@ -658,6 +694,7 @@ pub async fn run(
             // there is routine: what it says goes beside the disclosure,
             // never in its place.
             .with_disclosure(judge_notice)
+            .with_startup_interrupt(startup_interrupt)
             .with_provider(provider_id)
             .with_keybinds(keys)
             // Inline image previews, only where the environment says a kitty
