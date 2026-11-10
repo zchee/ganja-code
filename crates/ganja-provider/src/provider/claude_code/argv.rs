@@ -529,7 +529,7 @@ pub struct ChildEnv {
 
 impl ChildEnv {
     /// Puts this posture on `command`: [`STRIP`] removed by name, then
-    /// [`SET`] set, then the cwd.
+    /// [`SET`] set, server credentials removed, then the cwd.
     ///
     /// Never `env_clear` — the child is meant to be the user's own `claude`,
     /// which needs its `PATH`, its `HOME` and its `CLAUDE_CONFIG_DIR` — and
@@ -541,6 +541,7 @@ impl ChildEnv {
         for (name, value) in SET {
             command.env(name, value);
         }
+        ganja_tool::child_process::isolate(command.as_std_mut());
 
         command.current_dir(&self.cwd);
     }
