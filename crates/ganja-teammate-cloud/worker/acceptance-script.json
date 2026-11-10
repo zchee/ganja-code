@@ -1,0 +1,24 @@
+{
+  "cadence_ms": 20,
+  "turns": [
+    {
+      "text": "I will record the hosted worker check and push the member branch.",
+      "tool_calls": [
+        {
+          "name": "bash",
+          "args": {
+            "command": "printf '\\nHosted worker acceptance completed.\\n' >> NOTES.md && git add -- NOTES.md && git -c commit.gpgsign=false commit -m 'docs: record hosted worker acceptance' && git push --set-upstream origin HEAD",
+            "workdir": "/work",
+            "timeout": 120000
+          }
+        }
+      ]
+    },
+    {
+      "text": "The commit and push command finished. Check its tool result for success."
+    },
+    {
+      "text": "I received the second message after the worker resumed."
+    }
+  ]
+}
