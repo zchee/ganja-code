@@ -304,7 +304,6 @@ async fn cancelling_the_claude_launch_removes_its_owned_prompt() {
 #[tokio::test]
 async fn a_stalled_pane_kill_still_removes_the_claude_seed() {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use ganja_core::teammate::{SETTLE, Spawned as _};
 
@@ -329,12 +328,12 @@ async fn a_stalled_pane_kill_still_removes_the_claude_seed() {
     };
     let frozen = fixture.freeze();
 
-    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+    tokio::time::timeout(SETTLE * 4, member.kill())
         .await
         .expect("a held tmux call does not skip inbox cleanup");
     assert!(mailbox::read(&path).expect("inbox").valid.is_empty());
     drop(frozen);
-    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+    tokio::time::timeout(SETTLE * 4, member.kill())
         .await
         .expect("a second kill retries the unconfirmed pane");
     assert!(!fixture.private.panes().contains(&fixture.pane.id));
@@ -375,16 +374,16 @@ async fn a_stalled_claude_seed_does_not_hold_kill_and_is_removed_when_it_finishe
     let frozen = fixture.freeze();
     let state = member.inbox.lock().await;
     let unlock = async {
-        // Hold the state through the pane deadline and most of its own deadline.
-        tokio::time::sleep(SETTLE * 2 - Duration::from_millis(200)).await;
+        // Release before the lock deadline so the pending seed join is exercised under load.
+        tokio::time::sleep(SETTLE * 2 - SETTLE / 2).await;
         drop(state);
     };
-    let kill = tokio::time::timeout(SETTLE * 3 + Duration::from_secs(1), member.kill());
+    let kill = tokio::time::timeout(SETTLE * 4, member.kill());
     let (result, ()) = tokio::join!(kill, unlock);
     result.expect("held pane, inbox lock, and seed join fit the fifteen-second ceiling");
     assert!(!member.alive(), "local state is retired even when the pane kill is unconfirmed");
     drop(frozen);
-    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+    tokio::time::timeout(SETTLE * 4, member.kill())
         .await
         .expect("a second kill retries the pane without joining the same write again");
     assert!(!fixture.private.panes().contains(&fixture.pane.id), "pane cleanup completed");

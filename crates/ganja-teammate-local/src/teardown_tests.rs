@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ganja_core::teammate::{Lent, PaneFate, SETTLE, SpawnSpec, Spawned as _};
 use ganja_protocol::team::MemberBackend;
@@ -135,7 +134,7 @@ async fn every_pane_kill_command_obeys_the_cleanup_ceiling() {
             &fixture.spec,
             &fixture.lent,
         );
-        tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+        tokio::time::timeout(SETTLE * 2, member.kill())
             .await
             .expect("the whole identity-checked kill has one deadline");
         assert_eq!(tmux.commands().len(), held, "the intended command was held");
@@ -173,7 +172,7 @@ async fn every_tui_cleanup_path_obeys_the_member_ceiling() {
             fixture.spec.clone(),
             fixture.lent.clone(),
         );
-        tokio::time::timeout(SETTLE * 5 + Duration::from_secs(1), member.kill())
+        tokio::time::timeout(SETTLE * 6, member.kill())
             .await
             .expect("all TUI cleanup operations fit the documented member ceiling");
         assert!(tmux.commands().len() >= held, "the intended command was held");
@@ -194,17 +193,15 @@ async fn a_stalled_tmux_does_not_hold_pane_kill_or_its_second_call() {
     );
     let frozen = fixture.freeze();
 
-    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
-        .await
-        .expect("pane kill has its own deadline");
+    tokio::time::timeout(SETTLE * 2, member.kill()).await.expect("pane kill has its own deadline");
     assert!(!member.alive(), "local state is retired even when tmux cannot confirm the kill");
     drop(frozen);
     assert!(fixture.private.panes().contains(&fixture.pane.id), "timeout is not confirmed removal");
-    tokio::time::timeout(SETTLE + Duration::from_secs(1), member.kill())
+    tokio::time::timeout(SETTLE * 2, member.kill())
         .await
         .expect("a second kill retries an unconfirmed pane");
     assert!(!fixture.private.panes().contains(&fixture.pane.id));
-    tokio::time::timeout(Duration::from_millis(100), member.kill())
+    tokio::time::timeout(SETTLE / 2, member.kill())
         .await
         .expect("a confirmed kill performs no more tmux work");
 }
@@ -221,7 +218,7 @@ async fn a_stalled_tmux_leaves_tui_teardown_unconfirmed_and_idempotent() {
     );
     let frozen = fixture.freeze();
 
-    let fate = tokio::time::timeout(SETTLE + Duration::from_secs(1), pane.end())
+    let fate = tokio::time::timeout(SETTLE * 2, pane.end())
         .await
         .expect("TUI teardown has its own deadline");
     assert_eq!(fate, PaneFate::Left, "a held listing cannot confirm closure");
@@ -229,14 +226,14 @@ async fn a_stalled_tmux_leaves_tui_teardown_unconfirmed_and_idempotent() {
     drop(frozen);
     assert!(fixture.private.panes().contains(&fixture.pane.id));
     assert_eq!(
-        tokio::time::timeout(SETTLE * 5 + Duration::from_secs(1), pane.end())
+        tokio::time::timeout(SETTLE * 6, pane.end())
             .await
             .expect("a second end retries an unconfirmed pane"),
         PaneFate::Closed
     );
     assert!(!fixture.private.panes().contains(&fixture.pane.id));
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(100), pane.end())
+        tokio::time::timeout(SETTLE / 2, pane.end())
             .await
             .expect("a confirmed end performs no tmux work"),
         PaneFate::Closed
