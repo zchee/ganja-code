@@ -97,9 +97,17 @@ async fn a_saved_completed_envelope_can_precede_its_finish_at_the_fresh_head() {
     );
     let text: String = completed.parts.iter().filter_map(|part| part.as_text()).collect();
     assert_eq!(text, "x".repeat(ganja_core::engine::EVENT_CAPACITY + 32));
+    let heartbeat = fresh.next().await;
+    assert_eq!(heartbeat.event, "heartbeat");
+    fresh.pending.push_front(heartbeat);
     drop(blocked);
-    let finish = fresh.next().await;
+    let finish = fresh.next_non_heartbeat().await;
     assert_eq!(finish.event, "message");
+    assert_eq!(
+        finish.id.rsplit_once('-').expect("cursor").1.parse::<usize>().expect("sequence"),
+        head + 1,
+        "finish immediately follows the connected head"
+    );
     assert!(
         matches!(serde_json::from_str::<Event>(&finish.data).expect("finish JSON"), Event::MessageFinished { message_id, .. } if message_id == completed.id)
     );
@@ -232,18 +240,36 @@ impl Frames {
         .expect("frame before deadline")
     }
 
-    async fn finish(&mut self) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        loop {
-            let frame = self.next().await;
-            let finished = frame.event == "message"
-                && serde_json::from_str::<serde_json::Value>(&frame.data).expect("event JSON")["type"]
-                    == "message_finished";
-            frames.push(frame);
-            if finished {
-                return frames;
+    async fn next_non_heartbeat(&mut self) -> Frame {
+        tokio::time::timeout(DEADLINE, async {
+            loop {
+                let frame = self.next().await;
+                if frame.event != "heartbeat" {
+                    return frame;
+                }
             }
-        }
+        })
+        .await
+        .expect("non-heartbeat frame before deadline")
+    }
+
+    async fn finish(&mut self) -> Vec<Frame> {
+        tokio::time::timeout(DEADLINE, async {
+            let mut frames = Vec::new();
+            loop {
+                let frame = self.next().await;
+                let finished = frame.event == "message"
+                    && serde_json::from_str::<serde_json::Value>(&frame.data).expect("event JSON")
+                        ["type"]
+                        == "message_finished";
+                frames.push(frame);
+                if finished {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("finish before deadline")
     }
 }
 
@@ -375,15 +401,19 @@ async fn a_permission_before_the_fresh_head_is_visible_after_registration() {
         })
         .await
         .expect("prompt");
-    loop {
-        let frame = events.next().await;
-        if frame.event == "message"
-            && serde_json::from_str::<serde_json::Value>(&frame.data).expect("JSON")["type"]
-                == "permission_requested"
-        {
-            break;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let frame = events.next().await;
+            if frame.event == "message"
+                && serde_json::from_str::<serde_json::Value>(&frame.data).expect("JSON")["type"]
+                    == "permission_requested"
+            {
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("permission request before deadline");
     let mut fresh = Frames::connect(&handle, None).await;
     fresh.next().await;
     let pending: serde_json::Value = reqwest::get(format!("{}/permission", base_url(&handle)))
