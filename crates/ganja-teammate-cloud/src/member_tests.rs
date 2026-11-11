@@ -25,6 +25,12 @@ fn hold_inbox(
     (release, thread)
 }
 
+fn cleanup_budget(member: &CloudMember) -> Duration {
+    member.runtime.deadlines.cleanup
+        + delivery::FINAL_OBSERVATION
+        + delivery::TEST_SCHEDULER_ALLOWANCE
+}
+
 async fn wait_local_call(member: &CloudMember, kind: &str) {
     timeout(Duration::from_secs(2), async {
         while !member.delivery.running(kind) {
@@ -131,8 +137,10 @@ async fn repeated_retirements_bound_payloads_without_retaining_members() {
     let mut homes = Vec::new();
     for index in 0..12 {
         let mut fixture = Fixture::new().await;
-        Arc::get_mut(&mut fixture.member).expect("unique member").spec.name =
-            MemberName::parse(&format!("retiring-{index}")).expect("unique name");
+        let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+        member.spec.name = MemberName::parse(&format!("retiring-{index}")).expect("unique name");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+            Duration::from_millis(100);
         mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead inbox");
         if index < 4 {
             holders.push(hold_inbox(fixture.member.lent.lead_inbox.clone()));
@@ -142,9 +150,13 @@ async fn repeated_retirements_bound_payloads_without_retaining_members() {
             wait_local_call(&fixture.member, "write").await;
         }
         let weak = Arc::downgrade(&fixture.member);
-        timeout(Duration::from_secs(2), fixture.member.cleanup())
-            .await
-            .expect("retirement is bounded despite occupied workers");
+        if timeout(cleanup_budget(&fixture.member), fixture.member.cleanup()).await.is_err() {
+            for (release, holder) in holders {
+                release.send(()).expect("release inbox after cleanup timeout");
+                holder.join().expect("holder");
+            }
+            panic!("cleanup did not return within its bound with occupied workers");
+        }
         assert_eq!(fixture.member.phase(), Phase::Gone);
         assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
         let Fixture { _home, member, source, provisioner, worker } = fixture;
@@ -181,13 +193,20 @@ async fn repeated_retirements_bound_payloads_without_retaining_members() {
 
 #[tokio::test]
 async fn blocked_payload_work_does_not_retain_the_member() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
+    let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+    Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+        Duration::from_millis(100);
     mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");
     let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
     fixture.member.mail("late notification".to_owned()).await;
     wait_local_call(&fixture.member, "write").await;
     let weak = Arc::downgrade(&fixture.member);
-    fixture.member.cleanup().await;
+    if timeout(cleanup_budget(&fixture.member), fixture.member.cleanup()).await.is_err() {
+        release.send(()).expect("release inbox after cleanup timeout");
+        holder.join().expect("holder");
+        panic!("cleanup did not return within its bound while the lead write was blocked");
+    }
     assert_eq!(fixture.member.phase(), Phase::Gone);
     let Fixture { _home, member, source, provisioner, worker } = fixture;
     drop((member, source, provisioner, worker));
@@ -615,24 +634,27 @@ async fn every_control_action_has_a_finite_ceiling() {
         };
         fixture.member.set_phase(Phase::Suspended);
         fixture.provisioner.owner_recover(&fixture.worker);
-        if let Some(stalled) = stalled {
-            fixture
-                .provisioner
-                .holds
-                .lock()
-                .expect("holds")
-                .insert(stalled, Arc::new(Notify::new()));
-        }
+        let release = stalled.map(|stalled| {
+            let release = Arc::new(Notify::new());
+            fixture.provisioner.holds.lock().expect("holds").insert(stalled, Arc::clone(&release));
+            release
+        });
+        let ceiling = if action == ControlAction::Retire {
+            fixture.member.runtime.deadlines.cleanup + delivery::FINAL_OBSERVATION
+        } else {
+            fixture.member.runtime.deadlines.launch
+        };
         let start = Instant::now();
         let mut operation =
             CloudControl(Arc::clone(&fixture.member)).admit(action).expect("admitted");
-        let outcome = operation.wait().await;
-        let ceiling = Duration::from_millis(100)
-            + if action == ControlAction::Retire {
-                delivery::FINAL_OBSERVATION
-            } else {
-                Duration::ZERO
-            };
+        let result = timeout(ceiling + delivery::TEST_SCHEDULER_ALLOWANCE, operation.wait()).await;
+        if result.is_err() {
+            if let Some(release) = release {
+                release.notify_one();
+            }
+            panic!("control operation did not return within its bound: {action:?}/{stalled:?}");
+        }
+        let outcome = result.expect("bounded control result");
         assert!(start.elapsed() <= ceiling, "{action:?}/{stalled:?}");
         let expected = match action {
             ControlAction::ResumeForInspection => ControlOutcome::Unsupported,

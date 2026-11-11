@@ -176,7 +176,10 @@ fn long_answer() -> Vec<ProviderEvent> {
 #[tokio::test]
 async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
     for outcome in ["success", "failure", "cancel"] {
-        let running = Running::new(vec![ganja_testkit::says("answer")]).await;
+        let mut running = Running::new(vec![ganja_testkit::says("answer")]).await;
+        let member = Arc::get_mut(&mut running.fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+            Duration::from_millis(100);
         let member = &running.fixture.member;
         let inbox = member.spec.inbox();
         mailbox::write(
@@ -211,7 +214,12 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
             std::fs::create_dir(&inbox).expect("force real prune read failure");
         }
         if outcome == "cancel" {
-            member.cleanup().await;
+            if timeout(cleanup_budget(member), member.cleanup()).await.is_err() {
+                release.send(()).expect("release prune after cleanup timeout");
+                holder.join().expect("holder");
+                runner.abort();
+                panic!("cleanup did not return within its bound while the prune was blocked");
+            }
             timeout(Duration::from_secs(2), async {
                 while !runner.is_finished() {
                     tokio::task::yield_now().await;
@@ -258,7 +266,9 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
             .expect("a subsequent read was admitted after the successful prune");
             assert_eq!(user_count(), 1);
         }
-        member.cleanup().await;
+        timeout(cleanup_budget(member), member.cleanup())
+            .await
+            .expect("cleanup did not return within its bound after releasing the prune");
         timeout(Duration::from_secs(2), runner).await.expect("runner returned").expect("runner");
         assert_eq!(user_count(), usize::from(outcome == "success"), "{outcome}");
         running.close().await;
