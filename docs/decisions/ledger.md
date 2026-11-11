@@ -630,13 +630,17 @@ file selected by `GANJA_CONFIG` or `--config` that is not also a discovered
 project file. Discovery refuses the whole declaration, including a keyless
 loopback endpoint and a same-id replacement, naming the file and provider key
 without echoing its values. Passing a discovered `ganja.toml` explicitly does
-not elevate it: discovery reads and refuses it again. Builtin option-only
-entries and malformed/reserved-name validation keep their existing behavior;
-trusted provider entries still replace whole.
+not elevate it: discovery reads and refuses it again. An otherwise eligible
+explicit file is trusted as written, so it must not be a file in a checkout the
+owner has not reviewed; ganja cannot tell who set `GANJA_CONFIG`. Builtin
+option-only entries and malformed/reserved-name validation keep their existing
+behavior; trusted provider entries still replace whole.
 
 The opencode importer omits each custom provider when writing a project file
 and reports each omission; it keeps supported declarations for a global
-output. `config migrate` can still write such a table into a project file, and
+output. The omission hint requires reviewing the entry first: `--global`
+trusts it for every project, not just the importing checkout. `config migrate`
+can still write such a table into a project file, and
 `config import-claude-hooks` can preserve one there. Their shape validation is
 not tier validation: the next load refuses that file. These writer gaps remain
 for later work, not silently repaired by the importer change.
@@ -676,9 +680,12 @@ so these supply records do not establish bit-for-bit reproducibility.
 The shell policy denies everything except the four whole commands of the
 fixed fake script: append the acceptance note, stage it, commit with the exact
 unsigned-commit override, and push the branch. Unrelated Git configuration and
-alias forms are not granted. The reviewed fake script is the primary control;
-these permissions are defense in depth, not a hostile-code sandbox. Retaining
-root or a port-80 bind capability was not chosen.
+alias forms are not granted by the image config. A checkout's project config
+still merges permission rules, hooks, MCP entries and shell settings over it;
+the narrow grant therefore holds only for a checkout the owner has reviewed.
+The reviewed fake script is the primary control; these permissions are defense
+in depth, not a hostile-code sandbox. Retaining root or a port-80 bind capability
+was not chosen.
 
 The owner must build and push the image, record the base/binary/final-image
 identities, align the template and prove the actual uid, all five capability
@@ -695,31 +702,44 @@ Pinned by: `crates/ganja-teammate-cloud/worker/Dockerfile`,
 `crates/ganja-teammate-cloud/src/provisioner/substrate/kubectl_tests.rs`,
 `crates/ganja-teammate-cloud/tests/ateapi_stub.rs`.
 
-## D585 — hosted Shutdown requires confirmation of after-turn deletion (2026-11-11)
+## D585 — the hosted roster-menu Shutdown confirms after-turn deletion (2026-11-11)
 
 Crates: ganja-tui
 Amends: none
 
-The hosted action menu says, “Shutdown finishes the turn, then deletes the
-worker. Retire deletes it now.” Hosted Shutdown opens the existing confirmation
-step, initially on Cancel, and warns that unpushed changes will be lost. Only
-Enter on a visible affirmative naming the full member dispatches the request;
-clicking highlights rather than executes, and a clipped target cannot consent.
-A running owner action refuses another hosted Shutdown. Local Shutdown remains
-immediate. Retire and external-revert confirmations retain their guards.
+The hosted roster action menu says, “Shutdown finishes the turn, then deletes
+the worker. Retire deletes it now.” Its Shutdown action opens the existing
+confirmation step, initially on Cancel, and warns that unpushed changes will
+be lost. Only Enter on a visible affirmative naming the full member dispatches
+from that step; clicking highlights rather than executes, and a clipped
+Shutdown target removes the affirmative. A short terminal can hide consequence
+lines behind an overflow marker in any hosted confirmation, including Retire;
+hiding those lines does not itself remove the affirmative. The clipped-target
+rule is specific to Shutdown. A running owner action refuses another roster
+Shutdown. Local Shutdown remains immediate; Retire and external-revert
+confirmations retain their guards.
 
-Hint-only immediate dispatch was not chosen because it leaves accidental
-selection destructive. A confirmed request is not confirmed worker absence;
-cleanup reports Gone only after confirmation, otherwise owner action is still
-needed. Target identity is still name-addressed: a same-named replacement can
-receive a stale confirmed action. For acceptance, names must never be reused,
-including recovery or automatic respawn, and dialogs must be closed before
-replacement. This procedure does not fix identity. Live deletion and remaining
-worker cost still require the owner's observation.
+This confirmation covers the roster action menu, not every shutdown route.
+Typed `/teammate shutdown <member>` and whole-team `/teammate shutdown` dispatch
+without confirmation; the whole-team route also skips the per-member in-flight
+owner-action check. A shutdown-request frame in the hosted member's inbox starts
+the same cleanup regardless of sender. These unconfirmed routes and clipped
+consequence text remain known limits accepted for the first controlled run,
+not a guarantee that every deletion requires visible consent.
+
+Hint-only immediate dispatch from the menu was not chosen because it leaves
+accidental selection destructive. A confirmed request is not confirmed worker
+absence; cleanup reports Gone only after confirmation, otherwise owner action
+is still needed. Target identity is still name-addressed: a same-named
+replacement can receive a stale confirmed action. For acceptance, names must
+never be reused, including recovery or automatic respawn, and dialogs must be
+closed before replacement. This procedure does not fix identity. Live deletion
+and remaining worker cost still require the owner's observation.
 
 Pinned by: `crates/ganja-tui/src/component/team_tests.rs`,
-`crates/ganja-tui/src/app_tests.rs`,
+`crates/ganja-tui/src/app_tests.rs`, `crates/ganja-tui/src/app.rs`,
 `crates/ganja-tui/src/component/team.rs`,
+`crates/ganja-core/src/teammate/runner.rs`,
 `crates/ganja-teammate-cloud/src/member.rs`.
 
 ## D586 — bounded local mailbox work cannot hold hosted cleanup open (2026-11-11)
@@ -728,24 +748,30 @@ Crates: ganja-teammate-cloud
 Amends: D577, D578
 
 Hosted mailbox reads, prunes and writes run on four native filesystem workers
-with one independent deadline supervisor, outside Tokio's blocking pool. There
-are at most 64 outstanding jobs globally and eight per member instance,
-including running jobs and unconsumed final receipts. Submitted write/prune
-payloads are limited to 1 MiB including their charged paths/identities; reads
-reserve one policy-sized inbox result. This is not an exact allocator/RSS cap.
-Each member's accepted operations execute in admission order, at most one at a
-time; late work cannot be overtaken. A queued job expires one second after
-admission. Full, oversized, closed or unavailable admission is refused rather
-than creating overflow threads. Empty departed member queues are removed.
+with one independent deadline supervisor, outside Tokio's blocking pool. Each
+member instance has two independent lane identities: inbound reads and prunes
+of its own inbox, and outbound writes to the lead inbox. FIFO order is promised
+within each direction, not between directions. At most one job executes per
+lane; a late head cannot be overtaken within that lane. There are at most eight
+outstanding jobs per lane (eight inbound plus eight outbound per member) and
+64 globally, including running jobs and unconsumed final receipts. Submitted
+write/prune payloads are limited to 1 MiB including charged paths/identities;
+reads reserve one policy-sized inbox result. This is not an exact allocator/RSS
+cap. A queued job expires one second after admission and is dropped without
+execution. Full, oversized, closed or unavailable admission is refused rather
+than creating overflow threads. Empty departed lanes are removed.
 
 Read/prune observation and standalone event interruption use 250 ms budgets;
 read/prune observation retains the same receipt and races cancellation rather
-than duplicating an active call. Final delivery has one shared 250 ms
-observation budget outside the transition lock, not one per message. Shutdown
-attempts cleanup before pruning its request and enqueueing acknowledgement;
-neither notification nor acknowledgement delivery is a prerequisite for
-cleanup return. Remaining native work owns payloads, not the member or registry,
-and native threads are not joined during ordinary Tokio runtime destruction.
+than duplicating an active call. After cleanup, Shutdown submits the inbound
+prune and then the outbound acknowledgement; submission order does not promise
+execution order between directions. Both lanes are sealed, inbound then
+outbound, before the final-observation early return. Receipts from both share
+one 250 ms final observation budget outside the transition lock, not one per
+lane or message. Neither notification nor acknowledgement delivery is a
+prerequisite for cleanup return. Remaining native work owns payloads, not the
+member or registry, and native threads are not joined during ordinary Tokio
+runtime destruction.
 
 For configured launch, quiesce and cleanup budgets L, Q and C, let
 H = 2L + 2Q + C + 4B, with B = 250 ms and F = 250 ms final observation.
@@ -765,11 +791,16 @@ including work that began after a PendingQueued observation. Dropped means no
 operation started: refusal, queued cancellation/expiry or unavailable service.
 Late writes can still land after lifecycle return. Terminal decisions remain
 deduplicated, but mail is best effort, not one guaranteed message per decision.
-Four stalled calls can exhaust delivery availability; queue expiry and lifecycle
-progress remain separate from delivery success and from confirmed worker absence.
+Two members with both directions stuck occupy all four workers, stopping hosted
+mailbox delivery for every member while external Retire stays bounded. Queue
+expiry, lifecycle progress, delivery success and confirmed worker absence remain
+separate outcomes.
 
-Merely timing out a Tokio blocking waiter was not chosen: it neither cancels
-the syscall nor bounds accumulated work or runtime shutdown. Shared lock/protocol
+A single lane per member was not chosen: an outbound write waiting on the lead
+inbox delayed that member's own-inbox reads, so Shutdown sent through its inbox
+was noticed late or not at all while the write did not return. Merely timing
+out a Tokio blocking waiter was not chosen either: it neither cancels the
+syscall nor bounds accumulated work or runtime shutdown. Shared lock/protocol
 changes and target-identity redesign were not chosen. Arbitrarily stalled kernel
 or filesystem calls are outside a whole-process-exit guarantee, and oversized
 external inboxes are outside the bounded-file assumption. The owner still must

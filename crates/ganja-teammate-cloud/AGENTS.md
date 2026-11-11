@@ -26,27 +26,27 @@ another router, cannot fence an earlier dispatch. This is an independent gate la
 not a lifecycle phase. Only a reconciled deletion and a distinctly named
 replacement recover that identity boundary.
 
-Launch and cleanup have finite independent deadlines. A failed or ambiguous
-mutation is reconciled, never resent blindly. Terminal decisions are deduplicated
-per assistant message id across storage reads and the fresh stream; mail is best effort.
-Mailbox read/prune/write uses four native workers and one deadline supervisor,
-not Tokio's blocking pool. At most 64 jobs globally and eight per member instance
-remain outstanding, including running work and unconsumed finals; write/prune
-payloads are limited to 1 MiB, and queued jobs expire after one second.
-Accepted jobs execute in member order, one at a time; a late head cannot be overtaken.
-Read/prune observation and standalone event interruption use 250 ms budgets;
-final delivery observation shares 250 ms outside the transition lock. Cancellation
-interrupts observation, not a running syscall. Shutdown cleans up before prune/ack;
-neither mail delivery nor a held mailbox lock gates deletion.
-Delivered/Failed mean the operation returned success/error; PendingQueued means
-observation ended before execution, Late means execution outlived observation
-(eventually LateSucceeded/LateFailed), and Dropped means no operation started.
-Late writes may land after return; four stalled workers exhaust delivery availability.
-Default launch/quiesce/cleanup budgets are 420/60/60 s; bootstrap/health 180/90 s are
-inside launch. Preceding-holder formulas are in `CloudControl::admit` and `docs/decisions/ledger.md`.
-These are await budgets under scheduler progress and returning synchronous calls, not
-arbitrary-kernel-stall exit guarantees. Native payload work retains no member/registry;
-delivery, runner return, ordinary Tokio shutdown and Gone remain separate outcomes.
+Launch and cleanup have finite independent deadlines; ambiguous mutations are reconciled,
+never resent blindly. Terminal decisions are deduplicated per assistant message id;
+mail is best effort. Four native filesystem workers plus one supervisor serve two lane
+identities per member: inbound own-inbox reads/prunes and outbound lead-inbox writes.
+FIFO applies within each direction only, one executing job per lane; a late head cannot
+be overtaken there. Limits: eight outstanding jobs per lane (eight plus eight per member),
+64 globally including running/unconsumed finals, 1 MiB write/prune payloads, 1 s queued expiry.
+Read/prune observation and standalone event interruption use 250 ms budgets; cancellation
+interrupts observation, not a running syscall. After cleanup, Shutdown submits inbound
+prune then outbound acknowledgement, with no execution order between those directions.
+Both lanes seal, inbound then outbound, before the final-observation early return;
+receipts from both share 250 ms total outside the transition lock.
+Delivered/Failed mean success/error within observation; PendingQueued means observation
+ended before execution. Work executing after observation is late (LateSucceeded/LateFailed);
+Dropped means no execution, including queued expiry. Late writes can land after return.
+Two members with both lanes stuck exhaust all workers and stop hosted mailbox delivery
+for every member; external Retire stays bounded. Default launch/quiesce/cleanup: 420/60/60 s;
+bootstrap/health 180/90 s are inside launch. Preceding-holder formulas: `CloudControl::admit`,
+`docs/decisions/ledger.md`. These await budgets assume scheduler progress and returning
+synchronous calls, not arbitrary-kernel-stall exit guarantees. Native payload work retains
+no member/registry; delivery, runner return, ordinary Tokio shutdown and Gone are separate.
 
 Owner-reported reverts and contradictory lifecycle observations invalidate the
 held cursor before reconnect. An unannounced revert with no such observation is
@@ -153,11 +153,11 @@ The owner must build/push the image and prove the live run; no repository test d
   for `SSL_CERT_FILE` and `GIT_SSL_CAINFO`. Owner proof must cover actual uid, all five
   zero capability sets (drop all/add none), mounts, CA, bind, work/data writes, failed
   binary/config writes, and no unintended service-account material or template overrides.
-- The policy denies all but the fixed script's whole append/stage/unsigned-commit/push
-  commands; unrelated `git -c` and alias forms are not granted. The reviewed fake script
-  is the primary control, these grants defense in depth, never a hostile-code sandbox.
-  It consumes two model requests for the first message and one for the resumed reply.
-  The owner must prove the effective checkout policy and actual commit/push result.
+- The image policy grants only the fixed script's whole append/stage/unsigned-commit/push
+  commands, not unrelated `git -c` or alias forms. Project config still merges permission
+  rules, hooks, MCP entries and shell settings over it: the narrow grant requires an
+  owner-reviewed checkout. The reviewed fake script is primary; grants are defense in depth,
+  not isolation. First/resumed messages use two/one requests; policy and commit/push need owner proof.
 - Init's `/readyz` proves only a listener; the backend separately awaits authenticated
   engine health. Authentication, actor/tag storage disposal and credential retirement remain owner proof.
 
