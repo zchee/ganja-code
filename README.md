@@ -11,7 +11,7 @@ Codex, Grok, and agy), driven as teammates.
 > **ganja-code is under active development and not yet stable.** Features and
 > configuration may change without notice.
 
-## Design
+## Design goals
 
 Everything ganja fans out — subagents, teammates, whole parallel workstreams —
 is headed for the cloud, with ganja as their control plane. Your terminal stays
@@ -29,9 +29,12 @@ the cockpit, and three things follow from that.
   question rather than a hardware one.
 
 > [!NOTE]
-> None of the cloud behaviour above is implemented yet; it is the design this is
-> being built toward. Teammates currently run on your own machine, in-process or
-> in a tmux pane beside you, with the reach that implies.
+> **The general cloud fleet above is not built or proved live.** An experimental
+> hosted teammate path exists: it can bootstrap a worker through Agent Substrate
+> and coordinate its turns, suspension, resume and deletion. Its first live
+> acceptance is still owner-run work, using a fake-provider worker and a
+> disposable checkout. This is not delivered fleet scale or hostile-code isolation.
+> Local teammates also run in-process or in tmux panes, with the reach that implies.
 
 If it looks useful, a **Star** is welcome. Releases are not published yet, so
 **Watch** the repo to follow the work as it lands.

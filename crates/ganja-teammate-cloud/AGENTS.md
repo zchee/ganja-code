@@ -26,9 +26,27 @@ another router, cannot fence an earlier dispatch. This is an independent gate la
 not a lifecycle phase. Only a reconciled deletion and a distinctly named
 replacement recover that identity boundary.
 
-Launch and cleanup have finite independent deadlines. A failed or ambiguous
-mutation is reconciled, never resent blindly. One terminal decision and one mail
-per assistant message id apply across storage reads and the fresh stream.
+Launch and cleanup have finite independent deadlines; ambiguous mutations are reconciled,
+never resent blindly. Terminal decisions are deduplicated per assistant message id;
+mail is best effort. Four native filesystem workers plus one supervisor serve two lane
+identities per member: inbound own-inbox reads/prunes and outbound lead-inbox writes.
+FIFO applies within each direction only, one executing job per lane; a late head cannot
+be overtaken there. Limits: eight outstanding jobs per lane (eight plus eight per member),
+64 globally including running/unconsumed finals, 1 MiB write/prune payloads, 1 s queued expiry.
+Read/prune observation and standalone event interruption use 250 ms budgets; cancellation
+interrupts observation, not a running syscall. After cleanup, Shutdown submits inbound
+prune then outbound acknowledgement, with no execution order between those directions.
+Both lanes seal, inbound then outbound, before the final-observation early return;
+receipts from both share 250 ms total outside the transition lock.
+Delivered/Failed mean success/error within observation; PendingQueued means observation
+ended before execution. Work executing after observation is late (LateSucceeded/LateFailed);
+Dropped means no execution, including queued expiry. Late writes can land after return.
+Two members with both lanes stuck exhaust all workers and stop hosted mailbox delivery
+for every member; external Retire stays bounded. Default launch/quiesce/cleanup: 420/60/60 s;
+bootstrap/health 180/90 s are inside launch. Preceding-holder formulas: `CloudControl::admit`,
+`docs/decisions/ledger.md`. These await budgets assume scheduler progress and returning
+synchronous calls, not arbitrary-kernel-stall exit guarantees. Native payload work retains
+no member/registry; delivery, runner return, ordinary Tokio shutdown and Gone are separate.
 
 Owner-reported reverts and contradictory lifecycle observations invalidate the
 held cursor before reconnect. An unannounced revert with no such observation is
@@ -112,28 +130,36 @@ The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
 
 ### Acceptance image
 
-`worker/Dockerfile` and its adjacent inputs define an acceptance-only image using
-`GANJA_PROVIDER=fake`, not a production worker for a real provider. The owner still
-has to build and push this image; these files are not evidence of a live run.
+`worker/Dockerfile` defines a fake-provider acceptance image, not a real-provider worker.
+First acceptance is one owner/team and one hosted fake worker in a reviewed disposable checkout.
+The owner must build/push the image and prove the live run; no repository test does so.
 
-- The build context requires a Linux `ganja` executable alongside `ganja.toml`,
-  `gitconfig`, and `acceptance-script.json`; `.dockerignore` excludes unrelated
-  build-context files. The image starts `ganja worker init --port 80` in empty
-  `/work`. Its explicit environment variables all belong to the served-engine
-  allowlist below. The runtime template supplies the Basic password, never the image.
-- `GANJA_SERVER_USERNAME=ganja` is the image default and must match `[cloud].username`.
-  Build argument `GIT_HOST` scopes a placeholder Git authorization header to that
-  HTTPS host only. The platform supplies the real authorization outside the image;
-  `gitconfig` disables commit signing.
-- The platform must project its trust bundle at
-  `/run/ate/egress-trust-bundle/trust-bundle.pem`, used by both `SSL_CERT_FILE` and
-  `GIT_SSL_CAINFO`.
-- `acceptance-script.json` consumes two model requests for the first message: a Bash
-  tool call that appends to `NOTES.md`, commits, and pushes, then a final response.
-  One further model request answers the second message after resume.
-- Init's `/readyz` only confirms the bootstrap listener. It does not establish that
-  checkout and handoff finished; the backend separately awaits authenticated engine
-  health before opening a session.
+- Build context: Linux `ganja`, `ganja.toml`, `gitconfig`, `acceptance-script.json`;
+  `.dockerignore` excludes unrelated files. Required inputs: digest-pinned `BASE_IMAGE`,
+  matching binary `GANJA_SHA256`, and `GIT_HOST`. Apt packages remain unpinned.
+- The image declares `USER 10001:10001`, starts `ganja worker init --port 8080`
+  in empty `/work`, and leaves only `/work`, `/var/lib/ganja` and `/home/ganja`
+  writable by that user. Binary/config are root-owned and read-only, shared temp
+  is not writable, and the build clears/checks setuid/setgid files.
+- Both transports target 8080. Templates commanding/probing port 80 are incompatible;
+  migrate template/image/client together, or keep the old trio together for rollback.
+- The Basic password is not in the image; supplied by the platform template as a
+  disposable literal, it must match `GANJA_CLOUD_PASSWORD`. Retire it and the Git
+  token after acceptance. Username defaults to `ganja` and must match `[cloud].username`.
+  `GIT_HOST` scopes the placeholder HTTPS header; the platform supplies real Git auth.
+  `gitconfig` disables signing. Child filtering is not isolation: the template and
+  parent environments still hold plaintext readable by same-user processes.
+- The platform must project its CA bundle at `/run/ate/egress-trust-bundle/trust-bundle.pem`
+  for `SSL_CERT_FILE` and `GIT_SSL_CAINFO`. Owner proof must cover actual uid, all five
+  zero capability sets (drop all/add none), mounts, CA, bind, work/data writes, failed
+  binary/config writes, and no unintended service-account material or template overrides.
+- The image policy grants only the fixed script's whole append/stage/unsigned-commit/push
+  commands, not unrelated `git -c` or alias forms. Project config still merges permission
+  rules, hooks, MCP entries and shell settings over it: the narrow grant requires an
+  owner-reviewed checkout. The reviewed fake script is primary; grants are defense in depth,
+  not isolation. First/resumed messages use two/one requests; policy and commit/push need owner proof.
+- Init's `/readyz` proves only a listener; the backend separately awaits authenticated
+  engine health. Authentication, actor/tag storage disposal and credential retirement remain owner proof.
 
 ### Child environments
 

@@ -59,7 +59,7 @@ cargo run -- run "what does this crate do"  # one headless turn; --format json; 
 cargo run -- run --auto --command team "port the config loader"   # the /team pipeline headless; needs --auto
 cargo run -- run --json-schema <file|json> "…"                    # structured output; chatgpt and openai only
 cargo run -- serve --port 4096              # binds localhost; a non-loopback --hostname requires GANJA_SERVER_PASSWORD
-cargo run -- worker init --port 80          # bootstrap listener; requires server credentials and Git trust paths
+cargo run -- worker init --port 8080        # bootstrap listener; requires server credentials and Git trust paths
 cargo run -- auth login                     # also auth list, auth logout
 cargo run -- sessions                       # stored conversations; --live lists sessions answering on a socket now
 cargo run -- models anthropic --refresh     # the catalog for one provider; `models cursor` reads the wire's roster
