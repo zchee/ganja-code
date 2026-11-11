@@ -190,12 +190,12 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
         let (release, holder) = hold_inbox(inbox.clone());
         let runner = tokio::spawn(Arc::clone(member).run());
         wait_local_call(member, "prune").await;
-        let prune = member.delivery.watch("prune");
+        let prune = member.inbound.watch("prune");
         timeout(delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE, prune.observed("Late"))
             .await
             .expect("the original prune receipt was observed late before release");
         assert_eq!(
-            member.delivery.last_sequence(),
+            member.inbound.last_sequence(),
             prune.sequence(),
             "a pending prune must not be re-admitted"
         );
@@ -235,7 +235,7 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
             timeout(
                 runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
                 async {
-                    while member.delivery.last_read_sequence() <= prune.sequence() {
+                    while member.inbound.last_read_sequence() <= prune.sequence() {
                         tokio::task::yield_now().await;
                     }
                 },
@@ -257,7 +257,7 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
             timeout(
                 runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
                 async {
-                    while member.delivery.last_read_sequence() <= prune.sequence() {
+                    while member.inbound.last_read_sequence() <= prune.sequence() {
                         tokio::task::yield_now().await;
                     }
                 },

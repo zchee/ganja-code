@@ -1,7 +1,7 @@
 //! Bounded, ordered mailbox work outside Tokio's blocking pool.
 //!
 //! A fixed native worker service keeps uncancellable mailbox calls outside Tokio
-//! shutdown; per-member FIFO admission and independently supervised expiry bound
+//! shutdown; per-lane FIFO admission and independently supervised expiry bound
 //! retained work using standard channels. Existing thread pools do not supply
 //! this combination of receipt credit, lane serialization and queued expiry.
 
@@ -135,6 +135,7 @@ pub(crate) struct TestTrace {
     pub(crate) completed: Option<u64>,
     pub(crate) outcome: Option<&'static str>,
     pub(crate) observation: Option<&'static str>,
+    pub(crate) observation_budget: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -227,6 +228,10 @@ impl Receipt {
     }
 
     pub(crate) async fn observe(&mut self, budget: Duration) -> Observation {
+        #[cfg(test)]
+        {
+            self.cell.trace.lock().expect("test delivery trace").observation_budget = Some(budget);
+        }
         let _ = tokio::time::timeout(budget, async {
             loop {
                 let notified = self.cell.changed.notified();
@@ -608,26 +613,28 @@ impl Lane {
 
     #[cfg(test)]
     pub(crate) fn last_read_sequence(&self) -> u64 {
-        self.service
+        let sequence = self
+            .service
             .state
             .lock()
             .expect("delivery service")
             .lanes
             .get(&self.id)
-            .expect("live lane")
-            .last_read_sequence
+            .map(|queue| queue.last_read_sequence);
+        sequence.unwrap_or_else(|| panic!("read sequence requires live lane {}", self.id))
     }
 
     #[cfg(test)]
     pub(crate) fn last_sequence(&self) -> u64 {
-        self.service
+        let sequence = self
+            .service
             .state
             .lock()
             .expect("delivery service")
             .lanes
             .get(&self.id)
-            .expect("live lane")
-            .sequence
+            .map(|queue| queue.sequence);
+        sequence.unwrap_or_else(|| panic!("sequence requires live lane {}", self.id))
     }
 
     #[cfg(test)]
@@ -640,9 +647,26 @@ impl Lane {
             .credits
             .iter()
             .filter_map(Weak::upgrade)
-            .find(|cell| cell.lane == self.id && cell.kind == kind)
-            .expect("an admitted operation");
-        JobWatch(cell)
+            .find(|cell| cell.lane == self.id && cell.kind == kind);
+        JobWatch(
+            cell.unwrap_or_else(|| panic!("lane {} has no retained {kind} operation", self.id)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watch_sequence(&self, sequence: u64) -> JobWatch {
+        let cell = self
+            .service
+            .state
+            .lock()
+            .expect("delivery service")
+            .credits
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|cell| cell.lane == self.id && cell.sequence == sequence);
+        JobWatch(
+            cell.unwrap_or_else(|| panic!("lane {} has no retained sequence {sequence}", self.id)),
+        )
     }
 
     #[cfg(test)]
@@ -663,13 +687,19 @@ impl Lane {
 
     #[cfg(test)]
     pub(crate) fn running(&self, kind: &str) -> bool {
-        self.service.state.lock().expect("delivery service").credits.iter().any(|cell| {
-            cell.upgrade().is_some_and(|cell| {
-                cell.lane == self.id
-                    && cell.kind == kind
-                    && matches!(*cell.status.lock().expect("delivery status"), Status::Running)
-            })
-        })
+        let cells: Vec<_> = self
+            .service
+            .state
+            .lock()
+            .expect("delivery service")
+            .credits
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|cell| cell.lane == self.id && cell.kind == kind)
+            .collect();
+        cells
+            .iter()
+            .any(|cell| matches!(*cell.status.lock().expect("delivery status"), Status::Running))
     }
 
     pub(crate) fn seal(&self) {
