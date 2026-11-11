@@ -322,6 +322,8 @@ struct Job {
 
 #[derive(Debug, Default)]
 struct Queue {
+    #[cfg(test)]
+    last_read_sequence: u64,
     open: bool,
     sequence: u64,
     active: bool,
@@ -556,6 +558,10 @@ impl Lane {
             return Err(DropReason::Closed);
         }
         queue.sequence += 1;
+        #[cfg(test)]
+        if matches!(&payload, Payload::Read { .. }) {
+            queue.last_read_sequence = queue.sequence;
+        }
         let cell = Arc::new(Cell {
             lane: self.id,
             sequence: queue.sequence,
@@ -598,6 +604,18 @@ impl Lane {
             .count();
         let active = state.lanes.values().filter(|queue| queue.active).count();
         (state.lanes.len(), jobs, active)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_read_sequence(&self) -> u64 {
+        self.service
+            .state
+            .lock()
+            .expect("delivery service")
+            .lanes
+            .get(&self.id)
+            .expect("live lane")
+            .last_read_sequence
     }
 
     #[cfg(test)]
@@ -679,6 +697,22 @@ pub(crate) struct JobWatch(Arc<Cell>);
 
 #[cfg(test)]
 impl JobWatch {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.0.sequence
+    }
+
+    pub(crate) async fn observed(&self, expected: &str) {
+        loop {
+            let notified = self.0.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.snapshot().observation == Some(expected) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> TestTrace {
         *self.0.trace.lock().expect("test delivery trace")
     }

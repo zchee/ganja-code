@@ -230,7 +230,13 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
     );
     assert!(matches!(heads[0].observe(Duration::ZERO).await, Observation::Late));
     assert!(matches!(queued[0].observe(Duration::ZERO).await, Observation::PendingQueued));
-    tokio::time::sleep(EXPIRY + Duration::from_millis(100)).await;
+    tokio::time::timeout(EXPIRY + TEST_SCHEDULER_ALLOWANCE, async {
+        for receipt in &queued {
+            JobWatch(Arc::clone(&receipt.cell)).settled().await;
+        }
+    })
+    .await
+    .expect("queued jobs report terminal expiry within their total budget");
     assert!(queued.iter().all(|receipt| matches!(
         *receipt.cell.status.lock().expect("status"),
         Status::Final(Some(Value::Dropped(DropReason::Expired)))

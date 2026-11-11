@@ -188,7 +188,14 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
         let runner = tokio::spawn(Arc::clone(member).run());
         wait_local_call(member, "prune").await;
         let prune = member.delivery.watch("prune");
-        tokio::time::sleep(delivery::OBSERVATION + Duration::from_millis(20)).await;
+        timeout(delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE, prune.observed("Late"))
+            .await
+            .expect("the original prune receipt was observed late before release");
+        assert_eq!(
+            member.delivery.last_sequence(),
+            prune.sequence(),
+            "a pending prune must not be re-admitted"
+        );
         let user_count = || {
             running
                 .storage
@@ -217,12 +224,14 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
         holder.join().expect("holder");
         timeout(Duration::from_secs(2), prune.settled()).await.expect("late prune final result");
         if outcome == "failure" {
-            let before = member.delivery.last_sequence();
-            timeout(Duration::from_secs(3), async {
-                while member.delivery.last_sequence() == before {
-                    tokio::task::yield_now().await;
-                }
-            })
+            timeout(
+                runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+                async {
+                    while member.delivery.last_read_sequence() <= prune.sequence() {
+                        tokio::task::yield_now().await;
+                    }
+                },
+            )
             .await
             .expect("the runner polls again after the failed prune");
             assert_eq!(user_count(), 0, "a failed prune must never dispatch its cached message");
@@ -237,8 +246,16 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
             .expect("confirmed late prune dispatches the cached prompt");
             assert_eq!(user_count(), 1);
             assert!(mailbox::read(&inbox).expect("pruned inbox").valid.is_empty());
-            // A further complete polling cycle cannot replay the already removed entry.
-            tokio::time::sleep(runner::POLL + Duration::from_millis(20)).await;
+            timeout(
+                runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+                async {
+                    while member.delivery.last_read_sequence() <= prune.sequence() {
+                        tokio::task::yield_now().await;
+                    }
+                },
+            )
+            .await
+            .expect("a subsequent read was admitted after the successful prune");
             assert_eq!(user_count(), 1);
         }
         member.cleanup().await;
