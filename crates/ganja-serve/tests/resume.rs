@@ -254,17 +254,22 @@ impl Frames {
     }
 
     async fn finish(&mut self) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        loop {
-            let frame = self.next().await;
-            let finished = frame.event == "message"
-                && serde_json::from_str::<serde_json::Value>(&frame.data).expect("event JSON")["type"]
-                    == "message_finished";
-            frames.push(frame);
-            if finished {
-                return frames;
+        tokio::time::timeout(DEADLINE, async {
+            let mut frames = Vec::new();
+            loop {
+                let frame = self.next().await;
+                let finished = frame.event == "message"
+                    && serde_json::from_str::<serde_json::Value>(&frame.data).expect("event JSON")
+                        ["type"]
+                        == "message_finished";
+                frames.push(frame);
+                if finished {
+                    return frames;
+                }
             }
-        }
+        })
+        .await
+        .expect("finish before deadline")
     }
 }
 
@@ -396,15 +401,19 @@ async fn a_permission_before_the_fresh_head_is_visible_after_registration() {
         })
         .await
         .expect("prompt");
-    loop {
-        let frame = events.next().await;
-        if frame.event == "message"
-            && serde_json::from_str::<serde_json::Value>(&frame.data).expect("JSON")["type"]
-                == "permission_requested"
-        {
-            break;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let frame = events.next().await;
+            if frame.event == "message"
+                && serde_json::from_str::<serde_json::Value>(&frame.data).expect("JSON")["type"]
+                    == "permission_requested"
+            {
+                break;
+            }
         }
-    }
+    })
+    .await
+    .expect("permission request before deadline");
     let mut fresh = Frames::connect(&handle, None).await;
     fresh.next().await;
     let pending: serde_json::Value = reqwest::get(format!("{}/permission", base_url(&handle)))
