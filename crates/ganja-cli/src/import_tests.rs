@@ -15,7 +15,40 @@ fn rows(rows: &[(String, String)]) -> Vec<(&str, &str)> {
 }
 
 fn imported(text: &str) -> (Built, Report) {
-    map_config(&parse(text).expect("the fixture is JSONC"))
+    map_config(&parse(text).expect("the fixture is JSONC"), true)
+}
+
+/// Project output reports one omission per custom endpoint, not its values.
+#[test]
+fn a_project_import_reports_each_custom_provider_without_its_values() {
+    let source = parse(
+        r#"{
+        "provider": {
+            "first": {"npm": "@ai-sdk/openai-compatible", "options": {
+                "baseURL": "http://127.0.0.1:11434", "headers": {"x-route": "private-route"}
+            }},
+            "second": {"npm": "@ai-sdk/openai", "options": {
+                "baseURL": "https://provider.invalid", "apiKey": "synthetic-import-key"
+            }}
+        }
+    }"#,
+    )
+    .expect("the provider fixture parses");
+    let (built, report) = map_config(&source, false);
+    assert!(built.provider.is_empty(), "a project import must omit custom endpoints");
+    let hint = "trusted tier only; use ganja config import-opencode --file <source> --global";
+    assert_eq!(rows(&report.skipped), vec![("provider.first", hint), ("provider.second", hint)]);
+    assert!(report.mapped.is_empty(), "omitted fields are never reported as written");
+    assert!(report.warnings.is_empty(), "no endpoint values enter warnings");
+}
+
+#[test]
+fn a_global_import_keeps_custom_provider_mapping_rows() {
+    let (built, report) = imported(FIXTURE);
+    assert!(built.provider.iter().any(|(id, _)| id == "local-llama"));
+    assert!(report.mapped.iter().any(|(from, to)| from == "provider.local-llama.options.baseURL"
+        && to == "provider.local-llama.base_url"));
+    assert!(!report.skipped.iter().any(|(_, reason)| reason.contains("trusted tier")));
 }
 
 /// The accept criterion: one config in, and the table plus the file it

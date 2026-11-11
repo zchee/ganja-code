@@ -262,7 +262,7 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
         return Ok(());
     }
 
-    let (built, report) = map_config(&sources.config);
+    let (built, report) = map_config(&sources.config, global);
     print_table(&report, HEADER, "GANJA");
     print_warnings(&report);
 
@@ -771,7 +771,7 @@ impl Built {
 }
 
 /// Maps a whole opencode config, in the order it spells its keys.
-fn map_config(source: &Json) -> (Built, Report) {
+fn map_config(source: &Json, global: bool) -> (Built, Report) {
     let mut built = Built::default();
     let mut report = Report::default();
     let root = At::root();
@@ -820,7 +820,7 @@ fn map_config(source: &Json) -> (Built, Report) {
             "mcp" => built.mcp = mcp(&mut report, &at, value),
             "lsp" => built.lsp = lsp(&mut report, &at, value),
             "snapshot" => built.snapshot = boolean(&mut report, &at, value),
-            "provider" => built.provider = providers(&mut report, &at, value),
+            "provider" => built.provider = providers(&mut report, &at, value, global),
             "autoshare" => {
                 report.skip(&at.from, reason::UNSUPPORTED);
                 if value.as_bool() == Some(true) {
@@ -1803,7 +1803,7 @@ fn initialization(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
 ///   chat-completions server;
 /// * no endpoint — upstream takes the default from the SDK it loads, and there
 ///   is nothing here to take one from for a provider ganja does not ship.
-fn providers(report: &mut Report, at: &At, value: &Json) -> Vec<(String, Json)> {
+fn providers(report: &mut Report, at: &At, value: &Json, global: bool) -> Vec<(String, Json)> {
     let Some(entries) = value.as_object() else {
         report.skip(&at.from, reason::CATALOG);
 
@@ -1812,6 +1812,13 @@ fn providers(report: &mut Report, at: &At, value: &Json) -> Vec<(String, Json)> 
 
     let mut carried = Vec::new();
     for (id, provider) in entries {
+        if !global && !ganja_core::provider::PROVIDERS.contains(&id.as_str()) {
+            report.skip(
+                &at.child(id).from,
+                "trusted tier only; use ganja config import-opencode --file <source> --global",
+            );
+            continue;
+        }
         if let Some(entry) = provider_entry(report, &at.child(id), id, provider) {
             insert(&mut carried, id.clone(), entry);
         }

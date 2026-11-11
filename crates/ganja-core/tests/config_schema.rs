@@ -280,6 +280,9 @@ fn the_schema_matches_what_the_real_loader_accepts() {
     the_loader_refuses_a_non_loopback_mcp_url_that_the_schema_alone_would_accept(
         &home.path().join("non-loopback"),
     );
+    the_loader_refuses_a_project_declared_endpoint_that_the_schema_alone_would_accept(
+        &home.path().join("project-endpoint"),
+    );
     the_loader_refuses_the_per_id_narrowing_the_schema_alone_cannot_express(
         &home.path().join("per-id"),
     );
@@ -306,15 +309,24 @@ fn the_loader_and_schema_agree_on_provider_variable_names(project: &Path) {
     }
     cases.extend([("FOO_KEY".to_owned(), true), ("_x1".to_owned(), true)]);
     fs::create_dir_all(project.join(".git")).expect("fixture repository");
+    // Loaded as the file `--config` names — a trusted, non-discovered tier —
+    // because a declared endpoint no longer loads from a discovered project
+    // file at all, and what these probes measure is the variable-name rule,
+    // not the tier.
+    let explicit = project.join("explicit.toml");
     for (name, expected) in cases {
         let instance = json!({"provider": {"fixture": {
             "dialect": "openai-chat-completions", "base_url": "https://provider.invalid",
             "key_env": name,
         }}});
         let document = toml::to_string(&instance).expect("config serializes");
-        fs::write(project.join("ganja.toml"), document).expect("config file");
+        fs::write(&explicit, document).expect("config file");
         assert_eq!(
-            Config::load_with(project, &Overrides::default()).is_ok(),
+            Config::load_with(
+                project,
+                &Overrides { config_file: Some(explicit.clone()), ..Overrides::default() },
+            )
+            .is_ok(),
             expected,
             "loader acceptance of {name:?}"
         );
@@ -567,12 +579,42 @@ fn the_loader_and_the_schema_both_refuse_a_key_neither_id_reads(project: &Path) 
 /// field, must load through the real loader without complaint — the other
 /// half of [`a_kitchen_sink_document_also_validates_against_the_schema`],
 /// which checks the same text against the schema alone.
+///
+/// Read as the file `--config` names rather than as a discovered project
+/// file: the sink declares endpoints, which only the trusted tiers may do,
+/// and what this probe measures is that every key loads, not which tier may
+/// write one. The tier refusal has its own probe below.
 fn the_kitchen_sink_document_loads_through_the_real_loader(project: &Path) {
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
-    fs::write(project.join("ganja.toml"), KITCHEN_SINK).expect("the fixture file is writable");
+    let explicit = project.join("explicit.toml");
+    fs::write(&explicit, KITCHEN_SINK).expect("the fixture file is writable");
 
-    Config::load_with(project, &Overrides::default())
+    Config::load_with(project, &Overrides { config_file: Some(explicit), ..Overrides::default() })
         .expect("a document naming every key this build understands loads");
+}
+
+/// The other rule no keyword can spell: a declared endpoint is a valid
+/// *shape* wherever it is written — the schema accepts it, as it must, since
+/// JSON Schema cannot know which file a document came from — and the loader
+/// refuses it from a discovered project file, naming the file and the key.
+/// See [`the_schema_accepts_what_only_the_loader_can_refuse`] for the
+/// schema-side statement of the same split over the MCP loopback rule.
+fn the_loader_refuses_a_project_declared_endpoint_that_the_schema_alone_would_accept(
+    project: &Path,
+) {
+    let document = "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+                    base_url = \"http://127.0.0.1:11434/v1\"\n";
+    let instance: Value = toml::from_str(document).expect("the document is valid TOML");
+    let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
+    assert!(
+        validator.is_valid(&instance),
+        "the schema describes the shape; the tier is the loader's to know"
+    );
+
+    let message = bogus_key_error(project, document);
+    assert!(message.contains("provider.local-llama"), "{message}");
+    assert!(message.contains("trusted tiers"), "{message}");
+    assert!(!message.contains("127.0.0.1"), "the refusal echoes no URL: {message}");
 }
 
 /// What the schema cannot express, documented as evidence rather than a

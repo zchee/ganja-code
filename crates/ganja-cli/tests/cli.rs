@@ -609,14 +609,18 @@ fn a_provider_this_table_does_not_carry_is_named_rather_than_listed_as_empty() {
         );
 }
 
-/// A config file declaring one endpoint, in a project directory of its own.
+/// A config file declaring one endpoint, in a directory discovery never
+/// walks, for a command to read as the file `GANJA_CONFIG` names.
 ///
-/// Written as `ganja.toml` in a directory carrying a checkout marker, which is
-/// where discovery's project tier looks — the same file a person would write.
-fn declaring_project() -> TempDir {
-    let directory = project();
+/// A declared endpoint is the trusted tiers' to write — the global config, or
+/// an explicitly named non-discovered file — never a discovered project
+/// file's, so this is the explicit tier: the same entry a person would keep
+/// in a file of their own and point a session at.
+fn declaring_config() -> (TempDir, std::path::PathBuf) {
+    let directory = TempDir::new().expect("a temporary directory is creatable");
+    let path = directory.path().join("declared.toml");
     fs::write(
-        directory.path().join("ganja.toml"),
+        &path,
         r#"
           [provider.local-llama]
           dialect = "openai-chat-completions"
@@ -626,7 +630,7 @@ fn declaring_project() -> TempDir {
     )
     .expect("the config file is writable");
 
-    directory
+    (directory, path)
 }
 
 /// A provider a session **can** run as, with no rows in the table, is not the
@@ -635,11 +639,13 @@ fn declaring_project() -> TempDir {
 #[test]
 fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing() {
     let cache = cache();
-    let project = declaring_project();
+    let (_declared, config) = declaring_config();
+    let project = project();
 
-    // A configured endpoint: selectable because this project's own config
-    // declares it, and cataloged by nothing.
+    // A configured endpoint: selectable because a trusted tier declares it,
+    // and cataloged by nothing.
     offline(&cache)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["models", "local-llama"])
         .assert()
@@ -655,6 +661,7 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
     // unpriced — answers the same way, because the tier is a fact about the
     // table rather than about where the provider came from.
     offline(&cache)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["models", "fake"])
         .assert()
@@ -665,9 +672,10 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
     // own, so `models cursor` is the live listing — or its refusal — and is
     // pinned in its own test below.
 
-    // The typo keeps the refusal it always had: this project declares no such
+    // The typo keeps the refusal it always had: this config declares no such
     // endpoint, so nothing could run as it.
     offline(&cache)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["models", "local-lama"])
         .assert()
@@ -675,9 +683,8 @@ fn a_selectable_provider_with_no_rows_says_what_it_gives_up_instead_of_failing()
         .stdout(predicate::str::contains("PROVIDER").not());
 }
 
-/// **AC-10.** What the refusal for an unknown provider calls "this project's
-/// config declares" is its **endpoints**, and since **D563** a `provider`
-/// entry does not have to be one.
+/// An unknown-provider refusal lists declared endpoints, not builtin options
+/// entries: an `options` table configures an existing wire and declares none.
 ///
 /// `[provider.chatgpt.options]` configures a wire this build already ships; it
 /// declares nothing, and naming it here would answer a typo by pointing at an
@@ -706,13 +713,39 @@ fn an_options_entry_for_a_builtin_is_not_something_this_project_declares() {
     // The declared shape still answers as it always did, which is what makes
     // the clause above about the *kind* of entry rather than about D563
     // silencing the list.
+    let (_declared, config) = declaring_config();
     offline(&cache)
-        .current_dir(declaring_project().path())
+        .env("GANJA_CONFIG", &config)
+        .current_dir(project().path())
         .env("GANJA_PROVIDER", "bogus")
         .args(["run", "hello"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("this config names local-llama"));
+}
+
+/// A discovered project file declaring an endpoint fails the load before any
+/// provider is constructed: a checkout must not choose where a session's
+/// requests and credentials go. The refusal names the file and the key, and
+/// repeats neither the URL nor anything else the entry wrote.
+#[test]
+fn a_project_file_declaring_an_endpoint_is_refused_with_its_path_and_key() {
+    let cache = cache();
+    let project = project();
+    fs::write(
+        project.path().join("ganja.toml"),
+        "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+         base_url = \"http://127.0.0.1:11434/v1\"\n",
+    )
+    .expect("the config file is writable");
+
+    let discovered = project.path().join("ganja.toml").canonicalize().expect("the config resolves");
+    offline(&cache).current_dir(project.path()).args(["models", "fake"]).assert().failure().stderr(
+        predicate::str::contains(discovered.to_string_lossy().as_ref())
+            .and(predicate::str::contains("provider.local-llama"))
+            .and(predicate::str::contains("trusted tiers"))
+            .and(predicate::str::contains("11434").not()),
+    );
 }
 
 /// The cursor roster is the wire's to serve, so `models cursor` asks the
@@ -831,9 +864,11 @@ fn write_pre_split_chatgpt_login(data: &TempDir) {
 #[test]
 fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
     let data = data();
-    let project = declaring_project();
+    let (_declared, config) = declaring_config();
+    let project = project();
 
     ganja(&data)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["auth", "login", "--provider", "local-llama", "--key", CANARY])
         .assert()
@@ -845,6 +880,7 @@ fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
         );
 
     ganja(&data)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["auth", "list"])
         .assert()
@@ -855,6 +891,7 @@ fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
     // entry supplies none of them — so naming one is refused rather than
     // attempted against nothing.
     ganja(&data)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["auth", "login", "--provider", "local-llama", "--method", "device"])
         .assert()
@@ -862,16 +899,18 @@ fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
         .stderr(predicate::str::contains("key"));
 
     ganja(&data)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["auth", "logout", "--provider", "local-llama"])
         .assert()
         .success()
         .stdout(predicate::str::contains("forgot the stored local-llama"));
 
-    // A name this project's config does not declare is refused with both tiers
-    // named, because somebody who mistyped their own entry has to see what
-    // they actually wrote.
+    // A name this config does not declare is refused with both tiers named,
+    // because somebody who mistyped their own entry has to see what they
+    // actually wrote.
     ganja(&data)
+        .env("GANJA_CONFIG", &config)
         .current_dir(project.path())
         .args(["auth", "login", "--provider", "local-lama", "--key", CANARY])
         .assert()

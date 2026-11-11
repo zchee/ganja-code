@@ -809,6 +809,124 @@ fn a_project_dialog_expiry_is_refused_by_name() {
     assert_eq!(merged.dialog_expiry(), DialogExpiry::OneMinute);
 }
 
+/// The `provider` table at the same seam: a config-declared endpoint decides
+/// where a session's requests — and the credential its `key_env` names — are
+/// sent, so declaring one is the trusted tiers' alone. The refusal names the
+/// file and the key and echoes nothing else back: the URL and the variable
+/// name are the halves a reader cannot vet at a glance, and a message is not
+/// the place to reproduce a line of somebody else's config.
+#[test]
+fn a_project_provider_endpoint_is_refused_before_merge() {
+    // A keyed remote endpoint and a keyless loopback one: the refusal is
+    // about the tier, not about the credential, so an entry that names no
+    // variable and stays on this machine is refused all the same.
+    for entry in [
+        "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+         base_url = \"https://llama.example/v1\"\nkey_env = \"LOCAL_LLAMA_KEY\"\n",
+        "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+         base_url = \"http://127.0.0.1:11434/v1\"\n",
+    ] {
+        let mut merged = parse("").expect("an empty config parses");
+        let error = merged
+            .merge_project(
+                parse(entry).expect("the entry itself parses"),
+                Path::new("/checkout/ganja.toml"),
+            )
+            .expect_err("a checkout must not declare an endpoint");
+        let ConfigError::Parse { path, message } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert_eq!(path, Path::new("/checkout/ganja.toml"));
+        assert!(message.contains("provider.local-llama"), "{message}");
+        assert!(
+            !message.contains("llama.example") && !message.contains("127.0.0.1"),
+            "the refusal echoes no URL: {message}"
+        );
+        assert!(
+            !message.contains("LOCAL_LLAMA_KEY"),
+            "the refusal echoes no variable name: {message}"
+        );
+        assert!(merged.provider.is_empty(), "the refusal leaves the table unmerged");
+    }
+}
+
+/// Same-id replacement is what the refusal above exists to stop: the person's
+/// own entry keeps deciding where their credential goes, however a checkout
+/// respells it — a loopback respelling included.
+#[test]
+fn a_project_provider_cannot_replace_a_trusted_endpoint() {
+    let mut merged = parse(
+        "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+         base_url = \"https://llama.example/v1\"\nkey_env = \"LOCAL_LLAMA_KEY\"\n",
+    )
+    .expect("the trusted tier parses");
+    let error = merged
+        .merge_project(
+            parse(
+                "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+                 base_url = \"http://127.0.0.1:4444/v1\"\n",
+            )
+            .expect("the respelling itself parses"),
+            Path::new("/checkout/ganja.toml"),
+        )
+        .expect_err("a checkout must not move a declared endpoint");
+    assert!(matches!(error, ConfigError::Parse { .. }), "got {error:?}");
+    assert_eq!(
+        merged.provider["local-llama"].base_url.as_deref(),
+        Some("https://llama.example/v1"),
+        "the trusted entry is untouched"
+    );
+    assert_eq!(
+        merged.provider["local-llama"].key_env.as_deref(),
+        Some("LOCAL_LLAMA_KEY"),
+        "the credential name still belongs to the trusted entry"
+    );
+}
+
+/// Between trusted tiers an entry replaces wholesale rather than merging
+/// field by field: the fields are one description of one endpoint, and a
+/// closer tier that moved a provider to another host without repeating its
+/// `key_env` would otherwise present the old credential to the new host.
+#[test]
+fn trusted_provider_entries_are_replaced_whole() {
+    let mut merged = parse(
+        "[provider.local-llama]\ndialect = \"openai-chat-completions\"\n\
+         base_url = \"https://llama.example/v1\"\nkey_env = \"LOCAL_LLAMA_KEY\"\n",
+    )
+    .expect("the global tier parses");
+    merged.merge(
+        parse(
+            "[provider.local-llama]\ndialect = \"openai-responses\"\n\
+             base_url = \"https://moved.example/v1\"\n",
+        )
+        .expect("the explicit tier parses"),
+    );
+
+    let entry = &merged.provider["local-llama"];
+    assert_eq!(entry.base_url.as_deref(), Some("https://moved.example/v1"));
+    assert_eq!(entry.dialect, Some(Dialect::OpenaiResponses), "the dialect moves with the entry");
+    assert_eq!(entry.key_env, None, "the old credential name does not ride along to the new host");
+}
+
+/// A builtin's `options` entry configures a wire this build already ships
+/// and declares nothing, so the project tier keeps it — the same split
+/// `declared_endpoints` reads the table under.
+#[test]
+fn a_project_builtin_options_entry_still_merges() {
+    let mut merged = parse("").expect("an empty config parses");
+    merged
+        .merge_project(
+            parse("[provider.chatgpt.options]\nservice_tier = \"priority\"\n")
+                .expect("the options entry parses"),
+            Path::new("/checkout/ganja.toml"),
+        )
+        .expect("a builtin options entry stays the project tier's to set");
+    assert!(
+        merged.provider["chatgpt"].options.is_some(),
+        "the options table lands where the engine reads it"
+    );
+}
+
 /// `true` is both moments and `false` is none — the same answer absent
 /// gives — so a config only ever writes the boolean to say something.
 #[test]

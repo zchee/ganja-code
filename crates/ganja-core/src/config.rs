@@ -1682,7 +1682,12 @@ pub struct Config {
     /// Language servers this session may run. **Absent is none of them**; see
     /// [`LspConfig`].
     pub lsp: Option<LspConfig>,
-    /// Endpoints this build can talk to besides the ones it ships, by id.
+    /// Endpoints this build can talk to besides the ones it ships, by id,
+    /// and option-only entries for the `chatgpt` and `openai` builtins.
+    ///
+    /// Custom endpoints are accepted only from the global config or a
+    /// non-discovered explicit file. Discovered project files may configure
+    /// builtin options, but cannot declare or replace a custom endpoint.
     ///
     /// The id is what a session names — `GANJA_PROVIDER`, `--model <id>/…`,
     /// this file's own `model` key — and what a stored credential and a
@@ -2641,7 +2646,7 @@ impl Config {
     /// The distinction exists because a `provider` entry stopped being one
     /// thing: `[provider.chatgpt.options]` configures a wire this build
     /// already ships and declares nothing, so a refusal that listed it as
-    /// something "this project's config declares" would send somebody looking
+    /// something "a trusted config declares" would send somebody looking
     /// for an endpoint they never wrote. Every listing of what a config
     /// declares reads this rather than the table's keys.
     #[must_use]
@@ -2857,14 +2862,12 @@ impl Config {
             }
             config.merge(tier);
         }
-        // The project tier does not join the trusted merge (**D523**): a
-        // checkout's file may only *tighten* `cross_session_inbound` and may
-        // not set `dialog_expiry` at all, and `merge_project` is where both
-        // rules live — every other key keeps the later-wins the trusted
-        // tiers just used. Per file, because the ancestor walk can find
-        // several and each may tighten further. The source moves only when
-        // the value did: a project file that merely agrees with the standing
-        // policy did not establish it.
+        // The project tier does not join the trusted merge: declarations of
+        // custom provider endpoints, `cloud` and `dialog_expiry` are refused,
+        // while policy keys may only tighten. `merge_project` applies these
+        // rules per discovered file, because the ancestor walk can find
+        // several. The source moves only when the value did: a project file
+        // that agrees with the standing policy did not establish it.
         for path in project_files(cwd)? {
             if let Some(tier) = read(&path)? {
                 let standing = config.cross_session_inbound;
@@ -3007,9 +3010,9 @@ impl Config {
     /// Overlays one **project-tier** file onto the running result (**D523**).
     ///
     /// The project tier is the one tier whose author is the checkout rather
-    /// than the person running it, so five keys diverge from
-    /// [`Config::merge`]'s later-wins: `dialog_expiry` is refused outright —
-    /// the complaint names the key and `path` — while `cross_session_inbound`
+    /// than the person running it. Custom provider endpoints, `cloud` and
+    /// `dialog_expiry` are refused outright, naming the key and `path`.
+    /// Builtin provider options remain permitted. `cross_session_inbound`
     /// and `teamless_send` (**D531**) replace the running result only when
     /// strictly more severe on their own [`InboundPolicy::severity`] /
     /// [`TeamlessSend::severity`] orders, so a checkout can tighten the
@@ -3026,9 +3029,20 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Parse`] naming `dialog_expiry` and the file when the
-    /// file sets it.
+    /// [`ConfigError::Parse`] naming the key and file when the file declares
+    /// a custom provider endpoint, `cloud` or `dialog_expiry`.
     fn merge_project(&mut self, mut other: Self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(id) =
+            other.provider.keys().find(|id| !crate::provider::PROVIDERS.contains(&id.as_str()))
+        {
+            return Err(ConfigError::Parse {
+                path: path.to_owned(),
+                message: format!(
+                    "provider.{id} is set by trusted tiers only — the global config, or a \
+                     non-discovered file GANJA_CONFIG or --config names — never by a project file"
+                ),
+            });
+        }
         if other.cloud.is_some() {
             return Err(ConfigError::Parse {
                 path: path.to_owned(),
