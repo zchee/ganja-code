@@ -57,9 +57,10 @@ ENV HOME=/home/ganja \
 
 # Only the checkout, data and home trees are writable by the worker user.
 # Binary and configuration stay root-owned and read-only; the shared temp
-# directories lose world write because nothing the worker runs needs them
-# (tool-output spills prefer the writable data home, and git writes inside
-# the checkout). Clearing and then re-scanning the setuid/setgid bits makes
+# directories lose world write because the fixed acceptance path does not
+# need them: checkout uses a temporary directory inside the work tree, the
+# TCP server binds no session socket, and tool-output spills use the data
+# directory. Clearing and then re-scanning the setuid/setgid bits makes
 # the build itself fail if any such file survives.
 RUN chmod 0555 /etc/ganja /usr/local/bin/ganja \
     && chmod 0444 /etc/ganja/* \
