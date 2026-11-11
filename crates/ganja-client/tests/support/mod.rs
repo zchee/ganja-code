@@ -258,14 +258,22 @@ impl Stub {
             let error = task.await.expect_err("the listener runs until stopped");
             assert!(error.is_cancelled(), "listener failed: {error}");
         }
-        let handlers = std::mem::take(&mut *self.handlers.lock().expect("handler lock"));
-        tokio::time::timeout(DEADLINE, async {
-            for handler in handlers {
-                handler.await.expect("the request handler finished");
+        let mut handlers = std::mem::take(&mut *self.handlers.lock().expect("handler lock"));
+        let joined = tokio::time::timeout(DEADLINE, async {
+            for handler in &mut handlers {
+                handler.await?;
             }
+            Ok::<(), tokio::task::JoinError>(())
         })
-        .await
-        .expect("all accepted request handlers finish");
+        .await;
+        for handler in handlers {
+            if !handler.is_finished() {
+                handler.abort();
+            }
+        }
+        joined
+            .expect("all accepted request handlers finish")
+            .expect("the request handler finished");
     }
 
     /// The one request it received, which is what most suites assert about.
