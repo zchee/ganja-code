@@ -27,6 +27,56 @@ fn failed_startup_does_not_retain_departed_lanes() {
 }
 
 #[tokio::test]
+async fn a_detached_queued_notification_records_its_late_terminal_outcome() {
+    for failed in [false, true] {
+        let service = Service::start();
+        let home = tempfile::tempdir().expect("home");
+        let lanes: Vec<_> = (0..=WORKERS).map(|_| Lane::on(Arc::clone(&service))).collect();
+        let mut holders = Vec::new();
+        let mut heads = Vec::new();
+        for (index, lane) in lanes.iter().take(WORKERS).enumerate() {
+            let path = home.path().join(format!("held-{index}"));
+            mailbox::seed(&path).expect("seed held inbox");
+            holders.push(hold(path.clone()));
+            let head = lane
+                .submit(Payload::Write { path, envelope: Box::new(message("head")) })
+                .expect("head admitted");
+            started(&head).await;
+            heads.push(head);
+        }
+        let path = home.path().join("queued");
+        if failed {
+            std::fs::create_dir(&path).expect("real write failure");
+        }
+        let mut notice = lanes[WORKERS]
+            .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("notice")) })
+            .expect("queued notice");
+        let watch = JobWatch(Arc::clone(&notice.cell));
+        assert!(matches!(notice.observe(FINAL_OBSERVATION).await, Observation::PendingQueued));
+        notice.detach();
+        let (release, holder) = holders.pop().expect("one occupied worker");
+        release.send(()).expect("release one worker before expiry");
+        holder.join().expect("holder");
+        tokio::time::timeout(EXPIRY + FINAL_OBSERVATION + Duration::from_secs(2), watch.settled())
+            .await
+            .expect("queued notice has a terminal result");
+        let trace = watch.snapshot();
+        for (release, holder) in holders {
+            release.send(()).expect("release remaining worker");
+            holder.join().expect("holder");
+        }
+        assert_eq!(trace.observation, Some("PendingQueued"));
+        assert_eq!(trace.outcome, Some(if failed { "LateFailed" } else { "LateSucceeded" }));
+        assert!(trace.admitted < trace.started.expect("notice started"));
+        assert!(trace.started < trace.completed);
+        if !failed {
+            assert_eq!(mailbox::read(&path).expect("written notice").valid[0].text, "notice");
+        }
+        drop(heads);
+    }
+}
+
+#[tokio::test]
 async fn unconsumed_results_hold_the_per_member_limit() {
     let lane = Lane::on(Service::start());
     let home = tempfile::tempdir().expect("home");

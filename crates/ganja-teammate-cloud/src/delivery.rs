@@ -122,6 +122,19 @@ enum Status {
     Final(Option<Value>),
 }
 
+#[cfg(test)]
+static TEST_EVENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TestTrace {
+    pub(crate) admitted: u64,
+    pub(crate) started: Option<u64>,
+    pub(crate) completed: Option<u64>,
+    pub(crate) outcome: Option<&'static str>,
+    pub(crate) observation: Option<&'static str>,
+}
+
 #[derive(Debug)]
 struct Cell {
     lane: u64,
@@ -131,6 +144,8 @@ struct Cell {
     changed: Notify,
     credited: AtomicBool,
     late: AtomicBool,
+    #[cfg(test)]
+    trace: Mutex<TestTrace>,
 }
 
 impl Cell {
@@ -160,6 +175,12 @@ impl Cell {
                 }
             }
         };
+        #[cfg(test)]
+        {
+            let mut trace = self.trace.lock().expect("test delivery trace");
+            trace.completed = Some(TEST_EVENT.fetch_add(1, Ordering::SeqCst));
+            trace.outcome = Some(outcome);
+        }
         *status = Status::Final(Some(value));
         drop(status);
         if let Some(reason) = dropped {
@@ -222,7 +243,10 @@ impl Receipt {
                 self.cell.credited.store(false, Ordering::SeqCst);
                 Observation::Final(value.take().expect("receipt consumed once"))
             }
-            Status::Queued => Observation::PendingQueued,
+            Status::Queued => {
+                self.cell.late.store(true, Ordering::SeqCst);
+                Observation::PendingQueued
+            }
             Status::Running => {
                 self.cell.late.store(true, Ordering::SeqCst);
                 Observation::Late
@@ -234,6 +258,11 @@ impl Receipt {
             Observation::PendingQueued => "PendingQueued",
             Observation::Late => "Late",
         };
+        #[cfg(test)]
+        {
+            self.cell.trace.lock().expect("test delivery trace").observation = Some(outcome);
+            self.cell.changed.notify_waiters();
+        }
         tracing::debug!(
             lane = self.cell.lane,
             sequence = self.cell.sequence,
@@ -256,6 +285,12 @@ impl Drop for Receipt {
             let cancelled = matches!(*status, Status::Queued);
             if cancelled {
                 *status = Status::Final(Some(Value::Dropped(DropReason::Cancelled)));
+                #[cfg(test)]
+                {
+                    let mut trace = self.cell.trace.lock().expect("test delivery trace");
+                    trace.completed = Some(TEST_EVENT.fetch_add(1, Ordering::SeqCst));
+                    trace.outcome = Some("Dropped");
+                }
             } else if matches!(*status, Status::Running) {
                 self.cell.late.store(true, Ordering::SeqCst);
             }
@@ -336,6 +371,15 @@ impl Service {
                                     false
                                 } else {
                                     *status = Status::Running;
+                                    #[cfg(test)]
+                                    {
+                                        job.cell
+                                            .trace
+                                            .lock()
+                                            .expect("test delivery trace")
+                                            .started =
+                                            Some(TEST_EVENT.fetch_add(1, Ordering::SeqCst));
+                                    }
                                     true
                                 }
                             };
@@ -518,6 +562,11 @@ impl Lane {
             changed: Notify::new(),
             credited: AtomicBool::new(true),
             late: AtomicBool::new(false),
+            #[cfg(test)]
+            trace: Mutex::new(TestTrace {
+                admitted: TEST_EVENT.fetch_add(1, Ordering::SeqCst),
+                ..TestTrace::default()
+            }),
         });
         queue.jobs.push_back(Job {
             payload,
@@ -628,6 +677,10 @@ pub(crate) struct JobWatch(Arc<Cell>);
 
 #[cfg(test)]
 impl JobWatch {
+    pub(crate) fn snapshot(&self) -> TestTrace {
+        *self.0.trace.lock().expect("test delivery trace")
+    }
+
     pub(crate) async fn settled(&self) {
         loop {
             let notified = self.0.changed.notified();
