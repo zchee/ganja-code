@@ -145,7 +145,8 @@ impl Running {
         self
     }
 
-    fn mail(&self) -> Vec<MailboxMessage> {
+    async fn mail(&self) -> Vec<MailboxMessage> {
+        self.fixture.flush_notifications().await;
         mailbox::read(&self.fixture.member.lent.lead_inbox).expect("mailbox").valid
     }
 
@@ -170,6 +171,108 @@ fn long_answer() -> Vec<ProviderEvent> {
         vec![ProviderEvent::TextDelta("x".to_owned()); ganja_core::engine::EVENT_CAPACITY + 32];
     answer.push(ProviderEvent::Finish(FinishReason::Completed));
     answer
+}
+
+#[tokio::test]
+async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
+    for outcome in ["success", "failure", "cancel"] {
+        let mut running = Running::new(vec![ganja_testkit::says("answer")]).await;
+        let member = Arc::get_mut(&mut running.fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+            Duration::from_millis(100);
+        let member = &running.fixture.member;
+        let inbox = member.spec.inbox();
+        mailbox::write(
+            &inbox,
+            MailboxMessage::new("team-lead", "real prompt", record::now_iso8601()),
+        )
+        .expect("prompt");
+        let (release, holder) = hold_inbox(inbox.clone());
+        let runner = tokio::spawn(Arc::clone(member).run());
+        wait_local_call(member, "prune").await;
+        let prune = member.inbound.watch("prune");
+        timeout(delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE, prune.observed("Late"))
+            .await
+            .expect("the original prune receipt was observed late before release");
+        assert_eq!(
+            member.inbound.last_sequence(),
+            prune.sequence(),
+            "a pending prune must not be re-admitted"
+        );
+        let user_count = || {
+            running
+                .storage
+                .load_transcript(&running.engine.session_id())
+                .expect("transcript")
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count()
+        };
+        assert_eq!(user_count(), 0, "unconfirmed prune must not dispatch");
+        if outcome == "failure" {
+            std::fs::rename(&inbox, inbox.with_extension("saved")).expect("preserve inbox");
+            std::fs::create_dir(&inbox).expect("force real prune read failure");
+        }
+        if outcome == "cancel" {
+            if timeout(cleanup_budget(member), member.cleanup()).await.is_err() {
+                release.send(()).expect("release prune after cleanup timeout");
+                holder.join().expect("holder");
+                runner.abort();
+                panic!("cleanup did not return within its bound while the prune was blocked");
+            }
+            timeout(Duration::from_secs(2), async {
+                while !runner.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancelled runner returns while prune is blocked");
+        }
+        release.send(()).expect("release prune");
+        holder.join().expect("holder");
+        timeout(Duration::from_secs(2), prune.settled()).await.expect("late prune final result");
+        if outcome == "failure" {
+            timeout(
+                runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+                async {
+                    while member.inbound.last_read_sequence() <= prune.sequence() {
+                        tokio::task::yield_now().await;
+                    }
+                },
+            )
+            .await
+            .expect("the runner polls again after the failed prune");
+            assert_eq!(user_count(), 0, "a failed prune must never dispatch its cached message");
+        }
+        if outcome == "success" {
+            timeout(Duration::from_secs(3), async {
+                while member.phase() != Phase::Suspended {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("confirmed late prune dispatches the cached prompt");
+            assert_eq!(user_count(), 1);
+            assert!(mailbox::read(&inbox).expect("pruned inbox").valid.is_empty());
+            timeout(
+                runner::POLL + delivery::OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+                async {
+                    while member.inbound.last_read_sequence() <= prune.sequence() {
+                        tokio::task::yield_now().await;
+                    }
+                },
+            )
+            .await
+            .expect("a subsequent read was admitted after the successful prune");
+            assert_eq!(user_count(), 1);
+        }
+        timeout(cleanup_budget(member), member.cleanup())
+            .await
+            .expect("cleanup did not return within its bound after releasing the prune");
+        timeout(Duration::from_secs(2), runner).await.expect("runner returned").expect("runner");
+        assert_eq!(user_count(), usize::from(outcome == "success"), "{outcome}");
+        running.close().await;
+    }
 }
 
 #[tokio::test]
@@ -209,7 +312,7 @@ async fn a_saved_envelope_is_mailed_once_when_its_finish_arrives_after_the_gap()
     .expect("saved envelope before finish publication");
     running.source.gap.store(true, Ordering::SeqCst);
     running.fixture.member.wait_for_terminal(None, None, false).await.expect("gap convergence");
-    let before = running.mail();
+    let before = running.mail().await;
     assert_eq!(before.len(), 2, "one final text and one idle notification");
     assert!(before.iter().any(|mail| mail.text.contains("final text may be incomplete")));
     assert!(before.iter().any(|mail| matches!(serde_json::from_str::<Frame>(&mail.text), Ok(Frame::IdleNotification(ref idle)) if idle.idle_reason == Some(IdleReason::Interrupted))));
@@ -225,7 +328,7 @@ async fn a_saved_envelope_is_mailed_once_when_its_finish_arrives_after_the_gap()
         running.fixture.member.terminal.lock().expect("decisions").get(&completed.id),
         Some(&Some(FinishReason::Completed))
     );
-    assert_eq!(running.mail().len(), before.len(), "retained finish cannot mail twice");
+    assert_eq!(running.mail().await.len(), before.len(), "retained finish cannot mail twice");
     running.close().await;
 }
 
@@ -262,7 +365,7 @@ async fn only_shorter_recovered_text_gets_a_positive_loss_marker() {
             .push_back(Resumed::Event(Box::new(started)));
         running.source.gap.store(true, Ordering::SeqCst);
         running.fixture.member.wait_for_terminal(None, None, false).await.expect("gap convergence");
-        let mail = running.mail();
+        let mail = running.mail().await;
         let text = &mail
             .iter()
             .find(|message| message.text.contains("final text may be incomplete"))
@@ -315,7 +418,7 @@ async fn text_loss_evidence_survives_a_terminal_reconciliation_timeout() {
         .resume_for_inspection()
         .await
         .expect("explicit continuation");
-    let mail = running.mail();
+    let mail = running.mail().await;
     assert_eq!(mail.len(), 2);
     let text = &mail
         .iter()
@@ -342,9 +445,13 @@ async fn a_new_epoch_converges_to_the_same_idle_transcript() {
     running.fixture.member.wait_for_terminal(None, None, false).await.expect("cold convergence");
     let after = running.storage.load_transcript(&running.engine.session_id()).expect("after");
     assert_eq!(before, after);
-    assert_eq!(running.mail().len(), 2);
+    assert_eq!(running.mail().await.len(), 2);
     assert!(
-        running.mail().iter().any(|message| message.text.contains("final text may be incomplete"))
+        running
+            .mail()
+            .await
+            .iter()
+            .any(|message| message.text.contains("final text may be incomplete"))
     );
     running.close().await;
 }
@@ -364,8 +471,8 @@ async fn a_new_epoch_interrupts_a_stored_turn_without_a_completed_envelope() {
         .wait_for_terminal(None, None, false)
         .await
         .expect("cold interrupted turn");
-    assert_eq!(running.mail().len(), 2);
-    assert!(running.mail().iter().any(|message| matches!(serde_json::from_str::<Frame>(&message.text), Ok(Frame::IdleNotification(ref idle)) if idle.idle_reason == Some(IdleReason::Interrupted))));
+    assert_eq!(running.mail().await.len(), 2);
+    assert!(running.mail().await.iter().any(|message| matches!(serde_json::from_str::<Frame>(&message.text), Ok(Frame::IdleNotification(ref idle)) if idle.idle_reason == Some(IdleReason::Interrupted))));
     assert_eq!(running.fixture.member.terminal.lock().expect("decisions").len(), 1);
     drop(fault);
     running.close().await;
@@ -375,7 +482,7 @@ async fn a_new_epoch_interrupts_a_stored_turn_without_a_completed_envelope() {
 async fn an_owner_reported_revert_invalidates_before_any_explicit_resume() {
     let running = Running::new(vec![ganja_testkit::says("old answer")]).await;
     running.fixture.member.turn("team-lead", "first request").await.expect("first turn");
-    assert_eq!(running.mail().len(), 2);
+    assert_eq!(running.mail().await.len(), 2);
     assert!(!running.fixture.member.terminal.lock().expect("decisions").is_empty());
     let control = CloudControl(running.fixture.member.clone());
     running.fixture.provisioner.owner_recover(&running.fixture.worker);
@@ -383,11 +490,15 @@ async fn an_owner_reported_revert_invalidates_before_any_explicit_resume() {
     assert_eq!(control.phase(), Phase::Suspended);
     assert!(running.source.cursor().await.is_none(), "held checkpoint cursor was invalidated");
     assert!(running.fixture.member.terminal.lock().expect("decisions").is_empty());
-    assert_eq!(running.mail().len(), 2, "reporting a revert must not resume or mail automatically");
+    assert_eq!(
+        running.mail().await.len(),
+        2,
+        "reporting a revert must not resume or mail automatically"
+    );
     assert!(!running.fixture.member.gate.state().stream_open);
     assert!(!running.fixture.member.gate.state().rest_open);
     control.resume_for_inspection().await.expect("explicit resume");
-    assert_eq!(running.mail().len(), 4, "the new history gets its own conservative decision");
+    assert_eq!(running.mail().await.len(), 4, "the new history gets its own conservative decision");
     assert_eq!(control.phase(), Phase::Idle);
     running.close().await;
 }
@@ -432,7 +543,10 @@ async fn a_failed_envelope_with_a_pre_gap_finish_requires_bounded_recovery() {
         running.fixture.member.wait_for_terminal(None, None, false).await,
         Err("terminal state unavailable")
     );
-    assert!(running.mail().is_empty(), "no success or idle claim from an incomplete envelope");
+    assert!(
+        running.mail().await.is_empty(),
+        "no success or idle claim from an incomplete envelope"
+    );
     assert!(running.fixture.member.terminal.lock().expect("decisions").is_empty());
     drop(fault);
     running.close().await;
@@ -460,7 +574,7 @@ async fn a_missing_finish_mails_once_and_only_an_explicit_message_continues() {
     send("first request");
     timeout(Duration::from_secs(4), async {
         loop {
-            if member.phase() == Phase::RecoveryRequired && running.mail().len() == 1 {
+            if member.phase() == Phase::RecoveryRequired && running.mail().await.len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -468,7 +582,7 @@ async fn a_missing_finish_mails_once_and_only_an_explicit_message_continues() {
     })
     .await
     .expect("bounded recovery notice");
-    assert!(running.mail()[0].text.contains("terminal state unavailable"));
+    assert!(running.mail().await[0].text.contains("terminal state unavailable"));
     assert_eq!(
         running
             .storage
@@ -485,7 +599,7 @@ async fn a_missing_finish_mails_once_and_only_an_explicit_message_continues() {
     send("continue explicitly");
     timeout(Duration::from_secs(4), async {
         loop {
-            if member.phase() == Phase::Suspended && running.mail().len() == 5 {
+            if member.phase() == Phase::Suspended && running.mail().await.len() == 5 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -493,7 +607,7 @@ async fn a_missing_finish_mails_once_and_only_an_explicit_message_continues() {
     })
     .await
     .expect("owner continuation completes both decisions");
-    let mail = running.mail();
+    let mail = running.mail().await;
     assert_eq!(
         mail.iter().filter(|message| message.text.contains("terminal state unavailable")).count(),
         1

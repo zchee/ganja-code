@@ -17,6 +17,7 @@
 //! contribute a config of its own.
 
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::{env, fs};
 
 use assert_cmd::Command;
@@ -24,6 +25,7 @@ use ganja_core::Config;
 use ganja_core::config::{AgentMode, CONFIG_ENV, CONFIG_HOME_ENV, LspConfig, McpServer};
 use ganja_core::provider::Dialect;
 use ganja_permission::Action;
+use predicates::prelude::*;
 
 /// An imported `deny` is a rule this build carries out: it refuses the call
 /// without asking anybody.
@@ -56,15 +58,49 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         env::remove_var(CONFIG_ENV);
     }
 
-    Command::new(env!("CARGO_BIN_EXE_ganja"))
+    a_global_import_keeps_the_provider_fields(home.path(), &project.join("opencode.jsonc"));
+
+    let preview = Command::new(env!("CARGO_BIN_EXE_ganja"))
+        .current_dir(&project)
+        .args(["config", "import-opencode", "--dry-run"])
+        .assert()
+        .success();
+    let preview = String::from_utf8_lossy(&preview.get_output().stdout);
+    let preview_row = preview
+        .lines()
+        .find(|line| line.contains("trusted tier"))
+        .expect("the preview reports the omitted endpoint")
+        .to_owned();
+    assert!(preview_row.contains("provider.local-llama"), "{preview_row}");
+    assert!(
+        preview_row.contains("custom endpoints are trusted tier only; review the entry first; --global trusts it for every project; use ganja config import-opencode --file <source> --global"),
+        "{preview_row}"
+    );
+    assert!(!preview_row.contains("127.0.0.1") && !preview_row.contains("gpu-0"), "{preview_row}");
+    assert!(!project.join("ganja.toml").exists(), "the preview writes nothing");
+
+    let imported = Command::new(env!("CARGO_BIN_EXE_ganja"))
         .current_dir(&project)
         .args(["config", "import-opencode"])
         .assert()
         .success();
+    let output = String::from_utf8_lossy(&imported.get_output().stdout);
+    assert!(
+        output.lines().any(|line| line == preview_row),
+        "the real import keeps the preview row: {output}"
+    );
 
     // The file it wrote, under the name the loader now reads — and under
     // neither name it used to.
     let written = fs::read_to_string(project.join("ganja.toml")).expect("the import wrote a file");
+    assert!(
+        written
+            .parse::<toml_edit::DocumentMut>()
+            .expect("valid imported TOML")
+            .get("provider")
+            .is_none(),
+        "project output contains no provider table"
+    );
     for retired in ["ganja.jsonc", "ganja.json"] {
         assert!(!project.join(retired).exists(), "{retired} was written beside it");
     }
@@ -202,19 +238,7 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         "an entry leaning on a definition this build does not have was written anyway"
     );
 
-    // The provider table is the other half `validate` cannot prove alone: a
-    // config's own load refuses an entry naming a builtin and one whose
-    // endpoint would carry a key in the clear, so a file that got past both is
-    // one the importer could not have written wrong.
-    let local = &config.provider["local-llama"];
-    assert_eq!(local.dialect, Some(Dialect::OpenaiChatCompletions));
-    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
-    assert_eq!(local.headers["x-route"], "gpu-0");
-    assert_eq!(
-        local.key_env, None,
-        "opencode's entry held the key itself, and nothing invents the name of \
-         a variable holding it"
-    );
+    assert!(config.provider.is_empty(), "a project import declares no custom endpoint");
     assert!(
         !config.provider.contains_key("anthropic"),
         "an entry naming a provider this build ships is one `Config::load` \
@@ -226,4 +250,39 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         !config.snapshots_enabled(),
         "an author who told opencode not to track files has not been overruled"
     );
+}
+
+/// `--file` chooses the input and `--global` chooses the trusted destination;
+/// both flags together keep the endpoint without changing its mapped fields.
+fn a_global_import_keeps_the_provider_fields(home: &Path, source: &Path) {
+    let project = home.join("global-import-project");
+    fs::create_dir_all(project.join(".git")).expect("the global-load project exists");
+    let imported = Command::new(env!("CARGO_BIN_EXE_ganja"))
+        .current_dir(&project)
+        .args(["config", "import-opencode", "--global", "--file"])
+        .arg(source)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("provider.local-llama.models")
+                .and(predicate::str::contains("catalog")),
+        );
+    assert!(
+        !String::from_utf8_lossy(&imported.get_output().stdout).contains("trusted tier"),
+        "the global destination does not omit custom endpoints"
+    );
+    let global = home.join("config").join("ganja").join("ganja.toml");
+    assert!(global.is_file(), "--global writes the config home");
+    assert!(!project.join("ganja.toml").exists(), "no project output is written");
+    let config = Config::load(&project).expect("the global imported config loads");
+    let local = &config.provider["local-llama"];
+    assert_eq!(local.dialect, Some(Dialect::OpenaiChatCompletions));
+    assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:11434/v1"));
+    assert_eq!(local.headers["x-route"], "gpu-0");
+    assert_eq!(
+        local.key_env, None,
+        "opencode's entry held the key itself, and nothing invents the name of \
+         a variable holding it"
+    );
+    fs::remove_file(global).expect("the project import is checked without a global declaration");
 }

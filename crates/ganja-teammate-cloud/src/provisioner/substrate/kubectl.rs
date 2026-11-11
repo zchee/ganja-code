@@ -163,7 +163,7 @@ fn proxy_command(
         .env("PATH", path)
         .env("HOME", home)
         .env("KUBECONFIG", kubeconfig);
-    command.args(["ate", "proxy", "actor", &actor.name, "0:80"]);
+    command.args(["ate", "proxy", "actor", &actor.name, "0:8080"]);
     command.arg(format!("--atespace={}", actor.atespace));
     let mut config_flag = std::ffi::OsString::from("--kubeconfig=");
     config_flag.push(kubeconfig);
@@ -236,7 +236,7 @@ async fn ready_address(
     actor: &ObjectRef,
 ) -> Result<SocketAddr, ProvisionError> {
     let failed = || failure("proxy readiness", ProvisionErrorKind::Transient);
-    let suffix = format!(" -> {}/{}:80", actor.atespace, actor.name);
+    let suffix = format!(" -> {}/{}:8080", actor.atespace, actor.name);
     let mut line = Vec::new();
     for _ in 0..65536 {
         let byte = stderr.read_u8().await.map_err(|_| failed())?;

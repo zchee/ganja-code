@@ -87,6 +87,8 @@ GANJA_LIVE_TEST=1 cargo nextest run -p ganja-core -E 'binary(codex_identity_prob
 - `Command::Undo` deletes nothing: it records an anchor. The anchor and everything after it are deleted at the next `SendPrompt` or `RunShell`.
 - A hook runs with the user's authority and crosses no permission dialog. Only an explicit `permissionDecision: "allow"` on a clean exit allows a call; a killed or timed-out hook never does (`src/hook.rs`).
 - `config.rs` refuses unknown keys, and a legacy config file (`LEGACY_FILES`) is a refusal naming `ganja config migrate`. A new key goes into `schema/ganja-config.schema.json` too (pinned by `tests/config_schema.rs`). Permission rules keep document order (pinned by `src/config_tests.rs`).
+- Custom `[provider.<id>]` endpoints are trusted-tier only: global config or a non-discovered file named by `GANJA_CONFIG`/`--config`. Every discovered project declaration is refused with its file and key, including keyless loopback endpoints and same-id replacements; explicitly naming a discovered file does not elevate it. Builtin option-only entries remain permitted, and trusted entries replace whole. JSON Schema checks shape, not provenance (pinned by `tests/provider_config_tiers.rs` and `tests/config_schema.rs`). Writer-specific behavior and remaining migration/hooks gaps are documented in `crates/ganja-cli/AGENTS.md`.
+- An otherwise eligible file named through `GANJA_CONFIG` or `--config` is trusted as written: it must not be a file inside an unreviewed checkout. Ganja cannot tell who set the variable.
 - Ids are UUIDv7 (`Uuid::now_v7` in `ganja-protocol`) and sort by creation. Ids read from disk are taken verbatim.
 - `storage` and `snapshot` are re-exports of `ganja-storage`; edit them there.
 

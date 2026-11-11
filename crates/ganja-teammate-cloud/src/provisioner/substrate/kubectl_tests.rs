@@ -10,12 +10,46 @@ fn executable(directory: &std::path::Path, body: &str) -> PathBuf {
     path
 }
 
+#[test]
+fn the_proxy_command_targets_port_8080() {
+    let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };
+    let command = proxy_command(
+        std::path::Path::new("/usr/bin/kubectl"),
+        std::path::Path::new("/operator/config"),
+        None,
+        &actor,
+    )
+    .expect("proxy command");
+    assert_eq!(command.as_std().get_args().nth(4).expect("port mapping"), "0:8080");
+}
+
+#[tokio::test]
+async fn readiness_for_the_wrong_worker_port_is_rejected() {
+    let directory = tempfile::tempdir().expect("temporary fixture directory");
+    let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };
+    for target in ["ganja/worker:80", "ganja/other:8080"] {
+        let binary = executable(
+            directory.path(),
+            &format!("printf 'Proxying 127.0.0.1:12345 -> {target}\\n' >&2\nexec sleep 60"),
+        );
+        let result = start_proxy(
+            &binary,
+            &directory.path().join("operator-config"),
+            None,
+            &actor,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(result.is_err(), "readiness for {target} must not be accepted");
+    }
+}
+
 #[tokio::test]
 async fn proxy_readiness_needs_no_actor_connection_and_cancellation_reaps_the_child() {
     let directory = tempfile::tempdir().expect("temporary fixture directory");
     let binary = executable(
         directory.path(),
-        "printf 'Proxying 127.0.0.1:12345 -> ganja/worker:80\\n' >&2\nexec sleep 60",
+        "printf 'Proxying 127.0.0.1:12345 -> ganja/worker:8080\\n' >&2\nexec sleep 60",
     );
     let actor = ObjectRef { atespace: "ganja".to_owned(), name: "worker".to_owned() };
     let mut proxy = start_proxy(
@@ -45,7 +79,7 @@ async fn a_held_startup_does_not_block_other_actors_and_same_actor_callers_share
     let binary = executable(
         directory.path(),
         &format!(
-            "case \"$*\" in\n*held*)\nprintf 'started\\n' >> '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nname=held;;\n*) name=ready;;\nesac\nprintf 'Proxying {address} -> ganja/%s:80\\n' \"$name\" >&2\nexec sleep 60",
+            "case \"$*\" in\n*held*)\nprintf 'started\\n' >> '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nname=held;;\n*) name=ready;;\nesac\nprintf 'Proxying {address} -> ganja/%s:8080\\n' \"$name\" >&2\nexec sleep 60",
             started.display(),
             release.display(),
         ),
@@ -90,7 +124,7 @@ async fn retiring_a_proxy_reaps_its_child_removes_the_entry_and_allows_a_fresh_s
     const CHILD_ENV: &str = "GANJA_TEST_KUBECTL_LISTENER";
     if std::env::var_os(CHILD_ENV).is_some() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("child listener");
-        eprintln!("Proxying {} -> ganja/worker:80", listener.local_addr().expect("address"));
+        eprintln!("Proxying {} -> ganja/worker:8080", listener.local_addr().expect("address"));
         loop {
             let _ = listener.accept().await.expect("proxy connection");
         }
@@ -171,7 +205,7 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
     let binary = executable(
         directory.path(),
         &format!(
-            "printf '%s\\n' \"$@\" > '{}'\npwd > '{}'\nunset PWD SHLVL _\n/usr/bin/env > '{}'\nprintf 'Proxying 127.0.0.1:12345 -> ganja/worker:80\\n' >&2\nexec /bin/sleep 60",
+            "printf '%s\\n' \"$@\" > '{}'\npwd > '{}'\nunset PWD SHLVL _\n/usr/bin/env > '{}'\nprintf 'Proxying 127.0.0.1:12345 -> ganja/worker:8080\\n' >&2\nexec /bin/sleep 60",
             args.display(),
             cwd.display(),
             env.display(),
@@ -231,7 +265,7 @@ async fn proxy_child_receives_only_operator_paths_and_plugin_flags() {
             "proxy",
             "actor",
             "worker",
-            "0:80",
+            "0:8080",
             "--atespace=ganja",
             &format!("--kubeconfig={}", kubeconfig.display()),
             "--context=chosen-context",

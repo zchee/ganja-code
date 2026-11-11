@@ -1,0 +1,18 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen
+---
+                                                                                
+ ┌ teammate ──────────────────────────────────────────────────────────────────┐ 
+ │wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww            │ 
+ │... +3 lines not shown                                                      │ 
+ │  Cancel                                                                    │ 
+ │> Shut down wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww│ 
+ └────────────────────────────────────────────────────────────────────────────┘ 
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

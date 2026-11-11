@@ -24,7 +24,7 @@ Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`sr
 | `plugin` | `list`, `marketplace add\|list\|remove\|update`, `install`, `enable`, `disable`, `remove`, `details`. | Positional names only. |
 | `run [MESSAGE]` | One headless turn, then exit. | `--command`, `-c/--continue`, `-s/--session`, `--fork` (always refused), `--model`, `--agent`, `--effort`, `--deadline DURATION\|HH:MM`, `--json-schema FILE\|JSON`, `--config`, `--attach <URL>`, `--format default\|json`, `--auto`. |
 | `serve` | The engine over HTTP + SSE until SIGINT or SIGTERM. | `--port` (absent: 4096, else any free port), `--hostname` (default `127.0.0.1`; a non-loopback host requires `GANJA_SERVER_PASSWORD`). |
-| `worker init` | Bootstrap listener; replaces itself with `serve` after checkout. | `--port` (default 80, shared with the engine); requires `GANJA_SERVER_PASSWORD`, `GIT_CONFIG_GLOBAL`, and `GIT_SSL_CAINFO`. |
+| `worker init` | Bootstrap listener; replaces itself with `serve` after checkout. | `--port` (default 8080; the engine keeps the actual bound port, including one selected by the OS for `--port 0`); requires `GANJA_SERVER_PASSWORD`, `GIT_CONFIG_GLOBAL`, and `GIT_SSL_CAINFO`. |
 | `sessions` | Stored root sessions of this project. | `--live`: sessions answering on a socket now, every project. Hidden `--socket-dir`. |
 | `skills` | The skill roster a session can load. | None. |
 
@@ -62,6 +62,7 @@ cargo nextest run -p ganja-cli -E 'binary(run)'     # one integration binary
 - A flag that would parse and then decide nothing is refused by clap: `--attach` conflicts with `--config`, `--command`, `--effort`, `--deadline` and `--json-schema` (`src/run.rs`).
 - `run --deadline` parses with `ganja_tui::command::resolve_deadline`, the same grammar as `/deadline`, at the clap boundary.
 - The config writers edit with `toml_edit`, so a target's comments and key order survive; the importers never write an API key and never expand `{env:…}`/`{file:…}` (pinned by `src/import_tests.rs`).
+- Custom provider endpoints require global config or a non-discovered explicit file; discovered project files are refused even when named by `--config` (the loader contract is in `crates/ganja-core/AGENTS.md`). `config import-opencode` omits and reports each custom provider for a project destination, but keeps supported declarations with `--global`. Its omission hint requires reviewing the entry first: `--global` trusts it for every project. Known gap: `config migrate` can still write such a table into a project file, and `config import-claude-hooks` can preserve one there; their shape checks do not prove tier acceptance, and the next start refuses it. Move the declaration to a trusted source rather than treating either writer's success as a successful load.
 - A new subcommand gets an assertion in `tests/cli.rs`.
 
 ## Gotchas

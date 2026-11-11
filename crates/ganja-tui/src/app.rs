@@ -3352,6 +3352,12 @@ impl App {
 
             return;
         };
+        if self.cloud_controls.iter().any(|pending| {
+            pending.member == member && Arc::ptr_eq(teammates.registry(), &pending.registry)
+        }) {
+            self.tell_team("an owner action is already running for this member".to_owned());
+            return;
+        }
         let outcome = teammates.ask_shutdown(member).await;
         self.tell_team(said(member, outcome.as_ref()));
     }

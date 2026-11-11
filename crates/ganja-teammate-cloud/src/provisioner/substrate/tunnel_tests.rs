@@ -238,11 +238,11 @@ async fn an_early_final_response_ends_an_incomplete_large_upload() {
 }
 
 #[tokio::test]
-async fn connect_sends_routing_outside_worker_auth_and_preserves_buffered_bytes() {
+async fn the_connect_request_targets_port_8080() {
     let (client, mut server) = tokio::io::duplex(4096);
     let fixture = tokio::spawn(async move {
         let request = read_head(&mut server).await.expect("read CONNECT");
-        assert_eq!(request, b"CONNECT worker:80 HTTP/1.1\r\nHost: worker:80\r\nate-target-actor: ganja/worker\r\n\r\n");
+        assert_eq!(request, b"CONNECT worker:8080 HTTP/1.1\r\nHost: worker:8080\r\nate-target-actor: ganja/worker\r\n\r\n");
         server
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\nbuffered")
             .await
