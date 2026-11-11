@@ -10232,6 +10232,22 @@ async fn a_busy_cloud_action_cannot_be_submitted_twice() {
 }
 
 #[tokio::test]
+async fn a_shutdown_request_is_refused_while_a_hosted_owner_action_runs() {
+    use ganja_testkit::provisioner::ProvisionOperation;
+    let mut hosted = HostedApp::new().await;
+    let release = hosted.provisioner.hold_next(ProvisionOperation::Kill);
+    hosted.dispatch(component::team::CloudAction::Retire).await;
+    hosted.app.run_team_effect(component::team::Effect::Shutdown("hosted".into())).await;
+    let mut display = terminal(100, 24);
+    hosted.app.draw(&mut display).expect("busy notice draws");
+    let notice = screen(&display);
+    release.notify_one();
+    hosted.settled().await;
+    hosted.close().await;
+    assert!(notice.contains("an owner action is already running for this member"), "{notice}");
+}
+
+#[tokio::test]
 async fn changing_selection_does_not_retarget_an_inflight_action() {
     use ganja_testkit::provisioner::ProvisionOperation;
     let mut hosted = HostedApp::new().await;
@@ -10351,6 +10367,48 @@ fn hosted_dialog() -> component::team::Team {
         vec![team_row("hosted", ganja_protocol::MemberBackend::Cloud, false, &[])],
         Vec::new(),
     )
+}
+
+#[tokio::test]
+async fn a_hosted_shutdown_confirmation_keeps_the_full_target_visible() {
+    let name = "w".repeat(64);
+    let mut app = app();
+    let mut dialog = component::team::Team::new(
+        vec![team_row(&name, ganja_protocol::MemberBackend::Cloud, false, &[])],
+        Vec::new(),
+    );
+    dialog.submit();
+    dialog.move_selection(1);
+    assert_eq!(dialog.submit(), None, "opening Shutdown does not dispatch");
+    dialog.move_selection(1);
+    app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 24);
+    app.draw(&mut display).expect("confirmation draws");
+    let screen = screen(&display);
+    assert!(screen.contains(&format!("Shut down {name}")), "{screen}");
+    insta::assert_snapshot!(screen);
+}
+
+#[tokio::test]
+async fn a_short_hosted_shutdown_confirmation_never_hides_the_target() {
+    let name = "w".repeat(64);
+    let mut app = app();
+    let mut dialog = component::team::Team::new(
+        vec![team_row(&name, ganja_protocol::MemberBackend::Cloud, false, &[])],
+        Vec::new(),
+    );
+    dialog.submit();
+    dialog.move_selection(1);
+    assert_eq!(dialog.submit(), None, "opening Shutdown does not dispatch");
+    dialog.move_selection(1);
+    app.team_dialog = Some(dialog);
+    let mut display = terminal(80, 14);
+    app.draw(&mut display).expect("short confirmation draws");
+    let screen = screen(&display);
+    assert!(screen.contains(&name), "{screen}");
+    let dialog = app.team_dialog.as_ref().expect("dialog");
+    assert!(dialog.selection_visible(app.team_area));
+    insta::assert_snapshot!(screen);
 }
 
 #[tokio::test]
