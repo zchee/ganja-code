@@ -113,7 +113,13 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
             queued.push(lane.submit(payload).expect("credit"));
         }
     }
+    let overflow = Lane::on(Arc::clone(&service));
     assert_eq!(service.state.lock().expect("state").credits.len(), CAPACITY);
+    assert_eq!(
+        overflow.submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
+        DropReason::Full,
+        "the global cap includes jobs in every lane"
+    );
     assert_eq!(
         lanes[0].submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
         DropReason::Full
@@ -135,7 +141,7 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
         Status::Final(Some(Value::Dropped(DropReason::Expired)))
     )));
     assert_eq!(
-        lanes[7].submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
+        overflow.submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
         DropReason::Full,
         "unconsumed expired receipts retain credit"
     );
@@ -164,7 +170,7 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
             "expired followers cannot overtake the late head"
         );
     }
-    drop(lanes);
+    drop((lanes, overflow));
     tokio::time::timeout(Duration::from_secs(2), async {
         while !service.state.lock().expect("state").lanes.is_empty() {
             tokio::task::yield_now().await;
@@ -186,15 +192,68 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
 }
 
 #[tokio::test]
+async fn a_late_lane_head_cannot_be_overtaken_while_other_workers_are_available() {
+    let service = Service::start();
+    let lane = Lane::on(Arc::clone(&service));
+    let independent = Lane::on(service);
+    let home = tempfile::tempdir().expect("home");
+    let blocked = home.path().join("blocked");
+    mailbox::seed(&blocked).expect("blocked inbox");
+    let (release, holder) = hold(blocked.clone());
+    let mut head = lane
+        .submit(Payload::Write { path: blocked, envelope: Box::new(message("first")) })
+        .expect("head");
+    started(&head).await;
+    assert!(matches!(head.observe(Duration::ZERO).await, Observation::Late));
+    let follower_path = home.path().join("follower");
+    let mut follower = lane
+        .submit(Payload::Write {
+            path: follower_path.clone(),
+            envelope: Box::new(message("second")),
+        })
+        .expect("follower");
+    let mut other = independent
+        .submit(Payload::Read { path: home.path().join("missing") })
+        .expect("independent read");
+    assert!(
+        matches!(final_value(&mut other).await, Value::Read(Ok(_))),
+        "another worker can execute"
+    );
+    assert!(
+        matches!(follower.observe(Duration::ZERO).await, Observation::PendingQueued),
+        "the late head still serializes this lane"
+    );
+    assert!(matches!(final_value(&mut follower).await, Value::Dropped(DropReason::Expired)));
+    assert!(!follower_path.exists(), "an expired follower never started");
+    release.send(()).expect("release head");
+    holder.join().expect("holder");
+    assert!(matches!(final_value(&mut head).await, Value::Write(Ok(_))));
+    let mut third = lane
+        .submit(Payload::Write {
+            path: follower_path.clone(),
+            envelope: Box::new(message("third")),
+        })
+        .expect("next eligible job");
+    assert!(
+        third.cell.sequence > follower.cell.sequence && follower.cell.sequence > head.cell.sequence
+    );
+    assert!(matches!(final_value(&mut third).await, Value::Write(Ok(_))));
+    assert_eq!(mailbox::read(&follower_path).expect("follower inbox").valid[0].text, "third");
+}
+
+#[tokio::test]
 async fn consumed_results_and_dropped_receipts_release_their_admission_credit() {
     let service = Service::start();
     let lane = Lane::on(Arc::clone(&service));
     let home = tempfile::tempdir().expect("home");
+    let mut consumed = Vec::new();
     for _ in 0..32 {
         let mut receipt =
             lane.submit(Payload::Read { path: home.path().join("missing") }).expect("admitted");
         assert!(matches!(final_value(&mut receipt).await, Value::Read(_)));
+        consumed.push(receipt);
     }
+    assert_eq!(lane.outstanding(), 0);
     lane.seal();
     assert_eq!(
         lane.submit(Payload::Read { path: home.path().join("missing") }).unwrap_err(),

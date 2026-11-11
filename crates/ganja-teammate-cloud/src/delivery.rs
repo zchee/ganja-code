@@ -537,6 +537,18 @@ impl Lane {
     }
 
     #[cfg(test)]
+    pub(crate) fn last_sequence(&self) -> u64 {
+        self.service
+            .state
+            .lock()
+            .expect("delivery service")
+            .lanes
+            .get(&self.id)
+            .expect("live lane")
+            .sequence
+    }
+
+    #[cfg(test)]
     pub(crate) fn watch(&self, kind: &str) -> JobWatch {
         let cell = self
             .service

@@ -216,6 +216,17 @@ async fn a_late_prune_dispatches_once_only_after_confirmed_success() {
         release.send(()).expect("release prune");
         holder.join().expect("holder");
         timeout(Duration::from_secs(2), prune.settled()).await.expect("late prune final result");
+        if outcome == "failure" {
+            let before = member.delivery.last_sequence();
+            timeout(Duration::from_secs(3), async {
+                while member.delivery.last_sequence() == before {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the runner polls again after the failed prune");
+            assert_eq!(user_count(), 0, "a failed prune must never dispatch its cached message");
+        }
         if outcome == "success" {
             timeout(Duration::from_secs(3), async {
                 while member.phase() != Phase::Suspended {

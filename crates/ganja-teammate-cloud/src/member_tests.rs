@@ -55,7 +55,9 @@ async fn a_blocked_notification_does_not_hold_the_transition_lock() {
     mailbox::seed(&fixture.member.lent.lead_inbox).expect("seed");
     let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
     fixture.provisioner.failures.lock().expect("failures").insert("suspend", "ambiguous");
-    fixture.member.quiesce().await;
+    timeout(Duration::from_secs(1), fixture.member.quiesce())
+        .await
+        .expect("quiesce returns while notification is blocked");
     wait_local_call(&fixture.member, "write").await;
     let mut operation = CloudControl(Arc::clone(&fixture.member))
         .admit(ControlAction::ReportExternalRevert)
