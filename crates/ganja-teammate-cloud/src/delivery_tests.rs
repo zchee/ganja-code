@@ -1,0 +1,229 @@
+use super::*;
+
+#[test]
+fn partial_native_thread_startup_refuses_further_admission() {
+    for failure in 0..=WORKERS {
+        let lane = Lane::on(Service::start_with_failure(Some(failure)));
+        assert_eq!(
+            lane.submit(Payload::Read { path: PathBuf::from("unused") }).unwrap_err(),
+            DropReason::Unavailable
+        );
+        assert_eq!(lane.outstanding(), 0);
+    }
+}
+
+#[tokio::test]
+async fn unconsumed_results_hold_the_per_member_limit() {
+    let lane = Lane::on(Service::start());
+    let home = tempfile::tempdir().expect("home");
+    let mut receipts = Vec::new();
+    for _ in 0..LANE_CAPACITY {
+        receipts.push(
+            lane.submit(Payload::Read { path: home.path().join("missing") }).expect("admitted"),
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !receipts
+            .iter()
+            .all(|receipt| matches!(*receipt.cell.status.lock().expect("status"), Status::Final(_)))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all reads finish");
+    assert_eq!(lane.outstanding(), LANE_CAPACITY);
+    assert_eq!(
+        lane.submit(Payload::Read { path: home.path().join("missing") }).unwrap_err(),
+        DropReason::Full
+    );
+    receipts.pop();
+    lane.submit(Payload::Read { path: home.path().join("missing") })
+        .expect("dropped receipt releases credit");
+}
+
+fn message(text: &str) -> MailboxMessage {
+    MailboxMessage::new("sender", text, ganja_team::record::now_iso8601())
+}
+
+async fn final_value(receipt: &mut Receipt) -> Value {
+    loop {
+        if let Observation::Final(value) = receipt.observe(Duration::from_secs(2)).await {
+            return value;
+        }
+    }
+}
+
+async fn started(receipt: &Receipt) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(*receipt.cell.status.lock().expect("status"), Status::Running) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native operation starts");
+}
+
+fn hold(path: PathBuf) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let (ready, ready_rx) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let holder = thread::spawn(move || {
+        let _held = ganja_team::lock::acquire(&path).expect("real inbox lock");
+        ready.send(()).expect("ready");
+        release_rx.recv().expect("release");
+    });
+    ready_rx.recv_timeout(Duration::from_secs(2)).expect("holder ready");
+    (release, holder)
+}
+
+#[tokio::test]
+async fn notification_delivery_preserves_member_order_and_has_a_bound() {
+    let service = Service::start();
+    let home = tempfile::tempdir().expect("home");
+    let lanes: Vec<_> = (0..8).map(|_| Lane::on(Arc::clone(&service))).collect();
+    let mut held = Vec::new();
+    let mut heads = Vec::new();
+    for (index, lane) in lanes.iter().take(WORKERS).enumerate() {
+        let path = home.path().join(format!("{index}.json"));
+        mailbox::seed(&path).expect("seed");
+        held.push(hold(path.clone()));
+        let receipt = lane
+            .submit(Payload::Write { path, envelope: Box::new(message("head")) })
+            .expect("head admitted");
+        started(&receipt).await;
+        heads.push(receipt);
+    }
+    let expired_prune_path = home.path().join("expired-prune.json");
+    let retained = message("a queued prune must leave this intact");
+    mailbox::write(&expired_prune_path, retained.clone()).expect("seed prune candidate");
+    let mut queued = Vec::new();
+    for (index, lane) in lanes.iter().enumerate() {
+        for number in heads.get(index).map_or(0, |_| 1)..LANE_CAPACITY {
+            let payload = if index == WORKERS && number == 0 {
+                Payload::prune(expired_prune_path.clone(), std::slice::from_ref(&retained))
+            } else {
+                Payload::Write {
+                    path: home.path().join(format!("{index}.json")),
+                    envelope: Box::new(message(&number.to_string())),
+                }
+            };
+            queued.push(lane.submit(payload).expect("credit"));
+        }
+    }
+    assert_eq!(service.state.lock().expect("state").credits.len(), CAPACITY);
+    assert_eq!(
+        lanes[0].submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
+        DropReason::Full
+    );
+    assert_eq!(
+        lanes[0]
+            .submit(Payload::Write {
+                path: home.path().join("other"),
+                envelope: Box::new(message(&"x".repeat(PAYLOAD_CAPACITY)))
+            })
+            .unwrap_err(),
+        DropReason::Oversize
+    );
+    assert!(matches!(heads[0].observe(Duration::ZERO).await, Observation::Late));
+    assert!(matches!(queued[0].observe(Duration::ZERO).await, Observation::PendingQueued));
+    tokio::time::sleep(EXPIRY + Duration::from_millis(100)).await;
+    assert!(queued.iter().all(|receipt| matches!(
+        *receipt.cell.status.lock().expect("status"),
+        Status::Final(Some(Value::Dropped(DropReason::Expired)))
+    )));
+    assert_eq!(
+        lanes[7].submit(Payload::Read { path: home.path().join("other") }).unwrap_err(),
+        DropReason::Full,
+        "unconsumed expired receipts retain credit"
+    );
+    for receipt in &mut queued {
+        assert!(matches!(final_value(receipt).await, Value::Dropped(DropReason::Expired)));
+    }
+    let mut available = lanes[7]
+        .submit(Payload::Read { path: home.path().join("missing") })
+        .expect("consumed receipts release credit");
+    assert!(matches!(available.observe(Duration::ZERO).await, Observation::PendingQueued));
+    for (release, holder) in held {
+        release.send(()).expect("release");
+        holder.join().expect("holder");
+    }
+    for receipt in &mut heads {
+        assert!(matches!(final_value(receipt).await, Value::Write(Ok(_))));
+    }
+    assert!(matches!(final_value(&mut available).await, Value::Read(_)));
+    let remaining = mailbox::read(&expired_prune_path).expect("expired prune inbox").valid;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].text, retained.text);
+    for index in 0..WORKERS {
+        assert_eq!(
+            mailbox::read(&home.path().join(format!("{index}.json"))).expect("read").valid.len(),
+            1,
+            "expired followers cannot overtake the late head"
+        );
+    }
+    drop(lanes);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !service.state.lock().expect("state").lanes.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("closed empty lanes are removed");
+    for _ in 0..128 {
+        let lane = Lane::on(Arc::clone(&service));
+        lane.seal();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !service.state.lock().expect("state").lanes.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("repeated retirements leave no lane history");
+}
+
+#[tokio::test]
+async fn consumed_results_and_dropped_receipts_release_their_admission_credit() {
+    let service = Service::start();
+    let lane = Lane::on(Arc::clone(&service));
+    let home = tempfile::tempdir().expect("home");
+    for _ in 0..32 {
+        let mut receipt =
+            lane.submit(Payload::Read { path: home.path().join("missing") }).expect("admitted");
+        assert!(matches!(final_value(&mut receipt).await, Value::Read(_)));
+    }
+    lane.seal();
+    assert_eq!(
+        lane.submit(Payload::Read { path: home.path().join("missing") }).unwrap_err(),
+        DropReason::Closed
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_queued_prune_never_starts_after_its_predecessor() {
+    let service = Service::start();
+    let lane = Lane::on(service);
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("inbox");
+    let envelope = message("keep me");
+    mailbox::write(&path, envelope.clone()).expect("seed message");
+    let (release, holder) = hold(path.clone());
+    let mut head = lane
+        .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("head")) })
+        .expect("head");
+    started(&head).await;
+    let prune = lane.submit(Payload::prune(path.clone(), &[envelope])).expect("prune");
+    let cell = Arc::clone(&prune.cell);
+    drop(prune);
+    release.send(()).expect("release");
+    holder.join().expect("holder");
+    assert!(matches!(final_value(&mut head).await, Value::Write(Ok(_))));
+    assert!(matches!(
+        *cell.status.lock().expect("status"),
+        Status::Final(Some(Value::Dropped(DropReason::Cancelled)))
+    ));
+    assert_eq!(mailbox::read(&path).expect("read").valid.len(), 2);
+}

@@ -1,6 +1,6 @@
 use ganja_client::EventId;
 use ganja_client::sse::{Connected, Replay};
-use ganja_team::{MemberName, TeamName, TeamsRoot};
+use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 use tokio::sync::Notify;
 
 use super::*;
@@ -10,6 +10,175 @@ use crate::state::Deadlines;
 
 #[path = "member_recovery_tests.rs"]
 mod recovery;
+
+fn hold_inbox(
+    path: std::path::PathBuf,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (ready, ready_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let _guard = ganja_team::lock::acquire(&path).expect("hold real inbox");
+        ready.send(()).expect("holder ready");
+        release_rx.recv().expect("release holder");
+    });
+    ready_rx.recv_timeout(Duration::from_secs(2)).expect("real lock acquired");
+    (release, thread)
+}
+
+async fn wait_local_call(member: &CloudMember, kind: &str) {
+    timeout(Duration::from_secs(2), async {
+        while !member.delivery.running(kind) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native mailbox call starts");
+}
+
+fn shutdown_mail() -> MailboxMessage {
+    MailboxMessage::from_frame(
+        "team-lead",
+        &Frame::ShutdownRequest(ganja_protocol::team::ShutdownRequest {
+            request_id: "held-inbox-shutdown".to_owned(),
+            from: "team-lead".to_owned(),
+            reason: Some("test shutdown".to_owned()),
+            timestamp: record::now_iso8601(),
+        }),
+        record::now_iso8601(),
+    )
+    .expect("shutdown envelope")
+}
+
+#[tokio::test]
+async fn a_blocked_notification_does_not_hold_the_transition_lock() {
+    let fixture = Fixture::new().await;
+    mailbox::seed(&fixture.member.lent.lead_inbox).expect("seed");
+    let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
+    fixture.provisioner.failures.lock().expect("failures").insert("suspend", "ambiguous");
+    fixture.member.quiesce().await;
+    wait_local_call(&fixture.member, "write").await;
+    let mut operation = CloudControl(Arc::clone(&fixture.member))
+        .admit(ControlAction::ReportExternalRevert)
+        .expect("report admitted");
+    let outcome = timeout(Duration::from_secs(1), operation.wait()).await;
+    let empty =
+        mailbox::read(&fixture.member.lent.lead_inbox).expect("read unlocked").valid.is_empty();
+    release.send(()).expect("release");
+    holder.join().expect("holder");
+    assert_eq!(outcome, Ok(ControlOutcome::Completed));
+    assert!(empty, "no delivery success while the real lock is held");
+    fixture.flush_notifications().await;
+}
+
+#[tokio::test]
+async fn a_held_member_inbox_does_not_block_shutdown_cleanup() {
+    let fixture = Fixture::new().await;
+    mailbox::write(&fixture.member.spec.inbox(), shutdown_mail()).expect("shutdown");
+    let (release, holder) = hold_inbox(fixture.member.spec.inbox());
+    let runner = tokio::spawn(Arc::clone(&fixture.member).run());
+    timeout(Duration::from_secs(2), runner)
+        .await
+        .expect("runner returns while prune is blocked")
+        .expect("runner");
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+    assert!(fixture.provisioner.calls.lock().expect("calls").contains(&"kill"));
+    assert_eq!(mailbox::read(&fixture.member.spec.inbox()).expect("read").valid.len(), 1);
+    release.send(()).expect("release");
+    holder.join().expect("holder");
+}
+
+#[tokio::test]
+async fn a_held_lead_inbox_does_not_pin_shutdown_acknowledgement() {
+    let fixture = Fixture::new().await;
+    mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");
+    mailbox::write(&fixture.member.spec.inbox(), shutdown_mail()).expect("shutdown");
+    let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
+    let runner = tokio::spawn(Arc::clone(&fixture.member).run());
+    timeout(Duration::from_secs(2), runner)
+        .await
+        .expect("runner returns with held ack")
+        .expect("runner");
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+    assert!(mailbox::read(&fixture.member.lent.lead_inbox).expect("lead").valid.is_empty());
+    wait_local_call(&fixture.member, "write").await;
+    release.send(()).expect("release");
+    holder.join().expect("holder");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let messages = mailbox::read(&fixture.member.lent.lead_inbox).expect("lead").valid;
+            if !messages.is_empty() {
+                assert_eq!(messages.len(), 1);
+                assert!(matches!(
+                    serde_json::from_str::<Frame>(&messages[0].text),
+                    Ok(Frame::ShutdownApproved(_))
+                ));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("one late acknowledgement");
+}
+
+#[tokio::test]
+async fn blocked_payload_work_does_not_retain_the_member() {
+    let fixture = Fixture::new().await;
+    mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");
+    let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
+    fixture.member.mail("late notification".to_owned()).await;
+    wait_local_call(&fixture.member, "write").await;
+    let weak = Arc::downgrade(&fixture.member);
+    fixture.member.cleanup().await;
+    assert_eq!(fixture.member.phase(), Phase::Gone);
+    let Fixture { _home, member, source, provisioner, worker } = fixture;
+    drop((member, source, provisioner, worker));
+    let freed_while_blocked = weak.upgrade().is_none();
+    release.send(()).expect("release");
+    holder.join().expect("holder");
+    assert!(freed_while_blocked, "native payload or receipt retained the member");
+    drop(_home);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_read_is_interrupted_by_retirement_without_waiting_for_eof() {
+    let fixture = Fixture::new().await;
+    let inbox = fixture.member.spec.inbox();
+    std::fs::create_dir_all(inbox.parent().expect("inbox parent")).expect("parent");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .args(["-m", "600"])
+            .arg(&inbox)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    let (paired, paired_rx) = oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let _writer =
+            std::fs::OpenOptions::new().write(true).open(inbox).expect("FIFO writer paired");
+        paired.send(()).expect("paired signal");
+        release_rx.recv().expect("release FIFO writer");
+    });
+    let runner = tokio::spawn(Arc::clone(&fixture.member).run());
+    timeout(Duration::from_secs(2), paired_rx)
+        .await
+        .expect("real read-only open pairs")
+        .expect("paired");
+    let mut retirement =
+        CloudControl(Arc::clone(&fixture.member)).admit(ControlAction::Retire).expect("retire");
+    assert_eq!(
+        timeout(Duration::from_secs(2), retirement.wait()).await.expect("retired"),
+        ControlOutcome::Completed
+    );
+    timeout(Duration::from_secs(2), runner).await.expect("runner without EOF").expect("runner");
+    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+    release.send(()).expect("release EOF");
+    writer.join().expect("writer");
+}
 
 // A unit-test target is a different crate instance from the library linked by
 // testkit's dev-only cycle. This local double must implement this instance's trait.
@@ -22,6 +191,7 @@ struct TestProvisioner {
     holds: Mutex<BTreeMap<&'static str, Arc<Notify>>>,
     failures: Mutex<BTreeMap<&'static str, &'static str>>,
     called: Notify,
+    resume_terminal: Mutex<Option<ProvisionErrorKind>>,
 }
 
 impl TestProvisioner {
@@ -34,6 +204,7 @@ impl TestProvisioner {
             holds: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(BTreeMap::new()),
             called: Notify::new(),
+            resume_terminal: Mutex::new(None),
         }
     }
     async fn before(
@@ -75,6 +246,9 @@ impl Provisioner for TestProvisioner {
         _worker: &Worker,
     ) -> Result<crate::provisioner::Resumed, crate::provisioner::ProvisionError> {
         self.before("resume").await?;
+        if let Some(kind) = self.resume_terminal.lock().expect("terminal failure").take() {
+            return Err(crate::provisioner::ProvisionError { operation: "resume", kind });
+        }
         let mut state = self.state.lock().expect("state");
         let was_suspended = *state == WorkerState::Suspended;
         *state = WorkerState::Running;
@@ -273,8 +447,55 @@ impl Fixture {
         Self { _home: home, member, source, provisioner, worker }
     }
 
+    async fn flush_notifications(&self) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let notifications =
+                    std::mem::take(&mut *self.member.notifications.lock().expect("receipts"));
+                for mut receipt in notifications {
+                    let result = receipt.observe(Duration::from_secs(2)).await;
+                    assert!(
+                        matches!(result, Observation::Final(Value::Write(Ok(_)))),
+                        "notification: {result:?}"
+                    );
+                }
+                if self.member.delivery.outstanding() == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all lane deliveries settle before inspecting mail");
+    }
+
     fn suspends(&self) -> usize {
         self.provisioner.suspended.load(Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn terminal_resume_failures_deliver_exactly_one_notice_after_the_lane_drains() {
+    for (kind, phase, sentence) in [
+        (ProvisionErrorKind::Crashed, Phase::Crashed, "worker crashed"),
+        (ProvisionErrorKind::Gone, Phase::Gone, "worker is gone"),
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.member.set_phase(Phase::Suspended);
+        fixture.provisioner.owner_recover(&fixture.worker);
+        *fixture.provisioner.resume_terminal.lock().expect("failure") = Some(kind);
+        let control = CloudControl(Arc::clone(&fixture.member));
+        assert!(control.resume_for_inspection().await.is_err());
+        assert_eq!(fixture.member.phase(), phase);
+        fixture.member.terminal_failure(phase, sentence).await;
+        fixture.flush_notifications().await;
+        assert_eq!(fixture.member.delivery.outstanding(), 0);
+        let mail = mailbox::read(&fixture.member.lent.lead_inbox).expect("mail");
+        assert_eq!(mail.valid.iter().filter(|message| message.text.contains(sentence)).count(), 1);
+        assert!(!mail.valid.iter().any(|message| matches!(
+            serde_json::from_str::<Frame>(&message.text),
+            Ok(Frame::IdleNotification(_))
+        )));
     }
 }
 
@@ -349,7 +570,13 @@ async fn every_control_action_has_a_finite_ceiling() {
         let mut operation =
             CloudControl(Arc::clone(&fixture.member)).admit(action).expect("admitted");
         let outcome = operation.wait().await;
-        assert!(start.elapsed() <= Duration::from_millis(100), "{action:?}/{stalled:?}");
+        let ceiling = Duration::from_millis(100)
+            + if action == ControlAction::Retire {
+                delivery::FINAL_OBSERVATION
+            } else {
+                Duration::ZERO
+            };
+        assert!(start.elapsed() <= ceiling, "{action:?}/{stalled:?}");
         let expected = match action {
             ControlAction::ResumeForInspection => ControlOutcome::Unsupported,
             ControlAction::Retire => ControlOutcome::UnconfirmedDeletion,
@@ -457,7 +684,7 @@ async fn outcomes_never_carry_server_text() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_mailbox_contention_is_excluded_from_the_remote_action_ceiling() {
+async fn cleanup_does_not_wait_forever_for_local_notification() {
     let fixture = Fixture::new().await;
     mailbox::seed(&fixture.member.lent.lead_inbox).expect("seed inbox");
     let held = ganja_team::lock::acquire(&fixture.member.lent.lead_inbox).expect("hold inbox");
@@ -468,15 +695,17 @@ async fn local_mailbox_contention_is_excluded_from_the_remote_action_ceiling() {
     while fixture.member.phase() != Phase::CleanupUnconfirmed {
         tokio::task::yield_now().await;
     }
-    tokio::select! {
-        biased;
-        outcome = operation.wait() => panic!("mailbox write must still be pending: {outcome:?}"),
-        () = tokio::task::yield_now() => {}
-    }
-    assert!(fixture.member.transition.try_lock().is_err(), "notification ordering remains locked");
+    let returned = timeout(Duration::from_secs(1), operation.wait()).await;
+    let transition_released = fixture.member.transition.try_lock().is_ok();
     assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
     drop(held);
     assert_eq!(operation.wait().await, ControlOutcome::UnconfirmedDeletion);
+    assert_eq!(
+        returned,
+        Ok(ControlOutcome::UnconfirmedDeletion),
+        "retirement must return while the inbox is held"
+    );
+    assert!(transition_released, "notification delivery must not retain the transition lock");
     assert_eq!(fixture.member.phase(), Phase::CleanupUnconfirmed);
 }
 
@@ -938,6 +1167,7 @@ async fn an_unproven_rest_attempt_stays_uncertain_after_owner_recovery() {
     fixture.member.quiesce().await;
     assert_eq!(fixture.suspends(), 0);
     assert!(fixture.member.gate.state().uncertain);
+    fixture.flush_notifications().await;
     let mail = mailbox::read(&fixture.member.lent.lead_inbox).expect("owner mail");
     assert_eq!(
         mail.valid.iter().filter(|message| message.text.contains("earlier request")).count(),

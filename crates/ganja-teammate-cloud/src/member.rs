@@ -13,13 +13,14 @@ use ganja_client::{BootstrapAuthor, BootstrapOutcome, Client, ClientError, Promp
 use ganja_core::teammate::{self, Exited, Lent, PaneFate, SpawnSpec, Spawned, Unsupported, runner};
 use ganja_protocol::team::{Frame, IdleNotification, IdleReason, MemberBackend, Tagged};
 use ganja_protocol::{Event, FinishReason, Message, MessageId, PartBody, Role, SessionId};
-use ganja_team::{MailboxMessage, Surface, mailbox, record};
+use ganja_team::{MailboxMessage, Surface, record};
 use secrecy::ExposeSecret as _;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::backend::Runtime;
+use crate::delivery::{self, Lane, Observation, Payload, Receipt, Value};
 use crate::gate::{AttemptOutcome, Door, Drain, WorkerGate};
 use crate::provisioner::{Bootstrap, ProvisionErrorKind, SuspendOutcome, Worker, WorkerState};
 use crate::state::{LaunchFailure, Phase};
@@ -146,12 +147,13 @@ impl CloudControl {
     /// budgets, and deletion uses `cleanup`. An action can wait behind launch,
     /// the runner's resume/quiescence, and cleanup, then spends at most two
     /// `launch` budgets for inspection/resume, one `cleanup` for retirement,
-    /// or no remote budget for a revert report. A conservative total including
-    /// preceding holders is `4 * launch + 2 * quiesce + cleanup` for inspection,
-    /// `2 * launch + 2 * quiesce + 2 * cleanup` for retirement, and
-    /// `2 * launch + 2 * quiesce + cleanup` for a revert report. Local mailbox
-    /// writes remain ordered under the transition lock and have no deadline;
-    /// these ceilings explicitly exclude that local filesystem work.
+    /// Let `H = 2 * launch + 2 * quiesce + cleanup + 4 * B`, where
+    /// `B` is the 250 ms event-barrier budget. Including preceding holders,
+    /// inspection takes at most `H + 2 * launch + 4 * B`, retirement takes
+    /// `H + cleanup + F`, and a revert report takes `H + B`. `F` is a shared
+    /// 250 ms final-delivery observation outside the transition lock.
+    /// Mailbox work uses a bounded native service and never extends a holder.
+    /// Its queued, late, failed and dropped outcomes are not delivery success.
     ///
     /// Event barriers are interruption-bounded: hold/invalidate notify before
     /// waiting for the consumer's state lock. Every connection, retry sleep and
@@ -250,6 +252,10 @@ pub struct CloudMember {
     epoch: Mutex<Option<String>>,
     needs_resync: AtomicBool,
     observed_crash: AtomicBool,
+    delivery: Lane,
+    notifications: Mutex<VecDeque<Receipt>>,
+    final_observed: AtomicBool,
+    barrier_failed: AtomicBool,
 }
 
 impl fmt::Debug for CloudMember {
@@ -339,6 +345,10 @@ impl CloudMember {
             epoch: Mutex::new(None),
             needs_resync: AtomicBool::new(false),
             observed_crash: AtomicBool::new(false),
+            delivery: Lane::new(),
+            notifications: Mutex::new(VecDeque::new()),
+            final_observed: AtomicBool::new(false),
+            barrier_failed: AtomicBool::new(false),
         })
     }
 
@@ -472,8 +482,10 @@ impl CloudMember {
 
     async fn invalidate_history(&self, phase: Phase, reason: &str) {
         self.gate.close();
-        if let Some(events) = &self.events {
-            events.invalidate().await;
+        if let Some(events) = &self.events
+            && timeout(delivery::OBSERVATION, events.invalidate()).await.is_err()
+        {
+            self.barrier_failed.store(true, Ordering::SeqCst);
         }
         self.terminal.lock().expect("terminal decision lock").clear();
         self.observed_text.lock().expect("observed text lock").clear();
@@ -491,7 +503,7 @@ impl CloudMember {
         if self.lent.cancel.is_cancelled() {
             return ControlOutcome::Cancelled;
         }
-        match action {
+        let outcome = match action {
             ControlAction::ResumeForInspection => {
                 if self.inspect_state().await.is_err() || self.resume_locked().await.is_err() {
                     ControlOutcome::Unsupported
@@ -516,7 +528,12 @@ impl CloudMember {
                 .await;
                 ControlOutcome::Completed
             }
+        };
+        drop(_transition);
+        if action == ControlAction::Retire {
+            self.observe_final().await;
         }
+        outcome
     }
 
     async fn inspect_state(&self) -> Result<(), &'static str> {
@@ -529,7 +546,9 @@ impl CloudMember {
             WorkerState::Crashed => {
                 self.observed_crash.store(true, Ordering::SeqCst);
                 self.gate.close();
-                self.events()?.hold().await;
+                timeout(delivery::OBSERVATION, self.events()?.hold())
+                    .await
+                    .map_err(|_| "worker event barrier timed out")?;
                 self.set_phase(Phase::RecoveryRequired);
                 Err("worker is crashed; inspect after owner recovery")
             }
@@ -561,7 +580,11 @@ impl CloudMember {
     }
 
     async fn resume(&self) -> Result<(), &'static str> {
-        let _transition = self.transition.lock().await;
+        let _transition = tokio::select! {
+            biased;
+            () = self.lent.cancel.cancelled() => return Err("member shutdown started"),
+            transition = self.transition.lock() => transition,
+        };
         self.resume_locked().await
     }
 
@@ -575,7 +598,9 @@ impl CloudMember {
         }
         if recovering {
             self.gate.close();
-            self.events()?.invalidate().await;
+            timeout(delivery::OBSERVATION, self.events()?.invalidate())
+                .await
+                .map_err(|_| "worker event invalidation timed out")?;
             self.needs_resync.store(true, Ordering::SeqCst);
         }
         self.set_phase(Phase::Resuming);
@@ -655,8 +680,10 @@ impl CloudMember {
 
     async fn terminal_failure(&self, phase: Phase, message: &str) {
         self.gate.close();
-        if let Some(events) = &self.events {
-            events.invalidate().await;
+        if let Some(events) = &self.events
+            && timeout(delivery::OBSERVATION, events.invalidate()).await.is_err()
+        {
+            self.barrier_failed.store(true, Ordering::SeqCst);
         }
         if self.alive.swap(false, Ordering::SeqCst) {
             self.mail(message.to_owned()).await;
@@ -666,14 +693,28 @@ impl CloudMember {
     }
 
     async fn quiesce(&self) {
-        let _transition = self.transition.lock().await;
+        let _transition = tokio::select! {
+            biased;
+            () = self.lent.cancel.cancelled() => return,
+            transition = self.transition.lock() => transition,
+        };
         if !self.alive.load(Ordering::SeqCst) {
             return;
         }
         self.set_phase(Phase::Quiescing);
         self.gate.close();
-        if let Some(events) = &self.events {
-            events.hold().await;
+        if let Some(events) = &self.events
+            && timeout(delivery::OBSERVATION, events.hold()).await.is_err()
+        {
+            self.barrier_failed.store(true, Ordering::SeqCst);
+        }
+        if self.barrier_failed.load(Ordering::SeqCst) {
+            self.reopen();
+            self.mail(
+                "worker event barrier is unconfirmed; automatic suspend is disabled".to_owned(),
+            )
+            .await;
+            return;
         }
         if self.gate.drain_rest(self.runtime.deadlines.quiesce).await == Drain::Deferred {
             self.set_phase(Phase::SuspendDeferred);
@@ -728,6 +769,11 @@ impl CloudMember {
     }
 
     async fn cleanup(&self) {
+        self.cleanup_work().await;
+        self.observe_final().await;
+    }
+
+    async fn cleanup_work(&self) {
         self.lent.cancel.cancel();
         {
             let mut task = self.control_task.lock().await;
@@ -787,18 +833,64 @@ impl CloudMember {
     }
 
     async fn mail(&self, text: String) {
-        let message = MailboxMessage::new(self.spec.name.as_str(), text, record::now_iso8601());
-        let inbox = self.lent.lead_inbox.clone();
-        if teammate::blocking_io(move || {
-            mailbox::write_bounded(&inbox, message, Some(teammate::postbox::INBOX_CEILING))
-        })
-        .await
-        .is_err()
-        {
-            tracing::error!(
-                member = self.spec.name.as_str(),
-                "cloud notification could not be delivered"
-            );
+        self.enqueue(Payload::Write {
+            path: self.lent.lead_inbox.clone(),
+            envelope: Box::new(MailboxMessage::new(
+                self.spec.name.as_str(),
+                text,
+                record::now_iso8601(),
+            )),
+        });
+    }
+
+    fn frame(&self, frame: &Frame) {
+        match MailboxMessage::from_frame(self.spec.name.as_str(), frame, record::now_iso8601()) {
+            Ok(envelope) => self.enqueue(Payload::Write {
+                path: self.lent.lead_inbox.clone(),
+                envelope: Box::new(envelope),
+            }),
+            Err(_) => tracing::error!("cloud notification encoding failed"),
+        }
+    }
+
+    fn enqueue(&self, payload: Payload) {
+        let mut notifications = self.notifications.lock().expect("notification receipts");
+        notifications.retain_mut(|receipt| receipt.take_final().is_none());
+        match self.delivery.submit(payload) {
+            Ok(receipt) => notifications.push_back(receipt),
+            Err(reason) => tracing::warn!(?reason, "cloud notification dropped before admission"),
+        }
+    }
+
+    async fn observe_final(&self) {
+        self.delivery.seal();
+        if self.final_observed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.observe_notifications().await;
+    }
+
+    async fn observe_notifications(&self) {
+        let deadline = Instant::now() + delivery::FINAL_OBSERVATION;
+        let notifications =
+            std::mem::take(&mut *self.notifications.lock().expect("notification receipts"));
+        for mut receipt in notifications {
+            let _ = receipt.observe(deadline.saturating_duration_since(Instant::now())).await;
+            receipt.detach();
+        }
+    }
+
+    async fn observe_io(&self, mut receipt: Receipt) -> Option<Value> {
+        loop {
+            let observation = tokio::select! {
+                biased;
+                () = self.lent.cancel.cancelled() => return None,
+                observation = receipt.observe(delivery::OBSERVATION) => observation,
+            };
+            match observation {
+                Observation::Final(value) => return Some(value),
+                Observation::PendingQueued | Observation::Late => {}
+            }
         }
     }
 
@@ -863,21 +955,15 @@ impl CloudMember {
             Some(FinishReason::Failed) => IdleReason::Failed,
             Some(FinishReason::Cancelled) | None => IdleReason::Interrupted,
         };
-        runner::write_frame(
-            self.lent.lead_inbox.clone(),
-            self.spec.name.as_str(),
-            &Frame::IdleNotification(IdleNotification {
-                from: self.spec.name.as_str().to_owned(),
-                timestamp: record::now_iso8601(),
-                idle_reason: Some(idle_reason),
-                summary: None,
-                completed_task_id: None,
-                completed_status: None,
-                failure_reason: None,
-            }),
-            "cloud turn completion",
-        )
-        .await;
+        self.frame(&Frame::IdleNotification(IdleNotification {
+            from: self.spec.name.as_str().to_owned(),
+            timestamp: record::now_iso8601(),
+            idle_reason: Some(idle_reason),
+            summary: None,
+            completed_task_id: None,
+            completed_status: None,
+            failure_reason: None,
+        }));
     }
 
     async fn recover_gap(
@@ -1096,50 +1182,53 @@ impl CloudMember {
     }
 
     async fn run(self: Arc<Self>) {
+        self.run_inbox().await;
+        if !self.lent.cancel.is_cancelled() {
+            self.observe_notifications().await;
+        }
+    }
+
+    async fn run_inbox(&self) {
         while !self.lent.cancel.is_cancelled() && self.alive.load(Ordering::SeqCst) {
-            let contents = runner::read_inbox(self.spec.inbox(), self.spec.name.as_str()).await;
-            if let Some(contents) = contents {
+            let receipt = self.delivery.submit(Payload::Read { path: self.spec.inbox() });
+            if let Ok(receipt) = receipt
+                && let Some(Value::Read(Ok(contents))) = self.observe_io(receipt).await
+            {
                 if let Some((_, message, request)) = runner::shutdown_ahead(&contents.valid) {
                     let request_id = request.request_id.clone();
-                    runner::prune_inbox(
-                        self.spec.inbox(),
-                        vec![mailbox::identity(message)],
-                        self.spec.name.as_str(),
-                    )
-                    .await;
-                    self.cleanup().await;
-                    runner::write_frame(
-                        self.lent.lead_inbox.clone(),
-                        self.spec.name.as_str(),
-                        &Frame::ShutdownApproved(ganja_protocol::team::ShutdownApproved {
-                            request_id,
-                            from: self.spec.name.as_str().to_owned(),
-                            timestamp: record::now_iso8601(),
-                            pane_id: None,
-                            backend_type: Some("cloud".to_owned()),
-                        }),
-                        "cloud shutdown acknowledgement",
-                    )
-                    .await;
+                    self.cleanup_work().await;
+                    self.enqueue(Payload::prune(self.spec.inbox(), std::slice::from_ref(message)));
+                    self.frame(&Frame::ShutdownApproved(ganja_protocol::team::ShutdownApproved {
+                        request_id,
+                        from: self.spec.name.as_str().to_owned(),
+                        timestamp: record::now_iso8601(),
+                        pane_id: None,
+                        backend_type: Some("cloud".to_owned()),
+                    }));
+                    self.observe_final().await;
                     return;
                 }
                 for message in contents.valid {
-                    let identity = mailbox::identity(&message);
+                    let receipt = self
+                        .delivery
+                        .submit(Payload::prune(self.spec.inbox(), std::slice::from_ref(&message)));
+                    let Ok(receipt) = receipt else {
+                        break;
+                    };
+                    if !matches!(self.observe_io(receipt).await, Some(Value::Prune(Ok(_)))) {
+                        break;
+                    }
+                    if self.lent.cancel.is_cancelled() {
+                        return;
+                    }
                     if !matches!(
                         Frame::classify(&message.text),
                         Tagged::NotAnObject | Tagged::Untagged
                     ) {
-                        runner::prune_inbox(
-                            self.spec.inbox(),
-                            vec![identity],
-                            self.spec.name.as_str(),
-                        )
-                        .await;
                         continue;
                     }
-                    runner::prune_inbox(self.spec.inbox(), vec![identity], self.spec.name.as_str())
-                        .await;
                     let result = tokio::select! {
+                        biased;
                         () = self.lent.cancel.cancelled() => return,
                         result = self.turn(&message.from, &message.text) => result,
                     };
@@ -1167,7 +1256,11 @@ impl Spawned for CloudMember {
     }
 
     async fn launch(&self) -> Result<(), Unsupported> {
-        let _transition = self.transition.lock().await;
+        let _transition = tokio::select! {
+            biased;
+            () = self.lent.cancel.cancelled() => return Err(self.unsupported("launch cancelled")),
+            transition = self.transition.lock() => transition,
+        };
         let result = tokio::select! {
             () = self.lent.cancel.cancelled() => Err(LaunchFailure::Refused("launch cancelled")),
             result = timeout(self.runtime.deadlines.launch, self.launch_inner()) => match result {
