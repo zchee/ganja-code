@@ -48,7 +48,7 @@ pub(crate) enum Action {
 #[derive(Debug, Args)]
 pub(crate) struct InitArgs {
     /// Port shared by the init listener and the served engine after handoff.
-    #[arg(long, default_value_t = 80)]
+    #[arg(long, default_value_t = 8080)]
     port: u16,
 }
 
