@@ -604,11 +604,15 @@ impl Lane {
     }
 
     pub(crate) fn seal(&self) {
-        if let Some(queue) =
-            self.service.state.lock().expect("delivery service").lanes.get_mut(&self.id)
-        {
+        let mut state = self.service.state.lock().expect("delivery service");
+        let remove = state.lanes.get_mut(&self.id).is_some_and(|queue| {
             queue.open = false;
+            queue.jobs.is_empty() && !queue.active
+        });
+        if remove {
+            state.lanes.remove(&self.id);
         }
+        drop(state);
         let _ = self.service.wake.try_send(());
     }
 }

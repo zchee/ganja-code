@@ -12,6 +12,20 @@ fn partial_native_thread_startup_refuses_further_admission() {
     }
 }
 
+#[test]
+fn failed_startup_does_not_retain_departed_lanes() {
+    for failure in 0..=WORKERS {
+        let service = Service::start_with_failure(Some(failure));
+        for _ in 0..128 {
+            drop(Lane::on(Arc::clone(&service)));
+        }
+        assert!(
+            service.state.lock().expect("service state").lanes.is_empty(),
+            "failed startup at thread {failure} retained closed empty lanes"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unconsumed_results_hold_the_per_member_limit() {
     let lane = Lane::on(Service::start());
