@@ -7,6 +7,7 @@
 //! unsupported: snapshot metadata and cursor ordering do not identify it.
 
 mod backend;
+mod delivery;
 pub mod gate;
 mod member;
 pub mod provisioner;

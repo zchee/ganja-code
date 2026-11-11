@@ -33,6 +33,113 @@ fn fixture(name: &str) -> (FakeProvisioner, WorkerSpec) {
     (FakeProvisioner::from_endpoint(endpoint), spec)
 }
 
+#[cfg(unix)]
+async fn blocked_runner_read(
+    hosted: &Hosted,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let name = MemberName::parse(&hosted.name).expect("name");
+    let inbox = hosted.root.inbox_path(&hosted.team, &name);
+    std::fs::remove_file(&inbox).expect("remove drained inbox");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .args(["-m", "600"])
+            .arg(&inbox)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    let (paired, paired_rx) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let _writer = std::fs::OpenOptions::new().write(true).open(inbox).expect("FIFO paired");
+        paired.send(()).expect("paired signal");
+        released.recv().expect("release writer");
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), paired_rx)
+        .await
+        .expect("runner opens FIFO read-only")
+        .expect("paired");
+    (release, writer)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cloud_runner_exits_without_retaining_its_registry() {
+    let hosted = Hosted::new().await;
+    hosted.start().await;
+    hosted.wait_suspended(1).await;
+    let weak = Arc::downgrade(&hosted.registry);
+    let (release, writer) = blocked_runner_read(&hosted).await;
+    let worker = hosted.provisioner.worker(&hosted.name).expect("worker before deletion");
+    tokio::time::timeout(std::time::Duration::from_secs(3), hosted.registry.shutdown())
+        .await
+        .expect("registry shutdown while native read remains blocked");
+    assert_eq!(hosted.provisioner.current(&worker), WorkerState::Gone);
+    let Hosted { home, root: _, team: _, name: _, registry, door, provisioner: _, server } = hosted;
+    drop((door, registry));
+    assert!(weak.upgrade().is_none(), "blocked payload must not retain registry");
+    release.send(()).expect("release FIFO");
+    writer.join().expect("writer");
+    server.close().await.expect("server close");
+    drop(home);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_process_exits_after_bounded_cloud_cleanup() {
+    const CHILD: &str = "GANJA_TEST_CLOUD_EXIT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let hosted = Hosted::new().await;
+            hosted.start().await;
+            hosted.wait_suspended(1).await;
+            let (release, writer) = blocked_runner_read(&hosted).await;
+            std::mem::forget(release);
+            drop(writer);
+            let worker = hosted.provisioner.worker(&hosted.name).expect("worker before deletion");
+            tokio::time::timeout(std::time::Duration::from_secs(3), hosted.registry.shutdown()).await.expect("registry and runners return");
+            assert_eq!(hosted.provisioner.current(&worker), WorkerState::Gone);
+            hosted.server.close().await.expect("server close");
+            println!("kill attempted; Gone confirmed; registry and runner returned; FIFO delivery pending");
+        });
+        drop(runtime);
+        println!("ordinary runtime destruction returned");
+        return;
+    }
+    let home = tempfile::tempdir().expect("child isolation");
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "the_process_exits_after_bounded_cloud_cleanup", "--nocapture"])
+        .env(CHILD, "1")
+        .env("XDG_DATA_HOME", home.path())
+        .env("GANJA_CONFIG_HOME", home.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("child");
+    // The launch allowance is separate from the fixture's one-second cleanup budget.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if child.try_wait().expect("child status").is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("kill timed-out child");
+            let output = child.wait_with_output().expect("reap timed-out child");
+            panic!(
+                "normal process exit exceeded the bound: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().expect("actual process wait");
+    assert!(output.status.success(), "child failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ordinary runtime destruction returned")
+    );
+}
+
 #[tokio::test]
 async fn creation_returns_suspended_and_delete_accepts_running_workers() {
     let (provisioner, spec) = fixture("worker");
@@ -238,9 +345,10 @@ impl Hosted {
             .count()
     }
 
-    async fn close(self) {
+    async fn close(self) -> tempfile::TempDir {
         self.registry.shutdown().await;
         self.server.close().await.expect("all fake servers stop");
+        self.home
     }
 }
 
@@ -267,9 +375,23 @@ async fn a_crashed_or_gone_worker_stops_once_without_an_idle_claim() {
         .await
         .expect("terminal lifecycle state");
         assert_eq!(hosted.idle_count(), 1, "an interrupted resume is not another idle turn");
-        let mail = ganja_team::mailbox::read(&hosted.registry.lead_inbox()).expect("inbox");
+        let inbox = hosted.registry.lead_inbox();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let mail = ganja_team::mailbox::read(&inbox).expect("inbox");
+                if mail.valid.iter().any(|message| message.text.contains(sentence)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal notice arrives");
+        let mail = ganja_team::mailbox::read(&inbox).expect("inbox");
         assert_eq!(mail.valid.iter().filter(|message| message.text.contains(sentence)).count(), 1);
-        hosted.close().await;
+        let _home = hosted.close().await;
+        let mail = ganja_team::mailbox::read(&inbox).expect("inbox after shutdown");
+        assert_eq!(mail.valid.iter().filter(|message| message.text.contains(sentence)).count(), 1);
     }
 }
 
