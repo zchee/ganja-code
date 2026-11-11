@@ -394,26 +394,41 @@ async fn matching_hooks_all_run_and_report_in_the_order_they_were_written() {
     );
 }
 
-/// The concurrency claim itself: two hooks that each sleep take about as
-/// long as one of them, not twice as long.
+/// No hook can finish successfully until all three hooks have started.
 #[tokio::test]
 async fn matching_hooks_run_concurrently() {
     let dir = tempfile::tempdir().expect("a scratch directory");
+    // Six hundred 50 ms polls allow nominally 30 seconds for a busy machine,
+    // below the default 60-second hook budget. The markers, not elapsed time,
+    // prove concurrency; the bound only prevents a serial runner from hanging.
+    std::fs::write(
+        dir.path().join("rendezvous.sh"),
+        r#": > "started-$1"
+polls=0
+while [ "$polls" -lt 600 ]; do
+    if [ -f started-1 ] && [ -f started-2 ] && [ -f started-3 ]; then
+        printf 'finished-%s\n' "$1"
+        exit 0
+    fi
+    polls=$((polls + 1))
+    sleep 0.05
+done
+printf 'not all hooks started\n' >&2
+exit 1
+"#,
+    )
+    .expect("write the hook rendezvous");
     let hooks = built(
         HookEvent::UserPromptSubmit,
         None,
-        &["sleep 0.4", "sleep 0.4", "sleep 0.4"],
+        &["sh rendezvous.sh 1", "sh rendezvous.sh 2", "sh rendezvous.sh 3"],
         dir.path(),
     );
 
-    let started = std::time::Instant::now();
-    hooks.fire("ses_1", &Payload::UserPromptSubmit { prompt: "go".to_owned() }).await;
-    let elapsed = started.elapsed();
+    let outcome = hooks.fire("ses_1", &Payload::UserPromptSubmit { prompt: "go".to_owned() }).await;
 
-    assert!(
-        elapsed < std::time::Duration::from_millis(900),
-        "three 400ms hooks in sequence would take 1.2s; this took {elapsed:?}"
-    );
+    assert!(outcome.notices.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.context, ["finished-1", "finished-2", "finished-3"]);
 }
 
 /// Hooks never fire for a hook. The pin is structural — nothing in this

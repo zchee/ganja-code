@@ -263,9 +263,10 @@ fn create_as(role: &str) {
 ///
 /// The bound is the lock's own [`lock::RETRIES`] spent again at the call
 /// level, never a number of this file's own — and, like npm's `retries: 10`,
-/// it counts the *retries*, so this is eleven attempts. Each of them already
-/// costs the whole ladder, which puts the ceiling past [`lock::STALE`]: a hold
-/// still standing then is one the next attempt breaks rather than waits for.
+/// it counts the *retries*, so this is eleven attempts. Eleven exhausted ladders
+/// request about 7.205 seconds of sleep, below [`lock::STALE`]. Scheduling and
+/// I/O add elapsed time, but this budget does not guarantee stale-lock recovery;
+/// a peer held throughout it can still exhaust every attempt.
 fn past_a_peers_hold<T>(mut attempt: impl FnMut() -> Result<T, TaskError>) -> Result<T, TaskError> {
     for _ in 0..lock::RETRIES {
         match attempt() {

@@ -35,5 +35,5 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-# Tests stand up a real loopback server to speak the wire against.
-tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread"] }
+# Tests speak real loopback bytes, then advance timeout clocks after receipt.
+tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread", "test-util"] }

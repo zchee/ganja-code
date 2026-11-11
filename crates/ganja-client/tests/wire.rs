@@ -49,6 +49,43 @@ async fn drain(events: &mut ganja_client::Events) -> Vec<Result<Event, ClientErr
     read
 }
 
+#[tokio::test]
+async fn finishing_a_stub_aborts_blocked_handlers_before_reporting_its_deadline() {
+    use futures::FutureExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let (held, released) = tokio::sync::oneshot::channel::<()>();
+    let stub = Stub::answering(move |_| {
+        // Only the listener and its accepted handlers own this sender.
+        let _ = &held;
+        Reply::Silent
+    })
+    .await;
+    let mut peer =
+        tokio::net::TcpStream::connect(stub.address().strip_prefix("http://").expect("a TCP stub"))
+            .await
+            .expect("connected to the stub");
+    peer.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n").await.expect("request sent");
+    stub.wait_for_requests("GET", 1).await;
+
+    tokio::time::pause();
+    let mut finishing = Box::pin(std::panic::AssertUnwindSafe(stub.finish()).catch_unwind());
+    assert!(futures::poll!(finishing.as_mut()).is_pending());
+    tokio::time::advance(DEADLINE + Duration::from_secs(1)).await;
+    let failure = finishing.await.expect_err("the blocked handler exceeds the deadline");
+    assert!(
+        failure
+            .downcast_ref::<String>()
+            .is_some_and(|message| { message.contains("all accepted request handlers finish") }),
+        "finish must report its handler deadline"
+    );
+    tokio::time::timeout(DEADLINE, released)
+        .await
+        .expect("the blocked handler is aborted, releasing its captured sender")
+        .expect_err("no handler sends a value");
+    assert_eq!(stub.only_request().method, "GET");
+}
+
 // ---------------------------------------------------------------------------
 // The REST surfaces.
 // ---------------------------------------------------------------------------
@@ -701,22 +738,41 @@ async fn an_unknown_stored_message_field_is_version_skew() {
     assert!(matches!(stub.client().messages(&session()).await, Err(ClientError::Skew { .. })));
 }
 
+/// Advances a timeout only after its request has reached the fixture.
+async fn elapse(duration: Duration) {
+    // The test stays runnable across advance's yield, preventing idle-clock
+    // auto-advance. Resume before waiting for socket I/O during reconciliation.
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
 #[tokio::test]
 async fn an_idle_status_after_an_ambiguous_post_never_authorizes_resending() {
     let stub = Stub::answering(|request| {
         if request.method == "POST" { Reply::Silent } else { Reply::ok(r#"{"status":"idle"}"#) }
     })
     .await;
-    let client = Client::with_bounds(
-        stub.address(),
-        None,
-        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
-    )
-    .expect("client");
+    let client =
+        Client::with_bounds(stub.address(), None, Bounds { connect: DEADLINE, read: DEADLINE })
+            .expect("client");
+    let bootstrapping =
+        tokio::spawn(async move { client.bootstrap(&bootstrap(), DEADLINE * 2).await });
+    stub.wait_for_requests("POST", 1).await;
+    elapse(DEADLINE + Duration::from_secs(1)).await;
+    // The second status request proves the first idle response was processed
+    // without authorizing another POST.
+    stub.wait_for_requests("GET", 2).await;
+    elapse(DEADLINE * 2).await;
     assert_eq!(
-        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("classified ambiguity"),
+        tokio::time::timeout(DEADLINE, bootstrapping)
+            .await
+            .expect("bootstrap terminates")
+            .expect("bootstrap task")
+            .expect("classified ambiguity"),
         BootstrapOutcome::AmbiguousStartup
     );
+    stub.finish().await;
     assert_eq!(stub.received().iter().filter(|request| request.method == "POST").count(), 1);
 }
 
@@ -1307,16 +1363,22 @@ async fn bootstrap_reconciles_a_timed_out_post_without_sending_it_again() {
         }
     })
     .await;
-    let client = Client::with_bounds(
-        stub.address(),
-        None,
-        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
-    )
-    .expect("client");
+    let client =
+        Client::with_bounds(stub.address(), None, Bounds { connect: DEADLINE, read: DEADLINE })
+            .expect("client");
+    let bootstrapping =
+        tokio::spawn(async move { client.bootstrap(&bootstrap(), DEADLINE * 2).await });
+    stub.wait_for_requests("POST", 1).await;
+    elapse(DEADLINE + Duration::from_secs(1)).await;
     assert!(matches!(
-        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("reconciled"),
+        tokio::time::timeout(DEADLINE, bootstrapping)
+            .await
+            .expect("bootstrap terminates")
+            .expect("bootstrap task")
+            .expect("reconciled"),
         BootstrapOutcome::Cloned { .. }
     ));
+    stub.finish().await;
     let received = stub.received();
     assert_eq!(received.iter().filter(|request| request.method == "POST").count(), 1);
     assert_eq!(received.iter().filter(|request| request.method == "GET").count(), 1);

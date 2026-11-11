@@ -405,12 +405,18 @@ fn render_chunk(bytes: &[u8], dropped: bool, spill: Option<&std::path::Path>) ->
 // process-group semantics that have no Windows spelling.
 #[cfg(all(test, unix))]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use ganja_tool::job::{Jobs as _, JobsError, State};
     use tokio::process::Command;
 
     use super::JobRegistry;
+
+    // Bound missing progress without assuming how quickly a child or its reader runs.
+    const OUTPUT_BUDGET: Duration = Duration::from_secs(15);
+    const TICK: Duration = Duration::from_millis(20);
+    // The fixture stops waiting after 30 seconds if a failed test never opens its gate.
+    const GATE_SPINS: u32 = 600;
 
     /// A command this platform's shell can run, split the way
     /// [`tokio::process::Command`] wants it, mirroring the two-argument
@@ -463,23 +469,59 @@ mod tests {
     #[tokio::test]
     async fn output_is_delivered_once_and_then_only_whats_new() {
         let registry = JobRegistry::new();
-        let status = registry
-            .start(
-                "echo one; sleep 0.2; echo two".to_owned(),
-                shell("echo one; sleep 0.2; echo two").spawn().expect("sh spawns"),
-            )
-            .await;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let gate = dir.path().join("gate");
+        let command = format!(
+            "echo one; \
+             i=0; while [ $i -lt {GATE_SPINS} ] && [ ! -f \"{gate}\" ]; \
+             do i=$((i+1)); sleep 0.05; done; \
+             echo two",
+            gate = gate.display(),
+        );
+        let status =
+            registry.start(command.clone(), shell(&command).spawn().expect("sh spawns")).await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let first = registry.output(&status.id).await.expect("a known id answers");
+        let deadline = Instant::now() + OUTPUT_BUDGET;
+        let first = loop {
+            let read = registry.output(&status.id).await.expect("a known id answers");
+            if !read.chunk.is_empty() {
+                break read;
+            }
+            if Instant::now() >= deadline {
+                registry.shutdown().await;
+                panic!("the job never produced any output within {OUTPUT_BUDGET:?}");
+            }
+            tokio::time::sleep(TICK).await;
+        };
         assert!(first.chunk.contains("one"), "got {:?}", first.chunk);
         assert!(!first.chunk.contains("two"), "got {:?}", first.chunk);
 
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let second = registry.output(&status.id).await.expect("a known id answers");
-        assert!(second.chunk.contains("two"), "got {:?}", second.chunk);
-        assert!(!second.chunk.contains("one"), "the first poll already delivered it");
-        assert!(matches!(second.status.state, State::Exited { code: Some(0) }));
+        // Only the first read can release the second line, regardless of scheduling.
+        std::fs::write(&gate, "go").expect("the gate is writable");
+        let deadline = Instant::now() + OUTPUT_BUDGET;
+        let mut delivered = String::new();
+        let mut exit = None;
+        loop {
+            let read = registry.output(&status.id).await.expect("a known id answers");
+            // Output and state are sampled separately, so retain data seen before exit.
+            delivered.push_str(&read.chunk);
+            if let State::Exited { code } = read.status.state {
+                exit = Some(code);
+            }
+            if delivered.contains("two") && exit.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                registry.shutdown().await;
+                panic!(
+                    "the job never delivered its second line and exited within \
+                     {OUTPUT_BUDGET:?}; everything since the first poll was {delivered:?}"
+                );
+            }
+            tokio::time::sleep(TICK).await;
+        }
+        assert!(!delivered.contains("one"), "the first poll already delivered it: {delivered:?}");
+        assert_eq!(exit, Some(Some(0)));
 
         let third = registry.output(&status.id).await.expect("a known id answers");
         assert!(third.chunk.is_empty(), "nothing new since the second poll");
@@ -551,12 +593,25 @@ mod tests {
     #[tokio::test]
     async fn a_job_outlives_the_registry_without_being_asked_to_stop() {
         let registry = JobRegistry::new();
-        let status = registry
-            .start("sleep 1".to_owned(), shell("sleep 1").spawn().expect("sh spawns"))
-            .await;
+        let command = "echo ready; read token";
+        let mut child =
+            shell(command).stdin(std::process::Stdio::piped()).spawn().expect("sh spawns");
+        // Keeping stdin open prevents natural exit until the registry is shut down.
+        let _gate = child.stdin.take().expect("stdin is piped");
+        let status = registry.start(command.to_owned(), child).await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mid = registry.output(&status.id).await.expect("a known id answers");
+        let deadline = Instant::now() + OUTPUT_BUDGET;
+        let mid = loop {
+            let read = registry.output(&status.id).await.expect("a known id answers");
+            if read.chunk.contains("ready") {
+                break read;
+            }
+            if Instant::now() >= deadline {
+                registry.shutdown().await;
+                panic!("the job never became ready within {OUTPUT_BUDGET:?}");
+            }
+            tokio::time::sleep(TICK).await;
+        };
         assert_eq!(mid.status.state, State::Running, "nothing here should have stopped it");
 
         registry.shutdown().await;
