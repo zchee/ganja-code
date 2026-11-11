@@ -701,22 +701,41 @@ async fn an_unknown_stored_message_field_is_version_skew() {
     assert!(matches!(stub.client().messages(&session()).await, Err(ClientError::Skew { .. })));
 }
 
+/// Advances a timeout only after its request has reached the fixture.
+async fn elapse(duration: Duration) {
+    // The test stays runnable across advance's yield, preventing idle-clock
+    // auto-advance. Resume before waiting for socket I/O during reconciliation.
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
+}
+
 #[tokio::test]
 async fn an_idle_status_after_an_ambiguous_post_never_authorizes_resending() {
     let stub = Stub::answering(|request| {
         if request.method == "POST" { Reply::Silent } else { Reply::ok(r#"{"status":"idle"}"#) }
     })
     .await;
-    let client = Client::with_bounds(
-        stub.address(),
-        None,
-        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
-    )
-    .expect("client");
+    let client =
+        Client::with_bounds(stub.address(), None, Bounds { connect: DEADLINE, read: DEADLINE })
+            .expect("client");
+    let bootstrapping =
+        tokio::spawn(async move { client.bootstrap(&bootstrap(), DEADLINE * 2).await });
+    stub.wait_for_requests("POST", 1).await;
+    elapse(DEADLINE + Duration::from_secs(1)).await;
+    // The second status request proves the first idle response was processed
+    // without authorizing another POST.
+    stub.wait_for_requests("GET", 2).await;
+    elapse(DEADLINE * 2).await;
     assert_eq!(
-        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("classified ambiguity"),
+        tokio::time::timeout(DEADLINE, bootstrapping)
+            .await
+            .expect("bootstrap terminates")
+            .expect("bootstrap task")
+            .expect("classified ambiguity"),
         BootstrapOutcome::AmbiguousStartup
     );
+    stub.finish().await;
     assert_eq!(stub.received().iter().filter(|request| request.method == "POST").count(), 1);
 }
 
@@ -1307,16 +1326,22 @@ async fn bootstrap_reconciles_a_timed_out_post_without_sending_it_again() {
         }
     })
     .await;
-    let client = Client::with_bounds(
-        stub.address(),
-        None,
-        Bounds { connect: Duration::from_secs(1), read: Duration::from_millis(100) },
-    )
-    .expect("client");
+    let client =
+        Client::with_bounds(stub.address(), None, Bounds { connect: DEADLINE, read: DEADLINE })
+            .expect("client");
+    let bootstrapping =
+        tokio::spawn(async move { client.bootstrap(&bootstrap(), DEADLINE * 2).await });
+    stub.wait_for_requests("POST", 1).await;
+    elapse(DEADLINE + Duration::from_secs(1)).await;
     assert!(matches!(
-        client.bootstrap(&bootstrap(), Duration::from_secs(5)).await.expect("reconciled"),
+        tokio::time::timeout(DEADLINE, bootstrapping)
+            .await
+            .expect("bootstrap terminates")
+            .expect("bootstrap task")
+            .expect("reconciled"),
         BootstrapOutcome::Cloned { .. }
     ));
+    stub.finish().await;
     let received = stub.received();
     assert_eq!(received.iter().filter(|request| request.method == "POST").count(), 1);
     assert_eq!(received.iter().filter(|request| request.method == "GET").count(), 1);
