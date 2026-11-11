@@ -86,12 +86,19 @@ pub struct Stub {
     /// The socket file, when this stub listens on one — unlinked on drop.
     socket: Option<PathBuf>,
     received: Arc<Mutex<Vec<Recorded>>>,
-    task: tokio::task::JoinHandle<()>,
+    recorded: Arc<tokio::sync::Notify>,
+    handlers: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for Stub {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self.task.get_mut().expect("listener lock").take() {
+            task.abort();
+        }
+        for handler in self.handlers.lock().expect("handler lock").iter() {
+            handler.abort();
+        }
         if let Some(socket) = &self.socket {
             let _ = std::fs::remove_file(socket);
         }
@@ -107,10 +114,14 @@ impl Stub {
             TcpListener::bind(("127.0.0.1", 0)).await.expect("a loopback port is bindable");
         let address = format!("http://{}", listener.local_addr().expect("the bound address reads"));
         let received = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::new(tokio::sync::Notify::new());
+        let handlers = Arc::new(Mutex::new(Vec::new()));
 
         let answer = Arc::new(answer);
         let task = tokio::spawn({
             let received = Arc::clone(&received);
+            let recorded = Arc::clone(&recorded);
+            let handlers = Arc::clone(&handlers);
             async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
@@ -118,14 +129,23 @@ impl Stub {
                     };
                     let answer = Arc::clone(&answer);
                     let received = Arc::clone(&received);
-                    tokio::spawn(async move {
-                        serve_one(socket, answer.as_ref(), &received).await;
+                    let recorded = Arc::clone(&recorded);
+                    let handler = tokio::spawn(async move {
+                        serve_one(socket, answer.as_ref(), &received, &recorded).await;
                     });
+                    handlers.lock().expect("handler lock").push(handler);
                 }
             }
         });
 
-        Arc::new(Self { address, socket: None, received, task })
+        Arc::new(Self {
+            address,
+            socket: None,
+            received,
+            recorded,
+            handlers,
+            task: Mutex::new(Some(task)),
+        })
     }
 
     /// Binds a Unix socket in the temp directory and answers every request
@@ -147,10 +167,14 @@ impl Stub {
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).expect("a socket is bindable");
         let received = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::new(tokio::sync::Notify::new());
+        let handlers = Arc::new(Mutex::new(Vec::new()));
 
         let answer = Arc::new(answer);
         let task = tokio::spawn({
             let received = Arc::clone(&received);
+            let recorded = Arc::clone(&recorded);
+            let handlers = Arc::clone(&handlers);
             async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
@@ -158,14 +182,23 @@ impl Stub {
                     };
                     let answer = Arc::clone(&answer);
                     let received = Arc::clone(&received);
-                    tokio::spawn(async move {
-                        serve_one(socket, answer.as_ref(), &received).await;
+                    let recorded = Arc::clone(&recorded);
+                    let handler = tokio::spawn(async move {
+                        serve_one(socket, answer.as_ref(), &received, &recorded).await;
                     });
+                    handlers.lock().expect("handler lock").push(handler);
                 }
             }
         });
 
-        Arc::new(Self { address: path.display().to_string(), socket: Some(path), received, task })
+        Arc::new(Self {
+            address: path.display().to_string(),
+            socket: Some(path),
+            received,
+            recorded,
+            handlers,
+            task: Mutex::new(Some(task)),
+        })
     }
 
     /// A stub that answers the same document to everything.
@@ -198,6 +231,43 @@ impl Stub {
         self.received.lock().expect("the request log is never poisoned").clone()
     }
 
+    /// Waits until at least `count` requests with `method` are recorded.
+    pub async fn wait_for_requests(&self, method: &str, count: usize) {
+        tokio::time::timeout(DEADLINE, async {
+            loop {
+                let recorded = self.recorded.notified();
+                tokio::pin!(recorded);
+                recorded.as_mut().enable();
+                if self.received().iter().filter(|request| request.method == method).count()
+                    >= count
+                {
+                    return;
+                }
+                recorded.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the fixture did not record {count} {method} requests"));
+    }
+
+    /// Stops accepting connections and waits for every accepted handler to finish.
+    pub async fn finish(&self) {
+        let task = self.task.lock().expect("listener lock").take();
+        if let Some(task) = task {
+            task.abort();
+            let error = task.await.expect_err("the listener runs until stopped");
+            assert!(error.is_cancelled(), "listener failed: {error}");
+        }
+        let handlers = std::mem::take(&mut *self.handlers.lock().expect("handler lock"));
+        tokio::time::timeout(DEADLINE, async {
+            for handler in handlers {
+                handler.await.expect("the request handler finished");
+            }
+        })
+        .await
+        .expect("all accepted request handlers finish");
+    }
+
     /// The one request it received, which is what most suites assert about.
     pub fn only_request(&self) -> Recorded {
         let received = self.received();
@@ -212,11 +282,13 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     mut socket: S,
     answer: &(dyn Fn(&Recorded) -> Reply + Send + Sync),
     received: &Mutex<Vec<Recorded>>,
+    recorded: &tokio::sync::Notify,
 ) {
     let Some(request) = read_request(&mut socket).await else {
         return;
     };
     received.lock().expect("the request log is never poisoned").push(request.clone());
+    recorded.notify_waiters();
 
     let mut reply = answer(&request);
     while let Reply::Late { after, reply: later } = reply {
