@@ -147,6 +147,8 @@ impl CloudControl {
     /// budgets, and deletion uses `cleanup`. An action can wait behind launch,
     /// the runner's resume/quiescence, and cleanup, then spends at most two
     /// `launch` budgets for inspection/resume, one `cleanup` for retirement,
+    /// or no remote work for a revert report.
+    ///
     /// Let `H = 2 * launch + 2 * quiesce + cleanup + 4 * B`, where
     /// `B` is the 250 ms event-barrier budget. Including preceding holders,
     /// inspection takes at most `H + 2 * launch + 4 * B`, retirement takes
@@ -226,7 +228,7 @@ impl CloudControl {
     }
 }
 
-/// The runtime of one hosted teammate, including exactly-once local notifications.
+/// One hosted teammate with deduplicated terminal decisions and best-effort ordered mail.
 pub struct CloudMember {
     runtime: Arc<Runtime>,
     worker: Worker,

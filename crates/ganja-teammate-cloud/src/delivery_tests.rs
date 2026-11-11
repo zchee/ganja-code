@@ -110,12 +110,43 @@ fn message(text: &str) -> MailboxMessage {
     MailboxMessage::new("sender", text, ganja_team::record::now_iso8601())
 }
 
+#[tokio::test]
+async fn a_blocked_final_wait_has_one_total_budget() {
+    use futures::FutureExt as _;
+
+    let lane = Lane::on(Service::start());
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("inbox");
+    mailbox::seed(&path).expect("inbox");
+    let (release, holder) = hold(path.clone());
+    let mut receipt = lane
+        .submit(Payload::Write { path, envelope: Box::new(message("blocked")) })
+        .expect("write admitted");
+    started(&receipt).await;
+    let budget = EXPIRY + FINAL_OBSERVATION + TEST_SCHEDULER_ALLOWANCE;
+    let result = tokio::time::timeout(
+        budget + TEST_SCHEDULER_ALLOWANCE,
+        std::panic::AssertUnwindSafe(final_value(&mut receipt)).catch_unwind(),
+    )
+    .await;
+    release.send(()).expect("release blocked write");
+    holder.join().expect("holder");
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "the helper must fail at its total deadline, not rely on an outer test timeout"
+    );
+}
+
 async fn final_value(receipt: &mut Receipt) -> Value {
-    loop {
-        if let Observation::Final(value) = receipt.observe(Duration::from_secs(2)).await {
-            return value;
+    tokio::time::timeout(EXPIRY + FINAL_OBSERVATION + TEST_SCHEDULER_ALLOWANCE, async {
+        loop {
+            if let Observation::Final(value) = receipt.observe(OBSERVATION).await {
+                return value;
+            }
         }
-    }
+    })
+    .await
+    .expect("delivery final result exceeded its total budget")
 }
 
 async fn started(receipt: &Receipt) {

@@ -742,21 +742,34 @@ async fn outcomes_never_carry_server_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cleanup_does_not_wait_forever_for_local_notification() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
+    let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+    Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+        Duration::from_millis(100);
+    let budget = fixture.member.runtime.deadlines.cleanup
+        + delivery::FINAL_OBSERVATION
+        + delivery::TEST_SCHEDULER_ALLOWANCE;
     mailbox::seed(&fixture.member.lent.lead_inbox).expect("seed inbox");
     let held = ganja_team::lock::acquire(&fixture.member.lent.lead_inbox).expect("hold inbox");
     fixture.provisioner.failures.lock().expect("failures").insert("state", "lookup");
     let mut operation = CloudControl(Arc::clone(&fixture.member))
         .admit(ControlAction::Retire)
         .expect("retirement admitted");
-    while fixture.member.phase() != Phase::CleanupUnconfirmed {
-        tokio::task::yield_now().await;
-    }
-    let returned = timeout(Duration::from_secs(1), operation.wait()).await;
+    let deadline = Instant::now() + budget;
+    let phase_observed = timeout_at(deadline, async {
+        while fixture.member.phase() != Phase::CleanupUnconfirmed {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let returned = timeout_at(deadline, operation.wait()).await;
     let transition_released = fixture.member.transition.try_lock().is_ok();
-    assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+    let worker_state = fixture.provisioner.current(&fixture.worker);
     drop(held);
-    assert_eq!(operation.wait().await, ControlOutcome::UnconfirmedDeletion);
+    let settled = timeout(budget, operation.wait()).await;
+    assert!(phase_observed.is_ok(), "cleanup phase was not observed within the total budget");
+    assert_eq!(worker_state, WorkerState::Gone);
+    assert_eq!(settled, Ok(ControlOutcome::UnconfirmedDeletion));
     assert_eq!(
         returned,
         Ok(ControlOutcome::UnconfirmedDeletion),

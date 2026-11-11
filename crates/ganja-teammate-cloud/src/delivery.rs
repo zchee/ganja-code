@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 
 pub(crate) const OBSERVATION: Duration = Duration::from_millis(250);
 pub(crate) const FINAL_OBSERVATION: Duration = Duration::from_millis(250);
+#[cfg(test)]
+pub(crate) const TEST_SCHEDULER_ALLOWANCE: Duration = Duration::from_secs(2);
 const EXPIRY: Duration = Duration::from_secs(1);
 const WORKERS: usize = 4;
 const CAPACITY: usize = 64;
