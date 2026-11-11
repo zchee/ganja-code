@@ -293,6 +293,69 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
 }
 
 #[tokio::test]
+async fn successful_followers_preserve_admission_order_across_a_dropped_gap() {
+    let lane = Lane::on(Service::start());
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("inbox");
+    mailbox::seed(&path).expect("inbox");
+    let (release, holder) = hold(path.clone());
+    let mut head = lane
+        .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("head")) })
+        .expect("head admitted");
+    started(&head).await;
+    let mut first = lane
+        .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("first")) })
+        .expect("first follower");
+    let gap = lane
+        .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("dropped")) })
+        .expect("cancelled gap");
+    let gap_watch = JobWatch(Arc::clone(&gap.cell));
+    drop(gap);
+    let mut second = lane
+        .submit(Payload::Write { path: path.clone(), envelope: Box::new(message("second")) })
+        .expect("second follower");
+    let watches = [
+        JobWatch(Arc::clone(&head.cell)),
+        JobWatch(Arc::clone(&first.cell)),
+        JobWatch(Arc::clone(&second.cell)),
+    ];
+    assert!(watches[1].snapshot().started.is_none());
+    assert!(watches[2].snapshot().started.is_none());
+    assert!(watches[0].sequence() < watches[1].sequence());
+    assert!(watches[1].sequence() < gap_watch.sequence());
+    assert!(gap_watch.sequence() < watches[2].sequence());
+    release.send(()).expect("release head before queued expiry");
+    holder.join().expect("holder");
+    for receipt in [&mut head, &mut first, &mut second] {
+        assert!(matches!(final_value(receipt).await, Value::Write(Ok(_))));
+    }
+    let traces = watches.map(|watch| watch.snapshot());
+    for trace in traces {
+        assert!(trace.admitted < trace.started.expect("write started"));
+        assert!(trace.started < trace.completed);
+        assert!(matches!(trace.outcome, Some("Delivered" | "LateSucceeded")));
+    }
+    for pair in traces.windows(2) {
+        assert!(pair[0].admitted < pair[1].admitted);
+        assert!(
+            pair[0].completed < pair[1].started,
+            "a follower started before its predecessor completed"
+        );
+    }
+    let gap_trace = gap_watch.snapshot();
+    assert_eq!(gap_trace.outcome, Some("Dropped"));
+    assert!(gap_trace.started.is_none(), "the cancelled gap must never execute");
+    assert!(traces[1].admitted < gap_trace.admitted && gap_trace.admitted < traces[2].admitted);
+    let texts: Vec<_> = mailbox::read(&path)
+        .expect("delivered inbox")
+        .valid
+        .into_iter()
+        .map(|message| message.text)
+        .collect();
+    assert_eq!(texts, ["head", "first", "second"]);
+}
+
+#[tokio::test]
 async fn a_late_lane_head_cannot_be_overtaken_while_other_workers_are_available() {
     let service = Service::start();
     let lane = Lane::on(Arc::clone(&service));
