@@ -22,6 +22,11 @@ const WRITERS: usize = 6;
 /// Each message takes its own lock; refusals are recovered without contention.
 const EACH: usize = 5;
 
+/// Fails a stuck barrier or child with counts instead of hanging the run. This
+/// does not bound lock admission: five full retry ladders request about 3.275
+/// seconds of sleep, well below this watchdog's allowance for scheduling and I/O.
+const WATCHDOG: Duration = Duration::from_secs(60);
+
 /// Set on a child, absent in the parent: which writer this process is.
 const WRITER: &str = "GANJA_TEAM_CONTENTION_WRITER";
 
@@ -60,7 +65,7 @@ fn n_processes_writing_one_inbox_lose_no_message() {
         );
     }
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + WATCHDOG;
     let ready_before_go = loop {
         let ready =
             (0..WRITERS).filter(|nth| barrier.join(format!("writer-{nth}")).exists()).count();
@@ -176,7 +181,7 @@ fn write_as(writer: &str) {
     let go = barrier.join("go");
     assert!(!go.exists(), "{writer} started after go; accepted=0 refused=0");
     fs::write(barrier.join(writer), []).expect("a writer announces readiness");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + WATCHDOG;
     while !go.exists() {
         assert!(Instant::now() < deadline, "{writer} was not released; accepted=0 refused=0");
         thread::sleep(Duration::from_millis(5));
