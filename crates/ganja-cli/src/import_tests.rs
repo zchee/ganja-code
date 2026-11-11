@@ -36,7 +36,7 @@ fn a_project_import_reports_each_custom_provider_without_its_values() {
     .expect("the provider fixture parses");
     let (built, report) = map_config(&source, false);
     assert!(built.provider.is_empty(), "a project import must omit custom endpoints");
-    let hint = "trusted tier only; use ganja config import-opencode --file <source> --global";
+    let hint = "custom endpoints are trusted tier only; review the entry first; --global trusts it for every project; use ganja config import-opencode --file <source> --global";
     assert_eq!(rows(&report.skipped), vec![("provider.first", hint), ("provider.second", hint)]);
     assert!(report.mapped.is_empty(), "omitted fields are never reported as written");
     assert!(report.warnings.is_empty(), "no endpoint values enter warnings");
