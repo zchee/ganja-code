@@ -103,15 +103,16 @@ async fn an_early_initializer_exit_reports_status_and_redacted_stderr() {
 async fn explicit_initializer_ports_survive_the_server_handoff() {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
+    let server = GitServer::start(false).await;
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve an explicit port");
     let explicit = reservation.local_addr().expect("reserved address").port();
-    drop(reservation);
-    let server = GitServer::start(false).await;
+    let mut reservation = Some(reservation);
     for requested in [0, explicit] {
         let home = tempfile::tempdir().expect("worker home");
         let work = home.path().join("work");
         std::fs::create_dir(&work).expect("empty checkout directory");
-        let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"))
+        let mut command = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"));
+        command
             .args(["worker", "init", "--port", &requested.to_string()])
             .env_clear()
             .env("PATH", std::env::var_os("PATH").expect("PATH"))
@@ -126,9 +127,11 @@ async fn explicit_initializer_ports_survive_the_server_handoff() {
             .current_dir(&work)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("worker init");
+            .kill_on_drop(true);
+        if requested != 0 {
+            drop(reservation.take());
+        }
+        let mut child = command.spawn().expect("worker init");
         let stdout = child.stdout.take().expect("stdout");
         let mut lines = BufReader::new(stdout).lines();
         let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
