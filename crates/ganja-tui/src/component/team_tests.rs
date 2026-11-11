@@ -72,7 +72,7 @@ fn a_cloud_row_offers_message_shutdown_and_the_three_owner_actions() {
 
 #[test]
 fn hosted_actions_explain_shutdown_and_retirement_without_clipping() {
-    let hint = "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
+    let hint = "Shutdown finishes the turn, then deletes the worker. Retire deletes it now.";
     for width in [40, 76] {
         let area = Rect { width, height: 24, ..AREA };
         let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
@@ -86,7 +86,7 @@ fn hosted_actions_explain_shutdown_and_retirement_without_clipping() {
         assert!(text.contains(hint), "hint was clipped at width {width}:\n{screen}");
         assert!(screen.contains("[Enter] run"), "keyboard hints were clipped:\n{screen}");
         let hint_row =
-            screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+            screen.lines().position(|line| line.contains("Shutdown finishes")).expect("hint");
         assert_eq!(dialog.click(area, 4, hint_row as u16), None);
         assert!(dialog.is_choosing_action(), "clicking the hint must not submit an action");
     }
@@ -105,7 +105,101 @@ fn message_and_shutdown_on_a_hosted_row_match_a_local_rows_effects() {
         );
         dialog.submit();
         dialog.move_selection(1);
+        if backend == MemberBackend::Cloud {
+            assert_eq!(dialog.submit(), None, "hosted Shutdown needs confirmation");
+            dialog.move_selection(1);
+        }
         assert_eq!(dialog.submit(), Some(Effect::Shutdown("member".into())));
+    }
+}
+
+#[test]
+fn a_hosted_shutdown_requires_a_visible_confirmation() {
+    let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+    dialog.submit();
+    dialog.move_selection(1);
+    assert_eq!(dialog.submit(), None, "opening Shutdown must not dispatch");
+    let screen = rendered(&dialog, AREA);
+    for text in [
+        "Shut down this hosted worker?",
+        "Finish the current turn, then delete the worker.",
+        "Unpushed changes will be lost.",
+        "> Cancel",
+        "Shut down hosted",
+    ] {
+        assert!(screen.contains(text), "missing {text:?}:\n{screen}");
+    }
+    assert_eq!(dialog.submit(), None, "Cancel never dispatches");
+    dialog.submit();
+    dialog.move_selection(1);
+    dialog.submit();
+    let screen = rendered(&dialog, AREA);
+    let line =
+        screen.lines().position(|line| line.contains("Shut down hosted")).expect("affirmative");
+    for _ in 0..3 {
+        assert_eq!(dialog.click(AREA, 8, line as u16), None, "click only highlights");
+    }
+    assert!(dialog.selection_visible(AREA));
+    assert_eq!(dialog.submit(), Some(Effect::Shutdown("hosted".into())));
+    assert_eq!(dialog.submit(), None, "repeated Enter cannot send twice");
+}
+
+#[test]
+fn a_busy_hosted_shutdown_is_not_dispatched() {
+    for becomes_busy_in_confirmation in [false, true] {
+        let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(1);
+        if becomes_busy_in_confirmation {
+            assert_eq!(dialog.submit(), None);
+            dialog.move_selection(1);
+        }
+        dialog.set_control_busy("hosted", true);
+        assert_eq!(dialog.submit(), None, "busy Shutdown must not dispatch");
+        assert!(rendered(&dialog, AREA).contains("an owner action is already running"));
+    }
+}
+
+#[test]
+fn a_local_shutdown_remains_immediate() {
+    for backend in [
+        MemberBackend::InProcess,
+        MemberBackend::Ganja,
+        MemberBackend::Claude,
+        MemberBackend::Codex,
+        MemberBackend::Agy,
+        MemberBackend::Grok,
+    ] {
+        let mut dialog = Team::new(vec![row("local", backend, &[])], Vec::new());
+        dialog.submit();
+        dialog.move_selection(1);
+        assert_eq!(dialog.submit(), Some(Effect::Shutdown("local".into())));
+    }
+}
+
+#[test]
+fn a_hosted_shutdown_cannot_confirm_a_clipped_target() {
+    let name = "w".repeat(64);
+    for width in [16, 40, 76, 80] {
+        for height in [5, 6, 7, 8, 20] {
+            let area = Rect::new(0, 0, width, height);
+            let mut dialog = Team::new(vec![row(&name, MemberBackend::Cloud, &[])], Vec::new());
+            dialog.submit();
+            dialog.move_selection(1);
+            assert_eq!(dialog.submit(), None);
+            dialog.move_selection(1);
+            let screen = rendered(&dialog, area);
+            let full_label = format!("Shut down {name}");
+            assert_eq!(
+                dialog.selection_visible(area),
+                screen.contains(&full_label),
+                "{width}x{height}:\n{screen}"
+            );
+            dialog.clamp_selection(area);
+            if !screen.contains(&full_label) {
+                assert_eq!(dialog.submit(), None, "a clipped target cannot dispatch");
+            }
+        }
     }
 }
 
@@ -127,7 +221,7 @@ fn local_rows_never_offer_cloud_controls() {
             !screen.contains("inspection")
                 && !screen.contains("Retire")
                 && !screen.contains("revert")
-                && !screen.contains("Shutdown asks"),
+                && !screen.contains("Shutdown finishes"),
             "{screen}"
         );
     }
@@ -253,7 +347,7 @@ fn repeated_clicks_at_one_position_never_confirm_a_hosted_action() {
                 );
             }
             assert!(
-                matches!(dialog.step, super::Step::Confirm { action: selected, option: 1, .. } if selected == action)
+                matches!(dialog.step, super::Step::Confirm { action: selected, option: 1, .. } if selected == super::RowAction::Cloud(action))
             );
         }
     }
@@ -333,7 +427,7 @@ fn hint_blank_and_footer_rows_never_select_an_action() {
     let mut dialog = Team::new(vec![row("hosted", MemberBackend::Cloud, &[])], Vec::new());
     dialog.submit();
     let screen = rendered(&dialog, AREA);
-    let hint = screen.lines().position(|line| line.contains("Shutdown asks")).expect("hint");
+    let hint = screen.lines().position(|line| line.contains("Shutdown finishes")).expect("hint");
     let footer = screen.lines().position(|line| line.contains("[Enter] run")).expect("footer");
     for row in [hint, footer - 1, footer] {
         assert_eq!(dialog.click(AREA, 4, row as u16), None);
@@ -362,7 +456,10 @@ fn a_short_action_window_follows_selection_and_maps_the_drawn_row() {
         .position(|line| line.contains("Report external revert"))
         .expect("selected row");
     assert_eq!(dialog.click(area, 4, row as u16), None);
-    assert!(matches!(dialog.step, super::Step::Confirm { action: CloudAction::ReportRevert, .. }));
+    assert!(matches!(
+        dialog.step,
+        super::Step::Confirm { action: super::RowAction::Cloud(CloudAction::ReportRevert), .. }
+    ));
 }
 
 #[test]
@@ -371,8 +468,11 @@ fn short_confirmations_keep_the_target_visible_before_offering_consent() {
         for notice in [false, true] {
             for body in 1..=4 {
                 let mut dialog = retirement_dialog();
-                dialog.step =
-                    super::Step::Confirm { member: "hosted".to_owned(), action, option: 0 };
+                dialog.step = super::Step::Confirm {
+                    member: "hosted".to_owned(),
+                    action: super::RowAction::Cloud(action),
+                    option: 0,
+                };
                 if notice {
                     dialog.set_notice("A prior operation finished.");
                 }
@@ -403,8 +503,11 @@ fn short_confirmations_keep_the_target_visible_before_offering_consent() {
                             assert!(matches!(dialog.step, super::Step::Confirm { option: 0, .. }));
                         }
                     }
-                    dialog.step =
-                        super::Step::Confirm { member: "hosted".to_owned(), action, option: 1 };
+                    dialog.step = super::Step::Confirm {
+                        member: "hosted".to_owned(),
+                        action: super::RowAction::Cloud(action),
+                        option: 1,
+                    };
                     assert!(!dialog.selection_visible(area), "{screen}");
                 }
             }
@@ -417,7 +520,7 @@ fn a_long_confirmation_target_yields_to_the_omission_cue() {
     let mut dialog = retirement_dialog();
     dialog.step = super::Step::Confirm {
         member: "a-very-long-hosted-member-name".repeat(8),
-        action: CloudAction::Retire,
+        action: super::RowAction::Cloud(CloudAction::Retire),
         option: 0,
     };
     for width in [16, 40] {

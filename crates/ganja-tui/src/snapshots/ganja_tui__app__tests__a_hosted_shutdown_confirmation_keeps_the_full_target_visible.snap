@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ┌ teammate ──────────────────────────────────────────────────────────────────┐ 
+ │wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww            │ 
+ │Shut down this hosted worker?                                               │ 
+ │Finish the current turn, then delete the worker.                            │ 
+ │Unpushed changes will be lost.                                              │ 
+ │  Cancel                                                                    │ 
+ │> Shut down wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww│ 
+ │                                                                            │ 
+ │[j/k] [up/down] move   [Enter] run   [Esc] close                            │ 
+ └────────────────────────────────────────────────────────────────────────────┘ 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

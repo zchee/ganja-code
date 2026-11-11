@@ -12,8 +12,8 @@ expression: screen(&terminal)
   │  Resume for inspection                                                   │  
   │  Retire                                                                  │  
   │  Report external revert                                                  │  
-  │Shutdown asks the teammate to finish and exit. Retire deletes its worker  │  
-  │now, without asking.                                                      │  
+  │Shutdown finishes the turn, then deletes the worker. Retire deletes it    │  
+  │now.                                                                      │  
   │                                                                          │  
   │[j/k] [up/down] move   [Enter] run   [Esc] close                          │  
   └──────────────────────────────────────────────────────────────────────────┘  

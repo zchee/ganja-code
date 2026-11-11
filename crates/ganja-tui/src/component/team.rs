@@ -72,7 +72,7 @@ const EMPTY: &str = "no team members";
 const SPAWN_LABEL: &str = "Spawn teammate\u{2026}";
 
 const HOSTED_ACTION_HINT: &str =
-    "Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.";
+    "Shutdown finishes the turn, then deletes the worker. Retire deletes it now.";
 
 /// What a spawn is refused with while another one is still starting.
 ///
@@ -340,6 +340,25 @@ impl RowAction {
             Self::Cloud(action) => action.label(),
         }
     }
+
+    fn confirmation(self) -> &'static [&'static str] {
+        match self {
+            Self::Shutdown => &[
+                "Shut down this hosted worker?",
+                "Finish the current turn, then delete the worker.",
+                "Unpushed changes will be lost.",
+            ],
+            Self::Cloud(action) => action.confirmation(),
+            Self::Message => &[],
+        }
+    }
+
+    fn affirmative(self, member: &str) -> String {
+        match self {
+            Self::Shutdown => format!("Shut down {member}"),
+            Self::Message | Self::Cloud(_) => self.label().to_owned(),
+        }
+    }
 }
 
 /// What a free-text step is collecting.
@@ -371,7 +390,7 @@ enum Step {
         option: usize,
     },
     /// Confirms an owner action without making Enter alone destructive.
-    Confirm { member: String, action: CloudAction, option: usize },
+    Confirm { member: String, action: RowAction, option: usize },
     /// Typing the text a step needs.
     Input {
         /// What the text is for.
@@ -671,20 +690,24 @@ impl Team {
                 // row, and a member that left the roster is answered by
                 // `refresh` dropping this step before Enter is ever read.
                 let row = self.row_named(&member)?;
-                let effect = match *Self::actions(row).get(option)? {
-                    RowAction::Cloud(action) => {
-                        if self.busy_controls.contains(&member) {
-                            self.notice = Some(
-                                "an owner action is already running for this member".to_owned(),
-                            );
-                            return None;
-                        }
-                        if action != CloudAction::Inspect {
-                            self.step = Step::Confirm { member, action, option: 0 };
-                            return None;
-                        }
-                        Effect::Cloud { member, action }
-                    }
+                let action = *Self::actions(row).get(option)?;
+                let hosted_shutdown =
+                    action == RowAction::Shutdown && row.backend == MemberBackend::Cloud;
+                if (hosted_shutdown || matches!(action, RowAction::Cloud(_)))
+                    && self.busy_controls.contains(&member)
+                {
+                    self.notice =
+                        Some("an owner action is already running for this member".to_owned());
+                    return None;
+                }
+                if hosted_shutdown
+                    || matches!(action, RowAction::Cloud(cloud) if cloud != CloudAction::Inspect)
+                {
+                    self.step = Step::Confirm { member, action, option: 0 };
+                    return None;
+                }
+                let effect = match action {
+                    RowAction::Cloud(action) => Effect::Cloud { member, action },
                     RowAction::Shutdown => Effect::Shutdown(member),
                     RowAction::Message => {
                         self.step =
@@ -700,8 +723,21 @@ impl Team {
                 Some(effect)
             }
             Step::Confirm { member, action, option } => {
-                let effect = (*option == 1 && !self.busy_controls.contains(member))
-                    .then(|| Effect::Cloud { member: member.clone(), action: *action });
+                let effect = if *option != 1 {
+                    None
+                } else if self.busy_controls.contains(member) {
+                    self.notice =
+                        Some("an owner action is already running for this member".to_owned());
+                    None
+                } else {
+                    match action {
+                        RowAction::Shutdown => Some(Effect::Shutdown(member.clone())),
+                        RowAction::Cloud(action) => {
+                            Some(Effect::Cloud { member: member.clone(), action: *action })
+                        }
+                        RowAction::Message => None,
+                    }
+                };
                 self.step = Step::Members;
                 effect
             }
@@ -737,7 +773,15 @@ impl Team {
     }
 
     fn popup(&self, area: Rect) -> Rect {
-        let width = area.width.saturating_sub(4).clamp(1, MAX_WIDTH);
+        // The longest valid name needs room beside the shutdown verb and marker.
+        let width = if let Step::Confirm { member, action: RowAction::Shutdown, .. } = &self.step {
+            let desired = u16::try_from(member.width() + "Shut down ".width() + MARKER.width() + 2)
+                .unwrap_or(u16::MAX)
+                .max(MAX_WIDTH);
+            area.width.saturating_sub(2).clamp(1, desired)
+        } else {
+            area.width.saturating_sub(4).clamp(1, MAX_WIDTH)
+        };
         let available = area.height.saturating_sub(2).clamp(1, MAX_HEIGHT);
         let content = match &self.step {
             Step::Members => {
@@ -869,7 +913,7 @@ impl Team {
                         .map(|line| Line::styled(clip(line, width), theme.fg)),
                 );
                 lines.push(action_row(0, *option, "Cancel", width, theme));
-                lines.push(action_row(1, *option, action.label(), width, theme));
+                lines.push(action_row(1, *option, &action.affirmative(member), width, theme));
                 lines
             }
             Step::Input { asking, buffer } => Self::input_rows(width, asking, buffer, theme),
@@ -945,10 +989,16 @@ impl Team {
             });
             if budget >= 3 {
                 rows.push(VisibleRow {
-                    line: action_row(1, *option, action.label(), width, theme),
+                    line: action_row(1, *option, &action.affirmative(member), width, theme),
                     option: Some(1),
                 });
             }
+        }
+        if let Step::Confirm { member, action: RowAction::Shutdown, .. } = &self.step
+            && MARKER.width() + "Shut down ".width() + member.width() > width
+        {
+            // A clipped target cannot grant consent through the keyboard or mouse.
+            rows.retain(|row| row.option != Some(1));
         }
         if notice > 0
             && let Some(text) = &self.notice
