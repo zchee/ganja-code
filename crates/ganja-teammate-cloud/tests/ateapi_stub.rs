@@ -498,7 +498,7 @@ async fn router_socket(mut socket: WebSocket, state: Arc<KubeState>) {
         let header = String::from_utf8(header).expect("CONNECT header");
         assert_eq!(
             header,
-            "CONNECT worker:80 HTTP/1.1\r\nHost: worker:80\r\nate-target-actor: ganja/worker\r\n\r\n"
+            "CONNECT worker:8080 HTTP/1.1\r\nHost: worker:8080\r\nate-target-actor: ganja/worker\r\n\r\n"
         );
         state.connect_headers.lock().expect("CONNECT headers lock").push(header);
         stream

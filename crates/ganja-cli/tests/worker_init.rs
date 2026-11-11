@@ -19,6 +19,17 @@ use tokio_util::sync::CancellationToken;
 use worker_git::{Checkout, GitOptions, Stage, prepare};
 use worker_support::GitServer;
 
+#[test]
+fn worker_init_defaults_to_port_8080() {
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"))
+        .args(["worker", "init", "--help"])
+        .output()
+        .expect("worker init help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("help text");
+    assert!(help.contains("[default: 8080]"), "unexpected default: {help}");
+}
+
 #[tokio::test]
 async fn the_initializer_and_replacement_server_announce_the_same_ephemeral_port() {
     let server = GitServer::start(false).await;
@@ -89,53 +100,84 @@ async fn an_early_initializer_exit_reports_status_and_redacted_stderr() {
 }
 
 #[tokio::test]
-async fn an_initializer_announces_its_bound_ephemeral_port() {
+async fn explicit_initializer_ports_survive_the_server_handoff() {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-    let home = tempfile::tempdir().expect("worker home");
-    let gitconfig = home.path().join("gitconfig");
-    let ca = home.path().join("ca.pem");
-    std::fs::write(&gitconfig, "").expect("git configuration");
-    std::fs::write(&ca, "fixture").expect("trust file");
-    let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"))
-        .args(["worker", "init", "--port", "0"])
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").expect("PATH"))
-        .env("HOME", home.path())
-        .env("GANJA_SERVER_PASSWORD", "synthetic-worker-password")
-        .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("GIT_SSL_CAINFO", &ca)
-        .current_dir(home.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("worker init");
-    let stdout = child.stdout.take().expect("stdout");
-    let mut lines = BufReader::new(stdout).lines();
-    let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
-        .await
-        .expect("initializer announces its bound address")
-        .expect("address line")
-        .expect("stdout stays open");
-    let address: std::net::SocketAddr = line
-        .strip_prefix("ganja server listening on http://")
-        .expect("same address format as serve")
-        .parse()
-        .expect("bound socket address");
-    assert!(address.ip().is_unspecified());
-    assert_ne!(address.port(), 0);
-    let client = ganja_client::Client::new(
-        &format!("http://127.0.0.1:{}", address.port()),
-        Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
-    )
-    .expect("client");
-    assert!(matches!(
-        client.bootstrap_status().await.expect("announced listener responds"),
-        ganja_client::BootstrapStatus::Idle
-    ));
-    child.kill().await.expect("stop initializer");
-    child.wait().await.expect("reap initializer");
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve an explicit port");
+    let explicit = reservation.local_addr().expect("reserved address").port();
+    drop(reservation);
+    let server = GitServer::start(false).await;
+    for requested in [0, explicit] {
+        let home = tempfile::tempdir().expect("worker home");
+        let work = home.path().join("work");
+        std::fs::create_dir(&work).expect("empty checkout directory");
+        let mut child = tokio::process::Command::new(assert_cmd::cargo::cargo_bin!("ganja"))
+            .args(["worker", "init", "--port", &requested.to_string()])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").expect("PATH"))
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("GANJA_CONFIG_HOME", home.path().join("config"))
+            .env("GANJA_PROVIDER", "fake")
+            .env("GANJA_DISABLE_MODELS_FETCH", "1")
+            .env("GANJA_SERVER_PASSWORD", "synthetic-worker-password")
+            .env("GIT_CONFIG_GLOBAL", &server.gitconfig)
+            .env("GIT_SSL_CAINFO", &server.ca)
+            .current_dir(&work)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("worker init");
+        let stdout = child.stdout.take().expect("stdout");
+        let mut lines = BufReader::new(stdout).lines();
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("initializer announces its bound address")
+            .expect("address line")
+            .expect("stdout stays open");
+        let address: std::net::SocketAddr = line
+            .strip_prefix("ganja server listening on http://")
+            .expect("same address format as serve")
+            .parse()
+            .expect("bound socket address");
+        assert!(address.ip().is_unspecified());
+        assert_ne!(address.port(), 0);
+        if requested != 0 {
+            assert_eq!(address.port(), requested);
+        }
+        let client = ganja_client::Client::new(
+            &format!("http://127.0.0.1:{}", address.port()),
+            Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
+        )
+        .expect("client");
+        assert!(matches!(
+            client.bootstrap_status().await.expect("announced listener responds"),
+            ganja_client::BootstrapStatus::Idle
+        ));
+        let bootstrap = Bootstrap {
+            repository: server.url.clone(),
+            reference: "main".to_owned(),
+            branch: "workers/explicit-port".to_owned(),
+            author: BootstrapAuthor {
+                name: "fixture".to_owned(),
+                email: "fixture@example.invalid".to_owned(),
+            },
+        };
+        let outcome =
+            client.bootstrap(&bootstrap, Duration::from_secs(15)).await.expect("bootstrap");
+        assert!(matches!(outcome, BootstrapOutcome::Cloned { .. }), "{outcome:?}");
+        let replacement = tokio::time::timeout(Duration::from_secs(15), lines.next_line())
+            .await
+            .expect("replacement announces its port")
+            .expect("replacement address")
+            .expect("replacement stays open");
+        assert_eq!(replacement, line, "explicit port survives checkout and exec");
+        client.health().await.expect("same port reaches the served engine");
+        child.kill().await.expect("stop served engine");
+        child.wait().await.expect("reap served engine");
+    }
+    server.close().await;
 }
 
 #[tokio::test]

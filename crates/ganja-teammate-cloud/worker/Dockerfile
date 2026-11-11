@@ -31,5 +31,5 @@ ENV GANJA_CONFIG_HOME=/etc/ganja \
     GANJA_SERVER_USERNAME=ganja
 
 WORKDIR /work
-EXPOSE 80
-ENTRYPOINT ["ganja", "worker", "init", "--port", "80"]
+EXPOSE 8080
+ENTRYPOINT ["ganja", "worker", "init", "--port", "8080"]
