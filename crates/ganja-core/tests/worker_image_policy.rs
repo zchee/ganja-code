@@ -114,10 +114,10 @@ fn the_acceptance_policy_rejects_git_alias_execution() {
 
 #[test]
 fn the_worker_image_requires_pinned_supply_inputs() {
-    check_supply_inputs(DOCKERFILE);
+    check_supply_inputs(DOCKERFILE).expect("valid image supply inputs");
 }
 
-fn active_instructions(source: &str) -> Vec<(String, String)> {
+fn active_instructions(source: &str) -> Result<Vec<(String, String)>, &'static str> {
     let mut instructions = Vec::new();
     let mut logical = String::new();
     for line in source.lines().map(str::trim) {
@@ -132,54 +132,40 @@ fn active_instructions(source: &str) -> Vec<(String, String)> {
         logical.push_str(part);
         if !continued {
             let (name, arguments) =
-                logical.split_once(char::is_whitespace).expect("instruction arguments");
+                logical.split_once(char::is_whitespace).ok_or("instruction arguments missing")?;
             instructions.push((name.to_ascii_uppercase(), arguments.trim().to_owned()));
             logical.clear();
         }
     }
-    assert!(logical.is_empty(), "unterminated Dockerfile continuation");
-    instructions
+    if !logical.is_empty() {
+        return Err("unterminated Dockerfile continuation");
+    }
+    Ok(instructions)
 }
 
-fn instruction_position(instructions: &[(String, String)], name: &str, arguments: &str) -> usize {
-    instructions
-        .iter()
-        .position(|(kind, body)| kind == name && body == arguments)
-        .unwrap_or_else(|| panic!("missing active {name} {arguments}"))
+fn instruction_position(
+    instructions: &[(String, String)],
+    name: &str,
+    arguments: &str,
+) -> Option<usize> {
+    instructions.iter().position(|(kind, body)| kind == name && body == arguments)
 }
 
-// These are the fixed image's AND lists, not arbitrary shell programs. Compare
-// whole commands in active RUN instructions so comments or quoted copies of a
-// command cannot stand in for the command that enforces the property.
-fn run_sequence(instructions: &[(String, String)], commands: &[&str]) -> usize {
-    let positions: Vec<_> = commands
-        .iter()
-        .map(|required| {
-            instructions
-                .iter()
-                .enumerate()
-                .filter(|(_, (name, _))| name == "RUN")
-                .find_map(|(instruction, (_, body))| {
-                    body.split(" && ")
-                        .position(|command| command == *required)
-                        .map(|command| (instruction, command))
-                })
-                .unwrap_or_else(|| panic!("missing active RUN command: {required}"))
-        })
-        .collect();
-    assert!(
-        positions.windows(2).all(|pair| pair[0].0 == pair[1].0 && pair[0].1 < pair[1].1),
-        "commands must run in order in one AND list: {commands:?}"
-    );
-    positions.first().expect("nonempty command sequence").0
+// The fixed image's complete AND lists must match, not pieces that could be
+// quoted text or separated by an unreviewed command.
+fn run_sequence(instructions: &[(String, String)], commands: &[&str]) -> Option<usize> {
+    instruction_position(instructions, "RUN", &commands.join(" && "))
 }
 
-fn check_supply_inputs(dockerfile: &str) {
-    let instructions = active_instructions(dockerfile);
-    let base_arg = instruction_position(&instructions, "ARG", "BASE_IMAGE");
-    let from = instruction_position(&instructions, "FROM", "${BASE_IMAGE}");
-    assert!(base_arg < from, "base must be a required build argument");
-    assert_eq!(instructions.iter().filter(|(name, _)| name == "FROM").count(), 1);
+fn check_supply_inputs(dockerfile: &str) -> Result<(), &'static str> {
+    let instructions = active_instructions(dockerfile)?;
+    let base_arg = instruction_position(&instructions, "ARG", "BASE_IMAGE")
+        .ok_or("missing required base argument")?;
+    let from = instruction_position(&instructions, "FROM", "${BASE_IMAGE}")
+        .ok_or("missing digest-supplied FROM")?;
+    if base_arg >= from || instructions.iter().filter(|(name, _)| name == "FROM").count() != 1 {
+        return Err("base argument or FROM order is invalid");
+    }
     let base_check = run_sequence(
         &instructions,
         &[
@@ -188,19 +174,24 @@ fn check_supply_inputs(dockerfile: &str) {
             "test \"${#digest}\" -eq 64",
             "case \"$digest\" in \"\"|*[!a-fA-F0-9]*) exit 1 ;; esac",
         ],
-    );
-    assert!(
-        instructions[from + 1..base_check]
+    )
+    .ok_or("missing complete base-check RUN")?;
+    if base_check <= from
+        || !instructions[from + 1..base_check]
             .iter()
             .any(|(name, body)| name == "ARG" && body == "BASE_IMAGE")
-    );
-    assert_eq!(instructions.iter().position(|(name, _)| name == "RUN"), Some(base_check));
+        || instructions.iter().position(|(name, _)| name == "RUN") != Some(base_check)
+    {
+        return Err("base checks must be the first RUN with the base argument in scope");
+    }
     let binary = instruction_position(
         &instructions,
         "COPY",
         "--chown=0:0 --chmod=0555 ganja /usr/local/bin/ganja",
-    );
-    let hash_arg = instruction_position(&instructions, "ARG", "GANJA_SHA256");
+    )
+    .ok_or("missing immutable binary COPY")?;
+    let hash_arg = instruction_position(&instructions, "ARG", "GANJA_SHA256")
+        .ok_or("missing required binary hash argument")?;
     let hash_check = run_sequence(
         &instructions,
         &[
@@ -208,46 +199,61 @@ fn check_supply_inputs(dockerfile: &str) {
             "case \"$GANJA_SHA256\" in \"\"|*[!a-fA-F0-9]*) exit 1 ;; esac",
             "printf '%s  /usr/local/bin/ganja\\n' \"$GANJA_SHA256\" | sha256sum --check --strict -",
         ],
-    );
-    assert!(base_check < binary && binary < hash_check && hash_arg < hash_check);
+    )
+    .ok_or("missing complete binary-hash RUN")?;
+    if !(base_check < binary && binary < hash_check && hash_arg < hash_check) {
+        return Err("binary hash must be checked after COPY and its argument");
+    }
     let label = instruction_position(
         &instructions,
         "LABEL",
         "org.opencontainers.image.base.name=\"${BASE_IMAGE}\" io.ganja.binary.sha256=\"${GANJA_SHA256}\"",
-    );
-    assert!(hash_check < label);
+    )
+    .ok_or("missing supply labels")?;
+    if hash_check >= label {
+        return Err("supply labels must follow binary verification");
+    }
+    Ok(())
 }
 
 #[test]
 fn the_worker_image_keeps_only_runtime_directories_writable() {
-    check_ownership(DOCKERFILE);
+    check_ownership(DOCKERFILE).expect("valid image ownership");
 }
 
-fn check_ownership(dockerfile: &str) {
-    let instructions = active_instructions(dockerfile);
+fn check_ownership(dockerfile: &str) -> Result<(), &'static str> {
+    let instructions = active_instructions(dockerfile)?;
     let (user, (_, identity)) = instructions
         .iter()
         .enumerate()
         .rev()
         .find(|(_, (name, _))| name == "USER")
-        .expect("active runtime USER");
-    let (uid, gid) = identity.split_once(':').expect("explicit numeric uid and gid");
-    assert_ne!(uid.parse::<u32>().expect("numeric uid"), 0);
-    assert_ne!(gid.parse::<u32>().expect("numeric gid"), 0);
-    assert!(
-        !instructions[user + 1..].iter().any(|(name, _)| matches!(name.as_str(), "RUN" | "COPY"))
-    );
-    assert_eq!(instructions.iter().filter(|(name, _)| name == "COPY").count(), 2);
+        .ok_or("missing active runtime USER")?;
+    let (uid, gid) =
+        identity.split_once(':').ok_or("runtime USER must have numeric uid and gid")?;
+    if uid.parse::<u32>().ok().is_none_or(|uid| uid == 0)
+        || gid.parse::<u32>().ok().is_none_or(|gid| gid == 0)
+    {
+        return Err("runtime uid and gid must be numeric and nonzero");
+    }
+    if instructions[user + 1..].iter().any(|(name, _)| matches!(name.as_str(), "RUN" | "COPY")) {
+        return Err("RUN or COPY follows the runtime USER");
+    }
+    if instructions.iter().filter(|(name, _)| name == "COPY").count() != 2 {
+        return Err("only the two reviewed COPY instructions are allowed");
+    }
     let binary = instruction_position(
         &instructions,
         "COPY",
         "--chown=0:0 --chmod=0555 ganja /usr/local/bin/ganja",
-    );
+    )
+    .ok_or("missing immutable binary COPY")?;
     let config = instruction_position(
         &instructions,
         "COPY",
         "--chown=0:0 --chmod=0444 ganja.toml gitconfig acceptance-script.json /etc/ganja/",
-    );
+    )
+    .ok_or("missing immutable configuration COPY")?;
     let permissions = run_sequence(
         &instructions,
         &[
@@ -260,19 +266,31 @@ fn check_ownership(dockerfile: &str) {
             "remaining=\"$(find / -xdev -type f -perm /6000)\"",
             "test -z \"$remaining\"",
         ],
-    );
-    assert!(binary < permissions && config < permissions && permissions < user);
-    assert!(instructions.iter().any(|(name, body)| name == "ENV"
-        && body.split_whitespace().any(|value| value == "HOME=/home/ganja")));
-    instruction_position(&instructions, "EXPOSE", "8080");
+    )
+    .ok_or("missing complete ordered ownership RUN")?;
+    if !(binary < permissions && config < permissions && permissions < user) {
+        return Err("ownership checks must follow COPY and precede USER");
+    }
+    if !instructions.iter().any(|(name, body)| {
+        name == "ENV" && body.split_whitespace().any(|value| value == "HOME=/home/ganja")
+    }) {
+        return Err("missing runtime HOME");
+    }
+    instruction_position(&instructions, "EXPOSE", "8080").ok_or("missing EXPOSE 8080")?;
     instruction_position(
         &instructions,
         "ENTRYPOINT",
         "[\"ganja\", \"worker\", \"init\", \"--port\", \"8080\"]",
-    );
+    )
+    .ok_or("missing worker ENTRYPOINT on 8080")?;
+    Ok(())
 }
 
 fn comment_instruction(source: &str, prefix: &str) -> String {
+    assert!(
+        source.lines().any(|line| line.trim_start().starts_with(prefix)),
+        "fixture prefix missing"
+    );
     let mut commenting = false;
     source
         .lines()
@@ -288,34 +306,73 @@ fn comment_instruction(source: &str, prefix: &str) -> String {
 
 #[test]
 fn disabled_or_reordered_image_instructions_are_refused() {
+    let start = DOCKERFILE.find("RUN digest=").expect("base check RUN");
+    let end = start + DOCKERFILE[start..].find("\n\n").expect("end of base check RUN");
+    let base_run = &DOCKERFILE[start..end];
+    let (_, base_commands) = active_instructions(base_run)
+        .expect("valid base instruction")
+        .pop()
+        .expect("base instruction");
+    let quoted = DOCKERFILE
+        .replace(base_run, &format!("RUN printf '%s\\n' 'inert && {base_commands} && inert'"));
     let strip =
         "    && find / -xdev \\( -type f -o -type d \\) -perm /0022 -exec chmod go-w {} + \\\n";
     let chown = "    && chown -R 10001:10001 /work /var/lib/ganja /home/ganja \\\n";
+    let cleanup = concat!(
+        "    && chmod 0755 /tmp /var/tmp \\\n",
+        "    && find / -xdev -type f -perm /6000 -exec chmod a-s {} + \\\n",
+        "    && remaining=\"$(find / -xdev -type f -perm /6000)\" \\\n",
+        "    && test -z \"$remaining\"",
+    );
+    assert!(DOCKERFILE.contains(cleanup), "cleanup fixture must match the real command tail");
     let cases = [
-        ("commented USER", comment_instruction(DOCKERFILE, "USER ")),
-        ("commented checksum", comment_instruction(DOCKERFILE, "RUN test \"${#GANJA_SHA256}\"")),
         (
-            "commented cleanup",
-            comment_instruction(DOCKERFILE, "&& find / -xdev -type f -perm /6000"),
+            "commented USER",
+            comment_instruction(DOCKERFILE, "USER "),
+            Ok(()),
+            Err("missing active runtime USER"),
+        ),
+        (
+            "commented checksum",
+            comment_instruction(DOCKERFILE, "RUN test \"${#GANJA_SHA256}\""),
+            Err("missing complete binary-hash RUN"),
+            Ok(()),
+        ),
+        (
+            "removed cleanup",
+            DOCKERFILE.replace(cleanup, "    && chmod 0755 /tmp /var/tmp"),
+            Ok(()),
+            Err("missing complete ordered ownership RUN"),
         ),
         (
             "write strip after chown",
             DOCKERFILE.replace(&format!("{strip}{chown}"), &format!("{chown}{strip}")),
+            Ok(()),
+            Err("missing complete ordered ownership RUN"),
         ),
-        ("RUN after USER", DOCKERFILE.replace("USER 10001:10001", "USER 10001:10001\nRUN true")),
-        ("tag-only FROM", DOCKERFILE.replace("FROM ${BASE_IMAGE}", "FROM debian:trixie-slim")),
+        (
+            "RUN after USER",
+            DOCKERFILE.replace("USER 10001:10001", "USER 10001:10001\nRUN true"),
+            Ok(()),
+            Err("RUN or COPY follows the runtime USER"),
+        ),
+        (
+            "tag-only FROM",
+            DOCKERFILE.replace("FROM ${BASE_IMAGE}", "FROM debian:trixie-slim"),
+            Err("missing digest-supplied FROM"),
+            Ok(()),
+        ),
+        ("quoted base checks", quoted, Err("missing complete base-check RUN"), Ok(())),
+        (
+            "unreviewed command",
+            DOCKERFILE.replace("RUN digest=", "RUN true && digest="),
+            Err("missing complete base-check RUN"),
+            Ok(()),
+        ),
     ];
-    let mut accepted = Vec::new();
-    for (name, source) in cases {
+    for (name, source, supply, ownership) in cases {
         assert_ne!(source, DOCKERFILE, "fixture {name} must alter the real Dockerfile");
-        if std::panic::catch_unwind(|| {
-            check_supply_inputs(&source);
-            check_ownership(&source);
-        })
-        .is_ok()
-        {
-            accepted.push(name);
-        }
+        assert_eq!(check_supply_inputs(&source), supply, "supply validator: {name}");
+        assert_eq!(check_ownership(&source), ownership, "ownership validator: {name}");
     }
-    assert!(accepted.is_empty(), "disabled or reordered instructions accepted: {accepted:?}");
 }
