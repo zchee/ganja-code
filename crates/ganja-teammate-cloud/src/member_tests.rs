@@ -125,6 +125,61 @@ async fn a_held_lead_inbox_does_not_pin_shutdown_acknowledgement() {
 }
 
 #[tokio::test]
+async fn repeated_retirements_bound_payloads_without_retaining_members() {
+    let observer = Lane::new();
+    let mut holders = Vec::new();
+    let mut homes = Vec::new();
+    for index in 0..12 {
+        let mut fixture = Fixture::new().await;
+        Arc::get_mut(&mut fixture.member).expect("unique member").spec.name =
+            MemberName::parse(&format!("retiring-{index}")).expect("unique name");
+        mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead inbox");
+        if index < 4 {
+            holders.push(hold_inbox(fixture.member.lent.lead_inbox.clone()));
+        }
+        fixture.member.mail("retirement notice".to_owned()).await;
+        if index < 4 {
+            wait_local_call(&fixture.member, "write").await;
+        }
+        let weak = Arc::downgrade(&fixture.member);
+        timeout(Duration::from_secs(2), fixture.member.cleanup())
+            .await
+            .expect("retirement is bounded despite occupied workers");
+        assert_eq!(fixture.member.phase(), Phase::Gone);
+        assert_eq!(fixture.provisioner.current(&fixture.worker), WorkerState::Gone);
+        let Fixture { _home, member, source, provisioner, worker } = fixture;
+        drop((member, source, provisioner, worker));
+        assert!(weak.upgrade().is_none(), "retired member {index} was retained by payload work");
+        homes.push(_home);
+        let (_, outstanding, active) = observer.global_counts();
+        assert!(outstanding <= 64 && active <= 4);
+    }
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let (lanes, outstanding, active) = observer.global_counts();
+            if lanes == 5 && outstanding == 4 && active == 4 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("only four blocked jobs and their lanes remain after queued expiry");
+    for (release, holder) in holders {
+        release.send(()).expect("release inbox");
+        holder.join().expect("holder");
+    }
+    timeout(Duration::from_secs(2), async {
+        while observer.global_counts() != (1, 0, 0) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("late completion removes all departed member lanes");
+    drop(homes);
+}
+
+#[tokio::test]
 async fn blocked_payload_work_does_not_retain_the_member() {
     let fixture = Fixture::new().await;
     mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");

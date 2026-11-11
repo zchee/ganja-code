@@ -537,6 +537,19 @@ impl Lane {
     }
 
     #[cfg(test)]
+    pub(crate) fn global_counts(&self) -> (usize, usize, usize) {
+        let state = self.service.state.lock().expect("delivery service");
+        let jobs = state
+            .credits
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|cell| cell.credited.load(Ordering::SeqCst))
+            .count();
+        let active = state.lanes.values().filter(|queue| queue.active).count();
+        (state.lanes.len(), jobs, active)
+    }
+
+    #[cfg(test)]
     pub(crate) fn last_sequence(&self) -> u64 {
         self.service
             .state
