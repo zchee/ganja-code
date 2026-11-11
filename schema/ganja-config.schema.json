@@ -233,7 +233,7 @@
     },
     "provider": {
       "type": "object",
-      "description": "Endpoints this build can talk to besides the ones it ships, by id, and — for the two ids that speak OpenAI's Responses API, chatgpt and openai — a curated `options` table for a builtin this build already ships (D563). The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. Any other builtin id is refused at load, because such an entry would never be reached.",
+      "description": "Endpoints this build can talk to besides the ones it ships, by id, and — for the two ids that speak OpenAI's Responses API, chatgpt and openai — a curated `options` table for a builtin this build already ships. Custom endpoints may be declared only in the global config or a non-discovered explicit file; discovered project files may carry builtin options only. Naming a discovered file explicitly does not elevate it. The loader enforces provenance; JSON Schema validates the shape without knowing the file's tier. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. Any other builtin id is refused at load, because such an entry would never be reached.",
       "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs check_providers/check_builtin_options against crates/ganja-provider/src/provider.rs PROVIDERS. This enum must equal PROVIDERS minus the two Responses ids, as a set; crates/ganja-core/tests/config_schema.rs pins both directions.",
       "default": {},
       "propertyNames": {
