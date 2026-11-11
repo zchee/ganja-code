@@ -72,7 +72,10 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         .expect("the preview reports the omitted endpoint")
         .to_owned();
     assert!(preview_row.contains("provider.local-llama"), "{preview_row}");
-    assert!(preview_row.contains("--global"), "{preview_row}");
+    assert!(
+        preview_row.contains("custom endpoints are trusted tier only; review the entry first; --global trusts it for every project; use ganja config import-opencode --file <source> --global"),
+        "{preview_row}"
+    );
     assert!(!preview_row.contains("127.0.0.1") && !preview_row.contains("gpu-0"), "{preview_row}");
     assert!(!project.join("ganja.toml").exists(), "the preview writes nothing");
 
