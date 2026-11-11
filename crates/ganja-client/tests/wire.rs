@@ -49,6 +49,43 @@ async fn drain(events: &mut ganja_client::Events) -> Vec<Result<Event, ClientErr
     read
 }
 
+#[tokio::test]
+async fn finishing_a_stub_aborts_blocked_handlers_before_reporting_its_deadline() {
+    use futures::FutureExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    let (held, released) = tokio::sync::oneshot::channel::<()>();
+    let stub = Stub::answering(move |_| {
+        // Only the listener and its accepted handlers own this sender.
+        let _ = &held;
+        Reply::Silent
+    })
+    .await;
+    let mut peer =
+        tokio::net::TcpStream::connect(stub.address().strip_prefix("http://").expect("a TCP stub"))
+            .await
+            .expect("connected to the stub");
+    peer.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n").await.expect("request sent");
+    stub.wait_for_requests("GET", 1).await;
+
+    tokio::time::pause();
+    let mut finishing = Box::pin(std::panic::AssertUnwindSafe(stub.finish()).catch_unwind());
+    assert!(futures::poll!(finishing.as_mut()).is_pending());
+    tokio::time::advance(DEADLINE + Duration::from_secs(1)).await;
+    let failure = finishing.await.expect_err("the blocked handler exceeds the deadline");
+    assert!(
+        failure
+            .downcast_ref::<String>()
+            .is_some_and(|message| { message.contains("all accepted request handlers finish") }),
+        "finish must report its handler deadline"
+    );
+    tokio::time::timeout(DEADLINE, released)
+        .await
+        .expect("the blocked handler is aborted, releasing its captured sender")
+        .expect_err("no handler sends a value");
+    assert_eq!(stub.only_request().method, "GET");
+}
+
 // ---------------------------------------------------------------------------
 // The REST surfaces.
 // ---------------------------------------------------------------------------

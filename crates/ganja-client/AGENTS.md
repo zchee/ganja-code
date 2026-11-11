@@ -59,7 +59,9 @@ The `frames`, `client_routes`, `attach_resume`, and `attach` tests live in `ganj
 
 ## Tests
 
-Unit tests live in sibling `*_tests.rs` files through `#[path]`. The integration tests use `tests/support/`, not `ganja-serve`, so `axum` stays out of this crate's graph; no binary needs setup beyond a loopback port or a temp socket path. The bound tests in `tests/wire.rs` use `Client::with_bounds` so none waits out 30 s: a 3 s read bound where the bound must end the wait, and a 5 s one beside a 1 s stub heartbeat where it must not; `Client::new`'s own bounds are pinned in `src/lib_tests.rs`.
+Unit tests live in sibling `*_tests.rs` files through `#[path]`. The integration tests use `tests/support/`, not `ganja-serve`, so `axum` stays out of this crate's graph; no binary needs setup beyond a loopback port or a temp socket path.
+
+In `tests/wire.rs`, silence, trickle, and prompt-only slow-acceptance tests use `Client::with_bounds` with a real 3 s read bound; heartbeat tests, including the stream left unread during slow prompt acceptance, use a real 5 s read bound beside a 1 s stub heartbeat. `a_connection_timeout_is_reported_once` uses a real 100 ms read bound. The bootstrap tests `bootstrap_reconciles_a_timed_out_post_without_sending_it_again` and `an_idle_status_after_an_ambiguous_post_never_authorizes_resending` use the shared 30 s `DEADLINE` for connect and read bounds, pause and advance the clock only after observing POST receipt, and resume it before reconciliation I/O; the idle-status test also observes the second GET before advancing past the bootstrap budget. `Client::new`'s own bounds are pinned in `src/lib_tests.rs`.
 
 ## History
 
