@@ -229,6 +229,10 @@ impl CloudControl {
 }
 
 /// One hosted teammate with deduplicated terminal decisions and best-effort ordered mail.
+///
+/// Inbound Read/Prune and outbound Write each have an independent FIFO lane;
+/// neither direction orders the other. Both share the native service's limits
+/// and one final-observation budget, so worker saturation may prevent delivery.
 pub struct CloudMember {
     runtime: Arc<Runtime>,
     worker: Worker,
@@ -254,7 +258,8 @@ pub struct CloudMember {
     epoch: Mutex<Option<String>>,
     needs_resync: AtomicBool,
     observed_crash: AtomicBool,
-    delivery: Lane,
+    inbound: Lane,
+    outbound: Lane,
     notifications: Mutex<VecDeque<Receipt>>,
     final_observed: AtomicBool,
     barrier_failed: AtomicBool,
@@ -347,7 +352,8 @@ impl CloudMember {
             epoch: Mutex::new(None),
             needs_resync: AtomicBool::new(false),
             observed_crash: AtomicBool::new(false),
-            delivery: Lane::new(),
+            inbound: Lane::new(),
+            outbound: Lane::new(),
             notifications: Mutex::new(VecDeque::new()),
             final_observed: AtomicBool::new(false),
             barrier_failed: AtomicBool::new(false),
@@ -858,14 +864,19 @@ impl CloudMember {
     fn enqueue(&self, payload: Payload) {
         let mut notifications = self.notifications.lock().expect("notification receipts");
         notifications.retain_mut(|receipt| receipt.take_final().is_none());
-        match self.delivery.submit(payload) {
+        let lane = match &payload {
+            Payload::Read { .. } | Payload::Prune { .. } => &self.inbound,
+            Payload::Write { .. } => &self.outbound,
+        };
+        match lane.submit(payload) {
             Ok(receipt) => notifications.push_back(receipt),
             Err(reason) => tracing::warn!(?reason, "cloud notification dropped before admission"),
         }
     }
 
     async fn observe_final(&self) {
-        self.delivery.seal();
+        self.inbound.seal();
+        self.outbound.seal();
         if self.final_observed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1192,7 +1203,7 @@ impl CloudMember {
 
     async fn run_inbox(&self) {
         while !self.lent.cancel.is_cancelled() && self.alive.load(Ordering::SeqCst) {
-            let receipt = self.delivery.submit(Payload::Read { path: self.spec.inbox() });
+            let receipt = self.inbound.submit(Payload::Read { path: self.spec.inbox() });
             if let Ok(receipt) = receipt
                 && let Some(Value::Read(Ok(contents))) = self.observe_io(receipt).await
             {
@@ -1212,7 +1223,7 @@ impl CloudMember {
                 }
                 for message in contents.valid {
                     let receipt = self
-                        .delivery
+                        .inbound
                         .submit(Payload::prune(self.spec.inbox(), std::slice::from_ref(&message)));
                     let Ok(receipt) = receipt else {
                         break;
