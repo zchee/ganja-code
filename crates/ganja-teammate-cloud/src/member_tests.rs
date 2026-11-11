@@ -33,7 +33,11 @@ fn cleanup_budget(member: &CloudMember) -> Duration {
 
 async fn wait_local_call(member: &CloudMember, kind: &str) {
     timeout(Duration::from_secs(2), async {
-        while !member.delivery.running(kind) {
+        while !match kind {
+            "read" | "prune" => member.inbound.running(kind),
+            "write" => member.outbound.running(kind),
+            _ => panic!("unknown mailbox operation"),
+        } {
             tokio::task::yield_now().await;
         }
     })
@@ -53,6 +57,507 @@ fn shutdown_mail() -> MailboxMessage {
         record::now_iso8601(),
     )
     .expect("shutdown envelope")
+}
+
+#[tokio::test]
+async fn final_observation_closes_both_lanes_while_the_member_is_retained() {
+    let fixture = Fixture::new().await;
+    fixture.member.cleanup().await;
+    // A repeated observation must still seal both lanes before returning early.
+    fixture.member.observe_final().await;
+    assert_eq!(
+        fixture
+            .member
+            .inbound
+            .submit(Payload::Read { path: fixture.member.spec.inbox() })
+            .unwrap_err(),
+        delivery::DropReason::Closed
+    );
+    assert_eq!(
+        fixture
+            .member
+            .outbound
+            .submit(Payload::Write {
+                path: fixture.member.lent.lead_inbox.clone(),
+                envelope: Box::new(shutdown_mail()),
+            })
+            .unwrap_err(),
+        delivery::DropReason::Closed
+    );
+    timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+        while fixture.member.inbound.global_counts().0 != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both empty inactive lane records disappear before member Drop");
+}
+
+#[tokio::test]
+async fn mixed_final_receipts_share_one_budget_in_both_insertion_orders() {
+    for inbound_first in [true, false] {
+        let fixture = Fixture::new().await;
+        let inbox = fixture.member.spec.inbox();
+        mailbox::seed(&inbox).expect("member inbox");
+        mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead inbox");
+        let inbound_hold = hold_inbox(inbox.clone());
+        let outbound_hold = hold_inbox(fixture.member.lent.lead_inbox.clone());
+        let mut head = fixture
+            .member
+            .inbound
+            .submit(Payload::prune(inbox.clone(), &[]))
+            .expect("inbound head");
+        wait_local_call(&fixture.member, "prune").await;
+        assert!(matches!(head.observe(Duration::ZERO).await, Observation::Late));
+        let head_sequence = fixture.member.inbound.last_sequence();
+        let prune = Payload::prune(inbox, &[]);
+        if inbound_first {
+            fixture.member.enqueue(prune);
+        }
+        fixture.member.mail("mixed outbound".to_owned()).await;
+        if !inbound_first {
+            fixture.member.enqueue(Payload::prune(fixture.member.spec.inbox(), &[]));
+        }
+        wait_local_call(&fixture.member, "write").await;
+        let outbound = fixture.member.outbound.watch("write");
+        // The queued shutdown prune is the second inbound operation.
+        let queued = fixture.member.inbound.watch_sequence(head_sequence + 1);
+        let observed = timeout(
+            delivery::FINAL_OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+            fixture.member.observe_final(),
+        )
+        .await;
+        let inbound_trace = queued.snapshot();
+        let outbound_trace = outbound.snapshot();
+        let expired =
+            timeout(runner::POLL * 2 + delivery::TEST_SCHEDULER_ALLOWANCE, queued.settled()).await;
+        for (release, holder) in [inbound_hold, outbound_hold] {
+            release.send(()).expect("release mixed holder");
+            holder.join().expect("mixed holder");
+        }
+        assert!(
+            observed.is_ok(),
+            "mixed final observation exceeded one final budget plus scheduler allowance"
+        );
+        assert_eq!(
+            inbound_trace.observation,
+            Some("PendingQueued"),
+            "queued inbound receipt was observed"
+        );
+        assert_eq!(
+            outbound_trace.observation,
+            Some("Late"),
+            "running outbound receipt was observed"
+        );
+        let last = if inbound_first { outbound_trace } else { inbound_trace };
+        assert!(
+            last.observation_budget.expect("second receipt observed")
+                < delivery::FINAL_OBSERVATION / 2,
+            "the second direction must spend the shared remainder, not a fresh final budget"
+        );
+        assert!(expired.is_ok(), "queued shutdown prune expires without waiting for its held head");
+        assert!(queued.snapshot().started.is_none());
+        assert_eq!(queued.snapshot().outcome, Some("Dropped"));
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, outbound.settled())
+            .await
+            .expect("outbound settles");
+        assert_eq!(outbound.snapshot().outcome, Some("LateSucceeded"));
+        assert!(matches!(
+            head.observe(delivery::TEST_SCHEDULER_ALLOWANCE).await,
+            Observation::Final(Value::Prune(Ok(_)))
+        ));
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+            while fixture.member.inbound.global_counts().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both active lane records disappear after completion");
+    }
+}
+
+#[tokio::test]
+async fn an_outbound_admission_between_seals_is_observed_before_final_return() {
+    for admitted_before_close in [true, false] {
+        let fixture = Fixture::new().await;
+        mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");
+        let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture.member.seal_barrier.lock().expect("seal barrier") = Some(Arc::clone(&barrier));
+        let member = Arc::clone(&fixture.member);
+        let mut final_task = tokio::spawn(async move {
+            member.observe_final().await;
+        });
+        let sealed = timeout(delivery::TEST_SCHEDULER_ALLOWANCE, barrier.wait()).await;
+        if sealed.is_err() {
+            release.send(()).expect("release race holder after seal failure");
+            holder.join().expect("race holder");
+            final_task.abort();
+            let _ = final_task.await;
+            panic!("inbound seal barrier exceeded scheduler allowance");
+        }
+        let inbound_admission =
+            fixture.member.inbound.submit(Payload::Read { path: fixture.member.spec.inbox() });
+        let watch = if admitted_before_close {
+            fixture.member.mail("racing outbound".to_owned()).await;
+            let started = timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+                while !fixture.member.outbound.running("write") {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            if started.is_err() {
+                release.send(()).expect("release race holder after write setup failure");
+                holder.join().expect("race holder");
+                final_task.abort();
+                let _ = final_task.await;
+                panic!("racing outbound write did not start within scheduler allowance");
+            }
+            Some(fixture.member.outbound.watch("write"))
+        } else {
+            None
+        };
+        let resumed = timeout(delivery::TEST_SCHEDULER_ALLOWANCE, barrier.wait()).await;
+        let returned = timeout(
+            delivery::FINAL_OBSERVATION + delivery::TEST_SCHEDULER_ALLOWANCE,
+            &mut final_task,
+        )
+        .await;
+        let observation = watch.as_ref().and_then(|watch| watch.snapshot().observation);
+        let refused = fixture.member.outbound.submit(Payload::Write {
+            path: fixture.member.lent.lead_inbox.clone(),
+            envelope: Box::new(shutdown_mail()),
+        });
+        let queue_empty = fixture.member.notifications.lock().expect("notifications").is_empty();
+        release.send(()).expect("release race holder");
+        holder.join().expect("race holder");
+        if returned.is_err() {
+            final_task.abort();
+            let _ = final_task.await;
+        }
+        assert!(resumed.is_ok(), "continue outbound seal within scheduler allowance");
+        assert_eq!(inbound_admission.unwrap_err(), delivery::DropReason::Closed);
+        assert!(returned.is_ok(), "final observation returns within one final budget");
+        returned.expect("bounded final task").expect("final task");
+        assert_eq!(refused.unwrap_err(), delivery::DropReason::Closed);
+        assert!(queue_empty, "no unobserved retained receipt");
+        assert_eq!(observation, admitted_before_close.then_some("Late"));
+        if let Some(watch) = watch {
+            timeout(delivery::TEST_SCHEDULER_ALLOWANCE, watch.settled())
+                .await
+                .expect("race settles");
+            assert_eq!(watch.snapshot().outcome, Some("LateSucceeded"));
+        }
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+            while fixture.member.inbound.global_counts().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("no lane records with member retained");
+    }
+}
+
+#[tokio::test]
+async fn two_members_can_saturate_both_directions_without_blocking_external_retirement() {
+    let mut fixtures = Vec::new();
+    let mut holders = Vec::new();
+    let mut watches = Vec::new();
+    for _ in 0..2 {
+        let mut fixture = Fixture::new().await;
+        let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+            Duration::from_millis(100);
+        mailbox::seed(&fixture.member.spec.inbox()).expect("member inbox");
+        mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead inbox");
+        holders.push(hold_inbox(fixture.member.spec.inbox()));
+        holders.push(hold_inbox(fixture.member.lent.lead_inbox.clone()));
+        fixture.member.enqueue(Payload::prune(fixture.member.spec.inbox(), &[]));
+        fixture.member.mail("saturated outbound".to_owned()).await;
+        wait_local_call(&fixture.member, "prune").await;
+        wait_local_call(&fixture.member, "write").await;
+        watches.push(fixture.member.inbound.watch("prune"));
+        watches.push(fixture.member.outbound.watch("write"));
+        fixtures.push(fixture);
+    }
+    let mut third = Fixture::new().await;
+    let member = Arc::get_mut(&mut third.member).expect("unique member");
+    Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+        Duration::from_millis(100);
+    let mut queued = third
+        .member
+        .inbound
+        .submit(Payload::Read { path: third.member.spec.inbox() })
+        .expect("third read queued");
+    let queued_watch = third.member.inbound.watch("read");
+    let queued_observation = queued.observe(delivery::OBSERVATION).await;
+    let mut runner = tokio::spawn(Arc::clone(&third.member).run());
+    let mut retirement = CloudControl(Arc::clone(&third.member))
+        .admit(ControlAction::Retire)
+        .expect("external retire");
+    let retired = timeout(cleanup_budget(&third.member), retirement.wait()).await;
+    let returned =
+        timeout(delivery::OBSERVATION + cleanup_budget(&third.member), &mut runner).await;
+    let counts = third.member.inbound.global_counts();
+    let starts: Vec<_> = watches.iter().map(|watch| watch.snapshot().started).collect();
+    let phase = third.member.phase();
+    let killed = third.provisioner.calls.lock().expect("calls").contains(&"kill");
+    let expired =
+        timeout(runner::POLL * 2 + delivery::TEST_SCHEDULER_ALLOWANCE, queued_watch.settled())
+            .await;
+    for (release, holder) in holders {
+        release.send(()).expect("release saturated holder");
+        holder.join().expect("saturated holder");
+    }
+    assert_eq!(
+        retired.expect("external retirement stays bounded at saturation"),
+        ControlOutcome::Completed
+    );
+    returned.expect("third runner bounded despite saturation").expect("third runner");
+    assert!(matches!(queued_observation, Observation::PendingQueued));
+    assert!(starts.iter().all(Option::is_some), "both directions really execute for both members");
+    assert_eq!(counts.2, 4, "exactly four native workers occupied");
+    assert_eq!(phase, Phase::Gone);
+    assert!(killed);
+    assert!(expired.is_ok());
+    assert!(queued_watch.snapshot().started.is_none(), "third member never occupied a worker");
+    assert!(matches!(
+        queued.observe(Duration::ZERO).await,
+        Observation::Final(Value::Dropped(delivery::DropReason::Expired))
+    ));
+    for watch in watches {
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, watch.settled())
+            .await
+            .expect("saturated call settles");
+    }
+    for fixture in fixtures {
+        fixture.member.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn each_direction_is_ordered_alone_and_neither_orders_the_other() {
+    let fixture = Fixture::new().await;
+    let inbox = fixture.member.spec.inbox();
+    mailbox::seed(&inbox).expect("member inbox");
+    mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead inbox");
+    let inbound_hold = hold_inbox(inbox.clone());
+    let outbound_hold = hold_inbox(fixture.member.lent.lead_inbox.clone());
+    let mut inbound_head =
+        fixture.member.inbound.submit(Payload::prune(inbox.clone(), &[])).expect("inbound head");
+    let mut outbound_head = fixture
+        .member
+        .outbound
+        .submit(Payload::Write {
+            path: fixture.member.lent.lead_inbox.clone(),
+            envelope: Box::new(shutdown_mail()),
+        })
+        .expect("outbound head");
+    wait_local_call(&fixture.member, "prune").await;
+    wait_local_call(&fixture.member, "write").await;
+    let inbound_follower = fixture
+        .member
+        .inbound
+        .submit(Payload::Read { path: inbox.clone() })
+        .expect("inbound follower");
+    let outbound_follower = fixture
+        .member
+        .outbound
+        .submit(Payload::Write {
+            path: fixture.member.lent.lead_inbox.clone(),
+            envelope: Box::new(shutdown_mail()),
+        })
+        .expect("outbound follower");
+    let watches = [
+        fixture.member.inbound.watch("prune"),
+        fixture.member.inbound.watch("read"),
+        fixture.member.outbound.watch_sequence(1),
+        fixture.member.outbound.watch_sequence(2),
+    ];
+    // Held heads let both queued followers expire first: out-of-order drop
+    // completion is permitted, a follower syscall is not.
+    let mut settled = Vec::new();
+    for follower in [&watches[1], &watches[3]] {
+        settled.push(
+            timeout(runner::POLL * 2 + delivery::TEST_SCHEDULER_ALLOWANCE, follower.settled())
+                .await,
+        );
+    }
+    let snapshots = watches.each_ref().map(|watch| watch.snapshot());
+    for (release, holder) in [inbound_hold, outbound_hold] {
+        release.send(()).expect("release order holder");
+        holder.join().expect("order holder");
+    }
+    for result in settled {
+        result.expect("queued follower expires behind its held head");
+    }
+    for pair in [[&snapshots[0], &snapshots[1]], [&snapshots[2], &snapshots[3]]] {
+        assert!(pair[0].admitted < pair[1].admitted, "admission increases within a direction");
+        assert!(
+            pair[0].started.is_some() && pair[1].started.is_none(),
+            "no follower syscall starts until its active predecessor completes"
+        );
+        assert_eq!(
+            pair[1].outcome,
+            Some("Dropped"),
+            "a queued expiry reports its explicit drop outcome"
+        );
+        assert!(
+            pair[0].completed.is_none() && pair[1].completed.is_some(),
+            "a queued expiry may complete before its held running head"
+        );
+    }
+    assert!(matches!(final_observed_value(&mut inbound_head).await, Value::Prune(Ok(_))));
+    assert!(matches!(final_observed_value(&mut outbound_head).await, Value::Write(Ok(_))));
+    let finals = watches.each_ref().map(|watch| watch.snapshot());
+    assert!(
+        finals[0].started.expect("inbound start")
+            < finals[0].completed.expect("inbound completion")
+    );
+    assert!(
+        finals[2].started.expect("outbound start")
+            < finals[2].completed.expect("outbound completion")
+    );
+    let mut inbound_third = fixture
+        .member
+        .inbound
+        .submit(Payload::Read { path: inbox.clone() })
+        .expect("next inbound read");
+    let mut inbound_fourth =
+        fixture.member.inbound.submit(Payload::prune(inbox, &[])).expect("next inbound prune");
+    let mut outbound_third = fixture
+        .member
+        .outbound
+        .submit(Payload::Write {
+            path: fixture.member.lent.lead_inbox.clone(),
+            envelope: Box::new(shutdown_mail()),
+        })
+        .expect("next outbound write");
+    let mut outbound_fourth = fixture
+        .member
+        .outbound
+        .submit(Payload::Write {
+            path: fixture.member.lent.lead_inbox.clone(),
+            envelope: Box::new(shutdown_mail()),
+        })
+        .expect("following outbound write");
+    let successful = [
+        fixture.member.inbound.watch_sequence(3),
+        fixture.member.inbound.watch_sequence(4),
+        fixture.member.outbound.watch_sequence(3),
+        fixture.member.outbound.watch_sequence(4),
+    ];
+    assert!(matches!(final_observed_value(&mut inbound_third).await, Value::Read(Ok(_))));
+    assert!(matches!(final_observed_value(&mut inbound_fourth).await, Value::Prune(Ok(_))));
+    assert!(matches!(final_observed_value(&mut outbound_third).await, Value::Write(Ok(_))));
+    assert!(matches!(final_observed_value(&mut outbound_fourth).await, Value::Write(Ok(_))));
+    for (head, pair) in [finals[0], finals[2]].into_iter().zip(successful.as_chunks::<2>().0) {
+        let first = pair[0].snapshot();
+        let second = pair[1].snapshot();
+        assert!(pair[0].sequence() < pair[1].sequence());
+        assert!(head.admitted < first.admitted && first.admitted < second.admitted);
+        assert!(head.completed.expect("head finished") < first.started.expect("third started"));
+        assert!(first.started < first.completed && first.completed < second.started);
+        assert!(second.started < second.completed);
+    }
+    // The directions interleave freely: assert only within-lane order, never between lanes.
+    drop((inbound_follower, outbound_follower));
+}
+
+async fn final_observed_value(receipt: &mut Receipt) -> Value {
+    timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+        loop {
+            if let Observation::Final(value) = receipt.observe(delivery::OBSERVATION).await {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("released head reaches its final value")
+}
+
+#[tokio::test]
+async fn retained_receipts_cap_each_direction_separately_and_count_globally() {
+    let mut fixtures = Vec::new();
+    let mut retained = Vec::new();
+    for _ in 0..4 {
+        let fixture = Fixture::new().await;
+        let home = fixture._home.path();
+        for index in 0..8 {
+            retained.push(
+                fixture
+                    .member
+                    .inbound
+                    .submit(Payload::Read { path: home.join(format!("missing-{index}")) })
+                    .expect("inbound credit"),
+            );
+            retained.push(
+                fixture
+                    .member
+                    .outbound
+                    .submit(Payload::Write {
+                        path: home.join(format!("out-{index}.json")),
+                        envelope: Box::new(shutdown_mail()),
+                    })
+                    .expect("outbound credit"),
+            );
+        }
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+            for sequence in 1..=8 {
+                fixture.member.inbound.watch_sequence(sequence).settled().await;
+                fixture.member.outbound.watch_sequence(sequence).settled().await;
+            }
+        })
+        .await
+        .expect("retained completed-but-unconsumed receipts settle");
+        assert_eq!(fixture.member.inbound.outstanding(), 8);
+        assert_eq!(fixture.member.outbound.outstanding(), 8);
+        assert_eq!(
+            fixture.member.inbound.submit(Payload::Read { path: home.join("ninth") }).unwrap_err(),
+            delivery::DropReason::Full,
+            "the ninth inbound job is refused while finals stay unconsumed"
+        );
+        assert_eq!(
+            fixture
+                .member
+                .outbound
+                .submit(Payload::Write {
+                    path: home.join("ninth.json"),
+                    envelope: Box::new(shutdown_mail())
+                })
+                .unwrap_err(),
+            delivery::DropReason::Full,
+            "the ninth outbound job is refused while finals stay unconsumed"
+        );
+        fixtures.push(fixture);
+    }
+    let extra = Fixture::new().await;
+    assert_eq!(
+        extra.member.inbound.global_counts().1,
+        64,
+        "four pairs of lanes share 64 completed-but-unconsumed credits"
+    );
+    assert_eq!(
+        extra.member.inbound.submit(Payload::Read { path: extra.member.spec.inbox() }).unwrap_err(),
+        delivery::DropReason::Full
+    );
+    assert_eq!(
+        extra
+            .member
+            .outbound
+            .submit(Payload::Write {
+                path: extra.member.lent.lead_inbox.clone(),
+                envelope: Box::new(shutdown_mail())
+            })
+            .unwrap_err(),
+        delivery::DropReason::Full
+    );
+    drop(retained);
+    extra
+        .member
+        .inbound
+        .submit(Payload::Read { path: extra.member.spec.inbox() })
+        .expect("dropped receipts release their credits");
 }
 
 #[tokio::test]
@@ -76,6 +581,193 @@ async fn a_blocked_notification_does_not_hold_the_transition_lock() {
     assert_eq!(outcome, Ok(ControlOutcome::Completed));
     assert!(empty, "no delivery success while the real lock is held");
     fixture.flush_notifications().await;
+}
+
+#[tokio::test]
+async fn a_blocked_outbound_write_does_not_delay_noticing_shutdown() {
+    for expire_ack in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let member = Arc::get_mut(&mut fixture.member).expect("unique member");
+        Arc::get_mut(&mut member.runtime).expect("unique runtime").deadlines.cleanup =
+            Duration::from_millis(100);
+        mailbox::seed(&fixture.member.lent.lead_inbox).expect("lead");
+        let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
+        fixture.member.mail("before shutdown".to_owned()).await;
+        let started = timeout(delivery::TEST_SCHEDULER_ALLOWANCE, async {
+            while !fixture.member.outbound.running("write") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if started.is_err() {
+            release.send(()).expect("release lead after setup failure");
+            holder.join().expect("lead holder");
+            panic!("native outbound call did not start within scheduler allowance");
+        }
+        let first = fixture.member.outbound.watch("write");
+        let mut receipt =
+            fixture.member.notifications.lock().expect("receipts").pop_front().expect("notice");
+        let initial = receipt.observe(delivery::OBSERVATION).await;
+        fixture.member.notifications.lock().expect("receipts").push_back(receipt);
+        if !matches!(initial, Observation::Late) {
+            release.send(()).expect("release lead after observation failure");
+            holder.join().expect("lead holder");
+            panic!("held outbound notice must be running: {initial:?}");
+        }
+        if let Err(error) = mailbox::write(&fixture.member.spec.inbox(), shutdown_mail()) {
+            release.send(()).expect("release lead after shutdown setup failure");
+            holder.join().expect("lead holder");
+            panic!("shutdown after blocked write: {error}");
+        }
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture.member.seal_barrier.lock().expect("seal barrier") = Some(Arc::clone(&barrier));
+        let mut runner = tokio::spawn(Arc::clone(&fixture.member).run());
+        let bound = runner::POLL + delivery::OBSERVATION + cleanup_budget(&fixture.member);
+        let deadline = Instant::now() + bound;
+        let reached = timeout_at(deadline, barrier.wait()).await;
+        if reached.is_err() {
+            release.send(()).expect("release lead after runner bound");
+            holder.join().expect("lead holder");
+            fixture.member.lent.cancel.cancel();
+            runner.abort();
+            let _ = runner.await;
+            panic!(
+                "Shutdown runner exceeded poll + observation + cleanup + final observation + scheduler allowance"
+            );
+        }
+        // Final observation has not drained the queue, so it still owns the ack.
+        // Retain this watcher across that drain even when native expiry wins first.
+        let ack = fixture.member.outbound.watch_sequence(2);
+        let expired =
+            if expire_ack { Some(timeout_at(deadline, ack.settled()).await) } else { None };
+        let expiry_trace = expire_ack.then(|| ack.snapshot());
+        let resumed = timeout_at(deadline, barrier.wait()).await;
+        let returned = timeout_at(deadline, &mut runner).await;
+        let killed = fixture.provisioner.calls.lock().expect("calls").contains(&"kill");
+        let phase = fixture.member.phase();
+        let worker = fixture.provisioner.current(&fixture.worker);
+        let lead_while_held = mailbox::read(&fixture.member.lent.lead_inbox);
+        let first_while_held = first.snapshot();
+        release.send(()).expect("release lead");
+        holder.join().expect("lead holder");
+        if returned.is_err() {
+            fixture.member.lent.cancel.cancel();
+            runner.abort();
+            let _ = runner.await;
+        }
+        assert!(resumed.is_ok(), "resume final observation within Shutdown bound");
+        if let Some(expired) = expired {
+            assert!(expired.is_ok(), "queued ack expires within Shutdown bound");
+            let trace = expiry_trace.expect("forced expiry inspected while queue owns ack");
+            assert_eq!(trace.outcome, Some("Dropped"));
+            assert!(trace.started.is_none(), "expired queued ack never started");
+        }
+        assert!(
+            returned.is_ok(),
+            "Shutdown runner exceeded poll + observation + cleanup + final observation + scheduler allowance"
+        );
+        returned.expect("bounded Shutdown runner").expect("Shutdown runner completed");
+        assert!(killed, "Shutdown must attempt deletion while the lead lock is held");
+        assert_eq!(phase, Phase::Gone);
+        assert_eq!(worker, WorkerState::Gone);
+        assert!(
+            lead_while_held.expect("lead").valid.is_empty(),
+            "no acknowledgement succeeds while held"
+        );
+        assert!(first_while_held.outcome.is_none());
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, first.settled())
+            .await
+            .expect("late notice settles");
+        assert_eq!(first.snapshot().outcome, Some("LateSucceeded"));
+        timeout(delivery::TEST_SCHEDULER_ALLOWANCE, ack.settled()).await.expect("ack settles");
+        let messages = mailbox::read(&fixture.member.lent.lead_inbox).expect("lead").valid;
+        assert_eq!(messages[0].text, "before shutdown");
+        let ack_trace = ack.snapshot();
+        match ack_trace.outcome {
+            Some("LateSucceeded") => {
+                assert!(
+                    first.snapshot().completed < ack_trace.started,
+                    "outbound notice precedes acknowledgement"
+                );
+                assert_eq!(messages.len(), 2);
+                assert!(matches!(
+                    serde_json::from_str::<Frame>(&messages[1].text),
+                    Ok(Frame::ShutdownApproved(_))
+                ));
+            }
+            Some("Dropped") => {
+                assert!(ack_trace.started.is_none(), "a dropped ack never executed");
+                assert_eq!(messages.len(), 1);
+            }
+            outcome => panic!("ack must honestly finish late or drop: {outcome:?}"),
+        }
+        assert_eq!(
+            fixture
+                .provisioner
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .filter(|call| **call == "kill")
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_blocked_inbound_read_does_not_delay_an_outbound_notice() {
+    let fixture = Fixture::new().await;
+    let inbox = fixture.member.spec.inbox();
+    std::fs::create_dir_all(inbox.parent().expect("inbox parent")).expect("parent");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .args(["-m", "600"])
+            .arg(&inbox)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    let (paired, paired_rx) = oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let _writer =
+            std::fs::OpenOptions::new().write(true).open(inbox).expect("FIFO writer paired");
+        paired.send(()).expect("paired signal");
+        release_rx.recv().expect("release FIFO writer");
+    });
+    let mut runner = tokio::spawn(Arc::clone(&fixture.member).run());
+    timeout(delivery::TEST_SCHEDULER_ALLOWANCE, paired_rx)
+        .await
+        .expect("real read-only open pairs")
+        .expect("paired");
+    wait_local_call(&fixture.member, "read").await;
+    fixture.member.mail("independent outbound notice".to_owned()).await;
+    let mut receipt =
+        fixture.member.notifications.lock().expect("receipts").pop_front().expect("notice");
+    let observed = receipt.observe(delivery::OBSERVATION).await;
+    let messages_while_blocked =
+        mailbox::read(&fixture.member.lent.lead_inbox).expect("lead").valid;
+    let read_still_running = fixture.member.inbound.running("read");
+    fixture.member.lent.cancel.cancel();
+    let returned = timeout(cleanup_budget(&fixture.member), &mut runner).await;
+    release.send(()).expect("release EOF");
+    writer.join().expect("writer");
+    if returned.is_err() {
+        timeout(cleanup_budget(&fixture.member), runner)
+            .await
+            .expect("reap runner")
+            .expect("runner");
+    }
+    assert!(
+        matches!(observed, Observation::Final(Value::Write(Ok(_)))),
+        "outbound notice must succeed within observation while the real FIFO Read is blocked: {observed:?}"
+    );
+    assert!(read_still_running);
+    assert_eq!(messages_while_blocked.len(), 1);
+    assert_eq!(messages_while_blocked[0].text, "independent outbound notice");
+    assert!(returned.is_ok(), "cancelled runner returns before FIFO EOF");
 }
 
 #[tokio::test]
@@ -201,18 +893,45 @@ async fn blocked_payload_work_does_not_retain_the_member() {
     let (release, holder) = hold_inbox(fixture.member.lent.lead_inbox.clone());
     fixture.member.mail("late notification".to_owned()).await;
     wait_local_call(&fixture.member, "write").await;
+    mailbox::seed(&fixture.member.spec.inbox()).expect("member inbox");
+    let (inbound_release, inbound_holder) = hold_inbox(fixture.member.spec.inbox());
+    fixture.member.enqueue(Payload::prune(fixture.member.spec.inbox(), &[]));
+    wait_local_call(&fixture.member, "prune").await;
+    let mut runner = tokio::spawn(Arc::clone(&fixture.member).run());
     let weak = Arc::downgrade(&fixture.member);
     if timeout(cleanup_budget(&fixture.member), fixture.member.cleanup()).await.is_err() {
         release.send(()).expect("release inbox after cleanup timeout");
         holder.join().expect("holder");
-        panic!("cleanup did not return within its bound while the lead write was blocked");
+        inbound_release.send(()).expect("release inbound after cleanup timeout");
+        inbound_holder.join().expect("inbound holder");
+        timeout(cleanup_budget(&fixture.member), runner)
+            .await
+            .expect("runner reaped")
+            .expect("runner");
+        panic!("cleanup did not return within its bound while both directions were blocked");
     }
+    let returned =
+        timeout(delivery::OBSERVATION + cleanup_budget(&fixture.member), &mut runner).await;
+    if returned.is_err() {
+        release.send(()).expect("release outbound after runner timeout");
+        holder.join().expect("outbound holder");
+        inbound_release.send(()).expect("release inbound after runner timeout");
+        inbound_holder.join().expect("inbound holder");
+        timeout(cleanup_budget(&fixture.member), runner)
+            .await
+            .expect("runner reaped")
+            .expect("runner");
+        panic!("runner did not return within its bound while both directions were blocked");
+    }
+    returned.expect("bounded runner").expect("runner");
     assert_eq!(fixture.member.phase(), Phase::Gone);
     let Fixture { _home, member, source, provisioner, worker } = fixture;
     drop((member, source, provisioner, worker));
     let freed_while_blocked = weak.upgrade().is_none();
     release.send(()).expect("release");
     holder.join().expect("holder");
+    inbound_release.send(()).expect("release inbound");
+    inbound_holder.join().expect("inbound holder");
     assert!(freed_while_blocked, "native payload or receipt retained the member");
     drop(_home);
 }
@@ -535,7 +1254,7 @@ impl Fixture {
                         "notification: {result:?}"
                     );
                 }
-                if self.member.delivery.outstanding() == 0 {
+                if self.member.outbound.outstanding() == 0 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -565,7 +1284,7 @@ async fn terminal_resume_failures_deliver_exactly_one_notice_after_the_lane_drai
         assert_eq!(fixture.member.phase(), phase);
         fixture.member.terminal_failure(phase, sentence).await;
         fixture.flush_notifications().await;
-        assert_eq!(fixture.member.delivery.outstanding(), 0);
+        assert_eq!(fixture.member.outbound.outstanding(), 0);
         let mail = mailbox::read(&fixture.member.lent.lead_inbox).expect("mail");
         assert_eq!(mail.valid.iter().filter(|message| message.text.contains(sentence)).count(), 1);
         assert!(!mail.valid.iter().any(|message| matches!(

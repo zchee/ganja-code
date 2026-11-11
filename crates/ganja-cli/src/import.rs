@@ -1815,7 +1815,7 @@ fn providers(report: &mut Report, at: &At, value: &Json, global: bool) -> Vec<(S
         if !global && !ganja_core::provider::PROVIDERS.contains(&id.as_str()) {
             report.skip(
                 &at.child(id).from,
-                "trusted tier only; use ganja config import-opencode --file <source> --global",
+                "custom endpoints are trusted tier only; review the entry first; --global trusts it for every project; use ganja config import-opencode --file <source> --global",
             );
             continue;
         }

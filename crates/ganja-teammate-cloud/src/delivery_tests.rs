@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn missing_test_observations_do_not_poison_the_delivery_service() {
+    let service = Service::start();
+    for observation in ["kind", "sequence", "last sequence", "last read sequence"] {
+        let lane = Lane::on(Arc::clone(&service));
+        lane.seal();
+        let failure = std::panic::catch_unwind(|| match observation {
+            "kind" => {
+                let _ = lane.watch("write");
+            }
+            "sequence" => {
+                let _ = lane.watch_sequence(42);
+            }
+            "last sequence" => {
+                let _ = lane.last_sequence();
+            }
+            "last read sequence" => {
+                let _ = lane.last_read_sequence();
+            }
+            _ => unreachable!("the observation list is exhaustive"),
+        });
+        assert!(failure.is_err(), "missing {observation} must fail its lookup");
+        assert!(!service.state.is_poisoned(), "missing {observation} poisoned the service mutex");
+        assert_eq!(lane.global_counts(), (0, 0, 0));
+        assert_eq!(lane.outstanding(), 0);
+        assert!(!lane.running("write"));
+    }
+}
+
+#[test]
 fn partial_native_thread_startup_refuses_further_admission() {
     for failure in 0..=WORKERS {
         let lane = Lane::on(Service::start_with_failure(Some(failure)));
@@ -17,7 +46,9 @@ fn failed_startup_does_not_retain_departed_lanes() {
     for failure in 0..=WORKERS {
         let service = Service::start_with_failure(Some(failure));
         for _ in 0..128 {
-            drop(Lane::on(Arc::clone(&service)));
+            let inbound = Lane::on(Arc::clone(&service));
+            let outbound = Lane::on(Arc::clone(&service));
+            drop((inbound, outbound));
         }
         assert!(
             service.state.lock().expect("service state").lanes.is_empty(),
@@ -280,8 +311,11 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
     .await
     .expect("closed empty lanes are removed");
     for _ in 0..128 {
-        let lane = Lane::on(Arc::clone(&service));
-        lane.seal();
+        let inbound = Lane::on(Arc::clone(&service));
+        let outbound = Lane::on(Arc::clone(&service));
+        inbound.seal();
+        outbound.seal();
+        assert!(service.state.lock().expect("state").lanes.is_empty());
     }
     tokio::time::timeout(Duration::from_secs(2), async {
         while !service.state.lock().expect("state").lanes.is_empty() {
