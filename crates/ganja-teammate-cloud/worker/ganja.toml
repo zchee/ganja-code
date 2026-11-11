@@ -1,3 +1,13 @@
+# Rules are last-match-wins: everything is denied, then exactly the commands
+# the fixed acceptance script runs are allowed, spelled whole so an unrelated
+# `git -c` form, another message or an alias never matches. The reviewed fake
+# script remains the primary control; this grant is defense in depth.
 [permission]
 "*" = "deny"
-bash = "allow"
+
+[permission.bash]
+"*" = "deny"
+"printf '\\nHosted worker acceptance completed.\\n' >> NOTES.md" = "allow"
+"git add -- NOTES.md" = "allow"
+"git -c commit.gpgsign=false commit -m 'docs: record hosted worker acceptance'" = "allow"
+"git push --set-upstream origin HEAD" = "allow"
