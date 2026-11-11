@@ -21,6 +21,7 @@ use rcgen::{CertificateParams, CertificateSigningRequestParams, IsCa, Issuer, Ke
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 // The lifecycle fixture shares this binary's fake Kubernetes control plane.
@@ -30,6 +31,15 @@ mod lifecycle;
 const CERT_CANARY: &str = "synthetic-router-certificate-private-key-canary";
 const TOKEN_CANARY: &str = "synthetic-ateapi-bearer-canary";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CertificateEvent {
+    Created(String),
+    Pending(String),
+    Cancelled(String, std::time::Instant),
+    DeleteReceived(String, std::time::Instant),
+    Removed(String, bool),
+}
+
 struct KubeState {
     version: &'static str,
     mode: AtomicU8,
@@ -38,6 +48,7 @@ struct KubeState {
     issuer: Issuer<'static, KeyPair>,
     ca_pem: String,
     objects: Mutex<BTreeMap<String, Value>>,
+    certificate_events: watch::Sender<Vec<CertificateEvent>>,
     router_enabled: AtomicBool,
     pod_lookups: AtomicUsize,
     forwarded_pods: Mutex<Vec<String>>,
@@ -73,6 +84,7 @@ impl KubeFixture {
             issuer: Issuer::new(parameters, key),
             ca_pem: ca.pem(),
             objects: Mutex::new(BTreeMap::new()),
+            certificate_events: watch::channel(Vec::new()).0,
             router_enabled: AtomicBool::new(false),
             pod_lookups: AtomicUsize::new(0),
             forwarded_pods: Mutex::new(Vec::new()),
@@ -97,6 +109,31 @@ impl KubeFixture {
         let client = ganja_teammate_cloud::provisioner::substrate::kube::client_from_config(config)
             .expect("loopback Kubernetes client");
         Self { client, state, server }
+    }
+
+    async fn wait_for_certificate_event(
+        &self,
+        predicate: impl Fn(&CertificateEvent) -> bool,
+    ) -> CertificateEvent {
+        let mut events = self.state.certificate_events.subscribe();
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                let found =
+                    events.borrow_and_update().iter().find(|event| predicate(event)).cloned();
+                if let Some(event) = found {
+                    return event;
+                }
+                events.changed().await.expect("fixture retains event sender");
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "certificate event not observed; events: {:?}; remaining requests: {:?}",
+                self.state.certificate_events.borrow(),
+                self.state.objects.lock().expect("objects lock").keys().collect::<Vec<_>>()
+            )
+        })
     }
 
     async fn wait_for_cleanup(&self, count: usize) {
@@ -234,22 +271,29 @@ async fn kube_request(
             object["status"] = json!({"conditions":[{"type":"Issued","status":"True"}],"certificateChain":format!("{}{}",certificate.pem(),state.ca_pem)});
         }
         let name = object["metadata"]["name"].as_str().expect("request name").to_owned();
-        state.objects.lock().expect("objects lock").insert(name, object.clone());
+        state.objects.lock().expect("objects lock").insert(name.clone(), object.clone());
+        state.certificate_events.send_modify(|events| events.push(CertificateEvent::Created(name)));
         return (StatusCode::CREATED, Json(object));
     }
     let name = path.rsplit('/').next().expect("last path component");
     if method == Method::GET {
-        return state
-            .objects
-            .lock()
-            .expect("objects lock")
-            .get(name)
-            .cloned()
-            .map(|object| (StatusCode::OK, Json(object)))
-            .unwrap_or_else(missing);
+        let object = state.objects.lock().expect("objects lock").get(name).cloned();
+        if object.as_ref().is_some_and(|object| object["status"]["conditions"] == json!([])) {
+            state
+                .certificate_events
+                .send_modify(|events| events.push(CertificateEvent::Pending(name.to_owned())));
+        }
+        return object.map(|object| (StatusCode::OK, Json(object))).unwrap_or_else(missing);
     }
     if method == Method::DELETE {
-        state.objects.lock().expect("objects lock").remove(name);
+        state.certificate_events.send_modify(|events| {
+            events
+                .push(CertificateEvent::DeleteReceived(name.to_owned(), std::time::Instant::now()));
+        });
+        let removed = state.objects.lock().expect("objects lock").remove(name).is_some();
+        state
+            .certificate_events
+            .send_modify(|events| events.push(CertificateEvent::Removed(name.to_owned(), removed)));
         state.deletes.fetch_add(1, Ordering::SeqCst);
         return (
             StatusCode::OK,
@@ -365,13 +409,36 @@ async fn denied_failed_and_expired_certificates_are_redacted_and_cleaned_up() {
 #[tokio::test]
 async fn cancelled_issuance_deletes_the_request_without_waiting_for_the_signer() {
     let fixture = KubeFixture::start("v1", 3).await;
-    let result = tokio::time::timeout(
-        Duration::from_millis(300),
-        KubeTunnel::connect(fixture.client.clone()),
-    )
-    .await;
-    assert!(result.is_err());
-    fixture.wait_for_cleanup(1).await;
+    let mut connect = Box::pin(KubeTunnel::connect(fixture.client.clone()));
+    let pending = tokio::select! {
+        result = &mut connect => panic!("pending signer unexpectedly completed: {result:?}"),
+        event = fixture.wait_for_certificate_event(|event| matches!(event, CertificateEvent::Pending(_))) => event,
+    };
+    let CertificateEvent::Pending(name) = pending else {
+        unreachable!("wait selected a pending request");
+    };
+    assert!(fixture.state.objects.lock().expect("objects lock").contains_key(&name));
+    let cancelled_at = std::time::Instant::now();
+    fixture
+        .state
+        .certificate_events
+        .send_modify(|events| events.push(CertificateEvent::Cancelled(name.clone(), cancelled_at)));
+    drop(connect);
+    let deleted = fixture
+        .wait_for_certificate_event(|event| matches!(event, CertificateEvent::DeleteReceived(deleted, _) if deleted == &name))
+        .await;
+    let CertificateEvent::DeleteReceived(_, received_at) = deleted else {
+        unreachable!("wait selected a delete request");
+    };
+    assert!(received_at >= cancelled_at, "cleanup must follow cancellation");
+    fixture
+        .wait_for_certificate_event(|event| *event == CertificateEvent::Removed(name.clone(), true))
+        .await;
+    assert!(
+        fixture.state.objects.lock().expect("objects lock").is_empty(),
+        "request remains after cleanup; events: {:?}",
+        fixture.state.certificate_events.borrow()
+    );
 }
 
 async fn router_upgrade(
