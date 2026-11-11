@@ -83,10 +83,10 @@ CI runs `cargo nextest run --locked --workspace --profile ci` (`.github/workflow
 ## Hosted teammate controls
 
 - In `/teammate` (`src/component/team.rs`), Enter on a hosted teammate opens these actions in order: **Message…**, **Shutdown**, **Resume for inspection**, **Retire**, **Report external revert**. Non-hosted teammates offer only Message and Shutdown; the lead row offers neither.
-- The hosted action menu says: “Shutdown asks the teammate to finish and exit. Retire deletes its worker now, without asking.” Shutdown sends the ordinary shutdown request, not a worker deletion.
+- The hosted action menu says: “Shutdown finishes the turn, then deletes the worker. Retire deletes it now.” Hosted Shutdown requires confirmation and warns that unpushed changes will be lost; local Shutdown stays immediate. A request is not confirmation that the worker is Gone.
 - Resume for inspection reconnects without clearing uncertainty. Retire requires confirmation, deletes the worker and reports whether absence was confirmed; an unconfirmed deletion still needs owner action.
-- Report external revert requires the owner to confirm that the worker was already reverted outside ganja. It invalidates stored history; it does not perform a revert or resume the worker. Both confirmation screens select **Cancel** initially.
-- Owner actions resolve against the current registry and member name. While an owner action is running for a member, another owner action for that member is refused; completion or refusal appears as a notice (`src/app.rs`).
+- Report external revert requires the owner to confirm that the worker was already reverted outside ganja. It invalidates stored history; it does not perform a revert or resume the worker. All three hosted confirmations start on **Cancel**. Hosted Shutdown dispatches only on Enter over a visible affirmative naming the full member; clicks highlight, and a clipped target cannot grant consent.
+- Owner actions resolve against the current registry and member name. While an owner action is running for a member, another owner action or hosted Shutdown for that member is refused; completion or refusal appears as a notice (`src/app.rs`). A same-named replacement can still receive a stale confirmed action: acceptance must use unique names, including recovery, close dialogs before replacement, and never automatically respawn under the same name. This rule avoids the unresolved identity problem; it does not fix it.
 
 ## Tests
 

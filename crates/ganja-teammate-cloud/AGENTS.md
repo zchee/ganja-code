@@ -27,8 +27,26 @@ not a lifecycle phase. Only a reconciled deletion and a distinctly named
 replacement recover that identity boundary.
 
 Launch and cleanup have finite independent deadlines. A failed or ambiguous
-mutation is reconciled, never resent blindly. One terminal decision and one mail
-per assistant message id apply across storage reads and the fresh stream.
+mutation is reconciled, never resent blindly. Terminal decisions are deduplicated
+per assistant message id across storage reads and the fresh stream; mail is best effort.
+Mailbox read/prune/write uses four native workers and one deadline supervisor,
+not Tokio's blocking pool. At most 64 jobs globally and eight per member instance
+remain outstanding, including running work and unconsumed finals; write/prune
+payloads are limited to 1 MiB, and queued jobs expire after one second.
+Accepted jobs execute in member order, one at a time; a late head cannot be overtaken.
+Read/prune observation and standalone event interruption use 250 ms budgets;
+final delivery observation shares 250 ms outside the transition lock. Cancellation
+interrupts observation, not a running syscall. Shutdown cleans up before prune/ack;
+neither mail delivery nor a held mailbox lock gates deletion.
+Delivered/Failed mean the operation returned success/error; PendingQueued means
+observation ended before execution, Late means execution outlived observation
+(eventually LateSucceeded/LateFailed), and Dropped means no operation started.
+Late writes may land after return; four stalled workers exhaust delivery availability.
+Default launch/quiesce/cleanup budgets are 420/60/60 s; bootstrap/health 180/90 s are
+inside launch. Preceding-holder formulas are in `CloudControl::admit` and `docs/decisions/ledger.md`.
+These are await budgets under scheduler progress and returning synchronous calls, not
+arbitrary-kernel-stall exit guarantees. Native payload work retains no member/registry;
+delivery, runner return, ordinary Tokio shutdown and Gone remain separate outcomes.
 
 Owner-reported reverts and contradictory lifecycle observations invalidate the
 held cursor before reconnect. An unannounced revert with no such observation is
@@ -112,28 +130,36 @@ The worker image supplies `GIT_CONFIG_GLOBAL` and the platform projects
 
 ### Acceptance image
 
-`worker/Dockerfile` and its adjacent inputs define an acceptance-only image using
-`GANJA_PROVIDER=fake`, not a production worker for a real provider. The owner still
-has to build and push this image; these files are not evidence of a live run.
+`worker/Dockerfile` defines a fake-provider acceptance image, not a real-provider worker.
+First acceptance is one owner/team and one hosted fake worker in a reviewed disposable checkout.
+The owner must build/push the image and prove the live run; no repository test does so.
 
-- The build context requires a Linux `ganja` executable alongside `ganja.toml`,
-  `gitconfig`, and `acceptance-script.json`; `.dockerignore` excludes unrelated
-  build-context files. The image starts `ganja worker init --port 80` in empty
-  `/work`. Its explicit environment variables all belong to the served-engine
-  allowlist below. The runtime template supplies the Basic password, never the image.
-- `GANJA_SERVER_USERNAME=ganja` is the image default and must match `[cloud].username`.
-  Build argument `GIT_HOST` scopes a placeholder Git authorization header to that
-  HTTPS host only. The platform supplies the real authorization outside the image;
-  `gitconfig` disables commit signing.
-- The platform must project its trust bundle at
-  `/run/ate/egress-trust-bundle/trust-bundle.pem`, used by both `SSL_CERT_FILE` and
-  `GIT_SSL_CAINFO`.
-- `acceptance-script.json` consumes two model requests for the first message: a Bash
-  tool call that appends to `NOTES.md`, commits, and pushes, then a final response.
-  One further model request answers the second message after resume.
-- Init's `/readyz` only confirms the bootstrap listener. It does not establish that
-  checkout and handoff finished; the backend separately awaits authenticated engine
-  health before opening a session.
+- Build context: Linux `ganja`, `ganja.toml`, `gitconfig`, `acceptance-script.json`;
+  `.dockerignore` excludes unrelated files. Required inputs: digest-pinned `BASE_IMAGE`,
+  matching binary `GANJA_SHA256`, and `GIT_HOST`. Apt packages remain unpinned.
+- The image declares `USER 10001:10001`, starts `ganja worker init --port 8080`
+  in empty `/work`, and leaves only `/work`, `/var/lib/ganja` and `/home/ganja`
+  writable by that user. Binary/config are root-owned and read-only, shared temp
+  is not writable, and the build clears/checks setuid/setgid files.
+- Both transports target 8080. Templates commanding/probing port 80 are incompatible;
+  migrate template/image/client together, or keep the old trio together for rollback.
+- The Basic password is not in the image; supplied by the platform template as a
+  disposable literal, it must match `GANJA_CLOUD_PASSWORD`. Retire it and the Git
+  token after acceptance. Username defaults to `ganja` and must match `[cloud].username`.
+  `GIT_HOST` scopes the placeholder HTTPS header; the platform supplies real Git auth.
+  `gitconfig` disables signing. Child filtering is not isolation: the template and
+  parent environments still hold plaintext readable by same-user processes.
+- The platform must project its CA bundle at `/run/ate/egress-trust-bundle/trust-bundle.pem`
+  for `SSL_CERT_FILE` and `GIT_SSL_CAINFO`. Owner proof must cover actual uid, all five
+  zero capability sets (drop all/add none), mounts, CA, bind, work/data writes, failed
+  binary/config writes, and no unintended service-account material or template overrides.
+- The policy denies all but the fixed script's whole append/stage/unsigned-commit/push
+  commands; unrelated `git -c` and alias forms are not granted. The reviewed fake script
+  is the primary control, these grants defense in depth, never a hostile-code sandbox.
+  It consumes two model requests for the first message and one for the resumed reply.
+  The owner must prove the effective checkout policy and actual commit/push result.
+- Init's `/readyz` proves only a listener; the backend separately awaits authenticated
+  engine health. Authentication, actor/tag storage disposal and credential retirement remain owner proof.
 
 ### Child environments
 
