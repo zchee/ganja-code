@@ -593,12 +593,25 @@ mod tests {
     #[tokio::test]
     async fn a_job_outlives_the_registry_without_being_asked_to_stop() {
         let registry = JobRegistry::new();
-        let status = registry
-            .start("sleep 1".to_owned(), shell("sleep 1").spawn().expect("sh spawns"))
-            .await;
+        let command = "echo ready; read token";
+        let mut child =
+            shell(command).stdin(std::process::Stdio::piped()).spawn().expect("sh spawns");
+        // Keeping stdin open prevents natural exit until the registry is shut down.
+        let _gate = child.stdin.take().expect("stdin is piped");
+        let status = registry.start(command.to_owned(), child).await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mid = registry.output(&status.id).await.expect("a known id answers");
+        let deadline = Instant::now() + OUTPUT_BUDGET;
+        let mid = loop {
+            let read = registry.output(&status.id).await.expect("a known id answers");
+            if read.chunk.contains("ready") {
+                break read;
+            }
+            if Instant::now() >= deadline {
+                registry.shutdown().await;
+                panic!("the job never became ready within {OUTPUT_BUDGET:?}");
+            }
+            tokio::time::sleep(TICK).await;
+        };
         assert_eq!(mid.status.state, State::Running, "nothing here should have stopped it");
 
         registry.shutdown().await;
