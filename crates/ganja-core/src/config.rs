@@ -2646,7 +2646,7 @@ impl Config {
     /// The distinction exists because a `provider` entry stopped being one
     /// thing: `[provider.chatgpt.options]` configures a wire this build
     /// already ships and declares nothing, so a refusal that listed it as
-    /// something "this project's config declares" would send somebody looking
+    /// something "a trusted config declares" would send somebody looking
     /// for an endpoint they never wrote. Every listing of what a config
     /// declares reads this rather than the table's keys.
     #[must_use]

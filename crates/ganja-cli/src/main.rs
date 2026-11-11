@@ -547,8 +547,9 @@ enum Auth {
     Login {
         /// Provider the credential belongs to: one this build ships
         /// (anthropic, openai, openrouter, opencode, opencode-go, grok,
-        /// github-copilot), or an id this project's config declares under
-        /// `provider`.
+        /// github-copilot), or an id a trusted config declares under `provider`.
+        /// Use the global config, or a file named by GANJA_CONFIG or --config
+        /// that is not a discovered project file.
         #[arg(
             long,
             value_parser = named_provider,
@@ -591,8 +592,9 @@ enum Auth {
     List,
     /// Forget a provider's stored credential.
     Logout {
-        /// Provider to forget: one this build ships, or an id this project's
-        /// config declares under `provider`.
+        /// Provider to forget: one this build ships, or an id a trusted config
+        /// declares under `provider`. Use the global config, or a file named
+        /// by GANJA_CONFIG or --config that is not a discovered project file.
         #[arg(long, value_parser = named_provider, value_name = "PROVIDER")]
         provider: NamedProvider,
     },
@@ -671,7 +673,7 @@ fn vetted_name(spelled: &str) -> Result<String, String> {
         .map_err(|refusal| refusal.to_string())
 }
 
-/// Refuses a configured provider this project's config does not declare.
+/// Refuses a configured provider no trusted config declares under `provider`.
 ///
 /// A builtin is nothing to check — clap already did. For anything else the
 /// config is the authority, and the refusal names **both** tiers, because
@@ -697,9 +699,9 @@ fn configured_provider_exists(provider: &NamedProvider) -> Result<()> {
         "no provider `{id}`; this build ships {}{}",
         ganja_core::provider::PROVIDERS.join(", "),
         if declared.is_empty() {
-            ", and this project's config declares none".to_owned()
+            ", and a trusted config declares none under `provider`".to_owned()
         } else {
-            format!(", and this project's config declares {declared}")
+            format!(", and a trusted config declares {declared} under `provider`")
         }
     )
 }
