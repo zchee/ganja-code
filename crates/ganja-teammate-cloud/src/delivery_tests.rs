@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn missing_test_observations_do_not_poison_the_delivery_service() {
+    let service = Service::start();
+    for observation in ["kind", "sequence", "last sequence", "last read sequence"] {
+        let lane = Lane::on(Arc::clone(&service));
+        lane.seal();
+        let failure = std::panic::catch_unwind(|| match observation {
+            "kind" => {
+                let _ = lane.watch("write");
+            }
+            "sequence" => {
+                let _ = lane.watch_sequence(42);
+            }
+            "last sequence" => {
+                let _ = lane.last_sequence();
+            }
+            "last read sequence" => {
+                let _ = lane.last_read_sequence();
+            }
+            _ => unreachable!("the observation list is exhaustive"),
+        });
+        assert!(failure.is_err(), "missing {observation} must fail its lookup");
+        assert!(!service.state.is_poisoned(), "missing {observation} poisoned the service mutex");
+        assert_eq!(lane.global_counts(), (0, 0, 0));
+        assert_eq!(lane.outstanding(), 0);
+        assert!(!lane.running("write"));
+    }
+}
+
+#[test]
 fn partial_native_thread_startup_refuses_further_admission() {
     for failure in 0..=WORKERS {
         let lane = Lane::on(Service::start_with_failure(Some(failure)));
