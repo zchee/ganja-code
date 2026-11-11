@@ -116,6 +116,8 @@ impl KubeFixture {
         predicate: impl Fn(&CertificateEvent) -> bool,
     ) -> CertificateEvent {
         let mut events = self.state.certificate_events.subscribe();
+        // Allow five seconds beyond detached cleanup's 30-second cap to report missing events.
+        // This watchdog preserves their history; it does not assert a timing guarantee.
         tokio::time::timeout(Duration::from_secs(35), async {
             loop {
                 let found =
