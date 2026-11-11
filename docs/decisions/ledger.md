@@ -583,3 +583,205 @@ Amends: D508, D549
 `MemberBackend::Cloud` (`"cloud"`) is the seventh surface; `/team … @cloud` and `--backend cloud` spawn it. `ganja-team` gains `Surface::Cloud`, whose record carries `backendType: "cloud"` and the in-process `tmuxPaneId` sentinel, and which reads back as an in-process member for the reason the headless shims do.
 
 Pinned by: `crates/ganja-core/src/teammate_tests.rs`, `crates/ganja-core/src/command_tests.rs`, `crates/ganja-team/src/record_tests.rs`
+
+## D582 — the first hosted acceptance is one disposable owner-controlled run (2026-11-11)
+
+Crates: ganja-teammate-cloud, ganja-cli
+Amends: D578, D580
+
+The first live acceptance is restricted to one owner, one team, a hosted worker
+using the fake provider, and a reviewed disposable checkout. The Basic password
+is not in the image; it is supplied as a disposable literal by the platform
+template. The provisioner submits that template unchanged and uses
+`GANJA_CLOUD_PASSWORD` for the worker client; it does not install an inbound
+credential through an outbound authorization header. The password and the
+repository-scoped Git token must be retired after acceptance, not reused.
+
+This accepts plaintext in the template and the lead/worker process environments.
+Child-environment filtering is not process isolation: same-user processes can
+read beyond it. Basic crosses the inner router-to-worker application hop over
+HTTP; underlay encryption is unproved. The outer router hop separately requires
+the allowed mTLS identity over a Kubernetes port-forward; Basic alone does not
+grant router access. Snapshot and durable state, including tag-owned copies
+that survive actor deletion, remain sensitive. Protected file projection and a
+per-worker credential issuer were not chosen: neither is implemented here.
+
+The owner must prove authenticated init/serve success and wrong-credential
+refusal, inspect the pushed commit including `NOTES.md` for credential presence
+without printing values, and account for template, actor, tag and retained
+storage disposal. API deletion is not proof of storage erasure. Building the
+image, running the cluster and completing live acceptance remain unproved by
+repository tests; this exception expires after the controlled run.
+
+Pinned by: `crates/ganja-teammate-cloud/worker/Dockerfile`,
+`crates/ganja-cli/src/worker.rs`,
+`crates/ganja-teammate-cloud/src/provisioner/substrate/runtime.rs`,
+`crates/ganja-permission/src/child_process.rs`,
+`crates/ganja-teammate-cloud/tests/no_secrets_in_logs.rs`. The scope and disposal
+requirements are owner rulings, not assertions that a live run passed.
+
+## D583 — custom provider endpoints require a trusted non-project source (2026-11-11)
+
+Crates: ganja-core, ganja-cli
+Amends: none
+
+Every custom provider declaration must come from global config or an explicit
+file selected by `GANJA_CONFIG` or `--config` that is not also a discovered
+project file. Discovery refuses the whole declaration, including a keyless
+loopback endpoint and a same-id replacement, naming the file and provider key
+without echoing its values. Passing a discovered `ganja.toml` explicitly does
+not elevate it: discovery reads and refuses it again. Builtin option-only
+entries and malformed/reserved-name validation keep their existing behavior;
+trusted provider entries still replace whole.
+
+The opencode importer omits each custom provider when writing a project file
+and reports each omission; it keeps supported declarations for a global
+output. `config migrate` can still write such a table into a project file, and
+`config import-claude-hooks` can preserve one there. Their shape validation is
+not tier validation: the next load refuses that file. These writer gaps remain
+for later work, not silently repaired by the importer change.
+
+Restricting only the environment-key field was not chosen because provider-id
+lookup can also find a stored credential. This trust rule does not make tools,
+hooks, plugins or MCP safe. JSON Schema describes shape, not provenance. The
+fake hosted worker needs no custom endpoint; the owner's live preflight still
+has to review the effective checkout and trusted inputs.
+
+Pinned by: `crates/ganja-core/src/config_tests.rs`,
+`crates/ganja-core/tests/provider_config_tiers.rs`,
+`crates/ganja-core/tests/config_schema.rs`,
+`crates/ganja-cli/tests/import_round_trip.rs`,
+`crates/ganja-cli/src/import_tests.rs`, `crates/ganja-cli/src/migrate.rs`,
+`crates/ganja-cli/src/claude_hooks.rs`.
+
+## D584 — the acceptance image uses a numeric non-root user and port 8080 (2026-11-11)
+
+Crates: ganja-cli, ganja-teammate-cloud, ganja-core (tests)
+Amends: D578, D579
+
+Worker init defaults to port 8080 and hands its actual bound port to serve,
+including an OS-selected port when explicitly asked for zero. The acceptance
+image and both hosted transports target 8080. Old templates that command or
+probe port 80 are incompatible with the new client; retire them or keep the
+old client/image/template combination together for rollback, never mix them.
+
+The image build requires `BASE_IMAGE` in digest-pinned form and `GANJA_SHA256`
+matching the supplied Linux binary, in addition to the existing `GIT_HOST`
+input. It declares user/group `10001:10001`; binary and config remain root-owned
+and unwritable by that user. Only checkout, data and home trees are made
+writable; shared temporary directories are not writable by the worker, and the
+build clears and checks setuid/setgid files. Apt package versions are not pinned,
+so these supply records do not establish bit-for-bit reproducibility.
+
+The shell policy denies everything except the four whole commands of the
+fixed fake script: append the acceptance note, stage it, commit with the exact
+unsigned-commit override, and push the branch. Unrelated Git configuration and
+alias forms are not granted. The reviewed fake script is the primary control;
+these permissions are defense in depth, not a hostile-code sandbox. Retaining
+root or a port-80 bind capability was not chosen.
+
+The owner must build and push the image, record the base/binary/final-image
+identities, align the template and prove the actual uid, all five capability
+sets zero (drop all, add none), mounts, trust bundle, 8080 bind, successful
+work/data writes, failed binary/config writes and checkout/commit/push. Runtime
+overrides, unintended service-account material and effective checkout policy
+remain owner proof; a Dockerfile declaration or static test is not that proof.
+
+Pinned by: `crates/ganja-teammate-cloud/worker/Dockerfile`,
+`crates/ganja-teammate-cloud/worker/ganja.toml`,
+`crates/ganja-core/tests/worker_image_policy.rs`,
+`crates/ganja-cli/tests/worker_init.rs`,
+`crates/ganja-teammate-cloud/src/provisioner/substrate/tunnel_tests.rs`,
+`crates/ganja-teammate-cloud/src/provisioner/substrate/kubectl_tests.rs`,
+`crates/ganja-teammate-cloud/tests/ateapi_stub.rs`.
+
+## D585 — hosted Shutdown requires confirmation of after-turn deletion (2026-11-11)
+
+Crates: ganja-tui
+Amends: none
+
+The hosted action menu says, “Shutdown finishes the turn, then deletes the
+worker. Retire deletes it now.” Hosted Shutdown opens the existing confirmation
+step, initially on Cancel, and warns that unpushed changes will be lost. Only
+Enter on a visible affirmative naming the full member dispatches the request;
+clicking highlights rather than executes, and a clipped target cannot consent.
+A running owner action refuses another hosted Shutdown. Local Shutdown remains
+immediate. Retire and external-revert confirmations retain their guards.
+
+Hint-only immediate dispatch was not chosen because it leaves accidental
+selection destructive. A confirmed request is not confirmed worker absence;
+cleanup reports Gone only after confirmation, otherwise owner action is still
+needed. Target identity is still name-addressed: a same-named replacement can
+receive a stale confirmed action. For acceptance, names must never be reused,
+including recovery or automatic respawn, and dialogs must be closed before
+replacement. This procedure does not fix identity. Live deletion and remaining
+worker cost still require the owner's observation.
+
+Pinned by: `crates/ganja-tui/src/component/team_tests.rs`,
+`crates/ganja-tui/src/app_tests.rs`,
+`crates/ganja-tui/src/component/team.rs`,
+`crates/ganja-teammate-cloud/src/member.rs`.
+
+## D586 — bounded local mailbox work cannot hold hosted cleanup open (2026-11-11)
+
+Crates: ganja-teammate-cloud
+Amends: D577, D578
+
+Hosted mailbox reads, prunes and writes run on four native filesystem workers
+with one independent deadline supervisor, outside Tokio's blocking pool. There
+are at most 64 outstanding jobs globally and eight per member instance,
+including running jobs and unconsumed final receipts. Submitted write/prune
+payloads are limited to 1 MiB including their charged paths/identities; reads
+reserve one policy-sized inbox result. This is not an exact allocator/RSS cap.
+Each member's accepted operations execute in admission order, at most one at a
+time; late work cannot be overtaken. A queued job expires one second after
+admission. Full, oversized, closed or unavailable admission is refused rather
+than creating overflow threads. Empty departed member queues are removed.
+
+Read/prune observation and standalone event interruption use 250 ms budgets;
+read/prune observation retains the same receipt and races cancellation rather
+than duplicating an active call. Final delivery has one shared 250 ms
+observation budget outside the transition lock, not one per message. Shutdown
+attempts cleanup before pruning its request and enqueueing acknowledgement;
+neither notification nor acknowledgement delivery is a prerequisite for
+cleanup return. Remaining native work owns payloads, not the member or registry,
+and native threads are not joined during ordinary Tokio runtime destruction.
+
+For configured launch, quiesce and cleanup budgets L, Q and C, let
+H = 2L + 2Q + C + 4B, with B = 250 ms and F = 250 ms final observation.
+Including preceding holders, inspection is bounded by H + 2L + 4B,
+retirement/cleanup by H + C + F, and a revert report by H + B. Registered-runner
+return after cancellation allows one additional 250 ms observation. Defaults
+are L = 420 s, Q = 60 s, C = 60 s; bootstrap 180 s and health 90 s are inside L.
+With no preceding holder cleanup has C + F, and kill is attempted after at most
+C/4 of event holding. These are coroutine await budgets under scheduler
+progress and returning ordinary synchronous calls, not hard real-time promises.
+
+Delivered means a mailbox operation returned success within observation;
+Failed means it returned an error. PendingQueued means observation ended before
+execution, not that delivery failed or succeeded. Late means execution outlived
+observation; later completion is recorded as LateSucceeded or LateFailed,
+including work that began after a PendingQueued observation. Dropped means no
+operation started: refusal, queued cancellation/expiry or unavailable service.
+Late writes can still land after lifecycle return. Terminal decisions remain
+deduplicated, but mail is best effort, not one guaranteed message per decision.
+Four stalled calls can exhaust delivery availability; queue expiry and lifecycle
+progress remain separate from delivery success and from confirmed worker absence.
+
+Merely timing out a Tokio blocking waiter was not chosen: it neither cancels
+the syscall nor bounds accumulated work or runtime shutdown. Shared lock/protocol
+changes and target-identity redesign were not chosen. Arbitrarily stalled kernel
+or filesystem calls are outside a whole-process-exit guarantee, and oversized
+external inboxes are outside the bounded-file assumption. The owner still must
+prove real same-worker suspension/wake, deletion attempted versus Gone,
+registered-runner return, delivery outcome, process exit and retained platform
+state. Repository subprocess tests do not establish those live results.
+
+Pinned by: `crates/ganja-teammate-cloud/src/delivery_tests.rs`,
+`crates/ganja-teammate-cloud/src/member_tests.rs`,
+`crates/ganja-teammate-cloud/src/member_recovery_tests.rs`,
+`crates/ganja-teammate-cloud/tests/fake_provisioner.rs`
+(`a_cloud_runner_exits_without_retaining_its_registry`,
+`the_process_exits_after_bounded_cloud_cleanup`),
+`crates/ganja-teammate-cloud/src/member.rs`,
+`crates/ganja-teammate-cloud/src/state.rs`.
