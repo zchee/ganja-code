@@ -262,6 +262,8 @@ pub struct CloudMember {
     outbound: Lane,
     notifications: Mutex<VecDeque<Receipt>>,
     final_observed: AtomicBool,
+    #[cfg(test)]
+    seal_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     barrier_failed: AtomicBool,
 }
 
@@ -356,6 +358,8 @@ impl CloudMember {
             outbound: Lane::new(),
             notifications: Mutex::new(VecDeque::new()),
             final_observed: AtomicBool::new(false),
+            #[cfg(test)]
+            seal_barrier: Mutex::new(None),
             barrier_failed: AtomicBool::new(false),
         })
     }
@@ -876,6 +880,14 @@ impl CloudMember {
 
     async fn observe_final(&self) {
         self.inbound.seal();
+        #[cfg(test)]
+        {
+            let barrier = self.seal_barrier.lock().expect("seal barrier").take();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+                barrier.wait().await;
+            }
+        }
         self.outbound.seal();
         if self.final_observed.swap(true, Ordering::SeqCst) {
             return;

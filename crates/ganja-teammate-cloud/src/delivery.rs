@@ -1,7 +1,7 @@
 //! Bounded, ordered mailbox work outside Tokio's blocking pool.
 //!
 //! A fixed native worker service keeps uncancellable mailbox calls outside Tokio
-//! shutdown; per-member FIFO admission and independently supervised expiry bound
+//! shutdown; per-lane FIFO admission and independently supervised expiry bound
 //! retained work using standard channels. Existing thread pools do not supply
 //! this combination of receipt credit, lane serialization and queued expiry.
 
@@ -135,6 +135,7 @@ pub(crate) struct TestTrace {
     pub(crate) completed: Option<u64>,
     pub(crate) outcome: Option<&'static str>,
     pub(crate) observation: Option<&'static str>,
+    pub(crate) observation_budget: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -227,6 +228,10 @@ impl Receipt {
     }
 
     pub(crate) async fn observe(&mut self, budget: Duration) -> Observation {
+        #[cfg(test)]
+        {
+            self.cell.trace.lock().expect("test delivery trace").observation_budget = Some(budget);
+        }
         let _ = tokio::time::timeout(budget, async {
             loop {
                 let notified = self.cell.changed.notified();
@@ -642,6 +647,21 @@ impl Lane {
             .filter_map(Weak::upgrade)
             .find(|cell| cell.lane == self.id && cell.kind == kind)
             .expect("an admitted operation");
+        JobWatch(cell)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watch_sequence(&self, sequence: u64) -> JobWatch {
+        let cell = self
+            .service
+            .state
+            .lock()
+            .expect("delivery service")
+            .credits
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|cell| cell.lane == self.id && cell.sequence == sequence)
+            .expect("an admitted sequence");
         JobWatch(cell)
     }
 

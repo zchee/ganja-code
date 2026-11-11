@@ -17,7 +17,9 @@ fn failed_startup_does_not_retain_departed_lanes() {
     for failure in 0..=WORKERS {
         let service = Service::start_with_failure(Some(failure));
         for _ in 0..128 {
-            drop(Lane::on(Arc::clone(&service)));
+            let inbound = Lane::on(Arc::clone(&service));
+            let outbound = Lane::on(Arc::clone(&service));
+            drop((inbound, outbound));
         }
         assert!(
             service.state.lock().expect("service state").lanes.is_empty(),
@@ -280,8 +282,11 @@ async fn notification_delivery_preserves_member_order_and_has_a_bound() {
     .await
     .expect("closed empty lanes are removed");
     for _ in 0..128 {
-        let lane = Lane::on(Arc::clone(&service));
-        lane.seal();
+        let inbound = Lane::on(Arc::clone(&service));
+        let outbound = Lane::on(Arc::clone(&service));
+        inbound.seal();
+        outbound.seal();
+        assert!(service.state.lock().expect("state").lanes.is_empty());
     }
     tokio::time::timeout(Duration::from_secs(2), async {
         while !service.state.lock().expect("state").lanes.is_empty() {
