@@ -548,8 +548,8 @@ enum Auth {
         /// Provider the credential belongs to: one this build ships
         /// (anthropic, openai, openrouter, opencode, opencode-go, grok,
         /// github-copilot), or an id a trusted config declares under `provider`.
-        /// Use the global config, or a file named by GANJA_CONFIG or --config
-        /// that is not a discovered project file.
+        /// Use the global config, or a file named by GANJA_CONFIG that is not
+        /// a discovered project file.
         #[arg(
             long,
             value_parser = named_provider,
@@ -594,7 +594,7 @@ enum Auth {
     Logout {
         /// Provider to forget: one this build ships, or an id a trusted config
         /// declares under `provider`. Use the global config, or a file named
-        /// by GANJA_CONFIG or --config that is not a discovered project file.
+        /// by GANJA_CONFIG that is not a discovered project file.
         #[arg(long, value_parser = named_provider, value_name = "PROVIDER")]
         provider: NamedProvider,
     },
