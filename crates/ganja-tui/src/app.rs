@@ -1636,6 +1636,15 @@ impl App {
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.open().await;
         let outcome = self.drive(terminal).await;
+        self.teardown().await;
+        outcome
+    }
+
+    async fn teardown(&mut self) {
+        // No loop exit may leave a spawn running without a UI to answer its dialogs.
+        if let Some(spawn) = self.team_spawn.take() {
+            spawn.abort();
+        }
         // The record first, and the socket after it (**D527**): stop
         // advertising before stopping answering. A record without a live
         // lock is filtered by every reader; a socket without a record is
@@ -1656,8 +1665,6 @@ impl App {
         // the id the envelope names is the session the engine is on *now* —
         // which a resume may have moved since startup.
         self.engine.session_end(ganja_core::hook::EXIT_REASON).await;
-
-        outcome
     }
 
     /// Keeps the session socket bound under the engine's current id, when

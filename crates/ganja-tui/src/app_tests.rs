@@ -475,6 +475,87 @@ async fn released_escape_is_handled_before_the_terminal_stream_ends() {
     assert!(!open, "EOF ends the terminal branch after dispatching released input");
 }
 
+fn pending_team_spawn(app: &mut App) -> tokio::sync::oneshot::Receiver<()> {
+    let (dropped, receiver) = tokio::sync::oneshot::channel();
+    app.team_spawn = Some(tokio::spawn(async move {
+        let _dropped = dropped;
+        futures::future::pending().await
+    }));
+    receiver
+}
+
+#[tokio::test(start_paused = true)]
+async fn teardown_aborts_a_pending_spawn_after_a_released_quit_and_read_error() {
+    let keys = crate::keybind::Keybinds::from_config(
+        &[("app_exit".to_owned(), "esc".to_owned())].into_iter().collect(),
+    )
+    .expect("the binding parses");
+    let mut app = app().with_keybinds(keys);
+    let dropped = pending_team_spawn(&mut app);
+    let base = tokio::time::Instant::now();
+    let mut stream =
+        terminal_script(vec![(0, terminal_key(KeyCode::Esc)), (10, terminal_key(KeyCode::Esc))])
+            .take(2)
+            .chain(futures::stream::once(async move {
+                tokio::time::sleep_until(base + Duration::from_millis(11)).await;
+                Err(std::io::Error::other("scripted terminal failure"))
+            }))
+            .boxed();
+    let first = stream.next().await;
+    let error = app.terminal_input(first, &mut stream).await.expect_err("the error propagates");
+    assert!(app.quit, "the released Esc requests exit before the read error");
+    assert_eq!(error.root_cause().to_string(), "scripted terminal failure");
+
+    app.teardown().await;
+
+    tokio::time::timeout(Duration::from_secs(1), dropped)
+        .await
+        .expect("teardown must abort the pending team spawn")
+        .expect_err("aborting the task drops its sender without sending");
+}
+
+#[tokio::test(start_paused = true)]
+async fn teardown_aborts_a_pending_spawn_after_a_released_quit_and_end_of_stream() {
+    let keys = crate::keybind::Keybinds::from_config(
+        &[("app_exit".to_owned(), "esc".to_owned())].into_iter().collect(),
+    )
+    .expect("the binding parses");
+    let mut app = app().with_keybinds(keys);
+    let dropped = pending_team_spawn(&mut app);
+    let mut stream =
+        terminal_script(vec![(0, terminal_key(KeyCode::Esc)), (10, terminal_key(KeyCode::Esc))])
+            .take(2);
+    let first = stream.next().await;
+    assert!(!app.terminal_input(first, &mut stream).await.expect("EOF is not an error"));
+    assert!(app.quit, "the released Esc requests exit before EOF");
+
+    app.teardown().await;
+
+    tokio::time::timeout(Duration::from_secs(1), dropped)
+        .await
+        .expect("teardown must abort the pending team spawn")
+        .expect_err("aborting the task drops its sender without sending");
+}
+
+#[tokio::test(start_paused = true)]
+async fn teardown_aborts_a_pending_spawn_after_a_read_error_without_a_quit_key() {
+    let mut app = app();
+    let dropped = pending_team_spawn(&mut app);
+    let mut stream =
+        futures::stream::iter([Err(std::io::Error::other("scripted terminal failure"))]);
+    let first = stream.next().await;
+    let error = app.terminal_input(first, &mut stream).await.expect_err("the error propagates");
+    assert!(!app.quit, "a read error does not need a quit key to end the loop");
+    assert_eq!(error.root_cause().to_string(), "scripted terminal failure");
+
+    app.teardown().await;
+
+    tokio::time::timeout(Duration::from_secs(1), dropped)
+        .await
+        .expect("teardown must abort the pending team spawn")
+        .expect_err("aborting the task drops its sender without sending");
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_unfinished_sequence_is_released_at_the_original_escape_deadline() {
     let mut stream = terminal_script(vec![
