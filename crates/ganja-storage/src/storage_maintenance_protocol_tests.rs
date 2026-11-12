@@ -179,6 +179,36 @@ fn captured_components_refuse_links_before_publishing_an_intent() {
 }
 
 #[test]
+fn pending_records_at_the_size_limit_are_read_unchanged() {
+    let (_directory, database) = raw_set();
+    let pending =
+        Pending::begin(&database, PREUUID, &Observation::default()).expect("valid record");
+    let mut bytes = serde_json::to_vec(&pending).expect("valid record bytes");
+    bytes.resize(4096, b' ');
+    fs::write(with_suffix(&database, PENDING), &bytes).expect("exactly sized valid JSON");
+    let actual = Pending::read(&database).expect("4096 bytes are accepted").expect("record reads");
+    assert_eq!(
+        serde_json::to_value(actual).expect("read record"),
+        serde_json::to_value(pending).expect("original record")
+    );
+}
+
+#[test]
+fn pending_records_one_byte_above_the_size_limit_are_refused() {
+    let (_directory, database) = raw_set();
+    let pending =
+        Pending::begin(&database, PREUUID, &Observation::default()).expect("valid record");
+    let mut bytes = serde_json::to_vec(&pending).expect("valid record bytes");
+    bytes.resize(4097, b' ');
+    fs::write(with_suffix(&database, PENDING), &bytes).expect("one byte oversized valid JSON");
+    let error = Pending::read(&database).expect_err("4097 bytes must be refused");
+    assert!(
+        matches!(error, StorageError::Maintenance { ref reason, .. } if reason.contains("exceeds")),
+        "the size cap must refuse: {error}"
+    );
+}
+
+#[test]
 fn oversized_pending_records_are_refused_before_decoding_the_whole_file() {
     let (_directory, database) = raw_set();
     let pending =
