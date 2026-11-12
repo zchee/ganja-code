@@ -457,18 +457,27 @@ impl CloudMember {
             }
         }
         *self.launch_timeout.lock().expect("launch phase lock") = LaunchFailure::HealthTimedOut;
-        let health = timeout(self.runtime.deadlines.health, async {
-            loop {
-                // Engine readiness probes precede normal request accounting;
-                // a delayed startup probe can still wake a suspended worker.
-                if let Ok(health) = client.health().await {
-                    return health;
+        let health = {
+            let mut tally =
+                crate::health::HealthWait::new(self.spec.name.as_str(), &self.lent.cancel);
+            timeout(self.runtime.deadlines.health, async {
+                loop {
+                    // Engine readiness probes precede normal request accounting;
+                    // a delayed startup probe can still wake a suspended worker.
+                    tally.begin();
+                    match client.health().await {
+                        Ok(health) => {
+                            tally.ready();
+                            return health;
+                        }
+                        Err(error) => tally.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .map_err(|_| LaunchFailure::HealthTimedOut)?;
+            })
+            .await
+            .map_err(|_| LaunchFailure::HealthTimedOut)?
+        };
         self.set_phase(Phase::Idle);
         *self.launch_timeout.lock().expect("launch phase lock") = LaunchFailure::SessionTimedOut;
         let sessions = self.rest(client.sessions()).await.map_err(LaunchFailure::Refused)?;

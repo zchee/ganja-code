@@ -19,6 +19,10 @@ Worker requests need a `WorkerGate` permit except bounded launch health probes
 after bootstrap success through the first decoded health. Stream and REST have
 separate doors. Suspend closes both, holds reconnect with an ack, closes and joins
 the stream, drains REST, and checks typed worker answers before control-plane suspend.
+The health wait emits one INFO summary: member, attempts, failures by fixed kind
+(HTTP classes, not bodies), elapsed ms and ready/deadline/cancelled outcome.
+An in-flight deadline counts as a timeout; cancellation leaves it unfinished.
+`GANJA_CLOUD_TRACE` remains strict event frames, not health summaries.
 
 A drain timeout defers suspend. Except for those launch probes, an unclassified
 routed attempt permanently disables automatic suspend for that worker identity:
@@ -177,8 +181,7 @@ only the corresponding allowlist:
   projected CA bundle; Git needs no server credentials or engine configuration.
   The child also sets `GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_NOSYSTEM=1` explicitly.
 
-Every other inherited variable is cleared; the two Git overrides above are not
-copied from the parent.
+Every other inherited variable is cleared; the two Git overrides above are not copied from the parent.
 
 ### Worker endpoints
 
@@ -191,10 +194,7 @@ URL parsing would normalize, are refused. Provisioner headers named
 
 ## Code and tests
 
-- `src/provisioner.rs`: lifecycle types and trait.
-- `src/gate.rs`: request admission and completion accounting.
+- `src/provisioner.rs`: lifecycle types and trait; `src/gate.rs`: request admission and completion accounting.
 - Unit tests are sibling `*_tests.rs` files; socket/process fixtures live in `tests/`.
-- Credentials never enter ganja's `Debug`, `Display`, ring rows, mail or own
-  tracing fields; the shipped filters keep third-party debug bodies disabled.
-- Commands run from the repository root; never create operational directories in
-  this member.
+- Credentials never enter ganja's `Debug`, `Display`, ring rows, mail or own tracing fields; shipped filters disable third-party debug bodies.
+- Commands run from the repository root; never create operational directories in this member.

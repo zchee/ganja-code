@@ -11,6 +11,9 @@ use http::HeaderMap;
 use secrecy::SecretString;
 use tokio::sync::Notify;
 
+#[path = "fake_provisioner/health_record.rs"]
+mod health_record;
+
 fn fixture(name: &str) -> (FakeProvisioner, WorkerSpec) {
     let endpoint = Endpoint {
         base_url: "http://127.0.0.1:1".to_owned(),
@@ -260,6 +263,10 @@ impl Provisioner for InitHealthProxy {
 enum LaunchHealthFault {
     InitRefusal,
     ConnectionFailure,
+    Refused,
+    Reset,
+    Decode,
+    Deadline,
 }
 
 struct InitHealthWire {
@@ -276,8 +283,11 @@ impl InitHealthWire {
     ) -> (Arc<InitHealthProxy>, Self) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
+        let mut listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
         let address = listener.local_addr().expect("proxy address");
+        let (outage, mut outages) =
+            tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
         let target = Arc::new(std::sync::Mutex::new(None));
         let cancel = tokio_util::sync::CancellationToken::new();
         let health_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -293,11 +303,23 @@ impl InitHealthWire {
                     tokio::select! {
                         () = cancel.cancelled() => break,
                         Some(result) = connections.join_next() => result.expect("proxy connection"),
+                        Some(closed) = outages.recv() => {
+                            drop(listener);
+                            closed.send(()).expect("listener outage begins");
+                            // This timed outage is the injected startup fault, not a
+                            // readiness sleep: bootstrap can complete while TCP refuses probes.
+                            tokio::select! {
+                                () = cancel.cancelled() => break,
+                                () = tokio::time::sleep(std::time::Duration::from_millis(350)) => {}
+                            }
+                            listener = tokio::net::TcpListener::bind(address).await.expect("listener recovers");
+                        }
                         accepted = listener.accept() => {
                             let (socket, _) = accepted.expect("proxy accept");
                             let target = *target.lock().expect("proxy target");
                             let health_requests = Arc::clone(&health_requests);
                             let dropped_health_requests = Arc::clone(&dropped_health_requests);
+                            let outage = outage.clone();
                             connections.spawn(async move {
                                 let mut reader = tokio::io::BufReader::new(socket);
                                 let mut head = String::new();
@@ -316,13 +338,26 @@ impl InitHealthWire {
                                     true
                                 }).await.expect("proxy receives request head");
                                 if !received { return; }
+                                if matches!(fault, LaunchHealthFault::Refused) && head.starts_with("POST /bootstrap ") {
+                                    let (closed, acknowledged) = tokio::sync::oneshot::channel();
+                                    outage.send(closed).await.expect("request listener outage");
+                                    acknowledged.await.expect("listener closed before bootstrap returns");
+                                }
                                 if head.starts_with("GET /global/health ") {
                                     let attempt = health_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                     if matches!(fault, LaunchHealthFault::ConnectionFailure) && attempt == 0 {
                                         dropped_health_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                         return;
                                     }
+                                    if matches!(fault, LaunchHealthFault::Reset) && attempt == 0 {
+                                        reader.get_ref().set_zero_linger().expect("reset on close");
+                                        return;
+                                    }
+                                    if matches!(fault, LaunchHealthFault::Deadline) {
+                                        std::future::pending::<()>().await;
+                                    }
                                     let reply = match (fault, attempt) {
+                                        (LaunchHealthFault::Decode, 0) => Some("HTTP/1.1 200 OK\r\nContent-Length: 21\r\nX-Canary: header-canary-9c81\r\nConnection: close\r\n\r\nbody-canary-4f32-json"),
                                         (LaunchHealthFault::InitRefusal, 0) => Some("HTTP/1.1 404 Not Found\r\nganja-serve-epoch: 01900000-0000-7000-8000-000000000001\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
                                         (LaunchHealthFault::InitRefusal, 1) => Some("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
                                         _ => None,
@@ -511,7 +546,7 @@ impl Hosted {
                     .with_writer(capture.clone())
                     .with_ansi(false)
                     .with_env_filter(
-                        "ganja_teammate_cloud::delivery=debug,ganja_serve::bootstrap=debug",
+                        "info,ganja_teammate_cloud::delivery=debug,ganja_serve::bootstrap=debug",
                     )
                     .finish(),
             )

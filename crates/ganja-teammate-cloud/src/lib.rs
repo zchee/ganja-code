@@ -9,6 +9,7 @@
 mod backend;
 mod delivery;
 pub mod gate;
+mod health;
 mod member;
 pub mod provisioner;
 pub mod state;
