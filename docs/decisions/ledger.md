@@ -1024,7 +1024,7 @@ Commit: 2b3aa324
 Crates: ganja-storage, ganja-core, ganja-cli, ganja-testkit
 Amends: D493 and the frozen `ganja-storage.md` quarantine rules
 
-Every store open takes a shared lease on the permanent sibling
+Store startup takes a shared lease on the permanent sibling
 `<database>.quarantine.lock` before any pending-record or existence decision
 or SQLite open. Both connections retain the lease until they close.
 Maintenance closes its own connections, releases shared admission, takes the
@@ -1036,11 +1036,11 @@ Normal stores share admission; SQLite still serializes writes.
 Old-id and corrupt stores use one recorded move. A version-1 pending record
 reserves one archive basename, the exact main/WAL/SHM membership and a
 no-legacy-import policy before the first rename. Its complete temporary file
-is flushed with `sync_all`, closed and renamed to `.quarantine.pending`, then
-its containing directory is flushed before any captured file moves. A failed
-flush returns its I/O error before those moves. These flushes cover record
-publication, not durability of the later renames or replacement initialization;
-there is no power-loss guarantee.
+is flushed with `sync_all`, closed and renamed to
+`<database>.quarantine.pending`, then its containing directory is flushed
+before any captured file moves. A failed flush returns its I/O error before
+those moves. These flushes cover record publication, not durability of the
+later renames or replacement initialization; there is no power-loss guarantee.
 
 Captured WAL and SHM move first, main last. The archived main publishes the
 set. The next opener reads the record before any live SQLite open and finishes
