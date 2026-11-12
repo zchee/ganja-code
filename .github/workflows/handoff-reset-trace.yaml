@@ -1,0 +1,38 @@
+name: Handoff reset trace
+
+on:
+  push:
+    branches:
+      - investigate/handoff-reset-trace
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: install the repository toolchain
+        run: rustup toolchain install nightly --profile minimal && rustup default nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: build the unchanged worker initialization test
+        run: bash scripts/handoff-reset-trace/build.sh
+      - name: measure without tracing
+        run: bash scripts/handoff-reset-trace/measure.sh 500 baseline
+      - name: preserve measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: handoff-reset-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/handoff-reset-results
+          if-no-files-found: error
+          retention-days: 14
