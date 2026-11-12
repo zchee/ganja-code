@@ -1004,8 +1004,9 @@ accounting, and no later success clears an uncertain attempt.
 
 A log filter that drops `info` drops this event. A reset is counted as such
 only when it reaches the client as an I/O error of that kind somewhere in the
-source chain; otherwise it is `other`. This has not yet been observed on a real
-worker; the local peer-reset test does not establish the deployed router's
+source chain. Otherwise the observed error follows the remaining classification
+rules; an unclassified error is `other`. This has not yet been observed on a
+real worker; the local peer-reset test does not establish the deployed router's
 error shape.
 
 Pinned by: `crates/ganja-teammate-cloud/src/health_tests.rs`
