@@ -69,22 +69,22 @@ fn inherited_socket_probe() {
 fn a_socket_name_failure_reports_read_only_descriptor_facts() {
     use std::os::fd::{FromRawFd as _, OwnedFd};
 
-    // SAFETY: socket returns a fresh unconnected kernel-control socket owned by this test.
-    let number = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
-    assert!(number >= 0, "kernel-control socket: {}", std::io::Error::last_os_error());
+    // SAFETY: socket returns a fresh routing socket owned by this test.
+    let number = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
+    assert!(number >= 0, "routing socket: {}", std::io::Error::last_os_error());
     // SAFETY: this successful socket call created a new descriptor with no other owner.
     let socket = unsafe { OwnedFd::from_raw_fd(number) };
     // SAFETY: F_GETFD is a read-only query of the live test-owned socket.
     let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) };
     let error = listener::matches(socket.as_raw_fd(), (Ipv4Addr::LOCALHOST, 0).into())
-        .expect_err("kernel control does not implement getsockname");
+        .expect_err("routing socket rejects the local-name query");
     let message = error.to_string();
     for field in [
-        format!("getsockname fd={number} errno={}", libc::EOPNOTSUPP),
+        format!("getsockname fd={number} errno={}", libc::EINVAL),
         "fstat_type=0o140000".to_owned(),
         "cloexec=false".to_owned(),
-        format!("so_type={}", libc::SOCK_DGRAM),
-        format!("getpeername_errno={}", libc::ENOTCONN),
+        format!("so_type={}", libc::SOCK_RAW),
+        "getpeername_errno=0".to_owned(),
     ] {
         assert!(message.contains(&field), "missing {field}: {message}");
     }
@@ -347,6 +347,19 @@ async fn the_child_scan_distinguishes_unrelated_inherited_descriptor_kinds() {
         ("shutdown TCP with closed peer", shutdown.as_fd()),
         ("socketpair with closed peer", socketpair.as_fd()),
     ];
+    #[cfg(target_vendor = "apple")]
+    let control = {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+
+        // SAFETY: socket returns a new unconnected kernel-control socket owned by this fixture.
+        let number =
+            unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
+        assert!(number >= 0, "kernel-control socket: {}", std::io::Error::last_os_error());
+        // SAFETY: the successful socket call created this fresh descriptor with no other owner.
+        unsafe { OwnedFd::from_raw_fd(number) }
+    };
+    #[cfg(target_vendor = "apple")]
+    let cases = cases.into_iter().chain([("unconnected kernel control", control.as_fd())]);
     // A kqueue cannot reach a forked child, so it is not an inheritance case.
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: initialized writable storage receives the process limit.

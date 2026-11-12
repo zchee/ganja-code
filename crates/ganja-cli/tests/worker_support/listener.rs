@@ -62,6 +62,11 @@ pub fn matches(number: RawFd, expected: SocketAddr) -> std::io::Result<bool> {
         let error = std::io::Error::last_os_error();
         return match error.raw_os_error() {
             Some(libc::EBADF | libc::ENOTSOCK) => Ok(false),
+            Some(libc::EOPNOTSUPP) => {
+                // A protocol without a local socket name cannot be the announced TCP listener.
+                // System libraries in the test process can pass such sockets to every child.
+                Ok(false)
+            }
             _ => Err(socket_name_error(number, error)),
         };
     }
@@ -91,7 +96,7 @@ pub fn matches(number: RawFd, expected: SocketAddr) -> std::io::Result<bool> {
     listening(number)
 }
 
-/// Bounds the test-only scan; the fixture inherits only stdio, not arbitrary FDs.
+/// Bounds the test-only scan; system libraries may pass extra descriptors to children.
 pub fn scan_bound() -> std::io::Result<i32> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: the initialized limit is writable and getrlimit changes no process state.
