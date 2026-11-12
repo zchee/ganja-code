@@ -135,6 +135,48 @@ fn a_killed_move_is_completed_before_any_live_sqlite_open() {
 }
 
 #[test]
+fn a_killed_wal_without_shm_move_recovers_the_captured_old_content() {
+    for boundary in ["Renamed(\"-wal\")", "Renamed(\"\")"] {
+        let directory = TempDir::new().expect("optional SHM crash fixture");
+        let root = directory.path().join("storage");
+        let database = seed(&root, true);
+        let mut worker = Worker::start(&root);
+        worker.until("ExclusiveAcquired");
+        worker.release();
+        worker.until("ReaderClosed");
+        // The exclusive probe is closed, so removing its disposable index leaves
+        // a quiescent real WAL and no SQLite handle that could recreate SHM.
+        fs::remove_file(with_suffix(&database, "-shm")).expect("remove the quiescent index");
+        assert!(with_suffix(&database, "-wal").is_file());
+        assert_wal_dependent(&database);
+        worker.release();
+        worker.until("IntentTemporary");
+        assert!(!with_suffix(&database, "-shm").exists());
+        assert_wal_dependent(&database);
+        worker.release();
+        worker.until("IntentPublished");
+        let record = serde_json::to_value(
+            Pending::read(&database).expect("published intent").expect("intent exists"),
+        )
+        .expect("membership decodes");
+        assert_eq!(record["components"], serde_json::json!(["wal", "main"]));
+        worker.release();
+        worker.until(boundary);
+        worker.child.kill().expect("kill at move boundary");
+        assert!(!worker.child.wait().expect("killed worker reaped").success());
+        drop(worker);
+        let store = safe_recovery(&root);
+        store.save_info(&info(FRESH, 2)).expect("replacement persists");
+        drop(store);
+        let kept = archives(directory.path(), ".preuuid-");
+        assert_eq!(kept.len(), 1, "one reserved archive after {boundary}");
+        assert!(!with_suffix(&kept[0], "-shm").exists(), "absent SHM was not captured");
+        assert_old_content(&kept[0]);
+        assert!(Pending::read(&database).expect("completed intent").is_none());
+    }
+}
+
+#[test]
 fn a_killed_corrupt_move_preserves_its_captured_bytes_without_companions() {
     for boundary in BOUNDARIES.iter().filter(|boundary| !boundary.starts_with("Renamed(\"-")) {
         let directory = TempDir::new().expect("corrupt crash fixture");
@@ -243,6 +285,41 @@ fn racing_maintenance_starters_revalidate_and_both_persist() {
 
 #[test]
 fn a_live_owner_defers_maintenance_without_moving_data() {
+    #[derive(Clone)]
+    struct Warnings(Arc<Mutex<String>>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Message<'a>(&'a mut String);
+            impl tracing::field::Visit for Message<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        use std::fmt::Write as _;
+
+                        write!(self.0, "{value:?}").expect("message records");
+                    }
+                }
+            }
+            event.record(&mut Message(&mut self.0.lock().expect("captured warnings")));
+        }
+    }
+
+    let warnings = Arc::new(Mutex::new(String::new()));
+    let _subscriber = tracing::subscriber::set_default(Warnings(warnings.clone()));
     let directory = TempDir::new().expect("deferred fixture");
     let root = directory.path().join("storage");
     let database = seed(&root, false);
@@ -253,6 +330,13 @@ fn a_live_owner_defers_maintenance_without_moving_data() {
     store
         .save_info(&info(FRESH, 2))
         .expect("readable old generation remains writable when maintenance is deferred");
+    assert!(
+        warnings
+            .lock()
+            .expect("captured warning")
+            .contains("the existing readable store remains live with its old ids"),
+        "the deferral warning must explicitly say old ids remain live"
+    );
     assert_eq!(old_rows(&database), vec![FRESH, OLD]);
     assert!(archives(directory.path(), ".preuuid-").is_empty(), "no data moved while SH is owned");
     drop(store);
@@ -375,6 +459,68 @@ fn snapshots_remain_unchanged_during_session_quarantine() {
             1
         );
     }
+}
+
+#[test]
+fn revalidation_rounds_share_one_admission_deadline() {
+    let directory = TempDir::new().expect("one-budget fixture");
+    let root = directory.path().join("storage");
+    let database = seed(&root, false);
+    let owner = lock_file(&database);
+    owner.lock_shared().expect("maintenance stays contended");
+    let (blocked, rounds) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let deadline = Mutex::new(None);
+    let mut store = observed(&root, move |phase| match phase {
+        Phase::AdmissionDeadline(current) => {
+            let mut original = deadline.lock().expect("original deadline");
+            if let Some(original) = *original {
+                assert_eq!(
+                    current, original,
+                    "revalidation must not restart the admission deadline"
+                );
+            } else {
+                *original = Some(current);
+            }
+        }
+        Phase::ExclusiveBlocked => {
+            blocked
+                .send(deadline.lock().expect("deadline").expect("deadline observed"))
+                .expect("contended round reports");
+            released
+                .lock()
+                .expect("round barrier")
+                .recv_timeout(Duration::from_secs(15))
+                .expect("parent releases contended round");
+        }
+        _ => {}
+    });
+    Arc::get_mut(&mut store.inner).expect("private short budget").admission_budget =
+        Some(Duration::from_secs(2));
+    thread::scope(|scope| {
+        let result = scope.spawn(move || store.list_sessions());
+        for round in 0..3 {
+            let deadline =
+                rounds.recv_timeout(Duration::from_secs(15)).expect("three revalidation rounds");
+            if round == 2 {
+                // The blocked opener stays at its acknowledgement barrier until
+                // the original deadline expires; no scheduling sleep orders it.
+                let (_keep_open, never_sent) = mpsc::channel::<()>();
+                assert!(matches!(
+                    never_sent.recv_timeout(
+                        deadline.saturating_duration_since(std::time::Instant::now())
+                    ),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                assert!(std::time::Instant::now() >= deadline);
+            }
+            release.send(()).expect("release refused EX");
+        }
+        assert!(result.join().expect("opener joins").expect("readable fallback").is_empty());
+    });
+    assert_eq!(old_rows(&database), vec![OLD]);
+    assert!(archives(directory.path(), ".preuuid-").is_empty());
 }
 
 #[test]
