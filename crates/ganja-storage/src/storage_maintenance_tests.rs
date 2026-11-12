@@ -185,7 +185,7 @@ fn observed(root: &Path, callback: impl Fn(Phase) + Send + Sync + 'static) -> St
     storage
 }
 
-fn lock_file(database: &Path) -> fs::File {
+pub(super) fn lock_file(database: &Path) -> fs::File {
     fs::OpenOptions::new()
         .create(true)
         .write(true)

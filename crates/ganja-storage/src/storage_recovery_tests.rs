@@ -297,6 +297,87 @@ fn pending_and_corrupt_stores_refuse_maintenance_under_an_established_lease() {
 }
 
 #[test]
+fn racing_legacy_tree_openers_set_the_tree_aside_once() {
+    let directory = TempDir::new().expect("legacy race fixture");
+    let root = directory.path().join("storage");
+    let relative = Path::new("session/info/ses_before_uuid.json");
+    fs::create_dir_all(root.join("session/info")).expect("legacy tree");
+    let bytes = serde_json::to_vec(&info(OLD, 4)).expect("legacy row");
+    fs::write(root.join(relative), &bytes).expect("legacy info");
+    fs::write(root.join("untouched-transcript"), b"whole old tree retained")
+        .expect("legacy sentinel");
+    let mut first = Worker::configured(&root, FRESH, Duration::from_secs(10));
+    let mut second = Worker::configured(&root, SECOND, Duration::from_secs(10));
+    first.until("SharedAcquired");
+    second.until("SharedAcquired");
+    first.release();
+    second.release();
+    first.until("ExclusiveWanted");
+    second.until("ExclusiveWanted");
+    first.release();
+    first.until("ExclusiveAcquired");
+    second.release();
+    second.until("SharedBlocked");
+    first.release();
+    first.until("Saved");
+    second.release();
+    second.until("Saved");
+    first.release();
+    first.finish();
+    second.release();
+    second.finish();
+    let kept = archives(directory.path(), "storage.preuuid-");
+    assert_eq!(kept.len(), 1, "exactly one whole legacy tree is set aside");
+    assert_eq!(fs::read(kept[0].join(relative)).expect("legacy info retained"), bytes);
+    assert_eq!(
+        fs::read(kept[0].join("untouched-transcript")).expect("whole tree retained"),
+        b"whole old tree retained"
+    );
+    assert!(!root.exists(), "legacy tree was not reimported by the second starter");
+    let live = Storage::open(root);
+    assert_eq!(live.list_sessions().expect("both new saves persist").len(), 2);
+    assert!(live.load_info(&info(OLD, 4).id).expect("old session absent").is_none());
+}
+
+#[test]
+fn snapshots_remain_unchanged_during_session_quarantine() {
+    for corrupt in [false, true] {
+        let directory = TempDir::new().expect("snapshot sentinel fixture");
+        let snapshot = directory.path().join("snapshot/project/worktree");
+        fs::create_dir_all(snapshot.join("objects")).expect("separate snapshot tree");
+        fs::write(snapshot.join("HEAD"), b"snapshot head sentinel").expect("snapshot head");
+        fs::write(snapshot.join("objects/retained"), b"snapshot tree sentinel")
+            .expect("snapshot object");
+        let root = directory.path().join("project/storage");
+        fs::create_dir_all(root.parent().expect("project directory")).expect("project data");
+        let database = if corrupt {
+            let database = Storage::open(root.clone()).database().to_path_buf();
+            fs::write(&database, b"corrupt store").expect("corrupt input");
+            database
+        } else {
+            seed(&root, false)
+        };
+        let store = Storage::open(root);
+        store.save_info(&info(FRESH, 2)).expect("session maintenance completes");
+        drop(store);
+        assert!(database.is_file(), "the replacement stays in project data");
+        assert_eq!(
+            fs::read(snapshot.join("HEAD")).expect("snapshot head unchanged"),
+            b"snapshot head sentinel"
+        );
+        assert_eq!(
+            fs::read(snapshot.join("objects/retained")).expect("snapshot object unchanged"),
+            b"snapshot tree sentinel"
+        );
+        assert_eq!(fs::read_dir(&snapshot).expect("snapshot directory unchanged").count(), 2);
+        assert_eq!(
+            fs::read_dir(snapshot.join("objects")).expect("snapshot objects unchanged").count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn an_expired_opener_never_waits_for_a_new_exclusive_owner() {
     let directory = TempDir::new().expect("expiry fixture");
     let root = directory.path().join("storage");

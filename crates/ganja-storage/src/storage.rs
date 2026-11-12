@@ -1,12 +1,7 @@
 //! Where sessions live between runs: one SQLite database per project.
 //!
-//! Spec: upstream `packages/core/src/database/database.ts` for the connection
-//! and its pragmas, `packages/core/src/database/migration.ts` for the journal
-//! and the three-way branch a first open takes, and
-//! `packages/core/src/database/schema.gen.ts` for the shape of the three
-//! tables a session needs. What is ported is the *machinery*, not upstream's
-//! 38 migrations: those are its history, and this tree starts at its own base
-//! schema.
+//! The schema and migration journal belong to this store; serialized record
+//! versions evolve independently of the identity and ordering columns.
 //!
 //! ```text
 //! session (id, parent_id, time_created, time_updated, data)
@@ -14,7 +9,7 @@
 //! part    (session_id, message_id, id, time_created, time_updated, data)
 //! ```
 //!
-//! `data` is opaque JSON, exactly as upstream keeps it: a part is not shredded
+//! `data` is opaque JSON: a part is not shredded
 //! into columns, so the serde shape stays the one every other module speaks
 //! and a schema change is not owed for every new part variant. The columns
 //! beside it are identity and ordering only.
@@ -23,7 +18,7 @@
 //! reason they used to live in their own files: a streaming turn rewrites one
 //! small row per fragment instead of the whole message. Ascending ids double
 //! as ordering — reassembly is `ORDER BY id`, never by a timestamp — and that
-//! is still true now that an id is a lowercase hyphenated UUIDv7 (**D493**):
+//! is still true now that an id is a lowercase hyphenated UUIDv7:
 //! the four hyphens sit at fixed positions in every one of them so they never
 //! discriminate, and `'0'..='9'` precedes `'a'..='f'` in ASCII exactly as
 //! their values order, so a lexicographic sort of these strings is a sort by
@@ -35,8 +30,9 @@
 //! — which is why a store holding such rows is **set aside** rather than
 //! minted into, both as a database — `sessions.db.preuuid-<millis>` — and as
 //! an older store's tree, `storage.preuuid-<millis>`. Nothing is deleted
-//! either way: the file or the directory is renamed and a fresh, empty store
-//! takes the name.
+//! either way: the file set or directory is renamed. Normally a fresh, empty
+//! store takes the name; readable old-id maintenance can be deferred while a
+//! cooperating process still owns that generation, leaving old ids live.
 //!
 //! Every record still carries a `version` field — [`SessionInfo`] inline,
 //! message and part rows through an envelope `{"version":1,"payload":…}` — and
@@ -54,7 +50,45 @@
 //! hold by convention — two writes racing out of order would persist stale
 //! content — *structurally*, in the queue, so it survives a caller that one
 //! day stops waiting for its answer. Reads take a second connection, which is
-//! what WAL buys: a listing never blocks the turn that is writing.
+//! what WAL buys: a listing never blocks the turn that is writing. Both
+//! connections open synchronously before startup is cached; a failed writer
+//! open is returned and the next operation can retry.
+//!
+//! # Admission and recoverable maintenance
+//!
+//! Every open first takes a shared lease on the permanent sibling
+//! `<database>.quarantine.lock`. Each connection keeps that lease until it
+//! closes. Maintenance closes its own connections and releases shared admission
+//! before trying the exclusive lease, then rechecks the pending record and live
+//! store. One five-second deadline bounds admission waiting, not maintenance
+//! already holding the exclusive lease. A readable old-id store may remain live
+//! with a warning when exclusive admission stays blocked; pending or corrupt
+//! stores, or blocked shared admission, return a typed storage error instead.
+//! Callers can continue in memory on that failure, but it is not persistence.
+//!
+//! Under exclusive admission, a complete versioned `.quarantine.pending` record
+//! names the reserved archive and captured components before any move. WAL and
+//! SHM move first; main moves last and publishes the archive. Closing SQLite does
+//! not promise a checkpoint: an archive can still require its matching WAL.
+//! Process death or a filesystem error can leave a split set and its pending
+//! record, not an unchanged live store. The next opener completes or refuses
+//! recovery before any live SQLite open. After main publication, recovery never
+//! revisits archive companions, which an ordinary archive reader may consume.
+//! Replacement migration completes without legacy reimport before intent removal.
+//!
+//! First creation and the legacy-tree decision also hold exclusive admission.
+//! Interrupted first-ever legacy import is outside this recovery guarantee;
+//! a legacy tree appearing after initialization is never imported.
+//!
+//! This protocol supports cooperating updated processes on one host, a local
+//! filesystem, macOS and Linux. Older binaries and external SQLite clients do
+//! not take the lease and cannot be detected or fenced: stop them all before
+//! opening a store that needs maintenance. Do not downgrade with a pending
+//! intent; afterwards an older binary sees the replacement, not the archive.
+//! Restore an archive offline with every companion archived with it. Debug and
+//! release database/lock names differ but share the legacy tree, so simultaneous
+//! first conversion by both builds is unsupported. No guarantee is made for
+//! network filesystems, several hosts, or durability across machine power loss.
 //!
 //! # Why `bundled`
 //!
@@ -134,7 +168,8 @@ const PREUUID: &str = "preuuid";
 ///
 /// Beside the database rather than inside the data home, because the thing
 /// being coordinated is this one file and the processes that race for it are
-/// the ones that opened this project. See [`QuarantineLock`].
+/// the ones that opened this project. Every connection retains its shared lease;
+/// maintenance takes exclusive admission on the same permanent inode.
 const QUARANTINE_LOCK: &str = "quarantine.lock";
 
 /// Every connection sets these, immediately after open.
@@ -1184,358 +1219,14 @@ fn integrity(connection: &Connection) -> Result<(), String> {
     }
 }
 
-/// Renames a database out of the way under `kind`, with the two files SQLite
-/// keeps beside it, and says whether it went.
-///
-/// The write-ahead log has to travel with the database it belongs to. Left
-/// behind, it is recovered into the *fresh* file that takes the old name —
-/// which would pour the store that was just set aside straight back in.
-///
-/// `kind` is [`QUARANTINE`] or [`PREUUID`]: the same reversible move for two
-/// different reasons, told apart in the name so a log reader can see which
-/// happened without reading the log.
-fn set_aside(
-    database: &Path,
-    reason: &str,
-    kind: &str,
-    #[cfg(test)] observation: &Observation,
-) -> bool {
-    let stamp = now();
-    let name = database.file_name().unwrap_or_default().to_string_lossy();
-    // The name the database itself lands under, which is the one worth
-    // logging: the other two are derived from it the way SQLite derives them.
-    let kept = database.with_file_name(format!("{name}.{kind}-{stamp}"));
-
-    for suffix in ["", "-wal", "-shm"] {
-        let from = with_suffix(database, suffix);
-        if !from.exists() {
-            continue;
-        }
-        let to = from.with_file_name(format!("{name}.{kind}-{stamp}{suffix}"));
-        // Refused rather than overwritten. A name already taken means another
-        // process set a store aside in this same millisecond, and the only
-        // thing worse than not moving this file is moving it onto the one
-        // copy of somebody else's.
-        if to.exists() {
-            tracing::warn!(
-                path = %from.display(),
-                taken = %to.display(),
-                "a database could not be moved aside: the name it would take is in use"
-            );
-
-            return false;
-        }
-        if let Err(failure) = fs::rename(&from, &to) {
-            tracing::warn!(
-                path = %from.display(),
-                %failure,
-                "a database could not be moved aside"
-            );
-
-            return false;
-        }
-        #[cfg(test)]
-        observation.hit(Phase::Renamed(suffix));
-    }
-
-    tracing::warn!(
-        path = %database.display(),
-        kept = %kept.display(),
-        reason,
-        "the session database was moved aside; this project starts with an empty store"
-    );
-
-    true
-}
-
-/// Sets a store that will not read aside, and hands back the sound store the
-/// path names instead — or [`None`] when the caller must open a fresh one.
-///
-/// The verdict that gets us here was taken on a connection opened before this
-/// process waited for anything, and a rename is not a database operation: no
-/// SQLite lock spans one. Two processes can both meet the same damaged file,
-/// both be right, and the second then renames the *fresh* store the first has
-/// already put in the old one's place — [`set_aside_preuuid`]'s race arriving
-/// through the other door. So the decision is taken again under
-/// [`QuarantineLock`], against the file the path names at that moment, and
-/// only a store that is *still* unreadable is moved.
-///
-/// Whether the move itself succeeded is not consulted: what the caller does
-/// next is open whatever is at the name, which is the right step either way —
-/// a fresh file when it moved, and the damaged one failing loudly when it did
-/// not. What replaces a store that moved is empty, which is worse than the
-/// sessions it held and better than a project that will not open.
-///
-/// A lock that cannot be had leaves the file exactly where it is, for
-/// [`QuarantineLock::take`]'s reason: an uncoordinated quarantine is the
-/// failure this exists to prevent rather than a lesser version of it. The
-/// caller then reopens a store that will not read and fails loudly — which
-/// costs this session's persistence and nothing that cannot be recovered by
-/// hand, where renaming a store another process is writing into costs that
-/// process the session it is in the middle of.
-fn set_aside_corrupt(
-    database: &Path,
-    #[cfg(test)] observation: &Observation,
-) -> Result<Option<Connection>, StorageError> {
-    // Nothing of this process's is held while waiting, for the reason
-    // `set_aside_preuuid` gives at length: a descriptor does not follow a
-    // rename, so a connection kept open across the wait pins the very file the
-    // winner is about to move.
-    let Some(_lock) = QuarantineLock::take(database) else {
-        return Ok(None);
-    };
-
-    match connect(database) {
-        Ok(connection) => match integrity(&connection) {
-            Ok(()) => {
-                tracing::warn!(
-                    path = %database.display(),
-                    "the session database read as damaged and was sound again by the time the \
-                     quarantine lock was had, so it was left where it is"
-                );
-
-                return Ok(Some(connection));
-            }
-            Err(reason) => {
-                drop(connection);
-                set_aside(
-                    database,
-                    &reason,
-                    QUARANTINE,
-                    #[cfg(test)]
-                    observation,
-                );
-            }
-        },
-        Err(error) if damaged(&error) => {
-            set_aside(
-                database,
-                &error.to_string(),
-                QUARANTINE,
-                #[cfg(test)]
-                observation,
-            );
-        }
-        Err(error) => return Err(error),
-    }
-
-    Ok(None)
-}
-
-/// Sets a store whose sessions predate UUIDv7 ids aside, and hands back the
-/// connection to go on with (**D493**).
-///
-/// The question is data-shaped rather than schema-shaped — there is no version
-/// to bump for it, and a store from before the change is structurally
-/// identical to one from after — so it is asked of the rows: does any session
-/// carry an id [`ganja_protocol::is_uuidv7`] refuses? Those ids came from a
-/// counter that started at zero in each *process*, so two processes reaching
-/// one millisecond minted the same one; mixing them with ids that cannot
-/// collide would fuse two sessions into one row, which is the outcome this
-/// exists to prevent. The store is renamed, never read further and never
-/// deleted, and a fresh one takes its name.
-///
-/// **A SQLite transaction cannot make this decision safely**, and the first
-/// version of it tried to. `IMMEDIATE` serializes the *reading*; the damage is
-/// done by the *renaming*, which is not a database operation and which no
-/// SQLite lock spans. Two processes can both read old ids, both be right, and
-/// then the second one renames the fresh store the first one had already put
-/// in the old one's place — leaving two `preuuid-` files, the second of them a
-/// clean store, and the first process's writer thread writing into a file no
-/// path names any more. Comparing inodes just before the rename narrows that
-/// window without closing it: the check and the rename are still two steps.
-///
-/// So the whole sequence — decide, rename, create fresh — happens under
-/// [`QuarantineLock`], and **the decision is taken again inside it**, against
-/// the file the path names at that moment rather than the one this connection
-/// was opened on. A process that waited for the lock finds a store with
-/// nothing old in it and does nothing, which is the right answer and the one
-/// it could not reach before. The cheap read that gets us here is done first
-/// and unlocked, so a store with nothing old in it — every store, after the
-/// first open that converts one — costs no lock and creates no lock file.
-///
-/// Nothing compares inodes before the rename any more. That check was the last
-/// word only while [`Inner::start`] could still rename this database without
-/// the lock; now that [`set_aside_corrupt`] takes it too, every renamer holds
-/// it, and a second guard behind the lock would claim to defend a window that
-/// no longer opens.
-///
-/// A move that is *refused* — the name it would take is already in use, the
-/// rename fails, or the lock cannot be had at all — leaves the store where it
-/// is and the session goes on reading it, old ids and all. That is worse than
-/// a quarantine and better than a project that will not open, and every one of
-/// those paths says so at `warn`.
-///
-/// The reopened store is migrated but deliberately **not** converted: the
-/// older `storage/` tree a first open would have read was either carried into
-/// the store that has just been set aside, or set aside itself by [`convert`]
-/// for holding the same old ids. Converting again would be importing the very
-/// sessions that were just moved out of the way.
-fn set_aside_preuuid(
-    connection: Connection,
-    database: &Path,
-    #[cfg(test)] observation: &Observation,
-) -> Result<Connection, StorageError> {
-    // The cheap question first, on the connection that is already open and
-    // taking nothing: this is asked on every open a project ever has, and all
-    // but one of them answer no.
-    if preuuid_id(&connection, database)?.is_none() {
-        return Ok(connection);
-    }
-
-    // Let go of the store *before* waiting, and open it again afterwards.
-    //
-    // Two reasons, and the first is not obvious. Waiting with this connection
-    // open would pin the very file the winner is about to rename, and SQLite
-    // deletes a write-ahead log **by the path it remembers**: when this
-    // process finally closed the last handle on the set-aside inode it would
-    // checkpoint that file correctly and then unlink
-    // `<database>-wal`/`-shm` — which by then name the *winner's fresh
-    // store*, leaving two processes writing one database through two
-    // different logs. Holding nothing while waiting makes the winner's own
-    // close the last one, so what it sets aside is settled and self-contained.
-    // The second reason is the ordinary one: a descriptor does not follow a
-    // rename, so the question has to be asked of the path again anyway.
-    drop(connection);
-
-    let lock = QuarantineLock::take(database);
-    // Whether or not the lock was had, this process needs a store to go on
-    // with, and the path is where one is.
-    let mut connection = connect(database)?;
-    migrate(&mut connection, database)?;
-
-    // Held until this function returns, which is after the fresh store exists:
-    // whoever was waiting must find a finished store rather than a gap.
-    let Some(_lock) = lock else {
-        return Ok(connection);
-    };
-
-    let named =
-        |source: rusqlite::Error| StorageError::Sql { path: database.to_path_buf(), source };
-    let old = {
-        // `IMMEDIATE` still, though the lock is what serializes us now: it
-        // keeps the row set from moving under the read while another process
-        // writes a session, which is a different race and a real one.
-        let transaction =
-            connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(named)?;
-        let old = preuuid_id(&transaction, database)?;
-        transaction.commit().map_err(named)?;
-
-        old
-    };
-
-    let Some(old) = old else {
-        // Somebody else did it while we waited. What we are holding is their
-        // replacement store, which is exactly what we would have made.
-        return Ok(connection);
-    };
-
-    drop(connection);
-    set_aside(
-        database,
-        &format!("session {old} predates UUIDv7 ids"),
-        PREUUID,
-        #[cfg(test)]
-        observation,
-    );
-
-    let mut connection = connect(database)?;
-    migrate(&mut connection, database)?;
-
-    Ok(connection)
-}
-
 /// The first session id the store carries that [`is_uuidv7`] refuses, if any.
 ///
-/// Takes a `&Connection` rather than a transaction so both callers can share
-/// it: the unlocked pre-check, which must be as cheap as a read gets, and the
-/// decision inside [`QuarantineLock`], where a `Transaction` derefs to one.
+/// Called under shared admission and again under exclusive maintenance, because
+/// a verdict from before releasing the shared lease may name an old generation.
 fn preuuid_id(connection: &Connection, database: &Path) -> Result<Option<String>, StorageError> {
     names(connection, "SELECT id FROM session")
         .map(|ids| ids.into_iter().find(|id| !is_uuidv7(id)))
         .map_err(|source| StorageError::Sql { path: database.to_path_buf(), source })
-}
-
-/// The exclusive advisory lock a pre-UUIDv7 quarantine is decided and
-/// performed under (**D493**).
-///
-/// A sibling of the database, `<database>.quarantine.lock`, locked with
-/// [`fs::File::lock`] — `flock(2)` on every platform this builds for, so the
-/// lock belongs to the open file description and two `ganja` processes really
-/// do exclude each other. No crate is involved and no lock protocol is
-/// invented: this is one call each way.
-///
-/// **It is never removed.** Unlinking a lock file is how a lock file stops
-/// working — the process that removed it and the one still holding a
-/// descriptor on it are no longer locking the same inode, so the next pair
-/// races exactly as if there were no lock. It is created only when a store
-/// that really does predate UUIDv7 is found, which happens at most once in a
-/// project's life, so what it leaves behind is one empty file and only where
-/// one was needed.
-///
-/// A lock that cannot be taken is reported, not worked around: see
-/// [`QuarantineLock::take`].
-struct QuarantineLock(fs::File);
-
-impl QuarantineLock {
-    /// Blocks until the lock is this process's, or says it cannot be had.
-    ///
-    /// [`None`] means the quarantine cannot be *coordinated* — a filesystem
-    /// with no advisory locking, a directory that will not take the file — and
-    /// an uncoordinated quarantine is the failure this exists to prevent
-    /// rather than a lesser version of it: it is what renames a store another
-    /// process is writing into, costing that process the session it is in the
-    /// middle of. So the caller reads the store as it is, old ids and all, and
-    /// the next open on a machine that can lock does the job properly. Waiting
-    /// costs nothing that is not already lost; renaming blind costs a session.
-    fn take(database: &Path) -> Option<Self> {
-        let name = database.file_name().unwrap_or_default().to_string_lossy();
-        let path = database.with_file_name(format!("{name}.{QUARANTINE_LOCK}"));
-
-        let refused = |failure: &io::Error| {
-            tracing::warn!(
-                path = %path.display(),
-                %failure,
-                "a store that predates UUIDv7 ids could not be set aside safely and was \
-                 left as it is: the quarantine lock could not be taken"
-            );
-        };
-
-        // `write` because a lock wants a writable handle and nothing else;
-        // `truncate(false)` said out loud because the file's *contents* are
-        // not the lock and never were — truncating one another process is
-        // holding would be a write for no reason.
-        let file = match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path)
-        {
-            Ok(file) => file,
-            Err(failure) => {
-                refused(&failure);
-
-                return None;
-            }
-        };
-        if let Err(failure) = file.lock() {
-            refused(&failure);
-
-            return None;
-        }
-
-        Some(Self(file))
-    }
-}
-
-impl Drop for QuarantineLock {
-    /// Lets the next process in.
-    ///
-    /// Closing the descriptor releases the lock on its own — that is what
-    /// makes a killed process let go of one, and it is why this needs no
-    /// staleness rule — so the call is not what makes the lock correct. It is
-    /// here because a guard's whole job is to be held and never read, and a
-    /// `Drop` is where that says so out loud rather than as a silenced
-    /// warning.
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
 }
 
 /// Whether SQLite refused because the file is damaged rather than because the
@@ -1681,12 +1372,10 @@ fn names(connection: &Connection, sql: &str) -> Result<Vec<String>, rusqlite::Er
 /// only what they wrote today. When one did not, the tree stays exactly where
 /// it is, because the only copy of what did not make it is in there.
 ///
-/// A tree whose sessions predate UUIDv7 ids is a third outcome, and it is
-/// decided before anything is carried (**D493**): the whole tree is set aside
-/// under [`PREUUID`] and nothing is imported. Deciding it afterwards would
-/// mean importing those sessions and then having [`set_aside_preuuid`]
-/// quarantine the store holding them — the same rows moved twice in one open,
-/// for one reason.
+/// A tree whose sessions predate UUIDv7 ids is a third outcome, decided before
+/// anything is carried: the whole tree is set aside under [`PREUUID`] and
+/// nothing is imported. Importing first would immediately require quarantining
+/// the database holding those same old rows.
 fn convert(connection: &mut Connection, root: &Path, path: &Path) -> Result<(), StorageError> {
     let files = stored_files(&root.join(SESSION).join(INFO))?;
     if files.is_empty() {
