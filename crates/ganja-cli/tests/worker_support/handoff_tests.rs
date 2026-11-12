@@ -691,7 +691,8 @@ async fn an_exec_failure_closes_the_worker_port_without_a_replacement_listener()
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
         .expect("executable copy");
     let deadline = Instant::now() + Duration::from_secs(30);
-    let (mut worker, home) = super::handoff_worker(&server, &barrier, false, Some(&binary), &[]);
+    let (mut worker, home) =
+        super::handoff_worker(&server, &barrier, false, Some((&binary, deadline)), &[]);
     // The already-running initializer keeps executing, but its later exec is refused.
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o600))
         .expect("refuse replacement exec");

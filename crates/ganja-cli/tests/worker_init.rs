@@ -250,14 +250,16 @@ fn handoff_worker(
     server: &GitServer,
     barrier: &HandoffBarrier,
     invalid_startup: bool,
-    binary: Option<&std::path::Path>,
+    binary: Option<(&std::path::Path, Instant)>,
     environment: &[(&str, &std::ffi::OsStr)],
 ) -> (tokio::process::Child, tempfile::TempDir) {
     let home = tempfile::tempdir().expect("worker home");
     let work = home.path().join("work");
     std::fs::create_dir(&work).expect("checkout directory");
     let mut command = tokio::process::Command::new(
-        binary.unwrap_or(std::path::Path::new(assert_cmd::cargo::cargo_bin!("ganja"))),
+        binary
+            .map(|(path, _)| path)
+            .unwrap_or(std::path::Path::new(assert_cmd::cargo::cargo_bin!("ganja"))),
     );
     command
         .args(["worker", "init", "--port", "0"])
@@ -279,7 +281,12 @@ fn handoff_worker(
     if invalid_startup {
         command.env("GIT_CONFIG_GLOBAL", "/missing-synthetic-gitconfig");
     }
-    (command.spawn().expect("worker init"), home)
+    let worker = if let Some((_, deadline)) = binary {
+        worker_support::spawn_written_executable(|| command.spawn(), deadline)
+    } else {
+        command.spawn()
+    };
+    (worker.expect("worker init"), home)
 }
 
 async fn bootstrap_worker(
