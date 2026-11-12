@@ -45,7 +45,7 @@ fn minted(ordinal: u32) -> String {
 
 /// Info with pinned times, so a test asserts on the order it asked for
 /// rather than on whatever the clock said.
-fn info(id: &str, updated: u64) -> SessionInfo {
+pub(super) fn info(id: &str, updated: u64) -> SessionInfo {
     SessionInfo {
         id: session(id),
         version: VERSION,
@@ -668,7 +668,7 @@ fn a_part_whose_message_was_never_stored_is_refused_rather_than_orphaned() {
 }
 
 #[test]
-fn a_write_leaves_nothing_beside_the_database_but_what_sqlite_owns() {
+fn a_write_leaves_only_sqlite_files_and_the_stable_admission_lock() {
     let directory = temporary();
     let storage = storage(&directory);
     let id = session("ses_1");
@@ -679,7 +679,8 @@ fn a_write_leaves_nothing_beside_the_database_but_what_sqlite_owns() {
         assert!(
             name == DATABASE
                 || name == format!("{DATABASE}-wal")
-                || name == format!("{DATABASE}-shm"),
+                || name == format!("{DATABASE}-shm")
+                || name == format!("{DATABASE}.quarantine.lock"),
             "a write left {name} behind"
         );
     }
@@ -838,7 +839,7 @@ fn an_unreadable_database_is_set_aside_and_the_store_starts_fresh() {
     // housekeeping: a write-ahead log beside a damaged database is not
     // damage — SQLite recovers the file out of it, header and all, and the
     // store reads perfectly. That is the right outcome, and it is also
-    // exactly why `set_aside` has to carry all three files together.
+    // exactly why maintenance carries all captured files together.
     let database = directory.path().join(DATABASE);
     for suffix in ["-wal", "-shm"] {
         let _ = fs::remove_file(directory.path().join(format!("{DATABASE}{suffix}")));
@@ -887,7 +888,12 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
             .expect("the file is writable");
     }
 
-    assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
+    let lease = super::maintenance_tests::lock_file(&database);
+    lease.try_lock().expect("fixture maintenance is exclusive");
+    let observation = super::Observation::default();
+    let pending = super::maintenance::Pending::begin(&database, super::QUARANTINE, &observation)
+        .expect("intent records the exact set");
+    pending.move_files(&database, &observation).expect("captured files move");
 
     // A log left behind is recovered into the *fresh* file that takes the
     // old name, which would pour the damaged store straight back in — so
@@ -895,7 +901,11 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
     // useless.
     let left = names(directory.path());
     assert_eq!(
-        left.iter().filter(|name| !name.contains(".corrupt-")).count(),
+        left.iter()
+            .filter(|name| !name.contains(".corrupt-")
+                && !name.ends_with(".quarantine.lock")
+                && !name.ends_with(".quarantine.pending"))
+            .count(),
         0,
         "nothing may be left under the name a fresh database will take, got {left:?}"
     );
@@ -907,151 +917,71 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
     }
 }
 
-/// The quarantine waits for the lock, and then asks again.
-///
-/// This is the regression drill for the bug the first version of
-/// [`set_aside_preuuid`] shipped: it decided on its own connection and
-/// renamed afterwards, so two processes could both decide "old ids", and
-/// the second one would rename the *fresh* store the first had already put
-/// in place. `ganja-cli`'s `two_processes_racing_the_quarantine…` catches
-/// it with two real processes, roughly one run in six; this catches it
-/// every time, by holding the lock and playing the winner underneath a
-/// store that is already past the point of no return.
-///
-/// Both halves are asserted, because either alone would pass on a build
-/// with no lock at all: that the waiting store does **not** rename while
-/// the lock is held, and that once it gets in it re-reads the path and
-/// finds nothing to do.
+/// A stale shared probe cannot authorize moving the winner's replacement.
 #[test]
 fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
-    let directory = temporary();
-    let root = directory.path().join("storage");
-    let old = "ses_0193b2f0a1c2000000";
-    {
-        let planted = storage(&directory);
-        planted.save_info(&info(old, 5)).expect("the record writes");
-    }
-    let database = Storage::open(root.clone()).database().to_path_buf();
-
-    // Taken before anybody else can want it, and held across the whole
-    // interleaving below.
-    let held = super::QuarantineLock::take(&database).expect("the lock is available");
-
-    let waiting = Storage::open(root.clone());
-    std::thread::scope(|scope| {
-        let parked = scope.spawn(|| waiting.list_sessions());
-        // Long enough for that store to have read the old id, asked for
-        // the lock, and be waiting on it.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            !names(directory.path()).iter().any(|name| name.contains(".preuuid-")),
-            "nothing may be set aside while another process holds the lock"
-        );
-
-        // The winner's move, played by this test: the store renamed aside
-        // and a fresh one created at the name it left.
-        assert!(super::set_aside(&database, "for the test", super::PREUUID));
-        let fresh = minted(1);
-        Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
-        drop(held);
-
-        let listed = parked
-            .join()
-            .expect("the waiting store does not panic")
-            .expect("the waiting store opens rather than failing");
-        assert_eq!(
-            listed.iter().map(|info| info.id.as_str()).collect::<Vec<_>>(),
-            vec![fresh.as_str()],
-            "the store that waited must go on with what the winner left"
-        );
-    });
-
-    let left = names(directory.path());
-    assert_eq!(
-        left.iter()
-            .filter(|name| name.contains(".preuuid-")
-                && !name.ends_with("-wal")
-                && !name.ends_with("-shm"))
-            .count(),
-        1,
-        "the store that waited must not set the winner's fresh store aside too, got {left:?}"
-    );
+    a_waiting_maintainer_leaves_the_replacement_alone(false);
 }
 
-/// The corrupt-store quarantine waits for the lock, and then asks again.
-///
-/// The drill above through the other door. `Inner::start` used to decide
-/// damage on its own connection and rename on the path with no lock at all, so
-/// two processes meeting one damaged file could each set the other's fresh
-/// replacement aside — the same shape the pre-UUIDv7 quarantine was fixed for,
-/// and the last unlocked renamer in the crate.
-///
-/// Both halves are asserted, because either alone would pass on a build with
-/// no lock at all: that the waiting store does **not** rename while the lock is
-/// held, and that once it gets in it re-reads the path, finds the winner's
-/// sound store there, and leaves it alone.
 #[test]
 fn a_corrupt_store_waits_for_the_lock_and_leaves_the_replacement_alone() {
+    a_waiting_maintainer_leaves_the_replacement_alone(true);
+}
+
+fn a_waiting_maintainer_leaves_the_replacement_alone(corrupt: bool) {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
     let directory = temporary();
     let root = directory.path().join("storage");
-    {
-        let planted = storage(&directory);
-        planted.save_info(&info("ses_lost", 5)).expect("the record writes");
-    }
     let database = Storage::open(root.clone()).database().to_path_buf();
-
-    // The log goes first and then the header, for the reason
-    // `an_unreadable_database_is_set_aside…` gives: a log beside a damaged
-    // database is not damage, because SQLite recovers the file out of it.
-    for suffix in ["-wal", "-shm"] {
-        let _ = fs::remove_file(directory.path().join(format!("{DATABASE}{suffix}")));
+    if corrupt {
+        fs::write(&database, b"corrupt old main").expect("damaged fixture");
+    } else {
+        let planted = Storage::open(root.clone());
+        planted.save_info(&info("ses_old", 5)).expect("old fixture");
     }
-    let mut bytes = fs::read(&database).expect("the database reads");
-    bytes[..16].copy_from_slice(b"not a database!!");
-    fs::write(&database, &bytes).expect("the database is damaged");
-
-    // Taken before anybody else can want it, and held across the whole
-    // interleaving below.
-    let held = super::QuarantineLock::take(&database).expect("the lock is available");
-
-    let waiting = Storage::open(root.clone());
-    std::thread::scope(|scope| {
-        let parked = scope.spawn(|| waiting.list_sessions());
-        // Long enough for that store to have met the damage, asked for the
-        // lock, and be waiting on it.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            !names(directory.path()).iter().any(|name| name.contains(".corrupt-")),
-            "nothing may be set aside while another process holds the lock"
-        );
-
-        // The winner's move, played by this test: the damaged store renamed
-        // aside and a fresh one created at the name it left.
-        assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
-        let fresh = minted(1);
-        Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
-        drop(held);
-
-        let listed = parked
-            .join()
-            .expect("the waiting store does not panic")
-            .expect("the waiting store opens rather than failing");
-        assert_eq!(
-            listed.iter().map(|info| info.id.as_str()).collect::<Vec<_>>(),
-            vec![fresh.as_str()],
-            "the store that waited must go on with what the winner left"
-        );
-    });
-
-    let left = names(directory.path());
+    let (arrived, wanted) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let mut waiting = Storage::open(root.clone());
+    Arc::get_mut(&mut waiting.inner).expect("private observer").observation =
+        super::Observation(Some(Arc::new(move |phase| {
+            if phase == super::Phase::ExclusiveWanted {
+                arrived.send(()).expect("stale probe arrived");
+                released
+                    .lock()
+                    .expect("ack lock")
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("winner releases waiting maintainer");
+            }
+        })));
+    let parked = std::thread::spawn(move || waiting.list_sessions());
+    wanted
+        .recv_timeout(Duration::from_secs(15))
+        .expect("waiter released its shared lease before asking EX");
+    assert!(
+        !names(directory.path())
+            .iter()
+            .any(|name| name.contains(".preuuid-") || name.contains(".corrupt-"))
+    );
+    let fresh = minted(1);
+    let winner = Storage::open(root);
+    winner.save_info(&info(&fresh, 1)).expect("winner initializes the replacement");
+    drop(winner);
+    release.send(()).expect("waiting maintainer may recheck");
+    let listed = parked.join().expect("waiter joins").expect("waiter rechecks current generation");
+    assert_eq!(listed, vec![info(&fresh, 1)]);
+    let prefix = if corrupt { ".corrupt-" } else { ".preuuid-" };
     assert_eq!(
-        left.iter()
-            .filter(|name| name.contains(".corrupt-")
+        names(directory.path())
+            .iter()
+            .filter(|name| name.contains(prefix)
                 && !name.ends_with("-wal")
                 && !name.ends_with("-shm"))
             .count(),
         1,
-        "the store that waited must not set the winner's fresh store aside too, got {left:?}"
+        "the stale waiter cannot move the replacement"
     );
 }
 

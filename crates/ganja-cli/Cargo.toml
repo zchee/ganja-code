@@ -118,6 +118,11 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# `tests/id_collision.rs` queries a disposable complete archive copy read-only.
+# Opening it through Storage would set its old ids aside again instead of
+# testing the retained logical content. Dev-only: the shipped SQLite boundary
+# remains ganja-storage's; the raw connection is only the test oracle.
+rusqlite.workspace = true
 # The logger canary emits events under third-party client target names.
 tracing.workspace = true
 # The worker's git peer is a real TLS server, with a generated test-only trust root.
