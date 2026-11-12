@@ -24,6 +24,10 @@ jobs:
       - name: install the repository toolchain
         run: rustup toolchain install nightly --profile minimal && rustup default nightly
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: install measurement utilities
+        run: sudo apt-get update && sudo apt-get install -y ripgrep iproute2
       - name: build the unchanged worker initialization test
         run: bash scripts/handoff-reset-trace/build.sh
       - name: measure without tracing
