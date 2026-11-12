@@ -1,0 +1,27 @@
+tracepoint:syscalls:sys_enter_write
+/@workers[pid] && args->fd == 1/
+{
+  @stdout_bytes[tid] = args->count;
+  printf("STDOUT_ENTER mono_ns=%llu pid=%d tid=%d comm=%s count=%llu\n", nsecs, pid, tid, comm, args->count);
+}
+
+tracepoint:syscalls:sys_exit_write
+/@stdout_bytes[tid]/
+{
+  printf("STDOUT_DONE mono_ns=%llu pid=%d tid=%d comm=%s count=%llu result=%lld\n", nsecs, pid, tid, comm, @stdout_bytes[tid], args->ret);
+  delete(@stdout_bytes[tid]);
+}
+
+tracepoint:syscalls:sys_enter_writev
+/@workers[pid] && args->fd == 1/
+{
+  @stdout_vectors[tid] = args->vlen;
+  printf("STDOUTV_ENTER mono_ns=%llu pid=%d tid=%d comm=%s vectors=%llu\n", nsecs, pid, tid, comm, args->vlen);
+}
+
+tracepoint:syscalls:sys_exit_writev
+/@stdout_vectors[tid]/
+{
+  printf("STDOUTV_DONE mono_ns=%llu pid=%d tid=%d comm=%s vectors=%llu result=%lld\n", nsecs, pid, tid, comm, @stdout_vectors[tid], args->ret);
+  delete(@stdout_vectors[tid]);
+}

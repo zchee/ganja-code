@@ -7,7 +7,7 @@ mkdir -p target/handoff-reset-results/observers || true
 results="$PWD/target/handoff-reset-results"
 # shellcheck source=scripts/handoff-reset-trace/disk.sh
 source scripts/handoff-reset-trace/disk.sh
-for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env ps sleep df du stat cat awk xargs sort cmp diff /home/linuxbrew/.linuxbrew/bin/brew; do
+for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env ps sleep df du stat cat awk xargs sort cmp diff id sync getconf truncate cp /home/linuxbrew/.linuxbrew/bin/brew; do
   command -v "$tool" >/dev/null || note "Prerequisite missing: $tool; diagnostics will not block measurement."
 done
 printf '%s\n' "$(date +%s)" > "$results/job-start-epoch.txt" || note 'Job epoch record failed.'
@@ -22,9 +22,11 @@ for tool in nstat ip ss fdfind; do
 done
 sudo apt-get install -y tcpdump bpftrace > "$results/observers/install.txt" 2>&1 || note 'Optional observer installation failed.'
 filter='ip and tcp and (tcp[tcpflags] & (tcp-syn|tcp-rst|tcp-fin) != 0)'
-if command -v tcpdump >/dev/null; then
+capture_user="$(id -un 2>/dev/null)"
+printf '%s\n' "$capture_user" > "$results/observers/capture-user.txt" || note 'Capture writer identity record unavailable.'
+if command -v tcpdump >/dev/null && [[ -n "$capture_user" ]]; then
   status=0
-  sudo -n timeout --signal=INT 3s tcpdump -i lo -nn -s 54 -c 1 -w "$results/observers/preflight.pcap" "$filter" > "$results/observers/capture-preflight.txt" 2>&1 || status=$?
+  sudo -n timeout --signal=INT 3s tcpdump -Z "$capture_user" -i lo -nn -s 54 -U -C 8 -W 4 -c 1 -w "$results/observers/preflight.pcap" "$filter" > "$results/observers/capture-preflight.txt" 2>&1 || status=$?
   if (( status == 0 || status == 124 )) && grep -q 'listening on lo' "$results/observers/capture-preflight.txt"; then
     diag 'Capture enabled marker' touch "$results/observers/capture.enabled"
   else
@@ -33,7 +35,7 @@ if command -v tcpdump >/dev/null; then
 else
   note 'Packet observer command missing.'
 fi
-for event in tcp/tcp_send_reset tcp/tcp_receive_reset sock/inet_sock_set_state; do
+for event in tcp/tcp_send_reset tcp/tcp_receive_reset sock/inet_sock_set_state syscalls/sys_enter_write syscalls/sys_exit_write syscalls/sys_enter_writev syscalls/sys_exit_writev; do
   name="${event//\//-}"
   sudo -n cat "/sys/kernel/tracing/events/$event/format" > "$results/observers/$name-format.txt" 2>&1 || note "Tracepoint format unavailable: $event."
 done
@@ -51,6 +53,9 @@ if command -v bpftrace >/dev/null; then
   fi
   if grep -q 'field:.*sport;' "$results/observers/tcp-tcp_receive_reset-format.txt" && grep -q 'field:.*oldstate;' "$results/observers/sock-inet_sock_set_state-format.txt"; then
     printf '%s\n' "$(< scripts/handoff-reset-trace/states.bt)" >> "$program" || note 'State probe snippet unavailable.'
+  fi
+  if (( full == 1 )) && grep -q 'field:.*count;' "$results/observers/syscalls-sys_enter_write-format.txt" && grep -q 'field:.*ret;' "$results/observers/syscalls-sys_exit_write-format.txt" && grep -q 'field:.*vlen;' "$results/observers/syscalls-sys_enter_writev-format.txt" && grep -q 'field:.*ret;' "$results/observers/syscalls-sys_exit_writev-format.txt"; then
+    printf '%s\n' "$(< scripts/handoff-reset-trace/stdout.bt)" >> "$program" || note 'Stdout timing probe unavailable.'
   fi
   if grep -q 'tracepoint:\|kprobe:\|kretprobe:' "$program"; then
     status=0

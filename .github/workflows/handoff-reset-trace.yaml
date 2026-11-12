@@ -11,7 +11,7 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-26.04
-    timeout-minutes: 50
+    timeout-minutes: 44
     defaults:
       run:
         shell: bash
@@ -59,12 +59,7 @@ jobs:
           for tool in bun tmux cargo-nextest rust-analyzer; do
             command -v "$tool" || note "Suite command unavailable: $tool"
           done
-      - name: build only the unchanged CI workspace
-        run: bash scripts/handoff-reset-trace/build.sh
-        env:
-          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
-          GANJA_LSP_EDIT_BUDGET_MS: "6000"
-      - name: measure worker-test neighbourhood then the exact CI suite
+      - name: run fresh CI then cold-cache CI rounds
         run: bash scripts/handoff-reset-trace/loaded.sh
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22

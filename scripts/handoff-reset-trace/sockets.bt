@@ -40,8 +40,8 @@ kprobe:tcp_close,kprobe:tcp_send_active_reset,kprobe:inet_csk_listen_stop
   if ($sk->__sk_common.skc_family == 2) {
     $tp = (struct tcp_sock *)arg0;
     printf("SOCKET mono_ns=%llu probe=%s pid=%d tid=%d comm=%s sk=%p local=%s:%d peer=%s:%d state=%d rcv_nxt=%u copied_seq=%u queue=%u\n", nsecs, probe, pid, tid, comm, $sk, ntop($sk->__sk_common.skc_rcv_saddr), $sk->__sk_common.skc_num, ntop($sk->__sk_common.skc_daddr), bswap($sk->__sk_common.skc_dport), $sk->__sk_common.skc_state, $tp->rcv_nxt, $tp->copied_seq, $sk->sk_receive_queue.qlen);
-    if (probe == "kprobe:tcp_send_active_reset") {
-      printf("%s\n", kstack(12));
+    if (probe == "kprobe:tcp_send_active_reset" || probe == "kprobe:tcp_close") {
+      printf("%s\n", kstack(20));
     }
   }
 }
