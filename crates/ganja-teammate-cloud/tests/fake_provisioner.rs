@@ -191,6 +191,182 @@ async fn a_late_dispatch_cannot_recreate_a_retired_identity_or_wake_its_replacem
     assert_eq!(provisioner.current(&replacement), WorkerState::Suspended);
 }
 
+#[derive(Debug)]
+struct InitHealthProxy {
+    provisioner: Arc<FakeProvisioner>,
+    address: std::net::SocketAddr,
+    target: Arc<std::sync::Mutex<Option<std::net::SocketAddr>>>,
+}
+
+#[async_trait::async_trait]
+impl Provisioner for InitHealthProxy {
+    async fn spawn(
+        &self,
+        spec: &WorkerSpec,
+    ) -> Result<
+        ganja_teammate_cloud::provisioner::Worker,
+        ganja_teammate_cloud::provisioner::ProvisionError,
+    > {
+        let mut worker = self.provisioner.spawn(spec).await?;
+        let target = url::Url::parse(&worker.endpoint.base_url).expect("fake router URL");
+        *self.target.lock().expect("proxy target") = Some(std::net::SocketAddr::new(
+            target.host_str().expect("fake router host").parse().expect("loopback IP"),
+            target.port().expect("fake router port"),
+        ));
+        worker.endpoint.base_url = format!("http://{}", self.address);
+        Ok(worker)
+    }
+
+    async fn resume(
+        &self,
+        worker: &ganja_teammate_cloud::provisioner::Worker,
+    ) -> Result<
+        ganja_teammate_cloud::provisioner::Resumed,
+        ganja_teammate_cloud::provisioner::ProvisionError,
+    > {
+        self.provisioner.resume(worker).await
+    }
+
+    async fn suspend(
+        &self,
+        worker: &ganja_teammate_cloud::provisioner::Worker,
+    ) -> Result<
+        ganja_teammate_cloud::provisioner::SuspendOutcome,
+        ganja_teammate_cloud::provisioner::ProvisionError,
+    > {
+        self.provisioner.suspend(worker).await
+    }
+
+    async fn state(
+        &self,
+        worker: &ganja_teammate_cloud::provisioner::Worker,
+    ) -> Result<WorkerState, ganja_teammate_cloud::provisioner::ProvisionError> {
+        self.provisioner.state(worker).await
+    }
+
+    async fn kill(
+        &self,
+        worker: &ganja_teammate_cloud::provisioner::Worker,
+    ) -> Result<(), ganja_teammate_cloud::provisioner::ProvisionError> {
+        self.provisioner.kill(worker).await
+    }
+
+    fn describe(&self, worker: &ganja_teammate_cloud::provisioner::Worker) -> String {
+        self.provisioner.describe(worker)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LaunchHealthFault {
+    InitRefusal,
+    ConnectionFailure,
+}
+
+struct InitHealthWire {
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+    health_requests: Arc<std::sync::atomic::AtomicUsize>,
+    dropped_health_requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl InitHealthWire {
+    async fn new(
+        provisioner: Arc<FakeProvisioner>,
+        fault: LaunchHealthFault,
+    ) -> (Arc<InitHealthProxy>, Self) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
+        let address = listener.local_addr().expect("proxy address");
+        let target = Arc::new(std::sync::Mutex::new(None));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let health_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped_health_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let target = Arc::clone(&target);
+            let cancel = cancel.clone();
+            let health_requests = Arc::clone(&health_requests);
+            let dropped_health_requests = Arc::clone(&dropped_health_requests);
+            async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        Some(result) = connections.join_next() => result.expect("proxy connection"),
+                        accepted = listener.accept() => {
+                            let (socket, _) = accepted.expect("proxy accept");
+                            let target = *target.lock().expect("proxy target");
+                            let health_requests = Arc::clone(&health_requests);
+                            let dropped_health_requests = Arc::clone(&dropped_health_requests);
+                            connections.spawn(async move {
+                                let mut reader = tokio::io::BufReader::new(socket);
+                                let mut head = String::new();
+                                let received = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                                    loop {
+                                        let mut line = String::new();
+                                        if reader.read_line(&mut line).await.expect("request head") == 0 {
+                                            return false;
+                                        }
+                                        assert!(head.len() + line.len() <= 16_384, "bounded fixture head");
+                                        if line == "\r\n" { break; }
+                                        if !line.to_ascii_lowercase().starts_with("connection:") {
+                                            head.push_str(&line);
+                                        }
+                                    }
+                                    true
+                                }).await.expect("proxy receives request head");
+                                if !received { return; }
+                                if head.starts_with("GET /global/health ") {
+                                    let attempt = health_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    if matches!(fault, LaunchHealthFault::ConnectionFailure) && attempt == 0 {
+                                        dropped_health_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        return;
+                                    }
+                                    let reply = match (fault, attempt) {
+                                        (LaunchHealthFault::InitRefusal, 0) => Some("HTTP/1.1 404 Not Found\r\nganja-serve-epoch: 01900000-0000-7000-8000-000000000001\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                                        (LaunchHealthFault::InitRefusal, 1) => Some("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                                        _ => None,
+                                    };
+                                    if let Some(reply) = reply {
+                                        reader.get_mut().write_all(reply.as_bytes()).await.expect("health refusal");
+                                        return;
+                                    }
+                                }
+                                // One request per connection keeps the scripted health boundary observable;
+                                // Tokio supplies streaming forwarding, including the event response.
+                                head.push_str("Connection: close\r\n\r\n");
+                                let mut upstream = tokio::net::TcpStream::connect(target.expect("spawn set target")).await.expect("fake router connection");
+                                upstream.write_all(head.as_bytes()).await.expect("forward head");
+                                upstream.write_all(reader.buffer()).await.expect("forward buffered body");
+                                let mut socket = reader.into_inner();
+                                let _closed = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                            });
+                        }
+                    }
+                }
+                connections.abort_all();
+                while let Some(result) = connections.join_next().await {
+                    if let Err(error) = result {
+                        assert!(error.is_cancelled(), "proxy task: {error}");
+                    }
+                }
+            }
+        });
+        (
+            Arc::new(InitHealthProxy { provisioner, address, target }),
+            Self { cancel, task, health_requests, dropped_health_requests },
+        )
+    }
+
+    async fn close(self) {
+        self.cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(3), self.task)
+            .await
+            .expect("proxy joins")
+            .expect("proxy task");
+    }
+}
+
 struct Hosted {
     home: tempfile::TempDir,
     storage: ganja_core::Storage,
@@ -202,6 +378,7 @@ struct Hosted {
     door: ganja_core::Teammates,
     provisioner: Arc<FakeProvisioner>,
     server: ganja_testkit::provisioner::FakeServer,
+    init_health_wire: Option<InitHealthWire>,
 }
 
 impl Hosted {
@@ -210,6 +387,13 @@ impl Hosted {
     }
 
     async fn with_deadline(launch: std::time::Duration) -> Self {
+        Self::configured(launch, None).await
+    }
+
+    async fn configured(
+        launch: std::time::Duration,
+        health_fault: Option<LaunchHealthFault>,
+    ) -> Self {
         Self::delivery_log();
         let home = tempfile::tempdir().expect("fixture home");
         let storage = ganja_core::Storage::open(home.path().join("storage"));
@@ -235,6 +419,13 @@ impl Hosted {
                 .await
                 .expect("two phase fake");
         let provisioner = Arc::new(provisioner);
+        let (backend_provisioner, init_health_wire): (Arc<dyn Provisioner>, _) =
+            if let Some(fault) = health_fault {
+                let (proxy, wire) = InitHealthWire::new(Arc::clone(&provisioner), fault).await;
+                (proxy, Some(wire))
+            } else {
+                (provisioner.clone(), None)
+            };
         let root = ganja_team::TeamsRoot::new(home.path().join("teams"));
         let team = ganja_team::TeamName::parse("cloud-test").expect("team");
         let name = format!("worker-{}", ganja_protocol::SessionId::ascending().as_str());
@@ -256,7 +447,7 @@ impl Hosted {
                     branch_prefix: "workers".to_owned(),
                 },
             },
-            provisioner.clone(),
+            backend_provisioner,
             Some(SecretString::from("test-password")),
             ganja_teammate_cloud::state::Deadlines {
                 launch,
@@ -271,7 +462,19 @@ impl Hosted {
             Arc::clone(&registry),
             ganja_core::Backends::new().with(Arc::new(cloud)),
         );
-        Self { home, storage, session, root, team, name, registry, door, provisioner, server }
+        Self {
+            home,
+            storage,
+            session,
+            root,
+            team,
+            name,
+            registry,
+            door,
+            provisioner,
+            server,
+            init_health_wire,
+        }
     }
 
     async fn start(&self) {
@@ -411,11 +614,97 @@ impl Hosted {
             .count()
     }
 
+    async fn assert_launch_health_recovers(self, expected_probes: usize, expected_drops: usize) {
+        let started = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            self.door.start(
+                ganja_testkit::spawn_with_prompt(&self.name, Some("cloud"), "first request"),
+                &ganja_testkit::caller(self.home.path()),
+                &ganja_testkit::AllowSpawn,
+            ),
+        )
+        .await;
+        let suspended = if matches!(started, Ok(Ok(_))) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(worker) = self.provisioner.worker(&self.name)
+                        && self.provisioner.current(&worker) == WorkerState::Suspended
+                        && self.idle_count() == 1
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        } else {
+            false
+        };
+        let diagnostics = self.boundary_diagnostics();
+        let suspends = self.suspends();
+        let probes = self.init_health_wire.as_ref().map_or_else(
+            || {
+                self.server
+                    .requests()
+                    .iter()
+                    .filter(|request| request.path == "/global/health")
+                    .count()
+            },
+            |wire| wire.health_requests.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        let drops = self.init_health_wire.as_ref().map_or(0, |wire| {
+            wire.dropped_health_requests.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        let inbox = self.registry.lead_inbox();
+        let _home = self.close().await;
+        let mail = ganja_team::mailbox::read(&inbox).expect("joined member mail");
+        assert_eq!(drops, expected_drops, "scripted health connection drops; {diagnostics}");
+        assert!(matches!(started, Ok(Ok(_))), "launch completes: {started:?}; {diagnostics}");
+        assert!(suspended, "first suspend follows the launch health retry; {diagnostics}");
+        assert_eq!(suspends, 1, "exactly one first suspension; {diagnostics}");
+        assert!(probes >= expected_probes, "health retries observed: {probes}; {diagnostics}");
+        assert!(!diagnostics.contains("uncertain; automatic suspend"), "{diagnostics}");
+        assert!(
+            !mail.valid.iter().any(|message| message.text.contains("earlier request")),
+            "startup probes must not report uncertainty: {mail:?}"
+        );
+    }
+
     async fn close(self) -> tempfile::TempDir {
         self.registry.shutdown().await;
-        self.server.close().await.expect("all fake servers stop");
+        let server_closed = self.server.close().await;
+        if let Some(wire) = self.init_health_wire {
+            wire.close().await;
+        }
+        server_closed.expect("all fake servers stop");
         self.home
     }
+}
+
+#[tokio::test]
+async fn a_launch_health_gap_does_not_disable_the_first_suspend() {
+    let hosted = Hosted::new().await;
+    hosted.server.reply_next("/global/health", 502);
+    hosted.assert_launch_health_recovers(2, 0).await;
+}
+
+#[tokio::test]
+async fn a_launch_health_connection_failure_does_not_disable_the_first_suspend() {
+    let hosted = Hosted::configured(
+        std::time::Duration::from_secs(5),
+        Some(LaunchHealthFault::ConnectionFailure),
+    )
+    .await;
+    hosted.assert_launch_health_recovers(2, 1).await;
+}
+
+#[tokio::test]
+async fn an_init_health_refusal_does_not_end_the_launch_probe_exception() {
+    let hosted =
+        Hosted::configured(std::time::Duration::from_secs(5), Some(LaunchHealthFault::InitRefusal))
+            .await;
+    hosted.assert_launch_health_recovers(3, 0).await;
 }
 
 #[tokio::test]
