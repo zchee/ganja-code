@@ -451,15 +451,27 @@ async fn the_child_scan_distinguishes_unrelated_inherited_descriptor_kinds() {
             .stderr(std::fs::File::create(home.path().join("stderr")).expect("matrix stderr"))
             .kill_on_drop(true);
         listener::inherit(&mut command, &descriptor);
-        // SAFETY: only async-signal-safe flag queries/updates run after fork.
-        // Other descriptors, including spawn's error pipe, remain usable until exec;
-        // only the selected descriptor survives it alongside stdio.
+        // Enumerate before fork so a full scan cannot keep another test's
+        // temporary listener alive in a child until exec.
+        let mut descriptors = Vec::new();
+        for candidate in 3..limit {
+            if candidate == number {
+                continue;
+            }
+            // SAFETY: F_GETFD is a read-only query and creates no descriptor owner.
+            if unsafe { libc::fcntl(candidate, libc::F_GETFD) } != -1 {
+                descriptors.push(candidate);
+            } else {
+                let error = std::io::Error::last_os_error();
+                assert_eq!(error.raw_os_error(), Some(libc::EBADF), "descriptor snapshot: {error}");
+            }
+        }
+        // SAFETY: the preallocated snapshot needs no allocation in the child;
+        // only async-signal-safe flag queries/updates run after fork. Std's
+        // later-created exec-error pipe is untouched and remains usable.
         unsafe {
             command.pre_exec(move || {
-                for candidate in 3..limit {
-                    if candidate == number {
-                        continue;
-                    }
+                for &candidate in &descriptors {
                     let flags = libc::fcntl(candidate, libc::F_GETFD);
                     if flags == -1 {
                         let error = std::io::Error::last_os_error();

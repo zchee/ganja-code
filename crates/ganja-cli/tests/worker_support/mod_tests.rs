@@ -5,6 +5,34 @@ use tokio::time::Instant;
 
 use super::spawn_written_executable;
 
+async fn wait_for_control_child(
+    child: &mut tokio::process::Child,
+    deadline: Instant,
+) -> Result<std::process::ExitStatus, Error> {
+    let result = tokio::time::timeout_at(deadline, child.wait())
+        .await
+        .map_err(|error| Error::new(ErrorKind::TimedOut, error))
+        .and_then(|status| status);
+    if result.is_err() {
+        // Tokio's kill also waits for reaping before returning.
+        child.kill().await?;
+    }
+    result
+}
+
+#[tokio::test]
+async fn a_control_child_is_killed_and_reaped_when_its_wait_deadline_expires() {
+    let mut child = tokio::process::Command::new("/bin/sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("stalled control child");
+    let error =
+        wait_for_control_child(&mut child, Instant::now()).await.expect_err("expired control wait");
+    assert_eq!(error.kind(), ErrorKind::TimedOut);
+    assert!(child.try_wait().expect("reaped child status").is_some());
+}
+
 #[test]
 fn a_written_executable_spawn_retries_only_busy_errors() {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -53,8 +81,8 @@ fn an_expired_spawn_deadline_returns_the_busy_error_without_retrying() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn a_written_executable_spawns_after_another_thread_releases_its_writer() {
+#[tokio::test]
+async fn a_written_executable_spawns_after_another_thread_releases_its_writer() {
     let home = tempfile::tempdir().expect("private executable directory");
     let binary = home.path().join("true");
     std::fs::copy("/bin/true", &binary).expect("private executable copy");
@@ -66,7 +94,9 @@ fn a_written_executable_spawns_after_another_thread_releases_its_writer() {
     });
     let mut release = Some(release);
     let mut first_kind = None;
-    let mut command = std::process::Command::new(&binary);
+    let mut command = tokio::process::Command::new(&binary);
+    command.kill_on_drop(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let result = spawn_written_executable(
         || {
             let result = command.spawn();
@@ -76,28 +106,32 @@ fn a_written_executable_spawns_after_another_thread_releases_its_writer() {
             }
             result
         },
-        Instant::now() + Duration::from_secs(5),
+        deadline,
     );
-    let status = result.and_then(|mut child| child.wait());
+    let status = match result {
+        Ok(mut child) => wait_for_control_child(&mut child, deadline).await,
+        Err(error) => Err(error),
+    };
     writer.join().expect("writer release thread joined");
     assert_eq!(first_kind, Some(ErrorKind::ExecutableFileBusy));
     assert!(status.expect("spawn succeeds after the writer closes").success());
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn a_written_executable_keeps_its_busy_error_while_the_writer_stays_open() {
+#[tokio::test]
+async fn a_written_executable_keeps_its_busy_error_while_the_writer_stays_open() {
     let home = tempfile::tempdir().expect("private executable directory");
     let binary = home.path().join("true");
     std::fs::copy("/bin/true", &binary).expect("private executable copy");
     let writer = std::fs::OpenOptions::new().write(true).open(&binary).expect("held writer");
-    let mut command = std::process::Command::new(&binary);
-    let result =
-        spawn_written_executable(|| command.spawn(), Instant::now() + Duration::from_millis(20));
+    let mut command = tokio::process::Command::new(&binary);
+    command.kill_on_drop(true);
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let result = spawn_written_executable(|| command.spawn(), deadline);
     drop(writer);
     let error = match result {
         Ok(mut child) => {
-            let status = child.wait();
+            let status = wait_for_control_child(&mut child, deadline).await;
             panic!("a held writer must prevent execution: {status:?}");
         }
         Err(error) => error,
