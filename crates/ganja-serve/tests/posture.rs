@@ -38,13 +38,33 @@ async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
     );
 }
 
+async fn stop_prebound(server: ganja_serve::Handle) -> std::io::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut shutdown = tokio::spawn(server.shutdown());
+    match tokio::time::timeout_at(deadline, &mut shutdown).await {
+        Ok(joined) => joined.map_err(std::io::Error::other)?,
+        Err(error) => {
+            shutdown.abort();
+            let _ = tokio::time::timeout_at(deadline + std::time::Duration::from_secs(5), shutdown)
+                .await
+                .map_err(std::io::Error::other)?;
+            Err(std::io::Error::other(error))
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_prebound_non_loopback_listener_requires_credentials_despite_a_loopback_config() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("network listener");
-    let result = ganja_serve::serve_on_tcp(engine(), loopback_config(), listener).await;
-    assert!(
-        matches!(result, Err(ServeError::UnsecuredNonLoopback { ref hostname }) if hostname == "0.0.0.0")
-    );
+    let result = tokio::time::timeout(
+        support::DEADLINE,
+        ganja_serve::serve_on_tcp(engine(), loopback_config(), listener),
+    )
+    .await;
+    let refused = matches!(&result, Ok(Err(ServeError::UnsecuredNonLoopback { hostname })) if hostname == "0.0.0.0");
+    let cleanup = if let Ok(Ok(server)) = result { stop_prebound(server).await } else { Ok(()) };
+    cleanup.expect("prebound fixture stopped before asserting refusal");
+    assert!(refused, "actual non-loopback address must require credentials");
 }
 
 #[tokio::test]
@@ -52,61 +72,77 @@ async fn a_prebound_tcp_listener_refuses_a_socket_classified_config() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("TCP listener");
     let mut config = loopback_config();
     config.listen = Listen::Unix { path: std::env::temp_dir().join("not-a-tcp-transport.sock") };
-    let result = ganja_serve::serve_on_tcp(engine(), config, listener).await;
-    assert!(
-        matches!(result, Err(ServeError::ExpectedTcp)),
-        "TCP cannot use the credential-free socket routes: {result:?}"
-    );
+    let result = tokio::time::timeout(
+        support::DEADLINE,
+        ganja_serve::serve_on_tcp(engine(), config, listener),
+    )
+    .await;
+    let refused = matches!(&result, Ok(Err(ServeError::ExpectedTcp)));
+    let cleanup = if let Ok(Ok(server)) = result { stop_prebound(server).await } else { Ok(()) };
+    cleanup.expect("prebound fixture stopped before asserting refusal");
+    assert!(refused, "TCP cannot use the credential-free socket routes");
 }
 
 #[tokio::test]
 async fn a_prebound_listener_preserves_basic_epoch_directory_readiness_and_route_posture() {
     let deadline = tokio::time::Instant::now() + support::DEADLINE;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("TCP listener");
-    let mut config = loopback_config();
-    config.credentials = Some(credentials());
-    let epoch = config.journal.epoch().to_owned();
-    let server =
-        ganja_serve::serve_on_tcp(engine(), config, listener).await.expect("prebound serve");
-    let base = base_url(&server);
-    let result: Result<(), reqwest::Error> = tokio::time::timeout_at(deadline, async {
-        let client = reqwest::Client::new();
-        for (path, password, directory, status) in [
-            ("/global/health", None, None, 401),
-            ("/global/health", Some("wrong"), None, 401),
-            ("/global/health", Some("hunter2"), None, 200),
-            ("/global/health", Some("hunter2"), Some("/another-directory"), 400),
-            ("/readyz", None, None, 200),
-            ("/bootstrap", Some("hunter2"), None, 404),
-        ] {
-            let mut request = client.get(format!("{base}{path}"));
-            if let Some(password) = password {
-                request = request.basic_auth("ganja", Some(password));
+    let mut server = None;
+    let result: Result<Result<(), Box<dyn std::error::Error + Send + Sync>>, _> =
+        tokio::time::timeout_at(deadline, async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let mut config = loopback_config();
+            config.credentials = Some(credentials());
+            let epoch = config.journal.epoch().to_owned();
+            server = Some(ganja_serve::serve_on_tcp(engine(), config, listener).await?);
+            let base = base_url(server.as_ref().expect("prebound server exists"));
+            let client = reqwest::Client::builder().timeout(support::DEADLINE).build()?;
+            for (path, password, directory, status) in [
+                ("/global/health", None, None, 401),
+                ("/global/health", Some("wrong"), None, 401),
+                ("/global/health", Some("hunter2"), None, 200),
+                ("/global/health", Some("hunter2"), Some("/another-directory"), 400),
+                ("/readyz", None, None, 200),
+                ("/bootstrap", Some("hunter2"), None, 404),
+            ] {
+                let mut request = client.get(format!("{base}{path}"));
+                if let Some(password) = password {
+                    request = request.basic_auth("ganja", Some(password));
+                }
+                if let Some(directory) = directory {
+                    request = request.header(ganja_serve::DIRECTORY_HEADER, directory);
+                }
+                let response = request.send().await?;
+                if response.status() != status {
+                    return Err(format!(
+                        "{path} answered {}, expected {status}",
+                        response.status()
+                    )
+                    .into());
+                }
+                if response
+                    .headers()
+                    .get(ganja_serve::EPOCH_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    != Some(epoch.as_str())
+                {
+                    return Err(format!("journal epoch missing or changed on {path}").into());
+                }
+                if status == 401
+                    && response
+                        .headers()
+                        .get("www-authenticate")
+                        .and_then(|value| value.to_str().ok())
+                        != Some("Basic realm=\"Secure Area\"")
+                {
+                    return Err("Basic challenge missing or changed".into());
+                }
             }
-            if let Some(directory) = directory {
-                request = request.header(ganja_serve::DIRECTORY_HEADER, directory);
-            }
-            let response = request.send().await?;
-            assert_eq!(response.status(), status, "{path}");
-            assert_eq!(
-                response.headers()[ganja_serve::EPOCH_HEADER],
-                epoch,
-                "journal epoch on {path}"
-            );
-            if status == 401 {
-                assert_eq!(
-                    response.headers()["www-authenticate"],
-                    "Basic realm=\"Secure Area\"",
-                    "Basic challenge"
-                );
-            }
-        }
-        Ok(())
-    })
-    .await
-    .expect("bounded route checks");
-    server.shutdown().await.expect("stop prebound serve");
-    result.expect("prebound TCP preserves engine posture");
+            Ok(())
+        })
+        .await;
+    let cleanup = if let Some(server) = server { stop_prebound(server).await } else { Ok(()) };
+    cleanup.expect("stop prebound serve within cleanup reserve");
+    result.expect("bounded route checks").expect("prebound TCP preserves engine posture");
 }
 
 #[tokio::test]

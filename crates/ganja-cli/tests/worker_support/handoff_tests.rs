@@ -163,6 +163,21 @@ async fn an_inherited_connected_stream_exits_with_an_ordinary_error() {
 }
 
 #[tokio::test]
+async fn an_inherited_listening_unix_stream_exits_with_an_ordinary_error() {
+    let home = tempfile::tempdir().expect("Unix listener directory");
+    let socket = std::os::unix::net::UnixListener::bind(home.path().join("listener.sock"))
+        .expect("listening Unix stream");
+    refused_start(
+        socket.as_raw_fd(),
+        true,
+        (Ipv4Addr::LOCALHOST, 4096).into(),
+        "not an IPv4 or IPv6 socket",
+    )
+    .await;
+    socket.local_addr().expect("parent still owns its Unix listener");
+}
+
+#[tokio::test]
 async fn an_inherited_address_mismatch_exits_with_an_ordinary_error() {
     let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
     let port = socket.local_addr().expect("address").port();

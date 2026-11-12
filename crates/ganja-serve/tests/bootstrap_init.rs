@@ -287,96 +287,129 @@ async fn concurrent_posts_admit_one_clone_and_success_drains_before_handoff() {
     assert_eq!(cloned.branch, "work");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_retained_init_listener_accepts_connections_after_handoff() {
     use std::os::fd::AsFd as _;
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::time::Instant;
 
-    let deadline = tokio::time::Instant::now() + DEADLINE;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind init");
-    let retained = std::net::TcpListener::from(
-        listener.as_fd().try_clone_to_owned().expect("retain the same socket"),
-    );
-    let address = listener.local_addr().expect("bound address");
+    type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    async fn finish<T>(mut task: tokio::task::JoinHandle<T>, deadline: Instant) -> TestResult<T> {
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(result) => Ok(result?),
+            Err(error) => {
+                task.abort();
+                let _ = tokio::time::timeout_at(deadline + Duration::from_secs(5), task).await?;
+                Err(error.into())
+            }
+        }
+    }
+
+    let deadline = Instant::now() + DEADLINE;
     let release = Arc::new(Semaphore::new(0));
-    let init = Service::new(
-        credentials(),
-        std::env::current_dir().expect("cwd"),
-        Arc::new(Controlled {
-            calls: Arc::new(AtomicUsize::new(0)),
-            release: release.clone(),
-            fail: false,
-        }),
-    )
-    .serve(listener)
-    .expect("serve init");
-    let base = format!("http://{address}");
-    let client = reqwest::Client::new();
-    let initial = client.get(format!("{base}/readyz")).send().await.expect("init readiness");
-    let init_epoch = initial.headers()[ganja_serve::EPOCH_HEADER].clone();
-    let post =
-        client.post(format!("{base}/bootstrap")).header("authorization", basic()).json(&body());
-    let posting = tokio::spawn(async move { post.send().await });
-    tokio::time::timeout_at(deadline, async {
-        while status(&client, &base).await["status"] != "in_progress" {
+    let mut posting = None;
+    let mut handoff = None;
+    let mut server = None;
+    let exercise: Result<TestResult<()>, _> = tokio::time::timeout_at(deadline, async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let retained = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned()?);
+        let address = listener.local_addr()?;
+        let init = Service::new(
+            credentials(),
+            std::env::current_dir()?,
+            Arc::new(Controlled {
+                calls: Arc::new(AtomicUsize::new(0)),
+                release: release.clone(),
+                fail: false,
+            }),
+        )
+        .serve(listener)?;
+        handoff = Some(tokio::spawn(init.handoff()));
+        let base = format!("http://{address}");
+        let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+        let initial = client.get(format!("{base}/readyz")).send().await?;
+        let init_epoch = initial.headers().get(ganja_serve::EPOCH_HEADER)
+            .ok_or("init epoch missing")?.to_str()?.to_owned();
+        let post = client.post(format!("{base}/bootstrap"))
+            .header("authorization", basic()).json(&body());
+        posting = Some(tokio::spawn(async move { post.send().await }));
+        loop {
+            let status = client.get(format!("{base}/bootstrap"))
+                .header("authorization", basic()).send().await?
+                .json::<serde_json::Value>().await?;
+            if status["status"] == "in_progress" {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    })
-    .await
-    .expect("executor is held");
-    let handoff = tokio::spawn(init.handoff());
-    release.add_permits(1);
-    let response = tokio::time::timeout_at(deadline, posting)
-        .await
-        .expect("bootstrap responds")
-        .expect("post joins")
-        .expect("POST");
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        response.json::<serde_json::Value>().await.expect("complete success body")["status"],
-        "cloned"
-    );
-    tokio::time::timeout_at(deadline, handoff)
-        .await
-        .expect("handoff drains")
-        .expect("handoff joins")
-        .expect("checkout");
+        release.add_permits(1);
+        let response = posting.as_mut().expect("posting task exists").await;
+        posting = None;
+        let response = response??;
+        if response.status() != 200 || response.json::<serde_json::Value>().await?["status"] != "cloned" {
+            return Err("complete bootstrap success response required".into());
+        }
+        let drained = handoff.as_mut().expect("handoff task exists").await;
+        handoff = None;
+        drained??;
 
-    // No engine exists yet: the retained socket alone holds this request.
-    let mut stream = tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(address))
-        .await
-        .expect("connect deadline")
-        .expect("queued connection");
-    let request = format!(
-        "GET /global/health HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nConnection: close\r\n\r\n",
-        basic()
-    );
-    tokio::time::timeout_at(deadline, stream.write_all(request.as_bytes()))
-        .await
-        .expect("write deadline")
-        .expect("queue complete request");
-    retained.set_nonblocking(true).expect("nonblocking retained socket");
-    let listener = tokio::net::TcpListener::from_std(retained).expect("register retained socket");
-    let mut config = support::loopback_config();
-    config.credentials = Some(credentials());
-    let epoch = config.journal.epoch().to_owned();
-    let server = ganja_serve::serve_on_tcp(support::engine(), config, listener)
-        .await
-        .expect("serve the retained socket without rebinding");
-    assert_eq!(server.address().tcp(), Some(address));
-    let mut response = String::new();
-    let read = tokio::time::timeout_at(deadline, stream.read_to_string(&mut response)).await;
-    server.shutdown().await.expect("engine shutdown");
-    read.expect("response deadline").expect("same connection answers");
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(response.contains(&format!("ganja-serve-epoch: {epoch}")), "{response}");
-    assert!(!response.contains(init_epoch.to_str().expect("init epoch")), "new engine epoch");
-    let body = response.split_once("\r\n\r\n").expect("HTTP body").1;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(body).expect("engine health")["healthy"],
-        true
-    );
+        // No engine exists yet: the retained socket alone holds this request.
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        let request = format!(
+            "GET /global/health HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nConnection: close\r\n\r\n",
+            basic()
+        );
+        stream.write_all(request.as_bytes()).await?;
+        retained.set_nonblocking(true)?;
+        let listener = tokio::net::TcpListener::from_std(retained)?;
+        let mut config = support::loopback_config();
+        config.credentials = Some(credentials());
+        let epoch = config.journal.epoch().to_owned();
+        server = Some(ganja_serve::serve_on_tcp(support::engine(), config, listener).await?);
+        if server.as_ref().expect("engine server exists").address().tcp() != Some(address) {
+            return Err("retained listener address changed".into());
+        }
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await?;
+        if !response.starts_with("HTTP/1.1 200")
+            || !response.contains(&format!("ganja-serve-epoch: {epoch}"))
+            || response.contains(&init_epoch)
+        {
+            return Err(format!("queued response must carry engine status and epoch: {response}").into());
+        }
+        let body = response.split_once("\r\n\r\n").ok_or("HTTP body missing")?.1;
+        if serde_json::from_str::<serde_json::Value>(body)?["healthy"] != true {
+            return Err("queued connection must answer healthy".into());
+        }
+        Ok(())
+    }).await;
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    release.add_permits(1);
+    let mut cleanup_errors = Vec::new();
+    if let Some(task) = posting
+        && let Err(error) = finish(task, cleanup_deadline).await
+    {
+        cleanup_errors.push(format!("posting cleanup: {error}"));
+    }
+    if let Some(task) = handoff
+        && let Err(error) = finish(task, cleanup_deadline).await
+    {
+        cleanup_errors.push(format!("handoff cleanup: {error}"));
+    }
+    if let Some(server) = server {
+        let shutdown = finish(tokio::spawn(server.shutdown()), cleanup_deadline).await;
+        if let Err(error) = shutdown.and_then(|result| result.map_err(Into::into)) {
+            cleanup_errors.push(format!("engine shutdown: {error}"));
+        }
+    }
+    assert!(cleanup_errors.is_empty(), "fixture cleanup failed: {cleanup_errors:?}");
+    exercise
+        .expect("absolute scenario deadline")
+        .expect("same queued connection answers engine health");
 }
 
 #[tokio::test]

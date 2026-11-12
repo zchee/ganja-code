@@ -70,6 +70,16 @@ fn a_datagram_socket_is_refused_without_being_closed() {
 }
 
 #[test]
+fn a_listening_unix_stream_is_refused_without_being_closed() {
+    let home = tempfile::tempdir().expect("Unix listener directory");
+    let socket = std::os::unix::net::UnixListener::bind(home.path().join("listener.sock"))
+        .expect("listening Unix stream");
+    let error = take(socket.as_raw_fd(), expected()).expect_err("not an Internet stream");
+    assert!(error.to_string().contains("not an IPv4 or IPv6 socket"), "{error:#}");
+    socket.local_addr().expect("the caller still owns its Unix listener");
+}
+
+#[test]
 fn an_unsupported_socket_query_is_an_ordinary_error() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
     let error = socket_option(listener.as_raw_fd(), libc::c_int::MAX)

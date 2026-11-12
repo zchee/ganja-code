@@ -51,6 +51,9 @@ pub struct ServeArgs {
     #[arg(long, value_name = "HOST", default_value = ganja_serve::DEFAULT_HOSTNAME)]
     hostname: String,
     /// The one listening socket retained by worker init across exec.
+    /// The hostname must be an IP address literal equal to the socket's bound
+    /// address, or localhost (case-insensitive), meaning IPv4 loopback.
+    /// Other names or nonmatching addresses are refused before adoption.
     #[cfg(unix)]
     #[arg(long, hide = true, value_name = "FD", requires = "port", allow_hyphen_values = true)]
     listen_fd: Option<std::os::fd::RawFd>,
