@@ -149,6 +149,8 @@ shlex.workspace = true
 [target.'cfg(unix)'.dependencies]
 # Bootstrap cancellation signals every process in git's isolated group.
 libc.workspace = true
+# Only the retained worker listener crosses exec; preserve other descriptor flags.
+rustix.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 expectrl.workspace = true

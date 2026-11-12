@@ -1486,6 +1486,7 @@ dependencies = [
  "rcgen",
  "regex",
  "reqwest",
+ "rustix",
  "secrecy",
  "serde_json",
  "shlex",

@@ -1,3 +1,5 @@
+pub mod listener;
+
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};

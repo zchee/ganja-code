@@ -37,6 +37,8 @@ mod claude_hooks;
 mod evaluate;
 mod import;
 #[cfg(unix)]
+mod inherited_listener;
+#[cfg(unix)]
 mod lister;
 mod login;
 mod mcp;

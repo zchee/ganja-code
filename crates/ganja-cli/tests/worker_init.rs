@@ -5,6 +5,8 @@
 
 #![cfg(unix)]
 
+#[path = "worker_support/handoff_tests.rs"]
+mod handoff;
 #[path = "../src/worker_git.rs"]
 mod worker_git;
 mod worker_support;
@@ -28,6 +30,289 @@ fn worker_init_defaults_to_port_8080() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("help text");
     assert!(help.contains("[default: 8080]"), "unexpected default: {help}");
+}
+
+// FIFO owners stay read-write and nonblocking on the Linux and macOS hosts
+// this suite supports. No helper thread can remain blocked in open or read.
+struct HandoffBarrier {
+    arrival: tokio::io::unix::AsyncFd<std::fs::File>,
+    release: std::fs::File,
+    group: Option<i32>,
+    home: tempfile::TempDir,
+}
+
+impl HandoffBarrier {
+    fn new() -> Self {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let home = tempfile::tempdir().expect("barrier home");
+        let open = |name| {
+            let path = home.path().join(name);
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("FIFO path");
+            // SAFETY: this NUL-terminated path is under the fixture's private
+            // directory; mkfifo creates no child process that could outlive it.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "create test-owned FIFO");
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(path)
+                .expect("nonblocking FIFO owner")
+        };
+        // SAFETY: AsyncFd owns this nonblocking FIFO file until deregistration;
+        // the fixture never closes or replaces its descriptor through another handle.
+        let arrival = unsafe { tokio::io::unix::AsyncFd::register(open("arrival")) }
+            .expect("arrival readiness");
+        let release = open("release");
+        let command = format!(
+            "printf '%s\\n' \"$$\" > {:?}; read -r token < {:?}",
+            home.path().join("arrival"),
+            home.path().join("release"),
+        );
+        // The hook cannot time out during a successful scenario (30 seconds).
+        std::fs::write(
+            home.path().join("ganja.toml"),
+            format!(
+                "model = \"fake/handoff\"\n[[hooks.SessionStart]]\nhooks = [{{ type = \"command\", command = {command:?}, timeout = 120 }}]\n"
+            ),
+        )
+        .expect("trusted barrier hook");
+        Self { arrival, release, group: None, home }
+    }
+
+    async fn arrived(&mut self, deadline: Instant) -> std::io::Result<()> {
+        use std::io::Read as _;
+
+        let mut token = Vec::new();
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let mut bytes = [0; 32];
+                let size = self
+                    .arrival
+                    .async_io(tokio::io::Interest::READABLE, |file| (&*file).read(&mut bytes))
+                    .await?;
+                token.extend_from_slice(&bytes[..size]);
+                if token.ends_with(b"\n") {
+                    let group = std::str::from_utf8(&token)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<i32>().ok())
+                        .filter(|group| *group > 1)
+                        .ok_or_else(|| std::io::Error::other("invalid hook group token"))?;
+                    self.group = Some(group);
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    fn release(&mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.release.write_all(b"release\n")
+    }
+
+    async fn cleanup(&mut self, worker: &mut tokio::process::Child) -> std::io::Result<()> {
+        // Release before killing the parent: its hook has its own process group.
+        self.release()?;
+        let hook_deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = hook_deadline + Duration::from_secs(5);
+        let hook_cleanup = if let Some(group) = self.group {
+            // SAFETY: this group was reported by the test-owned hook, whose
+            // isolated process group is created by the hook runner.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            tokio::time::timeout_at(hook_deadline, async {
+                loop {
+                    // SAFETY: signal zero only queries the test-owned group.
+                    if unsafe { libc::kill(-group, 0) } == -1 {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(std::io::Error::other)
+        } else {
+            Ok(())
+        };
+        // Keep the parent alive long enough to reap its killed hook first.
+        worker.start_kill()?;
+        tokio::time::timeout_at(deadline, worker.wait()).await.map_err(std::io::Error::other)??;
+        hook_cleanup
+    }
+}
+
+fn handoff_worker(
+    server: &GitServer,
+    barrier: &HandoffBarrier,
+    invalid_startup: bool,
+    binary: Option<&std::path::Path>,
+    environment: &[(&str, &std::ffi::OsStr)],
+) -> (tokio::process::Child, tempfile::TempDir) {
+    let home = tempfile::tempdir().expect("worker home");
+    let work = home.path().join("work");
+    std::fs::create_dir(&work).expect("checkout directory");
+    let mut command = tokio::process::Command::new(
+        binary.unwrap_or(std::path::Path::new(assert_cmd::cargo::cargo_bin!("ganja"))),
+    );
+    command
+        .args(["worker", "init", "--port", "0"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").expect("PATH"))
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .env("GANJA_CONFIG_HOME", barrier.home.path())
+        .env("GANJA_PROVIDER", "fake")
+        .env("GANJA_DISABLE_MODELS_FETCH", "1")
+        .env("GANJA_SERVER_PASSWORD", "synthetic-worker-password")
+        .env("GIT_CONFIG_GLOBAL", &server.gitconfig)
+        .env("GIT_SSL_CAINFO", &server.ca)
+        .current_dir(work)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::fs::File::create(home.path().join("stderr")).expect("stderr"))
+        .kill_on_drop(true);
+    command.envs(environment.iter().copied());
+    if invalid_startup {
+        command.env("GIT_CONFIG_GLOBAL", "/missing-synthetic-gitconfig");
+    }
+    (command.spawn().expect("worker init"), home)
+}
+
+async fn bootstrap_worker(
+    worker: &mut tokio::process::Child,
+    server: &GitServer,
+    deadline: Instant,
+    address_file: Option<&std::path::Path>,
+) -> anyhow::Result<(u16, String)> {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut lines = BufReader::new(worker.stdout.as_mut().expect("worker stdout")).lines();
+    let line = tokio::time::timeout_at(deadline, lines.next_line())
+        .await??
+        .ok_or_else(|| anyhow::anyhow!("worker exited before announcement"))?;
+    let address: std::net::SocketAddr = line
+        .strip_prefix("ganja server listening on http://")
+        .ok_or_else(|| anyhow::anyhow!("unexpected announcement"))?
+        .parse()?;
+    let base = format!("http://127.0.0.1:{}", address.port());
+    if let Some(path) = address_file {
+        std::fs::write(path, address.to_string())?;
+    }
+    let client = reqwest::Client::new();
+    let init =
+        tokio::time::timeout_at(deadline, client.get(format!("{base}/readyz")).send()).await??;
+    let epoch = init
+        .headers()
+        .get(ganja_serve::EPOCH_HEADER)
+        .ok_or_else(|| anyhow::anyhow!("init response omitted its epoch"))?
+        .to_str()?
+        .to_owned();
+    let body = serde_json::json!({
+        "repository": server.url, "reference": "main", "branch": "workers/handoff",
+        "author": {"name": "fixture", "email": "fixture@example.invalid"}, "deadline_secs": 15
+    });
+    let response = tokio::time::timeout_at(
+        deadline,
+        client
+            .post(format!("{base}/bootstrap"))
+            .basic_auth("ganja", Some("synthetic-worker-password"))
+            .json(&body)
+            .send(),
+    )
+    .await??;
+    anyhow::ensure!(response.status() == 200, "bootstrap status {}", response.status());
+    tokio::time::timeout_at(deadline, response.bytes()).await??;
+    Ok((address.port(), epoch))
+}
+
+async fn bootstrap_held_worker(
+    worker: &mut tokio::process::Child,
+    barrier: &mut HandoffBarrier,
+    server: &GitServer,
+    deadline: Instant,
+) -> anyhow::Result<(u16, String)> {
+    let initialized = bootstrap_worker(worker, server, deadline, None).await?;
+    barrier.arrived(deadline).await?;
+    Ok(initialized)
+}
+
+#[tokio::test]
+async fn a_connection_queued_during_worker_handoff_is_answered_by_serve() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let server = GitServer::start(false).await;
+    let mut barrier = HandoffBarrier::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut worker, _home) = handoff_worker(&server, &barrier, false, None, &[]);
+    let result: anyhow::Result<()> = async {
+        let (port, init_epoch) = bootstrap_held_worker(&mut worker, &mut barrier, &server, deadline).await?;
+        let mut queued = Vec::new();
+        for (path, password, status) in [
+            ("/global/health", "synthetic-worker-password", "200"),
+            ("/global/health", "wrong-password", "401"),
+            ("/readyz", "", "200"),
+        ] {
+            // Exactly one fresh connect while the hook is held: never retry.
+            let mut stream = tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(("127.0.0.1", port))).await?
+                .map_err(|error| anyhow::anyhow!("single connect while the hook is held: {error}"))?;
+            let built = reqwest::Client::new().get("http://localhost/")
+                .basic_auth("ganja", Some(password)).build()?;
+            let auth = built.headers()["authorization"].to_str()?;
+            let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n");
+            tokio::time::timeout_at(deadline, stream.write_all(request.as_bytes())).await??;
+            queued.push((stream, status, path));
+        }
+        barrier.release()?;
+        for (mut stream, status, path) in queued {
+            let mut response = String::new();
+            tokio::time::timeout_at(deadline, stream.read_to_string(&mut response)).await??;
+            anyhow::ensure!(response.starts_with(&format!("HTTP/1.1 {status}")), "unexpected queued status: {response}");
+            let epoch = response.lines().find_map(|line| line.strip_prefix("ganja-serve-epoch: "))
+                .ok_or_else(|| anyhow::anyhow!("missing serve epoch"))?;
+            anyhow::ensure!(ganja_protocol::is_uuidv7(epoch) && epoch != init_epoch, "response must carry serve's new epoch");
+            if path == "/global/health" && status == "200" {
+                let body = response.split_once("\r\n\r\n")
+                    .ok_or_else(|| anyhow::anyhow!("missing complete HTTP headers"))?.1;
+                let health: ganja_client::Health = serde_json::from_str(body)?;
+                anyhow::ensure!(health.healthy && !health.version.is_empty(), "complete healthy engine response");
+            }
+        }
+        anyhow::ensure!(Instant::now() < deadline, "scenario deadline expired");
+        Ok(())
+    }.await;
+    let cleanup = barrier.cleanup(&mut worker).await;
+    server.close().await;
+    cleanup.expect("barrier released, hook gone and worker reaped within cleanup reserve");
+    result.expect("queued requests survive the init-to-serve handoff");
+}
+
+#[tokio::test]
+async fn barrier_cleanup_reaps_a_worker_that_fails_before_the_hook_arrives() {
+    let server = GitServer::start(false).await;
+    let mut barrier = HandoffBarrier::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut worker, _home) = handoff_worker(&server, &barrier, true, None, &[]);
+    let status = tokio::time::timeout_at(deadline, worker.wait()).await;
+    let cleanup = barrier.cleanup(&mut worker).await;
+    server.close().await;
+    cleanup.expect("bounded cleanup before hook arrival");
+    assert!(!status.expect("startup ends").expect("reaped").success());
+    assert!(barrier.group.is_none(), "no hook was started");
+}
+
+#[tokio::test]
+async fn barrier_cleanup_reaps_a_worker_and_hook_after_arrival() {
+    let server = GitServer::start(false).await;
+    let mut barrier = HandoffBarrier::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut worker, _home) = handoff_worker(&server, &barrier, false, None, &[]);
+    let arrived = bootstrap_held_worker(&mut worker, &mut barrier, &server, deadline).await;
+    let cleanup = barrier.cleanup(&mut worker).await;
+    server.close().await;
+    cleanup.expect("bounded cleanup after hook arrival");
+    arrived.expect("hook was held when the failure was injected");
+    assert!(worker.try_wait().expect("child state").is_some(), "worker reaped");
 }
 
 #[tokio::test]
