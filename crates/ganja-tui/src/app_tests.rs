@@ -28,7 +28,7 @@ use super::{
     App, BACKTRACK_HINT, Chooser, Cleared, DEADLINE_NOTICE, Dropdown, ESC_CHORD, EVICTION_NOTICE,
     FRAME, Help, JoinHandle, ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS,
     NOBODY_TO_STOP, Palette, PendingDialog, Permission, RevertScope, Rewind, SLOW_TASK_READ,
-    TASK_READ_DEADLINE, WireListing, permission_reply,
+    TASK_READ_DEADLINE, WireListing, permission_reply, settle_terminal,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -396,40 +396,199 @@ fn typing(text: &str) -> impl Iterator<Item = AppEvent> + use<'_> {
     text.chars().map(|character| key(KeyCode::Char(character), KeyModifiers::NONE))
 }
 
-/// **D516.** The repaired stream drives the same editor a direct key
-/// would: a split Left arrow lands as cursor movement, never as `[D`
-/// text, and the phantom Esc never reaches the key handler at all.
-#[tokio::test]
-async fn a_split_arrow_repaired_by_the_machine_edits_the_composer() {
+fn terminal_script(
+    events: Vec<(u64, TermEvent)>,
+) -> BoxStream<'static, std::io::Result<TermEvent>> {
+    let base = tokio::time::Instant::now();
+    futures::stream::iter(events)
+        .then(move |(at, event)| async move {
+            tokio::time::sleep_until(base + Duration::from_millis(at)).await;
+            Ok(event)
+        })
+        .chain(futures::stream::pending())
+        .boxed()
+}
+
+fn terminal_key(code: KeyCode) -> TermEvent {
+    let modifiers = match code {
+        KeyCode::Char(c) if c.is_ascii_uppercase() => KeyModifiers::SHIFT,
+        _ => KeyModifiers::NONE,
+    };
+    TermEvent::Key(KeyEvent::new(code, modifiers))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timely_split_arrow_edits_the_composer_before_other_loop_work() {
     let mut app = app();
     for event in typing("ab") {
         app.handle(event).await.expect("typing is handled");
     }
-
+    let mut stream = terminal_script(vec![
+        (0, terminal_key(KeyCode::Esc)),
+        (5, terminal_key(KeyCode::Char('['))),
+        (6, terminal_key(KeyCode::Char('D'))),
+    ]);
     let mut machine = EscRepair::active();
-    let base = std::time::Instant::now();
-    let split = [
-        (KeyCode::Esc, KeyModifiers::NONE),
-        (KeyCode::Char('['), KeyModifiers::NONE),
-        // crossterm marks uppercase ASCII with SHIFT, so the final does.
-        (KeyCode::Char('D'), KeyModifiers::SHIFT),
-    ];
-    let mut repaired = Vec::new();
-    for (at, (code, modifiers)) in split.into_iter().enumerate() {
-        repaired.extend(machine.accept(
-            TermEvent::Key(KeyEvent::new(code, modifiers)),
-            base + std::time::Duration::from_millis(at as u64),
-        ));
-    }
+    let base = tokio::time::Instant::now();
+    let mut other_work_ran = false;
+    let repaired = tokio::select! {
+        biased;
+        incoming = stream.next() => {
+            let first = incoming.expect("the stream is open").expect("the first key reads");
+            settle_terminal(first, &mut stream, &mut machine).await.expect("the split settles")
+        }
+        () = async { other_work_ran = true; } => panic!("terminal input was ready first"),
+    };
+    assert_eq!(repaired, vec![terminal_key(KeyCode::Left)]);
+    assert!(!other_work_ran, "other UI work must not run between split fragments");
+    assert_eq!(tokio::time::Instant::now() - base, Duration::from_millis(6));
 
+    tokio::time::advance(Duration::from_millis(100)).await;
     for event in repaired {
         app.handle(AppEvent::Term(event)).await.expect("the repaired key is handled");
     }
     for event in typing("X") {
         app.handle(event).await.expect("typing is handled");
     }
-
     assert_eq!(app.editor.text(), "aXb");
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_escapes_return_control_within_the_wait_cap_without_losing_keys() {
+    let mut stream = terminal_script(
+        [0, 15, 30, 45, 60, 75].into_iter().map(|at| (at, terminal_key(KeyCode::Esc))).collect(),
+    );
+    let mut machine = EscRepair::active();
+    let base = tokio::time::Instant::now();
+    let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+    let mut delivered = settle_terminal(first, &mut stream, &mut machine)
+        .await
+        .expect("the repeated keys return control");
+    assert_eq!(tokio::time::Instant::now() - base, Duration::from_millis(50));
+    assert_eq!(delivered, vec![terminal_key(KeyCode::Esc); 3]);
+    assert_eq!(machine.deadline(), Some((base + Duration::from_millis(70)).into_std()));
+
+    let next = stream.next().await.expect("the stream is open").expect("the next Esc reads");
+    delivered.extend(
+        settle_terminal(next, &mut stream, &mut machine).await.expect("the remaining keys settle"),
+    );
+    assert_eq!(delivered, vec![terminal_key(KeyCode::Esc); 6]);
+    assert_eq!(machine.deadline(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_real_escape_before_a_split_arrow_is_delivered_before_the_arrow() {
+    let mut stream = terminal_script(vec![
+        (0, terminal_key(KeyCode::Esc)),
+        (10, terminal_key(KeyCode::Esc)),
+        (14, terminal_key(KeyCode::Char('['))),
+        (16, terminal_key(KeyCode::Char('D'))),
+    ]);
+    let mut machine = EscRepair::active();
+    let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+    assert_eq!(
+        settle_terminal(first, &mut stream, &mut machine).await.expect("the split settles"),
+        vec![terminal_key(KeyCode::Esc), terminal_key(KeyCode::Left)]
+    );
+    assert_eq!(machine.deadline(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_continuation_after_the_holdoff_stays_literal_and_survives_a_cancelled_read() {
+    let mut stream = terminal_script(vec![
+        (0, terminal_key(KeyCode::Esc)),
+        (26, terminal_key(KeyCode::Char('['))),
+        (27, terminal_key(KeyCode::Char('D'))),
+    ]);
+    let mut machine = EscRepair::active();
+    let base = tokio::time::Instant::now();
+    let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+    assert_eq!(
+        settle_terminal(first, &mut stream, &mut machine).await.expect("Esc expires"),
+        vec![terminal_key(KeyCode::Esc)]
+    );
+    assert_eq!(tokio::time::Instant::now() - base, Duration::from_millis(25));
+    for code in [KeyCode::Char('['), KeyCode::Char('D')] {
+        let event =
+            stream.next().await.expect("the cancelled read lost nothing").expect("key reads");
+        assert_eq!(
+            settle_terminal(event, &mut stream, &mut machine).await.expect("literal key settles"),
+            vec![terminal_key(code)]
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lone_escape_is_delivered_once_its_holdoff_passes() {
+    let mut stream = terminal_script(vec![(0, terminal_key(KeyCode::Esc))]);
+    let mut machine = EscRepair::active();
+    let base = tokio::time::Instant::now();
+    let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+    assert_eq!(
+        settle_terminal(first, &mut stream, &mut machine).await.expect("Esc expires"),
+        vec![terminal_key(KeyCode::Esc)]
+    );
+    assert_eq!(tokio::time::Instant::now() - base, Duration::from_millis(25));
+    assert_eq!(machine.deadline(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unrelated_key_releases_escape_before_that_key() {
+    let mut stream = terminal_script(vec![
+        (0, terminal_key(KeyCode::Esc)),
+        (5, terminal_key(KeyCode::Char('x'))),
+    ]);
+    let mut machine = EscRepair::active();
+    let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+    assert_eq!(
+        settle_terminal(first, &mut stream, &mut machine).await.expect("the keys settle"),
+        vec![terminal_key(KeyCode::Esc), terminal_key(KeyCode::Char('x'))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_key_events_keep_their_place_after_a_held_escape() {
+    for event in [
+        TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }),
+        TermEvent::Paste("pasted text".to_owned()),
+        TermEvent::Resize(80, 24),
+        TermEvent::FocusGained,
+        TermEvent::FocusLost,
+    ] {
+        let mut stream = terminal_script(vec![(0, terminal_key(KeyCode::Esc)), (5, event.clone())]);
+        let mut machine = EscRepair::active();
+        let first = stream.next().await.expect("the stream is open").expect("Esc reads");
+        assert_eq!(
+            settle_terminal(first, &mut stream, &mut machine).await.expect("the events settle"),
+            vec![terminal_key(KeyCode::Esc), event]
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn passthrough_input_is_unchanged_without_waiting_for_more() {
+    let mut stream = terminal_script(vec![
+        (0, terminal_key(KeyCode::Esc)),
+        (5, terminal_key(KeyCode::Char('['))),
+        (6, terminal_key(KeyCode::Char('D'))),
+    ]);
+    let mut machine = EscRepair::passthrough();
+    for code in [KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('D')] {
+        let event = stream.next().await.expect("the stream is open").expect("key reads");
+        let before = tokio::time::Instant::now();
+        assert_eq!(
+            settle_terminal(event, &mut stream, &mut machine)
+                .await
+                .expect("the event passes through"),
+            vec![terminal_key(code)]
+        );
+        assert_eq!(tokio::time::Instant::now(), before);
+    }
 }
 
 /// The prompt reaches the transcript through the engine, not through the

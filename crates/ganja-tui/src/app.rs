@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context as _, Result};
 use etcetera::BaseStrategy as _;
 use etcetera::base_strategy::Xdg;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::{FutureExt as _, Stream, StreamExt as _};
 use ganja_core::{
     Engine,
     EngineError,
@@ -86,7 +86,7 @@ use crate::component::skill_menu::SkillMenu;
 use crate::component::status::{Activity, Status, Todos, Totals, budget_left};
 use crate::component::themes::ThemeList;
 use crate::component::{context, effort, held, mcp, plugin, team, usage};
-use crate::escrepair::EscRepair;
+use crate::escrepair::{EscRepair, SEQ_DEADLINE};
 use crate::event::AppEvent;
 use crate::history::{self, History};
 use crate::keybind::{self, Keybinds};
@@ -95,6 +95,37 @@ use crate::{
     NOTICE_SEPARATOR, binder, clipboard, command, external, graphics, lister, member, mention,
     notify, transcript,
 };
+
+/// Reads a possible split without drawing, engine events or handlers between
+/// its fragments, for at most the whole-sequence allowance per wait. A hold
+/// left by repeated Escs returns to the general loop's deadline handling.
+async fn settle_terminal<S>(
+    first: TermEvent,
+    events: &mut S,
+    repair: &mut EscRepair,
+) -> Result<Vec<TermEvent>>
+where
+    S: Stream<Item = std::io::Result<TermEvent>> + Unpin,
+{
+    let started = tokio::time::Instant::now();
+    let wait_deadline = started + SEQ_DEADLINE;
+    let mut ready = repair.accept(first, started.into_std());
+    while tokio::time::Instant::now() < wait_deadline {
+        let Some(deadline) = repair.deadline() else {
+            break;
+        };
+        let wake = tokio::time::Instant::from_std(deadline).min(wait_deadline);
+        match tokio::time::timeout_at(wake, events.next()).await {
+            Ok(Some(event)) => {
+                let event = event.context("failed to read a terminal event")?;
+                ready.extend(repair.accept(event, tokio::time::Instant::now().into_std()));
+            }
+            Ok(None) => break,
+            Err(_) => ready.extend(repair.expire(tokio::time::Instant::now().into_std())),
+        }
+    }
+    Ok(ready)
+}
 
 /// Shortest gap between frames: roughly 60 FPS.
 pub const FRAME: Duration = Duration::from_millis(16);
@@ -1890,8 +1921,8 @@ impl App {
                 incoming = term_events.next() => match incoming {
                     Some(incoming) => {
                         let event = incoming.context("failed to read a terminal event")?;
-                        self.escrepair
-                            .accept(event, Instant::now())
+                        settle_terminal(event, &mut term_events, &mut self.escrepair)
+                            .await?
                             .into_iter()
                             .map(AppEvent::Term)
                             .collect()
@@ -1906,8 +1937,7 @@ impl App {
                 () = tokio::time::sleep(self.until_next_wakeup()), if self.wants_wakeup() => {
                     vec![AppEvent::Tick]
                 }
-                // A held Esc's deadline passed with nothing behind it: what
-                // was held was a real key press, released here (**D516**).
+                // Repeated Escs may leave a hold after the bounded inline wait.
                 () = tokio::time::sleep_until(repair_wake.unwrap_or_else(tokio::time::Instant::now)), if repair_wake.is_some() => {
                     self.escrepair
                         .expire(Instant::now())
