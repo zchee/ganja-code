@@ -422,7 +422,10 @@ impl CloudMember {
         result.map_err(|_| "the worker did not provide the expected response")
     }
 
-    async fn launch_inner(&self) -> Result<(), LaunchFailure> {
+    async fn launch_inner<'a>(
+        &'a self,
+        health_wait: &mut Option<crate::health::HealthWait<'a>>,
+    ) -> Result<(), LaunchFailure> {
         let client = self.client().map_err(LaunchFailure::Refused)?;
         self.set_phase(Phase::Resuming);
         self.runtime
@@ -457,18 +460,31 @@ impl CloudMember {
             }
         }
         *self.launch_timeout.lock().expect("launch phase lock") = LaunchFailure::HealthTimedOut;
-        let health = timeout(self.runtime.deadlines.health, async {
-            loop {
-                // Engine readiness probes precede normal request accounting;
-                // a delayed startup probe can still wake a suspended worker.
-                if let Ok(health) = client.health().await {
-                    return health;
+        let health = {
+            let tally = health_wait.insert(crate::health::HealthWait::new(self.spec.name.as_str()));
+            let result = timeout(self.runtime.deadlines.health, async {
+                loop {
+                    // Engine readiness probes precede normal request accounting;
+                    // a delayed startup probe can still wake a suspended worker.
+                    tally.begin();
+                    match client.health().await {
+                        Ok(health) => {
+                            tally.ready();
+                            return health;
+                        }
+                        Err(error) => tally.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+            .await;
+            if result.is_err() {
+                tally.deadline();
             }
-        })
-        .await
-        .map_err(|_| LaunchFailure::HealthTimedOut)?;
+            // The health outcome is final before session setup can be interrupted.
+            drop(health_wait.take());
+            result.map_err(|_| LaunchFailure::HealthTimedOut)?
+        };
         self.set_phase(Phase::Idle);
         *self.launch_timeout.lock().expect("launch phase lock") = LaunchFailure::SessionTimedOut;
         let sessions = self.rest(client.sessions()).await.map_err(LaunchFailure::Refused)?;
@@ -1288,11 +1304,19 @@ impl Spawned for CloudMember {
             () = self.lent.cancel.cancelled() => return Err(self.unsupported("launch cancelled")),
             transition = self.transition.lock() => transition,
         };
+        // This owner survives both timed futures. Only their selected timeout
+        // results may mark a deadline; every other dropped wait is cancellation.
+        let mut health_wait = None;
         let result = tokio::select! {
             () = self.lent.cancel.cancelled() => Err(LaunchFailure::Refused("launch cancelled")),
-            result = timeout(self.runtime.deadlines.launch, self.launch_inner()) => match result {
+            result = timeout(self.runtime.deadlines.launch, self.launch_inner(&mut health_wait)) => match result {
                 Ok(result) => result,
-                Err(_) => Err(self.launch_timeout.lock().expect("launch phase lock").clone()),
+                Err(_) => {
+                    if let Some(tally) = health_wait.as_mut() {
+                        tally.deadline();
+                    }
+                    Err(self.launch_timeout.lock().expect("launch phase lock").clone())
+                }
             },
         };
         result.map_err(|error| self.unsupported(error.to_string()))
