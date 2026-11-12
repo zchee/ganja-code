@@ -223,7 +223,10 @@ impl Pending {
         }
         fs::rename(&temporary, &path)
             .map_err(|source| StorageError::Io { path: path.clone(), source })?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|source| StorageError::Io { path: parent.to_path_buf(), source })?;

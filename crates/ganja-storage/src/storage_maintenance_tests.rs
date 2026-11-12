@@ -32,8 +32,13 @@ impl Worker {
     }
 
     fn configured(root: &Path, id: &str, budget: Duration) -> Self {
+        Self::in_directory(root, id, budget, Path::new("."))
+    }
+
+    fn in_directory(root: &Path, id: &str, budget: Duration, directory: &Path) -> Self {
         let mut child = Command::new(std::env::current_exe().expect("unit-test executable"))
             .args(["--exact", "storage::maintenance_tests::maintenance_worker", "--nocapture"])
+            .current_dir(directory)
             .env("GANJA_STORAGE_TEST_WORKER", root)
             .env("GANJA_STORAGE_TEST_ID", id)
             .env("GANJA_STORAGE_TEST_BUDGET_MS", budget.as_millis().to_string())
@@ -127,6 +132,73 @@ fn maintenance_worker() {
     assert_ne!(std::io::stdin().read_line(&mut release).expect("save acknowledgement"), 0);
     drop(storage);
     println!("STORAGE_PHASE Done");
+}
+
+#[test]
+fn a_relative_root_completes_old_id_maintenance_on_the_first_open() {
+    relative_root_completes_maintenance(false);
+}
+
+#[test]
+fn a_relative_root_completes_corrupt_maintenance_on_the_first_open() {
+    relative_root_completes_maintenance(true);
+}
+
+fn relative_root_completes_maintenance(corrupt: bool) {
+    let directory = TempDir::new().expect("relative root fixture");
+    let database = directory.path().join(DATABASE);
+    let old_data = if corrupt {
+        fs::write(&database, b"retained corrupt content").expect("corrupt fixture");
+        None
+    } else {
+        let seed = Storage::open(directory.path().join("storage"));
+        seed.save_info(&info(OLD, 1)).expect("old session seeds");
+        drop(seed);
+        let connection = Connection::open(&database).expect("seed reads");
+        Some(
+            connection
+                .query_row("SELECT data FROM session", [], |row| row.get::<_, String>(0))
+                .expect("old content reads"),
+        )
+    };
+    let mut worker = Worker::in_directory(
+        Path::new("storage"),
+        FRESH,
+        Duration::from_secs(10),
+        directory.path(),
+    );
+    worker.finish();
+    let prefix = format!("{DATABASE}.{}-", if corrupt { "corrupt" } else { "preuuid" });
+    let archives: Vec<_> = fs::read_dir(directory.path())
+        .expect("archives read")
+        .map(|entry| entry.expect("archive entry").path())
+        .filter(|path| {
+            let name = path.file_name().expect("archive name").to_string_lossy();
+            name.starts_with(&prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")
+        })
+        .collect();
+    assert_eq!(archives.len(), 1, "first open publishes exactly one archive");
+    let query = TempDir::new().expect("disposable archive copy");
+    let copy = query.path().join("query.db");
+    copy_set(&archives[0], &copy);
+    if let Some(expected) = old_data {
+        let connection = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("old archive opens normally");
+        let actual: (String, String) = connection
+            .query_row("SELECT id, data FROM session", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("old content reads from archive copy");
+        assert_eq!(actual, (OLD.to_owned(), expected));
+    } else {
+        assert_eq!(
+            fs::read(&copy).expect("corrupt archive copy reads"),
+            b"retained corrupt content"
+        );
+    }
+    assert!(
+        !with_suffix(&database, ".quarantine.pending").exists(),
+        "first open completes maintenance"
+    );
+    assert_eq!(old_rows(&database), vec![FRESH], "first open persists its new session");
 }
 
 #[cfg(unix)]
