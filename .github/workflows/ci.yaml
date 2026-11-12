@@ -46,6 +46,14 @@ jobs:
       run:
         shell: bash
 
+    env:
+      # Full debug info leaves ubuntu's test job about 2 GB free. On Linux,
+      # ganja-cli's 36 test executables shrank from 13.23 to 3.62 GB and its
+      # target directory from 16.46 to 5.60 GB with line tables, which retain
+      # backtrace source lines. Test inherits dev, so this also shrinks the
+      # ganja binary the tests copy (669 to 276 MB); local builds stay unchanged.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
     steps:
       - uses: actions/checkout@v7
 
@@ -141,6 +149,16 @@ jobs:
         run: cargo test --workspace --doc
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
+
+      - name: disk usage after tests
+        if: always()
+        # Diagnostic only: failing to measure must not fail a green job.
+        continue-on-error: true
+        run: |
+          df -h . "$RUNNER_TEMP"
+          if [ -d target ]; then
+            du -sh target
+          fi
 
   lint:
     name: lint
