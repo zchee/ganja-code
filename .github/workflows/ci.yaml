@@ -152,6 +152,8 @@ jobs:
 
       - name: disk usage after tests
         if: always()
+        # Diagnostic only: failing to measure must not fail a green job.
+        continue-on-error: true
         run: |
           df -h . "$RUNNER_TEMP"
           if [ -d target ]; then
