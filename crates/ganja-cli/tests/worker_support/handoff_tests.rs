@@ -102,13 +102,13 @@ fn probe_command(spec: serde_json::Value) -> String {
     )
 }
 
-fn record_probe_command(mut spec: serde_json::Value) -> String {
+fn record_probe_command(mut spec: serde_json::Value, git: &str) -> String {
     let output = spec["output"].as_str().expect("probe output").to_owned();
     spec["output_environment"] = serde_json::json!("GANJA_TEST_LISTENER_PROBE_OUTPUT");
     let probe = probe_command(spec);
     let output = shlex::try_quote(&output).expect("quote output");
     format!(
-        "probe_file={output}.probe.$$\nif GANJA_TEST_LISTENER_PROBE_OUTPUT=\"$probe_file\" {probe} >/dev/null 2>&1; then\n  IFS= read -r result < \"$probe_file\" || result='probe-failed status=0'\nelse\n  status=$?; result=\"probe-failed status=$status\"\nfi\nrm -f \"$probe_file\"\nprintf '%s\\n' \"$result\" >> {output}",
+        "probe_file={output}.probe.$$\nif GANJA_TEST_LISTENER_PROBE_OUTPUT=\"$probe_file\" {probe} >/dev/null 2>&1; then\n  IFS= read -r result < \"$probe_file\" || result='probe-failed status=0'\nelse\n  status=$?; result=\"probe-failed status=$status\"\nfi\nrm -f \"$probe_file\"\nrecord_status=0\nprintf '%s\\n' \"$result\" >> {output} || record_status=$?\n{git}\ngit_status=$?\nif [ \"$record_status\" -ne 0 ]; then\n  printf '%s\\n' 'probe record could not be written' >&2\n  exit 125\nfi\nexit \"$git_status\"",
     )
 }
 
@@ -116,11 +116,14 @@ fn record_probe_command(mut spec: serde_json::Value) -> String {
 async fn a_probe_failure_is_recorded_without_stopping_git() {
     let home = tempfile::tempdir().expect("failed probe home");
     let output = home.path().join("probe-result");
-    let probe = record_probe_command(serde_json::json!({
-        "address_file": home.path().join("missing-address"), "output": output,
-    }));
+    let probe = record_probe_command(
+        serde_json::json!({
+            "address_file": home.path().join("missing-address"), "output": output,
+        }),
+        "git --version",
+    );
     let mut child = tokio::process::Command::new("sh")
-        .args(["-c", &format!("{probe}\nexec git --version")])
+        .args(["-c", &probe])
         .stdout(std::fs::File::create(home.path().join("stdout")).expect("git stdout"))
         .stderr(std::fs::File::create(home.path().join("stderr")).expect("git stderr"))
         .kill_on_drop(true)
@@ -139,6 +142,73 @@ async fn a_probe_failure_is_recorded_without_stopping_git() {
             .expect("git output")
             .starts_with("git version ")
     );
+}
+
+#[tokio::test]
+async fn a_failed_probe_record_rejects_the_scenario_after_running_git() {
+    let home = tempfile::tempdir().expect("record failure home");
+    let output = home.path().join("probe-result");
+    let probe = record_probe_command(
+        serde_json::json!({"address": "127.0.0.1:0", "output": output}),
+        "git --version",
+    );
+    for blocked in [false, true] {
+        if blocked {
+            std::fs::rename(&output, home.path().join("earlier-record"))
+                .expect("preserve earlier absent record");
+            std::fs::create_dir(&output).expect("refuse the next record append");
+        }
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", &probe])
+            .stdout(std::fs::File::create(home.path().join("stdout")).expect("git stdout"))
+            .stderr(std::fs::File::create(home.path().join("stderr")).expect("git stderr"))
+            .kill_on_drop(true)
+            .spawn()
+            .expect("git wrapper");
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+        let cleanup = reap(&mut child).await;
+        cleanup.expect("git wrapper reaped");
+        let status = status.expect("bounded wrapper").expect("git status");
+        let stderr = std::fs::read_to_string(home.path().join("stderr")).expect("git stderr");
+        assert!(
+            std::fs::read_to_string(home.path().join("stdout"))
+                .expect("git output")
+                .starts_with("git version "),
+            "git must run even when recording fails: {stderr}"
+        );
+        if blocked {
+            assert_eq!(status.code(), Some(125), "a lost probe record must fail: {stderr}");
+            let scenario: anyhow::Result<()> = (|| {
+                anyhow::ensure!(status.success(), "git wrapper failed: {stderr}");
+                Ok(())
+            })();
+            assert!(
+                scenario
+                    .expect_err("record failure rejects the scenario")
+                    .to_string()
+                    .contains("probe record could not be written"),
+                "the scenario retains the record-failure diagnostic"
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("earlier-record"))
+                    .expect("earlier record"),
+                "absent\n"
+            );
+        } else {
+            assert!(status.success(), "normal wrapper: {stderr}");
+            assert_eq!(std::fs::read_to_string(&output).expect("normal record"), "absent\n");
+        }
+    }
+}
+
+#[test]
+fn a_query_error_keeps_non_os_failure_text() {
+    for reason in ["invalid socket option size", "invalid TCP connection-info size"] {
+        let error = listener::query_error("getsockopt", 17, std::io::Error::other(reason));
+        let message = error.to_string();
+        assert!(message.contains("getsockopt fd=17"), "query context: {message}");
+        assert!(message.contains(reason), "non-OS query reason must survive: {message}");
+    }
 }
 
 async fn reap(child: &mut tokio::process::Child) -> std::io::Result<std::process::ExitStatus> {
@@ -430,17 +500,15 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
         .map(|directory| directory.join("git"))
         .find(|candidate| candidate.is_file())
         .expect("real git");
-    let probe =
-        record_probe_command(serde_json::json!({"address_file": address_file, "output": output}));
-    let wrapper = bin.join("git");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\n{probe}\nexec {} \"$@\"\n",
+    let probe = record_probe_command(
+        serde_json::json!({"address_file": address_file, "output": output}),
+        &format!(
+            "{} \"$@\"",
             shlex::try_quote(git.to_str().expect("git path")).expect("quote git")
         ),
-    )
-    .expect("test-owned git wrapper");
+    );
+    let wrapper = bin.join("git");
+    std::fs::write(&wrapper, format!("#!/bin/sh\n{probe}\n")).expect("test-owned git wrapper");
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700))
         .expect("executable wrapper");
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
@@ -448,7 +516,7 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
     let test_process =
         scan_child((Ipv4Addr::LOCALHOST, 0).into(), &home.path().join("test-process-result"), None)
             .await
-            .expect("test-process scan child completed and reaped");
+            .unwrap_or_else(|error| format!("unavailable: {error:#}"));
     let deadline = Instant::now() + Duration::from_secs(30);
     let (mut worker, worker_home) =
         super::handoff_worker(&server, &barrier, false, None, &[("PATH", path.as_os_str())]);
@@ -508,7 +576,11 @@ async fn the_inherited_listener_is_not_passed_to_engine_children() {
         format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then {}\nfi\nexec {} \"$@\"\n",
             record_probe_command(
-                serde_json::json!({"number": number, "address": address, "output": snapshot_probe})
+                serde_json::json!({"number": number, "address": address, "output": snapshot_probe}),
+                &format!(
+                    "{} \"$@\"",
+                    shlex::try_quote(git.to_str().expect("git path")).expect("quote git")
+                ),
             ),
             shlex::try_quote(git.to_str().expect("git path")).expect("quote git")
         ),

@@ -165,16 +165,53 @@ fn assert_handoff(
 ) {
     let status = worker.try_wait();
     let stderr = std::fs::read_to_string(home.join("stderr"))
-        .map(|text| text.replace("synthetic-worker-password", "[redacted]"));
+        .map(|text| worker_support::redact_worker_text(&text));
     let stderr = match &stderr {
         Ok(text) => text.chars().rev().take(4096).collect::<String>().chars().rev().collect(),
         Err(error) => format!("unavailable: {error}"),
     };
     let failure = scenario.as_ref().err().map(|error| format!("{error:#}"));
-    assert!(
-        scenario.is_ok() && cleanup.as_ref().is_ok_and(|outcome| *outcome == expected),
+    let message = worker_support::redact_worker_text(&format!(
         "scenario: {}; cleanup: {cleanup:?}; expected: {expected:?}; worker status: {status:?}; stderr tail: {stderr}",
         failure.as_deref().unwrap_or("ok"),
+    ));
+    assert!(
+        scenario.is_ok() && cleanup.as_ref().is_ok_and(|outcome| *outcome == expected),
+        "{message}",
+    );
+}
+
+#[tokio::test]
+async fn a_handoff_failure_redacts_passwords_already_in_the_scenario() {
+    let home = tempfile::tempdir().expect("diagnostic home");
+    std::fs::write(home.path().join("stderr"), "synthetic-worker-password\n")
+        .expect("diagnostic stderr");
+    let mut worker = tokio::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .kill_on_drop(true)
+        .spawn()
+        .expect("diagnostic child");
+    let status = tokio::time::timeout(Duration::from_secs(5), worker.wait()).await;
+    let kill = worker.start_kill();
+    let reaped = tokio::time::timeout(Duration::from_secs(5), worker.wait()).await;
+    kill.expect("diagnostic child killed or already exited");
+    reaped.expect("bounded diagnostic reap").expect("diagnostic child reaped");
+    assert!(status.expect("bounded diagnostic child").expect("diagnostic status").success());
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_handoff(
+            Err(anyhow::anyhow!("scenario stderr: synthetic-worker-password")),
+            Ok(HookCleanup::Gone),
+            HookCleanup::Gone,
+            &mut worker,
+            home.path(),
+        );
+    }))
+    .expect_err("the synthetic scenario must fail");
+    let message = panic.downcast_ref::<String>().expect("formatted assertion panic");
+    assert!(message.contains("scenario: scenario stderr: [redacted]"), "{message}");
+    assert!(
+        !message.contains("synthetic-worker-password"),
+        "the complete handoff failure must redact the synthetic password: {message}"
     );
 }
 

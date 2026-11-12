@@ -159,9 +159,9 @@ fn socket_name_error(number: RawFd, error: std::io::Error) -> std::io::Error {
     ))
 }
 
-fn query_error(query: &str, number: RawFd, error: std::io::Error) -> std::io::Error {
+pub(crate) fn query_error(query: &str, number: RawFd, error: std::io::Error) -> std::io::Error {
     std::io::Error::other(format!(
-        "{query} fd={number} errno={}",
+        "{query} fd={number} errno={} error={error}",
         error.raw_os_error().unwrap_or(0)
     ))
 }
