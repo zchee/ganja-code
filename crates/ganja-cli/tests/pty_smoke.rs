@@ -30,7 +30,7 @@
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expectrl::process::unix::WaitStatus;
@@ -229,6 +229,28 @@ impl Ganja {
         all
     }
 
+    /// Reports the send clock and the child's own submission, preserving its log.
+    fn escape_failure(&mut self, message: &str, offsets: &[Duration]) -> ! {
+        let logs = self.sockets.parent().expect("the sockets have a data home").join("ganja/log");
+        let submitted: Vec<_> = fs::read_dir(&logs)
+            .expect("the child's isolated log directory exists")
+            .flat_map(|entry| {
+                let path = entry.expect("a log entry is readable").path();
+                let text = fs::read_to_string(&path).expect("the child's log is readable");
+                text.lines()
+                    .filter(|line| line.contains("the composer took a line"))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if let Some(homes) = self._homes.take() {
+            let _ = homes.keep();
+        }
+        panic!(
+            "{message}; write completion offsets: {offsets:?}; submitted: {submitted:?}; logs retained at {logs:?}"
+        );
+    }
+
     /// Waits for the process to end and checks that it ended cleanly.
     fn assert_clean_exit(mut self) {
         let mut session = self.session.take().expect("a session is only ever taken once");
@@ -282,6 +304,7 @@ fn ganja() -> Ganja {
     // A script exported in the shell that runs the tests would otherwise
     // replace the canned reply these two are about.
     command.env_remove("GANJA_FAKE_SCRIPT");
+    command.env("RUST_LOG", "ganja_tui::app=debug");
 
     Ganja::spawn(command, SMOKE_ROWS)
 }
@@ -389,57 +412,91 @@ fn a_negative_kitty_probe_pushes_nothing() {
     session.quit_and_assert_clean_exit();
 }
 
-/// **D516.** A Left arrow whose `ESC [ D` bytes are split across two writes
-/// lands as cursor movement, never as the literal text `[D` — and the phantom
-/// Esc the split once produced reaches nothing.
-///
-/// The drained pause between the two writes forces the read boundary the
-/// repair exists for: the app reads the bare ESC alone, then its tail inside
-/// the hold-off window. Asserted on the submitted transcript line, which
-/// paints in one frame — the composer's own cell-diffed echo never yields a
-/// contiguous needle for the pty stream to match.
+/// Split writes exercise the real terminal path. A sender descheduled past
+/// the hold-off did not send an on-time continuation, so only that attempt is
+/// inconclusive. A compliant send that fails repair is never retried.
 #[test]
 fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
-    let mut session = ganja();
-    session.breathe(100);
+    const ATTEMPTS: usize = 5;
+    const HOLDOFF: Duration = Duration::from_millis(25);
 
-    session.send("hel").expect("failed to type into the composer");
-    session.breathe(30);
-    session.send("\x1b").expect("failed to send the bare escape");
-    session.breathe(5);
-    session.send("[D").expect("failed to send the sequence tail");
-    session.send("X").expect("failed to type the marker");
-    session.send("\r").expect("failed to submit");
-
-    session.expect("heXl").expect("the split arrow was not repaired into a Left");
-
-    session.quit_and_assert_clean_exit();
+    for attempt in 1..=ATTEMPTS {
+        let mut session = ganja();
+        session.expect(COMPOSER).expect("the app is up and reading keys");
+        let sent = Instant::now();
+        let mut offsets = Vec::new();
+        session.send("hel").expect("failed to type into the composer");
+        offsets.push(sent.elapsed());
+        session.breathe(30);
+        session.send("\x1b").expect("failed to send the bare escape");
+        offsets.push(sent.elapsed());
+        session.breathe(5);
+        session.send("[D").expect("failed to send the sequence tail");
+        offsets.push(sent.elapsed());
+        let gap = offsets[2] - offsets[1];
+        if gap >= HOLDOFF {
+            eprintln!(
+                "split attempt {attempt}: inconclusive sender gap {gap:?}; offsets {offsets:?}"
+            );
+            if attempt == ATTEMPTS {
+                session
+                    .escape_failure("the sender never got a compliant gap below 25 ms", &offsets);
+            }
+            // A new child gives the next attempt an untouched composer line.
+            session.quit_and_assert_clean_exit();
+            continue;
+        }
+        session.send("X").expect("failed to type the marker");
+        offsets.push(sent.elapsed());
+        session.send("\r").expect("failed to submit");
+        offsets.push(sent.elapsed());
+        eprintln!("split attempt {attempt}: compliant sender gap {gap:?}; offsets {offsets:?}");
+        if let Err(error) = session.expect("heXl") {
+            session.escape_failure(
+                &format!("the split arrow was not repaired into a Left with a compliant sender gap: {error}"),
+                &offsets,
+            );
+        }
+        session.quit_and_assert_clean_exit();
+        return;
+    }
 }
 
-/// **D516.** A bare Esc followed by nothing within the hold-off was a real
-/// key press: it is released at the deadline, and a `[D` typed after that
-/// deadline is literal text — exactly what the person sent.
-///
-/// The gap before the tail is twenty hold-offs, not five: the hold-off runs
-/// from when the app *reads* the Esc, which nothing on this side can see, and
-/// on the ubuntu runner the app was descheduled past a 120ms gap after the
-/// Esc was sent — it then read Esc and `[D` in one batch, repaired them into
-/// a Left arrow, and the literal text never showed (2026-08-24). A late tail
-/// is late by any margin, so the margin is the generous one.
+/// The palette owns every key. Without Enter or a click, only a delivered
+/// Esc closes it; the next frame restores the composer's cursor. Consuming
+/// the open palette's cursor-hide before writing Esc excludes earlier
+/// cursor-show output. That close proves release; the retained 500 ms drain
+/// that follows is not the proof. The tail must be literal submitted text.
 #[test]
 fn a_late_continuation_stays_literal_text() {
     let mut session = ganja();
-    session.breathe(100);
-
+    session.expect(COMPOSER).expect("the app is up and reading keys");
+    let sent = Instant::now();
+    let mut offsets = Vec::new();
     session.send("ok").expect("failed to type into the composer");
+    offsets.push(sent.elapsed());
     session.breathe(30);
+    session.send("\x10").expect("failed to open the command palette with Ctrl-P");
+    offsets.push(sent.elapsed());
+    session.expect("search commands").expect("the command palette never opened");
+    session.expect("\x1b[?25l").expect("the open palette never hid the cursor");
     session.send("\x1b").expect("failed to send the bare escape");
+    offsets.push(sent.elapsed());
+    if let Err(error) = session.expect("\x1b[?25h") {
+        session.escape_failure(
+            &format!("the Esc was never released to close the palette: {error}"),
+            &offsets,
+        );
+    }
     session.breathe(500);
     session.send("[D").expect("failed to send the late tail");
+    offsets.push(sent.elapsed());
     session.send("\r").expect("failed to submit");
-
-    session.expect("ok[D").expect("a late tail should stay literal text");
-
+    offsets.push(sent.elapsed());
+    eprintln!("late attempt: observed Esc release; offsets {offsets:?}");
+    if let Err(error) = session.expect("ok[D") {
+        session.escape_failure(&format!("a late tail should stay literal text: {error}"), &offsets);
+    }
     session.quit_and_assert_clean_exit();
 }
 
