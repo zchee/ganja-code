@@ -5,6 +5,8 @@
 
 #![cfg(unix)]
 
+#[path = "worker_support/connection_tests.rs"]
+mod connections;
 #[path = "worker_support/handoff_tests.rs"]
 mod handoff;
 #[path = "../src/worker_git.rs"]
