@@ -11,7 +11,7 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 50
     defaults:
       run:
         shell: bash
@@ -53,8 +53,12 @@ jobs:
       - name: install the upstream CI fixture
         working-directory: upstream/opencode-v1.18.22
         run: bun install --frozen-lockfile
-      - name: preflight installed suite commands before compilation
-        run: command -v bun && command -v tmux && command -v cargo-nextest && command -v rust-analyzer
+      - name: record installed suite commands before compilation
+        run: |
+          source scripts/handoff-reset-trace/disk.sh
+          for tool in bun tmux cargo-nextest rust-analyzer; do
+            command -v "$tool" || note "Suite command unavailable: $tool"
+          done
       - name: build only the unchanged CI workspace
         run: bash scripts/handoff-reset-trace/build.sh
         env:

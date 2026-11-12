@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 directory="${1:?iteration directory}"
-exec 3> "$directory/tests.txt"
-exec 4> "$directory/status-received.tsv"
+# shellcheck source=scripts/handoff-reset-trace/disk.sh
+source scripts/handoff-reset-trace/disk.sh
+exec 3> "$directory/tests.txt" || { note 'Test log could not open; continue draining reporter output.'; exec 3> /dev/null; }
+exec 4> "$directory/status-received.tsv" || { note 'Result timing log could not open.'; exec 4> /dev/null; }
 while IFS= read -r line; do
-  printf '%s\n' "$line" >&3
+  if ! printf '%s\n' "$line" >&3; then
+    note 'Test log write failed; continue draining reporter output.'
+    exec 3> /dev/null
+  fi
   if [[ "$line" =~ ^[[:space:]]*(PASS|FAIL|TIMEOUT|XPASS|LEAK|ABORT|CRASH)[[:space:]] ]]; then
-    # These are observer receipt times; the original line retains test duration.
-    printf '%s\t%s\n' "$(date +%s%N)" "$line" >&4
+    if ! printf '%s\t%s\n' "$(date +%s%N)" "$line" >&4; then
+      note 'Result receipt timestamp write failed.'
+      exec 4> /dev/null
+    fi
   fi
 done
+exit 0
