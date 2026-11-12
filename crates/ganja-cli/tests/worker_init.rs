@@ -565,10 +565,25 @@ async fn a_hook_held_past_its_cleanup_check_deadline_is_reported_as_live() {
     assert_handoff(result, cleanup, HookCleanup::Gone, &mut worker, home.path());
 }
 
+fn health_diagnostic(result: Result<ganja_client::Health, ganja_client::ClientError>) -> String {
+    match result {
+        Ok(health) => format!("success: {health:?}"),
+        Err(error) => {
+            let debug = format!("{error:?}");
+            let error = anyhow::Error::new(error);
+            let io = error.chain().find_map(|source| source.downcast_ref::<std::io::Error>());
+            let io = io.map(|error| {
+                format!("kind={:?}, raw OS code={:?}", error.kind(), error.raw_os_error())
+            });
+            format!("{error:#}; debug: {debug}; IO error: {io:?}")
+        }
+    }
+}
+
 #[tokio::test]
 async fn the_initializer_and_replacement_server_announce_the_same_ephemeral_port() {
     let server = GitServer::start(false).await;
-    let worker = worker_support::WorkerProcess::start(&server).await;
+    let mut worker = worker_support::WorkerProcess::start(&server).await;
     let initial = worker.announced_ports();
     assert_eq!(initial.len(), 1);
     assert_ne!(initial[0], 0);
@@ -601,7 +616,32 @@ async fn the_initializer_and_replacement_server_announce_the_same_ephemeral_port
         [initial[0], initial[0]],
         "exec preserves the initializer's actual bound port"
     );
-    worker.client.health().await.expect("same client reaches replacement server");
+    if let Err(error) = worker.client.health().await {
+        let error = health_diagnostic(Err(error));
+        let status = match worker.status() {
+            Ok(None) => "still running".to_owned(),
+            Ok(Some(status)) => status.to_string(),
+            Err(error) => format!("status unavailable: {error}"),
+        };
+        let stderr = worker.stderr();
+        let tail = &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(4096))..];
+        let announcements = worker.announcements();
+        let fresh = async {
+            ganja_client::Client::new(
+                &worker.address,
+                Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
+            )?
+            .health()
+            .await
+        }
+        .await;
+        let fresh = health_diagnostic(fresh);
+        let original = health_diagnostic(worker.client.health().await);
+        let message = worker_support::redact_worker_text(&format!(
+            "same client reaches replacement server: {error}; worker status: {status}; stderr tail: {tail}; announcements: {announcements:?}; fresh client health: {fresh}; original client health after failure: {original}"
+        ));
+        panic!("{message}");
+    }
     drop(worker);
     server.close().await;
 }
@@ -719,7 +759,32 @@ async fn explicit_initializer_ports_survive_the_server_handoff() {
             .expect("replacement address")
             .expect("replacement stays open");
         assert_eq!(replacement, line, "explicit port survives checkout and exec");
-        client.health().await.expect("same port reaches the served engine");
+        if let Err(error) = client.health().await {
+            let error = health_diagnostic(Err(error));
+            let status = match child.try_wait() {
+                Ok(None) => "still running".to_owned(),
+                Ok(Some(status)) => status.to_string(),
+                Err(error) => format!("status unavailable: {error}"),
+            };
+            let stderr = worker_support::worker_stderr(home.path());
+            let tail = &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(4096))..];
+            let announcements = [&line, &replacement];
+            let fresh = async {
+                ganja_client::Client::new(
+                    &format!("http://127.0.0.1:{}", address.port()),
+                    Some(ganja_client::Credentials::new("ganja", "synthetic-worker-password")),
+                )?
+                .health()
+                .await
+            }
+            .await;
+            let fresh = health_diagnostic(fresh);
+            let original = health_diagnostic(client.health().await);
+            let message = worker_support::redact_worker_text(&format!(
+                "same port reaches the served engine: {error}; worker status: {status}; stderr tail: {tail}; announcements: {announcements:?}; fresh client health: {fresh}; original client health after failure: {original}"
+            ));
+            panic!("{message}");
+        }
         child.kill().await.expect("stop served engine");
         child.wait().await.expect("reap served engine");
     }

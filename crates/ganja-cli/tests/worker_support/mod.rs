@@ -345,11 +345,15 @@ impl WorkerProcess {
         worker
     }
 
+    /// Captured announcement output with the synthetic server password removed.
+    pub fn announcements(&self) -> std::io::Result<String> {
+        std::fs::read_to_string(self._state.path().join("stdout"))
+            .map(|output| redact_worker_text(&output))
+    }
+
     /// Ports announced by the initializer and its replacement server.
     pub fn announced_ports(&self) -> Vec<u16> {
-        let output =
-            std::fs::read_to_string(self._state.path().join("stdout")).expect("stdout log");
-        announced_ports(&output).collect()
+        announced_ports(&self.announcements().expect("stdout log")).collect()
     }
 
     /// Proves the provider received its own key rather than server authentication.
@@ -368,8 +372,13 @@ impl WorkerProcess {
         worker_stderr(self._state.path())
     }
 
+    /// Current child status, reaping it only if it has already exited.
+    pub fn status(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
     pub fn is_alive(&mut self) -> bool {
-        self.child.try_wait().expect("child state").is_none()
+        self.status().expect("child state").is_none()
     }
 
     fn signal_shutdown(&mut self) {
