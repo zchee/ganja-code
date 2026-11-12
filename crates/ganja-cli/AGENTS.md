@@ -24,9 +24,13 @@ Clap definitions: `src/main.rs`, plus `RunArgs` (`src/run.rs`), `ServeArgs` (`sr
 | `plugin` | `list`, `marketplace add\|list\|remove\|update`, `install`, `enable`, `disable`, `remove`, `details`. | Positional names only. |
 | `run [MESSAGE]` | One headless turn, then exit. | `--command`, `-c/--continue`, `-s/--session`, `--fork` (always refused), `--model`, `--agent`, `--effort`, `--deadline DURATION\|HH:MM`, `--json-schema FILE\|JSON`, `--config`, `--attach <URL>`, `--format default\|json`, `--auto`. |
 | `serve` | The engine over HTTP + SSE until SIGINT or SIGTERM. | `--port` (absent: 4096, else any free port), `--hostname` (default `127.0.0.1`; a non-loopback host requires `GANJA_SERVER_PASSWORD`). |
-| `worker init` | Bootstrap listener; replaces itself with `serve` after checkout. | `--port` (default 8080; the engine keeps the actual bound port, including one selected by the OS for `--port 0`); requires `GANJA_SERVER_PASSWORD`, `GIT_CONFIG_GLOBAL`, and `GIT_SSL_CAINFO`. |
+| `worker init` | Bootstrap listener; retains its socket and execs `serve` after checkout. | `--port` (default 8080; the engine keeps the actual bound port, including one selected by the OS for `--port 0`); requires `GANJA_SERVER_PASSWORD`, `GIT_CONFIG_GLOBAL`, and `GIT_SSL_CAINFO`. |
 | `sessions` | Stored root sessions of this project. | `--live`: sessions answering on a socket now, every project. Hidden `--socket-dir`. |
 | `skills` | The skill roster a session can load. | None. |
+
+For a successful handoff, with the process making progress and room in the listen backlog, the same socket stays bound and listening from before the bootstrap response until serve accepts. Requests init already accepted finish in init with init's epoch; connections that arrive after init stops accepting wait in the kernel queue and are answered by serve with serve's epoch. Not guaranteed: an answer to every connection (malformed or idle connections, client cancellation, a full backlog, exec or assembly failure, process death, a hook that blocks), or any bound on the wait. The launch-time health exception remains necessary and is unchanged.
+
+`serve` validates the inherited descriptor before taking ownership, restores close-on-exec before engine assembly can spawn children, and never falls back to binding. Its socket is TCP-reachable during assembly, before signal-handler registration and HTTP readiness; TCP connect success is not an engine-ready signal.
 
 `-v/--verbose` is global but must follow the subcommand (`ganja models -v`); `ganja -v models` is refused because the root sets `args_conflicts_with_subcommands` (`src/main.rs`).
 
