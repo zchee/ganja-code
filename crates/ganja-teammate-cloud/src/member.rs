@@ -459,7 +459,9 @@ impl CloudMember {
         *self.launch_timeout.lock().expect("launch phase lock") = LaunchFailure::HealthTimedOut;
         let health = timeout(self.runtime.deadlines.health, async {
             loop {
-                if let Ok(health) = self.rest(client.health()).await {
+                // Engine readiness probes precede normal request accounting;
+                // a delayed startup probe can still wake a suspended worker.
+                if let Ok(health) = client.health().await {
                     return health;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;

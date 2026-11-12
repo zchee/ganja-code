@@ -1969,6 +1969,60 @@ async fn a_rest_drain_deadline_defers_without_latching_uncertainty() {
 }
 
 #[tokio::test]
+async fn a_post_launch_health_failure_still_latches_uncertainty() {
+    let fixture = Fixture::new().await;
+    let client = fixture.member.client().expect("client");
+    assert!(fixture.member.rest(client.health()).await.is_err());
+    fixture.member.quiesce().await;
+    assert_eq!(fixture.suspends(), 0, "a failed post-launch health request forbids suspend");
+    assert!(fixture.member.gate.state().uncertain);
+    fixture.member.rest(async { Ok(()) }).await.expect("later successful answer");
+    fixture.provisioner.owner_recover(&fixture.worker);
+    fixture.provisioner.resume(&fixture.worker).await.expect("owner resumes");
+    fixture.member.quiesce().await;
+    assert_eq!(fixture.suspends(), 0, "later success and owner recovery are not fences");
+    assert!(fixture.member.gate.state().uncertain);
+    fixture.flush_notifications().await;
+    let mail = mailbox::read(&fixture.member.lent.lead_inbox).expect("owner mail");
+    assert_eq!(
+        mail.valid.iter().filter(|message| message.text.contains("earlier request")).count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_non_health_launch_attempt_keeps_the_uncertain_latch() {
+    let fixture = Fixture::new().await;
+    fixture.member.set_phase(Phase::Bootstrapping);
+    assert!(
+        fixture
+            .member
+            .rest::<()>(async {
+                Err(ClientError::Refused {
+                    method: "POST",
+                    path: "/bootstrap".to_owned(),
+                    status: 502,
+                    from_serve: false,
+                    body: "router unavailable".to_owned(),
+                })
+            })
+            .await
+            .is_err()
+    );
+    assert!(fixture.member.gate.state().uncertain, "non-health launch calls remain accounted");
+    fixture.member.rest(async { Ok(()) }).await.expect("later successful answer");
+    fixture.member.quiesce().await;
+    assert_eq!(fixture.suspends(), 0, "a launch phase never exempts generic REST");
+    assert!(fixture.member.gate.state().uncertain);
+    fixture.flush_notifications().await;
+    let mail = mailbox::read(&fixture.member.lent.lead_inbox).expect("owner mail");
+    assert_eq!(
+        mail.valid.iter().filter(|message| message.text.contains("earlier request")).count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn an_unproven_rest_attempt_stays_uncertain_after_owner_recovery() {
     let fixture = Fixture::new().await;
     fixture.member.gate.admit(Door::Rest).expect("REST open").finish(AttemptOutcome::Uncertain);
