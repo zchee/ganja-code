@@ -906,3 +906,114 @@ without closing unrelated resources and reused-number process failure),
 prebound address and transport cases in `crates/ganja-serve/tests/ports.rs` and
 `crates/ganja-serve/tests/posture.rs`.
 Commit: 2d9a0cc, 2c1b824
+
+## D589 — split keys are read before other UI work (2026-11-12)
+
+Crates: ganja-tui
+Amends: D516
+
+Once the escape-repair machine holds input, the terminal branch keeps reading
+its stream before drawing, engine work or input handlers run. It stamps each
+event when the stream yields it and returns when nothing is held or the
+existing whole-sequence allowance has passed since that wait began. Releasing
+an event does not alone end the wait: a real Esc followed by a split arrow
+must deliver Esc, then the arrow. Repeated Escs cannot extend the wait's cap;
+a hold left at the cap returns to the general loop's deadline handling. The
+stream remains owned and polled by the UI loop, with no new reader task,
+thread or channel.
+
+Previously each event was stamped when the general loop consumed it. Drawing
+or engine work between the Esc and its continuation could make a timely
+continuation look late and type an arrow's characters as literal text. Reading
+the held sequence inline removes that intervening work, not scheduling delay.
+The 25 ms hold-off, 50 ms whole-sequence allowance, literal late continuations
+and kitty-protocol passthrough mode are unchanged.
+
+An independent reader task or thread was rejected because the external editor
+takes stdin and crossterm offers no acknowledged stop of its reader thread.
+Timed polling on an owned thread would require another reader lifecycle and
+stop/join protocol to hand stdin back; the bounded inline wait needs neither.
+The library's waker ordering is not an acknowledgement that its reader has
+stopped, so it cannot establish that handoff either.
+
+Events already released are handled in order before a subsequent terminal read
+error or end of stream takes effect. A pending team spawn is aborted in the
+teardown that runs after every loop exit, including those error and end-of-stream
+paths; shutdown must not leave a detached task waiting on a dialog the UI can
+no longer answer.
+
+Input already queued after a stall is still stamped back to back: a genuine
+Esc followed by typed `[D` can still look like an arrow. Nothing here helps
+while the whole process is descheduled; stamps are stream-yield times, not
+byte-arrival times. Whether this removes the single failure observed on a
+saturated machine was not measured; the deterministic case demonstrates a
+mechanism, not the cause of that run.
+
+Pinned by: `crates/ganja-tui/src/app_tests.rs`
+(`a_timely_split_arrow_edits_the_composer_in_the_terminal_branch`,
+`a_real_escape_before_a_split_arrow_is_delivered_before_the_arrow`,
+`repeated_escapes_return_control_within_the_wait_cap_without_losing_keys`,
+`a_continuation_after_the_holdoff_stays_literal_and_survives_a_cancelled_read`,
+`released_escape_is_handled_before_a_later_terminal_read_error`,
+`released_escape_is_handled_before_the_terminal_stream_ends`, and the three
+`teardown_aborts_a_pending_spawn_…` cases),
+`crates/ganja-tui/src/escrepair_tests.rs`.
+Commit: 0a8cad7f
+
+## D590 — each launch health wait ends with one count-only log event (2026-11-12)
+
+Crates: ganja-teammate-cloud
+Amends: none
+
+Each hosted teammate's launch health wait ends with one ordinary `info` event,
+`launch health wait ended`, containing the member name, `attempts`, `failures`,
+`unfinished`, nine fixed failure-kind counters, `elapsed_ms` and `outcome`.
+Previously failed probes were discarded, so a launch could not say how many
+attempts failed or how. The event's outcome is `ready`, `deadline_reached` or
+`cancelled`, and its counts satisfy
+`attempts = failures + unfinished + (1 if ready, otherwise 0)`.
+
+The nine exclusive kinds are `connection_refused`, `connection_reset`,
+`timed_out`, `http_3xx`, `http_4xx`, `http_5xx`, `http_other`, `decode` and
+`other`; they sum to `failures`. `http_status` is an additional aggregate of
+the four HTTP counters, not a tenth kind. Classification uses the error's
+structure, never its text: it walks the whole transport source chain,
+including an I/O error's own payload, preferring reset, then refusal, then
+timeout. Otherwise it uses the transport timeout flag, HTTP status range,
+decode variant or `other`.
+
+The tally is owned outside both timed futures. Only the code that observes a
+health or enclosing launch timeout records `deadline_reached`; a deadline
+counts an in-flight probe as one timed-out failure, but adds no failure while
+waiting between probes. Dropping an unmarked wait reports `cancelled`, leaving
+an in-flight probe `unfinished`, not timed out. Success, either observed
+deadline, caller or member cancellation, task abort and panic unwind each emit
+one event per wait through its drop. Cancellation before the wait begins emits
+none. Process death without unwinding does not promise an event.
+
+The event goes to the ordinary log, not the cloud trace: the trace reader
+rejects records outside its strict frame schema. It may contain only counts,
+elapsed milliseconds, those fixed outcomes and the member name, whose grammar
+is ASCII letters, digits, `-` and `_`. Response bodies, header values, URLs
+and credentials never enter the summary.
+
+This is observability only. Retry behavior, 100 ms spacing, health and launch
+deadlines, tolerated failures, return values and request accounting are
+unchanged. D587 stands as written: only the bounded launch health calls bypass
+accounting, and no later success clears an uncertain attempt.
+
+A log filter that drops `info` drops this event. A reset is counted as such
+only when it reaches the client as an I/O error of that kind somewhere in the
+source chain; otherwise it is `other`. This has not yet been observed on a real
+worker; the local peer-reset test does not establish the deployed router's
+error shape.
+
+Pinned by: `crates/ganja-teammate-cloud/src/health_tests.rs`
+(`transport_classification_prefers_reset_then_refusal_then_timeout`,
+`a_nested_io_reset_is_not_hidden_by_an_outer_io_error`,
+`a_deadline_counts_only_an_in_flight_probe_as_an_additional_timeout`,
+`simultaneous_deadline_and_cancellation_keep_the_selected_outcome`),
+`crates/ganja-teammate-cloud/tests/fake_provisioner/health_record.rs`
+(the clean launch, refusal, peer reset, status, decode canary, health and launch
+deadline, and real pending-start cancellation, abort and unwind cases).
+Commit: 2b3aa324
