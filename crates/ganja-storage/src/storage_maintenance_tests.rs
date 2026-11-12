@@ -391,6 +391,17 @@ fn a_failed_writer_open_can_be_retried() {
     });
     let result = store.handles();
     assert!(result.is_err(), "startup must not cache a writer whose connection failed");
+    assert!(
+        store.inner.open.lock().expect("startup cache").is_none(),
+        "failed startup is not cached"
+    );
+    assert!(
+        store.inner.thread.lock().expect("writer thread slot").is_none(),
+        "failed startup owns no writer thread"
+    );
+    let lease = lock_file(&database);
+    lease.try_lock().expect("failed startup closes connections before releasing its lease");
+    drop(lease);
     fs::remove_dir(&database).expect("restore availability");
     fs::rename(&moved, &database).expect("restore database");
     store.save_info(&info(FRESH, 1)).expect("the same Storage retries startup");

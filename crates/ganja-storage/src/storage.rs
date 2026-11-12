@@ -81,7 +81,7 @@ use serde::{Deserialize, Serialize};
 mod admission;
 #[path = "storage_maintenance.rs"]
 mod maintenance;
-use admission::{Lease, LeasedConnection};
+use admission::LeasedConnection;
 
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
@@ -1059,12 +1059,19 @@ impl Inner {
     /// project ever has — the conversion of whatever the file layout left.
     fn start(&self) -> Result<Handles, StorageError> {
         let connection = self.admit()?;
-        let (writer, thread) = spawn_writer(
-            self.database.clone(),
+        #[cfg(test)]
+        self.observation.hit(Phase::WriterOpening);
+        let writer_connection = LeasedConnection::new(
+            connect(&self.database)?,
             connection.lease.clone(),
             #[cfg(test)]
             self.observation.clone(),
-        )?;
+            #[cfg(test)]
+            Phase::WriterClosed,
+        );
+        #[cfg(test)]
+        self.observation.hit(Phase::WriterOpened);
+        let (writer, thread) = spawn_writer(self.database.clone(), writer_connection)?;
         *self.thread.lock().expect("the writer thread handle is never poisoned") = Some(thread);
         Ok(Handles { writer, reader: Arc::new(Mutex::new(connection)) })
     }
@@ -1865,17 +1872,13 @@ fn json<T: Serialize>(value: &T) -> Result<String, rusqlite::Error> {
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
-/// Starts the thread every write goes through, on its own connection.
+/// Starts the thread every write goes through, with its already-ready connection.
 ///
-/// The queue outlives nothing: when the last [`Storage`] handle is dropped the
-/// sender goes with it, the loop below ends, and the connection closes. A
-/// connection that will not open is reported once and the thread stops, which
-/// every waiting caller sees as an error rather than as a panic on the turn
-/// task.
+/// Both connections are opened before startup can be cached. Failure therefore
+/// leaves the Storage retryable instead of remembering a permanently dead queue.
 fn spawn_writer(
     path: PathBuf,
-    lease: Arc<Lease>,
-    #[cfg(test)] observation: Observation,
+    connection: LeasedConnection,
 ) -> Result<(mpsc::Sender<Job>, thread::JoinHandle<()>), StorageError> {
     let (sender, receiver) = mpsc::channel::<Job>();
     let opened = path.clone();
@@ -1883,31 +1886,6 @@ fn spawn_writer(
     let thread = thread::Builder::new()
         .name("ganja-storage".to_owned())
         .spawn(move || {
-            #[cfg(test)]
-            observation.hit(Phase::WriterOpening);
-            let connection = match connect(&opened) {
-                Ok(connection) => connection,
-                Err(error) => {
-                    tracing::error!(
-                        path = %opened.display(),
-                        %error,
-                        "the session store could not be opened for writing"
-                    );
-
-                    return;
-                }
-            };
-
-            let connection = LeasedConnection::new(
-                connection,
-                lease,
-                #[cfg(test)]
-                observation.clone(),
-                #[cfg(test)]
-                Phase::WriterClosed,
-            );
-            #[cfg(test)]
-            observation.hit(Phase::WriterOpened);
             for job in receiver {
                 let outcome = apply(&connection, &opened, &job.work);
                 // A caller that stopped waiting is not an error: the answer
