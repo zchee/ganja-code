@@ -7,7 +7,6 @@ use std::io::ErrorKind;
 
 use ganja_client::ClientError;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -24,24 +23,35 @@ enum Kind {
 }
 
 fn transport_kind(mut error: &(dyn std::error::Error + 'static)) -> Kind {
+    let mut kind = Kind::Other;
     loop {
-        if let Some(error) = error.downcast_ref::<std::io::Error>() {
-            match error.kind() {
-                ErrorKind::ConnectionRefused => return Kind::ConnectionRefused,
-                ErrorKind::ConnectionReset => return Kind::ConnectionReset,
-                ErrorKind::TimedOut => return Kind::TimedOut,
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            match (io.kind(), kind) {
+                (ErrorKind::ConnectionReset, _) => kind = Kind::ConnectionReset,
+                (ErrorKind::ConnectionRefused, Kind::Other | Kind::TimedOut) => {
+                    kind = Kind::ConnectionRefused;
+                }
+                (ErrorKind::TimedOut, Kind::Other) => kind = Kind::TimedOut,
                 _ => {}
             }
+            // io::Error::source delegates to its payload's source, skipping
+            // the payload itself. Inspect that payload before continuing.
+            if let Some(inner) = io.get_ref() {
+                error = inner;
+                continue;
+            }
         }
-        let Some(source) = error.source() else { return Kind::Other };
+        let Some(source) = error.source() else { return kind };
         error = source;
     }
 }
 
 fn classify(error: &ClientError) -> Kind {
     match error {
-        ClientError::Transport { source, .. } if source.is_timeout() => Kind::TimedOut,
-        ClientError::Transport { source, .. } => transport_kind(source),
+        ClientError::Transport { source, .. } => match transport_kind(source) {
+            Kind::Other if source.is_timeout() => Kind::TimedOut,
+            kind => kind,
+        },
         ClientError::Unauthorized { .. } => Kind::Http4xx,
         ClientError::Refused { status: 300..=399, .. } => Kind::Http3xx,
         ClientError::Refused { status: 400..=499, .. } => Kind::Http4xx,
@@ -54,7 +64,6 @@ fn classify(error: &ClientError) -> Kind {
 
 pub(crate) struct HealthWait<'a> {
     name: &'a str,
-    cancel: &'a CancellationToken,
     started: Instant,
     attempts: u64,
     failures: u64,
@@ -64,16 +73,15 @@ pub(crate) struct HealthWait<'a> {
 }
 
 impl<'a> HealthWait<'a> {
-    pub(crate) fn new(name: &'a str, cancel: &'a CancellationToken) -> Self {
+    pub(crate) fn new(name: &'a str) -> Self {
         Self {
             name,
-            cancel,
             started: Instant::now(),
             attempts: 0,
             failures: 0,
             kinds: [0; 9],
             in_flight: false,
-            outcome: "deadline_reached",
+            outcome: "cancelled",
         }
     }
 
@@ -93,7 +101,8 @@ impl<'a> HealthWait<'a> {
         self.outcome = "ready";
     }
 
-    fn deadline(&mut self) {
+    pub(crate) fn deadline(&mut self) {
+        self.outcome = "deadline_reached";
         // A deadline can interrupt a request, or just the spacing between requests.
         // Only the former is an additional failed attempt.
         if self.in_flight {
@@ -106,19 +115,13 @@ impl<'a> HealthWait<'a> {
 
 impl Drop for HealthWait<'_> {
     fn drop(&mut self) {
-        // The enclosing launch deadline or owner cancellation can drop the inner
-        // health future before its own timeout returns. Record that exit too.
-        if self.outcome != "ready" {
-            if self.cancel.is_cancelled() {
-                self.outcome = "cancelled";
-            } else {
-                self.deadline();
-            }
-        }
+        // Only an observed timeout records a deadline. Dropping an unmarked
+        // future (including abort or unwind) leaves any pending probe unfinished.
         tracing::info!(
             name = self.name,
             attempts = self.attempts,
             failures = self.failures,
+            unfinished = u64::from(self.in_flight),
             connection_refused = self.kinds[Kind::ConnectionRefused as usize],
             connection_reset = self.kinds[Kind::ConnectionReset as usize],
             timed_out = self.kinds[Kind::TimedOut as usize],

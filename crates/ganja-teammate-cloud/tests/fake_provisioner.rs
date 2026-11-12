@@ -283,8 +283,7 @@ impl InitHealthWire {
     ) -> (Arc<InitHealthProxy>, Self) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        let mut listener =
-            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
         let address = listener.local_addr().expect("proxy address");
         let (outage, mut outages) =
             tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
@@ -306,13 +305,10 @@ impl InitHealthWire {
                         Some(closed) = outages.recv() => {
                             drop(listener);
                             closed.send(()).expect("listener outage begins");
-                            // This timed outage is the injected startup fault, not a
-                            // readiness sleep: bootstrap can complete while TCP refuses probes.
-                            tokio::select! {
-                                () = cancel.cancelled() => break,
-                                () = tokio::time::sleep(std::time::Duration::from_millis(350)) => {}
-                            }
-                            listener = tokio::net::TcpListener::bind(address).await.expect("listener recovers");
+                            // Keep refusing until teardown; bootstrap forwarding runs
+                            // in its own task and can still complete after this close.
+                            cancel.cancelled().await;
+                            break;
                         }
                         accepted = listener.accept() => {
                             let (socket, _) = accepted.expect("proxy accept");

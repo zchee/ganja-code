@@ -7,7 +7,36 @@ fn summary(name: &str) -> String {
         .filter(|line| line.contains("launch health wait ended") && line.contains(name))
         .collect::<Vec<_>>();
     assert_eq!(summaries.len(), 1, "exactly one launch summary: {logged}");
-    summaries[0].to_owned()
+    let line = summaries[0];
+    let failures = [
+        "connection_refused",
+        "connection_reset",
+        "timed_out",
+        "http_3xx",
+        "http_4xx",
+        "http_5xx",
+        "http_other",
+        "decode",
+        "other",
+    ]
+    .into_iter()
+    .map(|kind| field(line, kind))
+    .sum::<u64>();
+    assert_eq!(field(line, "failures"), failures, "{line}");
+    assert_eq!(
+        field(line, "http_status"),
+        ["http_3xx", "http_4xx", "http_5xx", "http_other"]
+            .into_iter()
+            .map(|kind| field(line, kind))
+            .sum::<u64>(),
+        "{line}"
+    );
+    assert_eq!(
+        field(line, "attempts"),
+        failures + field(line, "unfinished") + u64::from(line.contains("outcome=\"ready\"")),
+        "{line}"
+    );
+    line.to_owned()
 }
 
 fn field(line: &str, name: &str) -> u64 {
@@ -16,6 +45,106 @@ fn field(line: &str, name: &str) -> u64 {
         .unwrap_or_else(|| panic!("missing {name}: {line}"))
         .parse()
         .unwrap_or_else(|error| panic!("numeric {name}: {error}; {line}"))
+}
+
+async fn wait_pending_health(hosted: &Hosted) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while hosted
+            .init_health_wire
+            .as_ref()
+            .expect("health wire")
+            .health_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real health request reaches the pending peer");
+}
+
+async fn assert_cancelled_start(exit: &str) {
+    let hosted = Arc::new(
+        Hosted::configured(std::time::Duration::from_secs(5), Some(LaunchHealthFault::Deadline))
+            .await,
+    );
+    let task = tokio::spawn({
+        let hosted = Arc::clone(&hosted);
+        let exit = exit.to_owned();
+        async move {
+            let caller = ganja_testkit::caller(hosted.home.path());
+            let mut start = Box::pin(hosted.door.start(
+                ganja_testkit::spawn_with_prompt(&hosted.name, Some("cloud"), "first request"),
+                &caller,
+                &ganja_testkit::AllowSpawn,
+            ));
+            if matches!(exit.as_str(), "abort" | "member") {
+                let result = start.await;
+                assert!(result.is_err(), "member cancellation refuses launch");
+            } else {
+                tokio::select! {
+                    result = &mut start => panic!("pending start unexpectedly returned: {result:?}"),
+                    () = wait_pending_health(&hosted) => {}
+                }
+                if exit == "unwind" {
+                    panic!("unwind a caller with a pending start");
+                }
+                drop(start);
+            }
+        }
+    });
+    wait_pending_health(&hosted).await;
+    if exit == "abort" {
+        task.abort();
+    }
+    if exit == "member" {
+        hosted.registry.shutdown().await;
+    }
+    let joined = task.await;
+    match exit {
+        "abort" => assert!(joined.expect_err("caller aborted").is_cancelled()),
+        "unwind" => assert!(joined.expect_err("caller unwound").is_panic()),
+        _ => joined.expect("caller dropped its start"),
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !Hosted::delivery_log()
+            .logged()
+            .lines()
+            .any(|line| line.contains("launch health wait ended") && line.contains(&hosted.name))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("engine observes caller cancellation and drops launch");
+    let line = summary(&hosted.name);
+    Arc::try_unwrap(hosted).ok().expect("caller released fixture").close().await;
+    assert!(line.contains("outcome=\"cancelled\""), "{line}");
+    assert_eq!(field(&line, "attempts"), 1, "{line}");
+    assert_eq!(field(&line, "failures"), 0, "{line}");
+    assert_eq!(field(&line, "timed_out"), 0, "{line}");
+    assert_eq!(field(&line, "unfinished"), 1, "{line}");
+}
+
+#[tokio::test]
+async fn dropping_a_real_pending_start_reports_cancellation_not_a_deadline() {
+    assert_cancelled_start("drop").await;
+}
+
+#[tokio::test]
+async fn aborting_a_real_pending_start_reports_cancellation_not_a_deadline() {
+    assert_cancelled_start("abort").await;
+}
+
+#[tokio::test]
+async fn unwinding_a_real_pending_start_reports_cancellation_not_a_deadline() {
+    assert_cancelled_start("unwind").await;
+}
+
+#[tokio::test]
+async fn registry_shutdown_during_a_real_pending_start_reports_cancellation() {
+    assert_cancelled_start("member").await;
 }
 
 #[tokio::test]
@@ -52,19 +181,28 @@ async fn a_launch_reports_non_success_health_statuses() {
 }
 
 #[tokio::test]
-async fn a_launch_reports_refused_health_attempts_before_the_listener_recovers() {
+async fn a_launch_reports_refused_health_attempts_until_the_deadline() {
     let hosted =
         Hosted::configured(std::time::Duration::from_secs(5), Some(LaunchHealthFault::Refused))
             .await;
-    hosted.start().await;
+    let result = hosted
+        .door
+        .start(
+            ganja_testkit::spawn_with_prompt(&hosted.name, Some("cloud"), "first request"),
+            &ganja_testkit::caller(hosted.home.path()),
+            &ganja_testkit::AllowSpawn,
+        )
+        .await;
     let line = summary(&hosted.name);
     hosted.close().await;
+    assert!(result.is_err(), "closed listener prevents health readiness");
     let refused = field(&line, "connection_refused");
-    assert!(refused >= 2, "the injected listener outage refuses repeated probes: {line}");
-    assert_eq!(field(&line, "attempts"), refused + 1, "{line}");
-    assert_eq!(field(&line, "failures"), refused, "{line}");
+    assert!(refused > 0, "the closed listener refuses real probes: {line}");
+    assert_eq!(field(&line, "attempts"), field(&line, "failures"), "{line}");
+    assert_eq!(field(&line, "failures"), refused + field(&line, "timed_out"), "{line}");
+    assert_eq!(field(&line, "unfinished"), 0, "{line}");
     assert_eq!(field(&line, "other"), 0, "{line}");
-    assert!(line.contains("outcome=\"ready\""), "{line}");
+    assert!(line.contains("outcome=\"deadline_reached\""), "{line}");
 }
 
 #[tokio::test]

@@ -1,17 +1,15 @@
 <!-- Parent: ../AGENTS.md -->
 # ganja-teammate-cloud
 
-Hosted teammate lifecycle above `ganja-core`. The engine never imports this crate,
-and the server must never include a provisioner in its dependency closure.
+Hosted teammate lifecycle above `ganja-core`. The engine never imports this crate, and the server must never include a provisioner in its dependency closure.
 
 ## Boundary
 
 - `Provisioner` is vendor-neutral. Its `spawn` returns a suspended worker with
   policy installed and endpoint known; the member owns resume and bootstrap.
-- Vendor-specific resource names, credentials and routing stay in a provisioner.
+- Vendor-specific resource names, credentials and routing stay in a provisioner; `ganja-testkit` holds the fake provisioner (dev-only reverse dependency).
 - `depgate.toml` permits exactly `ganja-client`, `ganja-core`, and the six crates
   below core; neither `axum*` nor `ratatui*` may enter the production closure.
-- `ganja-testkit` holds the fake provisioner. The reverse dependency is dev-only.
 
 ## Lifecycle
 
@@ -19,10 +17,12 @@ Worker requests need a `WorkerGate` permit except bounded launch health probes
 after bootstrap success through the first decoded health. Stream and REST have
 separate doors. Suspend closes both, holds reconnect with an ack, closes and joins
 the stream, drains REST, and checks typed worker answers before control-plane suspend.
-The health wait emits one INFO summary: member, attempts, failures by fixed kind
-(HTTP classes, not bodies), elapsed ms and ready/deadline/cancelled outcome.
-An in-flight deadline counts as a timeout; cancellation leaves it unfinished.
-`GANJA_CLOUD_TRACE` remains strict event frames, not health summaries.
+Each wait emits one INFO event `launch health wait ended`: member, attempts, failures, unfinished, nine fixed kind counters, elapsed ms and outcome.
+Ordinary logs: `$XDG_DATA_HOME/ganja/log/ganja.<local-date>.log`, default `~/.local/share/ganja/log/` on every platform, including macOS.
+`attempts = failures + unfinished + (outcome == ready ? 1 : 0)`; the nine kind counters sum to failures.
+`http_status` is an extra aggregate of `http_3xx`, `http_4xx`, `http_5xx` and `http_other`, not a tenth kind.
+Only observed health/launch deadlines yield `deadline_reached` and count a pending probe as timed out; unmarked drop is `cancelled`.
+Caller/member cancellation, abort and unwind leave a pending probe `unfinished=1`, not failed; `GANJA_CLOUD_TRACE` stays event frames.
 
 A drain timeout defers suspend. Except for those launch probes, an unclassified
 routed attempt permanently disables automatic suspend for that worker identity:
