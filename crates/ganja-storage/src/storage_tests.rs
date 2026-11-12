@@ -45,7 +45,7 @@ fn minted(ordinal: u32) -> String {
 
 /// Info with pinned times, so a test asserts on the order it asked for
 /// rather than on whatever the clock said.
-fn info(id: &str, updated: u64) -> SessionInfo {
+pub(super) fn info(id: &str, updated: u64) -> SessionInfo {
     SessionInfo {
         id: session(id),
         version: VERSION,
@@ -887,7 +887,12 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
             .expect("the file is writable");
     }
 
-    assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
+    assert!(super::set_aside(
+        &database,
+        "for the test",
+        super::QUARANTINE,
+        &super::Observation::default()
+    ));
 
     // A log left behind is recovered into the *fresh* file that takes the
     // old name, which would pour the damaged store straight back in — so
@@ -950,7 +955,12 @@ fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
 
         // The winner's move, played by this test: the store renamed aside
         // and a fresh one created at the name it left.
-        assert!(super::set_aside(&database, "for the test", super::PREUUID));
+        assert!(super::set_aside(
+            &database,
+            "for the test",
+            super::PREUUID,
+            &super::Observation::default()
+        ));
         let fresh = minted(1);
         Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
         drop(held);
@@ -1027,7 +1037,12 @@ fn a_corrupt_store_waits_for_the_lock_and_leaves_the_replacement_alone() {
 
         // The winner's move, played by this test: the damaged store renamed
         // aside and a fresh one created at the name it left.
-        assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
+        assert!(super::set_aside(
+            &database,
+            "for the test",
+            super::QUARANTINE,
+            &super::Observation::default()
+        ));
         let fresh = minted(1);
         Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
         drop(held);

@@ -506,6 +506,8 @@ struct Inner {
     /// The writer thread, kept so that dropping the last handle on a store
     /// closes it rather than merely asking it to close.
     thread: Mutex<Option<thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    observation: Observation,
 }
 
 /// What an opened store is reached through.
@@ -614,6 +616,8 @@ impl Storage {
                 database,
                 open: Mutex::new(None),
                 thread: Mutex::new(None),
+                #[cfg(test)]
+                observation: Observation::default(),
             }),
         }
     }
@@ -1026,6 +1030,8 @@ impl Inner {
     /// Opens the store: the connection, the schema, and — on the first open a
     /// project ever has — the conversion of whatever the file layout left.
     fn start(&self) -> Result<Handles, StorageError> {
+        #[cfg(test)]
+        self.observation.hit(Phase::Admission);
         // Asked before the open, because opening creates the file: the
         // question is "has this project ever had a database", and after
         // `connect` the answer is always yes.
@@ -1042,14 +1048,22 @@ impl Inner {
                 Ok(()) => Some(connection),
                 Err(_) => {
                     drop(connection);
-                    set_aside_corrupt(&self.database)?
+                    set_aside_corrupt(
+                        &self.database,
+                        #[cfg(test)]
+                        &self.observation,
+                    )?
                 }
             },
             // A file so damaged that the pragmas cannot even be set: the same
             // damage `integrity` reports, arriving one statement earlier.
             // Anything else — a full disk, a directory that will not open — is
             // a passing condition and must not cost the file.
-            Err(error) if damaged(&error) => set_aside_corrupt(&self.database)?,
+            Err(error) if damaged(&error) => set_aside_corrupt(
+                &self.database,
+                #[cfg(test)]
+                &self.observation,
+            )?,
             Err(error) => return Err(error),
         };
 
@@ -1061,6 +1075,8 @@ impl Inner {
             }
         };
 
+        #[cfg(test)]
+        self.observation.hit(Phase::ReaderOpened);
         migrate(&mut connection, &self.database)?;
         if first {
             convert(&mut connection, &self.root, &self.database)?;
@@ -1070,9 +1086,18 @@ impl Inner {
         // has not yet written the older store's ids — a probe placed there
         // would pass on an empty file and then rename the store `convert` had
         // just filled.
-        let connection = set_aside_preuuid(connection, &self.database)?;
+        let connection = set_aside_preuuid(
+            connection,
+            &self.database,
+            #[cfg(test)]
+            &self.observation,
+        )?;
 
-        let (writer, thread) = spawn_writer(self.database.clone())?;
+        let (writer, thread) = spawn_writer(
+            self.database.clone(),
+            #[cfg(test)]
+            self.observation.clone(),
+        )?;
         *self.thread.lock().expect("the writer thread handle is never poisoned") = Some(thread);
 
         Ok(Handles { writer, reader: Arc::new(Mutex::new(connection)) })
@@ -1196,7 +1221,12 @@ fn integrity(connection: &Connection) -> Result<(), String> {
 /// `kind` is [`QUARANTINE`] or [`PREUUID`]: the same reversible move for two
 /// different reasons, told apart in the name so a log reader can see which
 /// happened without reading the log.
-fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
+fn set_aside(
+    database: &Path,
+    reason: &str,
+    kind: &str,
+    #[cfg(test)] observation: &Observation,
+) -> bool {
     let stamp = now();
     let name = database.file_name().unwrap_or_default().to_string_lossy();
     // The name the database itself lands under, which is the one worth
@@ -1231,6 +1261,8 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
 
             return false;
         }
+        #[cfg(test)]
+        observation.hit(Phase::Renamed(suffix));
     }
 
     tracing::warn!(
@@ -1268,7 +1300,10 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
 /// costs this session's persistence and nothing that cannot be recovered by
 /// hand, where renaming a store another process is writing into costs that
 /// process the session it is in the middle of.
-fn set_aside_corrupt(database: &Path) -> Result<Option<Connection>, StorageError> {
+fn set_aside_corrupt(
+    database: &Path,
+    #[cfg(test)] observation: &Observation,
+) -> Result<Option<Connection>, StorageError> {
     // Nothing of this process's is held while waiting, for the reason
     // `set_aside_preuuid` gives at length: a descriptor does not follow a
     // rename, so a connection kept open across the wait pins the very file the
@@ -1290,11 +1325,23 @@ fn set_aside_corrupt(database: &Path) -> Result<Option<Connection>, StorageError
             }
             Err(reason) => {
                 drop(connection);
-                set_aside(database, &reason, QUARANTINE);
+                set_aside(
+                    database,
+                    &reason,
+                    QUARANTINE,
+                    #[cfg(test)]
+                    observation,
+                );
             }
         },
         Err(error) if damaged(&error) => {
-            set_aside(database, &error.to_string(), QUARANTINE);
+            set_aside(
+                database,
+                &error.to_string(),
+                QUARANTINE,
+                #[cfg(test)]
+                observation,
+            );
         }
         Err(error) => return Err(error),
     }
@@ -1351,7 +1398,11 @@ fn set_aside_corrupt(database: &Path) -> Result<Option<Connection>, StorageError
 /// the store that has just been set aside, or set aside itself by [`convert`]
 /// for holding the same old ids. Converting again would be importing the very
 /// sessions that were just moved out of the way.
-fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connection, StorageError> {
+fn set_aside_preuuid(
+    connection: Connection,
+    database: &Path,
+    #[cfg(test)] observation: &Observation,
+) -> Result<Connection, StorageError> {
     // The cheap question first, on the connection that is already open and
     // taking nothing: this is asked on every open a project ever has, and all
     // but one of them answer no.
@@ -1407,7 +1458,13 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
     };
 
     drop(connection);
-    set_aside(database, &format!("session {old} predates UUIDv7 ids"), PREUUID);
+    set_aside(
+        database,
+        &format!("session {old} predates UUIDv7 ids"),
+        PREUUID,
+        #[cfg(test)]
+        observation,
+    );
 
     let mut connection = connect(database)?;
     migrate(&mut connection, database)?;
@@ -1851,6 +1908,7 @@ fn json<T: Serialize>(value: &T) -> Result<String, rusqlite::Error> {
 /// task.
 fn spawn_writer(
     path: PathBuf,
+    #[cfg(test)] observation: Observation,
 ) -> Result<(mpsc::Sender<Job>, thread::JoinHandle<()>), StorageError> {
     let (sender, receiver) = mpsc::channel::<Job>();
     let opened = path.clone();
@@ -1858,6 +1916,8 @@ fn spawn_writer(
     let thread = thread::Builder::new()
         .name("ganja-storage".to_owned())
         .spawn(move || {
+            #[cfg(test)]
+            observation.hit(Phase::WriterOpening);
             let connection = match connect(&opened) {
                 Ok(connection) => connection,
                 Err(error) => {
@@ -1871,6 +1931,8 @@ fn spawn_writer(
                 }
             };
 
+            #[cfg(test)]
+            observation.hit(Phase::WriterOpened);
             for job in receiver {
                 let outcome = apply(&connection, &opened, &job.work);
                 // A caller that stopped waiting is not an error: the answer
@@ -2041,6 +2103,33 @@ fn stored_files(directory: &Path) -> Result<Vec<PathBuf>, StorageError> {
 
     Ok(paths)
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Admission,
+    ReaderOpened,
+    WriterOpening,
+    WriterOpened,
+    Renamed(&'static str),
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct Observation(Option<Arc<dyn Fn(Phase) + Send + Sync>>);
+
+#[cfg(test)]
+impl Observation {
+    fn hit(&self, phase: Phase) {
+        if let Some(observe) = &self.0 {
+            observe(phase);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "storage_maintenance_tests.rs"]
+mod maintenance_tests;
 
 #[cfg(test)]
 #[path = "storage_tests.rs"]
