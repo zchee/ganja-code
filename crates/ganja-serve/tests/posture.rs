@@ -39,6 +39,77 @@ async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
 }
 
 #[tokio::test]
+async fn a_prebound_non_loopback_listener_requires_credentials_despite_a_loopback_config() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("network listener");
+    let result = ganja_serve::serve_on_tcp(engine(), loopback_config(), listener).await;
+    assert!(
+        matches!(result, Err(ServeError::UnsecuredNonLoopback { ref hostname }) if hostname == "0.0.0.0")
+    );
+}
+
+#[tokio::test]
+async fn a_prebound_tcp_listener_refuses_a_socket_classified_config() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("TCP listener");
+    let mut config = loopback_config();
+    config.listen = Listen::Unix { path: std::env::temp_dir().join("not-a-tcp-transport.sock") };
+    let result = ganja_serve::serve_on_tcp(engine(), config, listener).await;
+    assert!(
+        matches!(result, Err(ServeError::ExpectedTcp)),
+        "TCP cannot use the credential-free socket routes: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_prebound_listener_preserves_basic_epoch_directory_readiness_and_route_posture() {
+    let deadline = tokio::time::Instant::now() + support::DEADLINE;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("TCP listener");
+    let mut config = loopback_config();
+    config.credentials = Some(credentials());
+    let epoch = config.journal.epoch().to_owned();
+    let server =
+        ganja_serve::serve_on_tcp(engine(), config, listener).await.expect("prebound serve");
+    let base = base_url(&server);
+    let result: Result<(), reqwest::Error> = tokio::time::timeout_at(deadline, async {
+        let client = reqwest::Client::new();
+        for (path, password, directory, status) in [
+            ("/global/health", None, None, 401),
+            ("/global/health", Some("wrong"), None, 401),
+            ("/global/health", Some("hunter2"), None, 200),
+            ("/global/health", Some("hunter2"), Some("/another-directory"), 400),
+            ("/readyz", None, None, 200),
+            ("/bootstrap", Some("hunter2"), None, 404),
+        ] {
+            let mut request = client.get(format!("{base}{path}"));
+            if let Some(password) = password {
+                request = request.basic_auth("ganja", Some(password));
+            }
+            if let Some(directory) = directory {
+                request = request.header(ganja_serve::DIRECTORY_HEADER, directory);
+            }
+            let response = request.send().await?;
+            assert_eq!(response.status(), status, "{path}");
+            assert_eq!(
+                response.headers()[ganja_serve::EPOCH_HEADER],
+                epoch,
+                "journal epoch on {path}"
+            );
+            if status == 401 {
+                assert_eq!(
+                    response.headers()["www-authenticate"],
+                    "Basic realm=\"Secure Area\"",
+                    "Basic challenge"
+                );
+            }
+        }
+        Ok(())
+    })
+    .await
+    .expect("bounded route checks");
+    server.shutdown().await.expect("stop prebound serve");
+    result.expect("prebound TCP preserves engine posture");
+}
+
+#[tokio::test]
 async fn a_request_naming_another_directory_is_refused_with_400() {
     let handle =
         ganja_serve::serve(engine(), loopback_config()).await.expect("a loopback server comes up");

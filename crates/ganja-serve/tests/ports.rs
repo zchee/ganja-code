@@ -44,6 +44,18 @@ async fn an_explicit_port_that_is_taken_is_refused_rather_than_replaced() {
 }
 
 #[tokio::test]
+async fn a_prebound_listener_reports_and_serves_its_actual_address() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bound listener");
+    let address = listener.local_addr().expect("actual address");
+    let handle = ganja_serve::serve_on_tcp(engine(), loopback_config(), listener)
+        .await
+        .expect("already bound listener comes up");
+    assert_eq!(handle.address().tcp(), Some(address));
+    healthy(&handle).await;
+    handle.shutdown().await.expect("clean stop");
+}
+
+#[tokio::test]
 async fn an_os_assigned_port_is_reported_truthfully() {
     let handle =
         ganja_serve::serve(engine(), loopback_config()).await.expect("a loopback server comes up");

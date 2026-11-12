@@ -288,6 +288,98 @@ async fn concurrent_posts_admit_one_clone_and_success_drains_before_handoff() {
 }
 
 #[tokio::test]
+async fn a_retained_init_listener_accepts_connections_after_handoff() {
+    use std::os::fd::AsFd as _;
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind init");
+    let retained = std::net::TcpListener::from(
+        listener.as_fd().try_clone_to_owned().expect("retain the same socket"),
+    );
+    let address = listener.local_addr().expect("bound address");
+    let release = Arc::new(Semaphore::new(0));
+    let init = Service::new(
+        credentials(),
+        std::env::current_dir().expect("cwd"),
+        Arc::new(Controlled {
+            calls: Arc::new(AtomicUsize::new(0)),
+            release: release.clone(),
+            fail: false,
+        }),
+    )
+    .serve(listener)
+    .expect("serve init");
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let initial = client.get(format!("{base}/readyz")).send().await.expect("init readiness");
+    let init_epoch = initial.headers()[ganja_serve::EPOCH_HEADER].clone();
+    let post =
+        client.post(format!("{base}/bootstrap")).header("authorization", basic()).json(&body());
+    let posting = tokio::spawn(async move { post.send().await });
+    tokio::time::timeout_at(deadline, async {
+        while status(&client, &base).await["status"] != "in_progress" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("executor is held");
+    let handoff = tokio::spawn(init.handoff());
+    release.add_permits(1);
+    let response = tokio::time::timeout_at(deadline, posting)
+        .await
+        .expect("bootstrap responds")
+        .expect("post joins")
+        .expect("POST");
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.expect("complete success body")["status"],
+        "cloned"
+    );
+    tokio::time::timeout_at(deadline, handoff)
+        .await
+        .expect("handoff drains")
+        .expect("handoff joins")
+        .expect("checkout");
+
+    // No engine exists yet: the retained socket alone holds this request.
+    let mut stream = tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(address))
+        .await
+        .expect("connect deadline")
+        .expect("queued connection");
+    let request = format!(
+        "GET /global/health HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nConnection: close\r\n\r\n",
+        basic()
+    );
+    tokio::time::timeout_at(deadline, stream.write_all(request.as_bytes()))
+        .await
+        .expect("write deadline")
+        .expect("queue complete request");
+    retained.set_nonblocking(true).expect("nonblocking retained socket");
+    let listener = tokio::net::TcpListener::from_std(retained).expect("register retained socket");
+    let mut config = support::loopback_config();
+    config.credentials = Some(credentials());
+    let epoch = config.journal.epoch().to_owned();
+    let server = ganja_serve::serve_on_tcp(support::engine(), config, listener)
+        .await
+        .expect("serve the retained socket without rebinding");
+    assert_eq!(server.address().tcp(), Some(address));
+    let mut response = String::new();
+    let read = tokio::time::timeout_at(deadline, stream.read_to_string(&mut response)).await;
+    server.shutdown().await.expect("engine shutdown");
+    read.expect("response deadline").expect("same connection answers");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains(&format!("ganja-serve-epoch: {epoch}")), "{response}");
+    assert!(!response.contains(init_epoch.to_str().expect("init epoch")), "new engine epoch");
+    let body = response.split_once("\r\n\r\n").expect("HTTP body").1;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).expect("engine health")["healthy"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn a_lost_response_keeps_one_operation_and_a_cleaned_failure_allows_a_new_body() {
     let (handle, base, calls, release) = fixture(true).await;
     let client = reqwest::Client::new();
