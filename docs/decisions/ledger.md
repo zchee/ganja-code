@@ -1018,3 +1018,101 @@ Pinned by: `crates/ganja-teammate-cloud/src/health_tests.rs`
 (the clean launch, refusal, peer reset, status, decode canary, health and launch
 deadline, and real pending-start cancellation, abort and unwind cases).
 Commit: 2b3aa324
+
+## D591 — store leases fence main-last archive publication (2026-11-12)
+
+Crates: ganja-storage, ganja-core, ganja-cli, ganja-testkit
+Amends: D493 and the frozen `ganja-storage.md` quarantine rules
+
+Every store open takes a shared lease on the permanent sibling
+`<database>.quarantine.lock` before any pending-record or existence decision
+or SQLite open. Both connections retain the lease until they close.
+Maintenance closes its own connections, releases shared admission, takes the
+lease exclusively and decides again from the current state; an earlier
+verdict never authorizes a move. The write connection opens before startup
+reports success, and a failed start is not cached, so the same store can retry.
+Normal stores share admission; SQLite still serializes writes.
+
+Old-id and corrupt stores use one recorded move. A version-1 pending record
+reserves one archive basename, the exact main/WAL/SHM membership and a
+no-legacy-import policy before the first rename. Its complete temporary file
+is flushed with `sync_all`, closed and renamed to `.quarantine.pending`, then
+its containing directory is flushed before any captured file moves. A failed
+flush returns its I/O error before those moves. These flushes cover record
+publication, not durability of the later renames or replacement initialization;
+there is no power-loss guarantee.
+
+Captured WAL and SHM move first, main last. The archived main publishes the
+set. The next opener reads the record before any live SQLite open and finishes
+to that reserved name or returns a typed error. Before publication, a captured
+component present only at source moves; one only at destination is already
+moved. Both or neither, an unexpected component, or a malformed, unsupported
+or invalid record refuses persistence: nothing is guessed or overwritten.
+After main publication, recovery never replays or requires archive companions,
+which an ordinary archive reader may have consumed. Replacement migration
+finishes under exclusive admission, without legacy reimport, before the
+record is removed. An error can leave a split set with its record, not an
+unchanged live store.
+
+One five-second monotonic deadline per open bounds admission waiting, with
+nonblocking attempts polled at 10 ms intervals; revalidation never restarts it.
+It does not bound SQLite opens or interrupt a maintainer already holding the
+exclusive lease through replacement migration. On expiry, blocked shared
+admission returns `StorageError::Maintaining`. After a refused exclusive
+attempt, the fallback tries shared admission once and rechecks: a readable
+old-id store is opened as it is, with a warning that maintenance was deferred
+and its old ids stay live; pending or corrupt state returns the typed error.
+A replacement found ready is used normally. Storage failure still lets the
+engine continue in memory, not claim persistence. Deferred maintenance waits
+for a later open that can take the exclusive lease.
+
+On Unix the lock is opened without following a link at its own name and must
+be a regular file; links, directories, FIFOs and sockets there are refused.
+Links at an archive name, the pending record or a captured file are refused,
+not followed or replaced. The pending record must be regular and is read with
+a 4,096-byte inclusive cap. This is cooperation, not protection against a
+nonparticipating process placing a link between a check and a rename.
+
+A forced checkpoint or journal-mode change to publish a self-contained main
+was rejected: the matching file set can be retained without making checkpoint
+success a maintenance prerequisite. A logical copy and clear would replace the
+rename protocol with database-sized copying and a separate data-removal step.
+A new directory layout would change archive and restoration paths; the flat
+names stay. Detecting which process owns the lease was not chosen: admission
+and revalidation decide whether maintenance can proceed, not owner identity.
+The selected shape retains one lock descriptor per independently opened store,
+shared by its two connections. It adds two dependency edges, no new package:
+Unix-only `rustix` in `ganja-storage` for no-follow flags, and `rusqlite` as a
+`ganja-cli` dev-dependency for ordinary read-only archive queries in the drill.
+Schema, id generation and the single writer thread are unchanged.
+
+Only cooperating processes of this version on one host and a local filesystem
+are covered, on macOS and Linux. Older binaries and external SQLite clients
+are not detected or fenced: stop them before maintenance, never downgrade
+with a pending record, and restore an archive offline with every companion.
+First creation and the legacy-tree decision are exclusive, but an interrupted
+first import is not resumed and a later-appearing tree is never imported.
+Debug and release stores have separate leases but share that tree; simultaneous
+first conversion by both is unsupported. Closing a store promises closed
+connections and a released lease, not a checkpointed main file: a fixture
+assuming otherwise failed on Linux and now explicitly checkpoints its baseline.
+
+Pinned by: `crates/ganja-storage/src/storage_maintenance_tests.rs`
+(`a_store_retains_its_lease_until_both_connections_close`,
+`a_failed_writer_open_can_be_retried`,
+`an_archive_is_readable_when_its_main_name_is_published`,
+`a_lock_path_link_is_refused_before_any_sqlite_open_or_move`),
+`crates/ganja-storage/src/storage_recovery_tests.rs`
+(`a_killed_move_is_completed_before_any_live_sqlite_open`,
+`two_recoverers_finish_one_pending_move`,
+`revalidation_rounds_share_one_admission_deadline`,
+`a_live_owner_defers_maintenance_without_moving_data`),
+`crates/ganja-storage/src/storage_maintenance_protocol_tests.rs`
+(the reserved-name, conflict, missing/unexpected component, link, published-WAL
+and exact size-boundary cases),
+`crates/ganja-core/tests/storage_preuuid_wal.rs` (the explicit checkpoint and
+WAL-dependent recovery), `crates/ganja-cli/tests/id_collision.rs`
+(`two_processes_racing_the_quarantine_leave_one_aside_file` and its foreign-WAL
+negative control), and `crates/ganja-testkit/src/session.rs`
+(the close contract).
+Commit: 60d71e29
