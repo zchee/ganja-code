@@ -1,0 +1,7 @@
+BEGIN { printf("READY mono_ns=%llu\n", nsecs); }
+tracepoint:tcp:tcp_send_reset
+/args->family == 2 && args->saddr[0] == 127/
+{
+  printf("RESET mono_ns=%llu pid=%d tid=%d comm=%s local=%s:%d peer=%s:%d state=%d\n", nsecs, pid, tid, comm, ntop(args->saddr), args->sport, ntop(args->daddr), args->dport, args->state);
+  printf("%s\n", kstack(12));
+}

@@ -11,7 +11,7 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -21,17 +21,47 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: preflight before setup and compilation
+        run: bash scripts/handoff-reset-trace/preflight.sh
       - name: install the repository toolchain
-        run: rustup toolchain install nightly --profile minimal && rustup default nightly
+        run: rustup toolchain install nightly --profile minimal --component rust-analyzer && rustup default nightly
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: install measurement utilities
-        run: sudo apt-get update && sudo apt-get install -y ripgrep iproute2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: install the CI suite terminal dependency
+        run: |
+          command -v /home/linuxbrew/.linuxbrew/bin/brew
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install tmux
+          printf '%s/bin\n' "$(brew --prefix)" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v7
+        with:
+          repository: anomalyco/opencode
+          ref: v1.18.22
+          path: upstream/opencode-v1.18.22
+          persist-credentials: false
+      - uses: actions/cache@v6
+        with:
+          path: upstream/opencode-v1.18.22/node_modules
+          key: opencode-v1.18.22-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.22/bun.lock') }}
+      - name: install the upstream CI fixture
+        working-directory: upstream/opencode-v1.18.22
+        run: bun install --frozen-lockfile
+      - name: preflight installed suite commands before compilation
+        run: command -v bun && command -v tmux && command -v cargo-nextest && command -v rust-analyzer
       - name: build the unchanged worker initialization test
         run: bash scripts/handoff-reset-trace/build.sh
-      - name: measure without tracing
-        run: bash scripts/handoff-reset-trace/measure.sh 500 baseline
+      - name: measure beside the real CI suite
+        run: bash scripts/handoff-reset-trace/loaded.sh
+        env:
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
+          GANJA_LSP_EDIT_BUDGET_MS: "6000"
       - name: preserve measurements
         if: always()
         uses: actions/upload-artifact@v7

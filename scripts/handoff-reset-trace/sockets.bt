@@ -1,0 +1,54 @@
+BEGIN
+{
+  printf("READY mono_ns=%llu\n", nsecs);
+}
+
+tracepoint:sched:sched_process_exec
+/comm == "ganja" || @workers[pid] || strncmp(comm, "worker_init", 11) == 0/
+{
+  if (comm == "ganja") { @workers[pid] = 1; }
+  printf("EXEC mono_ns=%llu pid=%d tid=%d comm=%s\n", nsecs, pid, tid, comm);
+}
+
+tracepoint:sched:sched_process_fork
+/@workers[pid] || comm == "timeout" || strncmp(comm, "worker_init", 11) == 0/
+{
+  if (@workers[pid]) { @workers[args->child_pid] = 1; }
+  printf("FORK mono_ns=%llu pid=%d tid=%d comm=%s parent=%d child=%d\n", nsecs, pid, tid, comm, args->parent_pid, args->child_pid);
+}
+
+tracepoint:sched:sched_process_exit
+/@workers[tid]/
+{
+  if (tid == pid) { printf("EXIT mono_ns=%llu pid=%d comm=%s\n", nsecs, pid, comm); }
+  delete(@workers[tid]);
+}
+
+kretprobe:inet_csk_accept
+/@workers[pid] && retval != 0/
+{
+  $sk = (struct sock *)retval;
+  if ($sk->__sk_common.skc_family == 2) {
+    printf("ACCEPT mono_ns=%llu pid=%d tid=%d comm=%s sk=%p local=%s:%d peer=%s:%d state=%d\n", nsecs, pid, tid, comm, $sk, ntop($sk->__sk_common.skc_rcv_saddr), $sk->__sk_common.skc_num, ntop($sk->__sk_common.skc_daddr), bswap($sk->__sk_common.skc_dport), $sk->__sk_common.skc_state);
+  }
+}
+
+kprobe:tcp_close,kprobe:tcp_send_active_reset,kprobe:inet_csk_listen_stop
+/@workers[pid]/
+{
+  $sk = (struct sock *)arg0;
+  if ($sk->__sk_common.skc_family == 2) {
+    $tp = (struct tcp_sock *)arg0;
+    printf("SOCKET mono_ns=%llu probe=%s pid=%d tid=%d comm=%s sk=%p local=%s:%d peer=%s:%d state=%d rcv_nxt=%u copied_seq=%u queue=%u\n", nsecs, probe, pid, tid, comm, $sk, ntop($sk->__sk_common.skc_rcv_saddr), $sk->__sk_common.skc_num, ntop($sk->__sk_common.skc_daddr), bswap($sk->__sk_common.skc_dport), $sk->__sk_common.skc_state, $tp->rcv_nxt, $tp->copied_seq, $sk->sk_receive_queue.qlen);
+    if (probe == "kprobe:tcp_send_active_reset") {
+      printf("%s\n", kstack(12));
+    }
+  }
+}
+
+tracepoint:tcp:tcp_send_reset
+/args->family == 2 && args->saddr[0] == 127/
+{
+  printf("RESET mono_ns=%llu pid=%d tid=%d comm=%s local=%s:%d peer=%s:%d state=%d\n", nsecs, pid, tid, comm, ntop(args->saddr), args->sport, ntop(args->daddr), args->dport, args->state);
+  printf("%s\n", kstack(12));
+}
