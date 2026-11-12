@@ -64,6 +64,34 @@ fn inherited_socket_probe() {
     );
 }
 
+#[cfg(target_vendor = "apple")]
+#[test]
+fn a_socket_name_failure_reports_read_only_descriptor_facts() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+
+    // SAFETY: socket returns a fresh unconnected kernel-control socket owned by this test.
+    let number = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
+    assert!(number >= 0, "kernel-control socket: {}", std::io::Error::last_os_error());
+    // SAFETY: this successful socket call created a new descriptor with no other owner.
+    let socket = unsafe { OwnedFd::from_raw_fd(number) };
+    // SAFETY: F_GETFD is a read-only query of the live test-owned socket.
+    let flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) };
+    let error = listener::matches(socket.as_raw_fd(), (Ipv4Addr::LOCALHOST, 0).into())
+        .expect_err("kernel control does not implement getsockname");
+    let message = error.to_string();
+    for field in [
+        format!("getsockname fd={number} errno={}", libc::EOPNOTSUPP),
+        "fstat_type=0o140000".to_owned(),
+        "cloexec=false".to_owned(),
+        format!("so_type={}", libc::SOCK_DGRAM),
+        format!("getpeername_errno={}", libc::ENOTCONN),
+    ] {
+        assert!(message.contains(&field), "missing {field}: {message}");
+    }
+    // SAFETY: the probe must leave this descriptor open and its flags unchanged.
+    assert_eq!(unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) }, flags);
+}
+
 fn probe_command(spec: serde_json::Value) -> String {
     let spec = serde_json::to_string(&spec).expect("probe JSON");
     let binary = std::env::current_exe().expect("test binary");

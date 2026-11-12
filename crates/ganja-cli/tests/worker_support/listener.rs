@@ -62,7 +62,7 @@ pub fn matches(number: RawFd, expected: SocketAddr) -> std::io::Result<bool> {
         let error = std::io::Error::last_os_error();
         return match error.raw_os_error() {
             Some(libc::EBADF | libc::ENOTSOCK) => Ok(false),
-            _ => Err(query_error("getsockname", number, error)),
+            _ => Err(socket_name_error(number, error)),
         };
     }
     // SAFETY: all buffer bytes were initialized before the successful query.
@@ -117,6 +117,41 @@ pub fn scan(expected: SocketAddr) -> std::io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn socket_name_error(number: RawFd, error: std::io::Error) -> std::io::Error {
+    let failure = query_error("getsockname", number, error);
+    let mut status = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: fstat only queries the number and writes to initialized, aligned storage.
+    let file_type = if unsafe { libc::fstat(number, status.as_mut_ptr()) } == -1 {
+        format!("errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    } else {
+        // SAFETY: the successful query initialized stat; only its mode is read.
+        format!("{:#o}", unsafe { status.assume_init() }.st_mode & libc::S_IFMT)
+    };
+    // SAFETY: F_GETFD reads flags without changing or taking ownership of the descriptor.
+    let flags = unsafe { libc::fcntl(number, libc::F_GETFD) };
+    let close_on_exec = if flags == -1 {
+        format!("errno={}", std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    } else {
+        (flags & libc::FD_CLOEXEC != 0).to_string()
+    };
+    let socket_type =
+        integer_option(number, libc::SOL_SOCKET, libc::SO_TYPE, "getsockopt(SO_TYPE)")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|error| format!("error({error})"));
+    let mut peer = std::mem::MaybeUninit::<libc::sockaddr_storage>::zeroed();
+    let mut length = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: getpeername only queries the raw number and writes within the supplied buffer.
+    let peer_errno =
+        if unsafe { libc::getpeername(number, peer.as_mut_ptr().cast(), &raw mut length) } == -1 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        };
+    std::io::Error::other(format!(
+        "{failure} fstat_type={file_type} cloexec={close_on_exec} so_type={socket_type} getpeername_errno={peer_errno}"
+    ))
 }
 
 fn query_error(query: &str, number: RawFd, error: std::io::Error) -> std::io::Error {
