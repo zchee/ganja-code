@@ -124,8 +124,10 @@ fn an_opener_at_the_holdoff_boundary_is_literal() {
     let mut machine = EscRepair::active();
     let base = Instant::now();
     assert!(machine.accept(esc(), base).is_empty());
-    assert_eq!(machine.accept(ch('['), base + HOLDOFF), vec![esc(), ch('[')]);
-    assert_eq!(machine.accept(ch('D'), base + HOLDOFF), vec![ch('D')]);
+    let deadline = base + Duration::from_millis(25);
+    assert_eq!(machine.deadline(), Some(deadline));
+    assert_eq!(machine.accept(ch('['), deadline), vec![esc(), ch('[')]);
+    assert_eq!(machine.accept(ch('D'), deadline), vec![ch('D')]);
     assert_eq!(machine.deadline(), None);
 }
 

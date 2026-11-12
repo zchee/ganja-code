@@ -199,13 +199,11 @@ impl Ganja {
         Self { session: Some(session), _homes: homes, sockets }
     }
 
-    /// Keeps the pty drained for `ms` milliseconds so the app stays live.
+    /// Drains pty output for `ms` milliseconds to avoid stdout backpressure.
     ///
-    /// A bare `thread::sleep` starves the pty: the app blocks writing its
-    /// next frame into the kernel buffer nobody is reading, and never gets
-    /// to *read* the input a test sent — so bytes meant to arrive split are
-    /// read in one batch after all. Draining while waiting is what makes a
-    /// deliberate pause on this side a real pause on the app's side.
+    /// An unread output buffer can block the app before it reads more input.
+    /// Draining does not acknowledge input consumption or guarantee that
+    /// separate writes are read in separate batches.
     fn breathe(&mut self, ms: u64) {
         let deadline = std::time::Instant::now() + Duration::from_millis(ms);
         let mut sink = [0u8; 4096];
@@ -247,7 +245,7 @@ impl Ganja {
             let _ = homes.keep();
         }
         panic!(
-            "{message}; write completion offsets: {offsets:?}; submitted: {submitted:?}; logs retained at {logs:?}"
+            "{message}; write offsets: {offsets:?}; submitted: {submitted:?}; logs retained at {logs:?}"
         );
     }
 
@@ -412,9 +410,63 @@ fn a_negative_kitty_probe_pushes_nothing() {
     session.quit_and_assert_clean_exit();
 }
 
-/// Split writes exercise the real terminal path. A sender descheduled past
-/// the hold-off did not send an on-time continuation, so only that attempt is
-/// inconclusive. A compliant send that fails repair is never retried.
+#[derive(Debug, PartialEq, Eq)]
+enum SenderGap {
+    SpoiledBeforeSending,
+    ShownCompliant,
+    NotShownCompliant,
+}
+
+fn sender_gap(
+    offsets: [Duration; 3],
+    tail_completed: Option<Duration>,
+    holdoff: Duration,
+) -> SenderGap {
+    let [esc_started, _esc_completed, tail_started] = offsets;
+    // Reserve half the hold-off for the tail write itself and its clock reading.
+    if tail_started - esc_started >= holdoff / 2 {
+        SenderGap::SpoiledBeforeSending
+    } else if tail_completed.is_some_and(|completed| completed - esc_started < holdoff) {
+        SenderGap::ShownCompliant
+    } else {
+        SenderGap::NotShownCompliant
+    }
+}
+
+#[test]
+fn sender_gap_bounds_never_retry_an_uncertain_write() {
+    let holdoff = Duration::from_millis(25);
+    for (offsets_ns, expected) in [
+        ([0, 1_000, 12_500_000, 12_501_000], SenderGap::SpoiledBeforeSending),
+        ([0, 1_000, 12_499_999, 12_500_000], SenderGap::ShownCompliant),
+        ([0, 1_000, 5_000_000, 25_000_000], SenderGap::NotShownCompliant),
+        ([0, 1_000, 5_000_000, 24_999_999], SenderGap::ShownCompliant),
+        ([0, 1_000, 5_000_000, 40_000_000], SenderGap::NotShownCompliant),
+        ([41, 46_168_625, 52_227_375, 52_266_583], SenderGap::SpoiledBeforeSending),
+    ] {
+        let [esc_started, esc_completed, tail_started, tail_completed] =
+            offsets_ns.map(Duration::from_nanos);
+        let offsets = [esc_started, esc_completed, tail_started];
+        assert_eq!(
+            sender_gap(offsets, Some(tail_completed), holdoff),
+            expected,
+            "write offsets in ns: {offsets_ns:?}"
+        );
+        assert_eq!(
+            sender_gap(offsets, None, holdoff),
+            if expected == SenderGap::SpoiledBeforeSending {
+                SenderGap::SpoiledBeforeSending
+            } else {
+                SenderGap::NotShownCompliant
+            },
+            "before sending the tail, write offsets in ns: {offsets_ns:?}"
+        );
+    }
+}
+
+/// Split writes exercise the real terminal path. A spoiled pre-send gap discards
+/// the child without sending a tail. Once sent, a failed repair is never retried;
+/// sender timestamps do not prove UI consumption.
 #[test]
 fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
     const ATTEMPTS: usize = 5;
@@ -423,40 +475,57 @@ fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
     for attempt in 1..=ATTEMPTS {
         let mut session = ganja();
         session.expect(COMPOSER).expect("the app is up and reading keys");
-        let sent = Instant::now();
-        let mut offsets = Vec::new();
         session.send("hel").expect("failed to type into the composer");
-        offsets.push(sent.elapsed());
         session.breathe(30);
+        let sent = Instant::now();
+        let esc_started = sent.elapsed();
         session.send("\x1b").expect("failed to send the bare escape");
-        offsets.push(sent.elapsed());
+        let esc_completed = sent.elapsed();
         session.breathe(5);
-        session.send("[D").expect("failed to send the sequence tail");
-        offsets.push(sent.elapsed());
-        let gap = offsets[2] - offsets[1];
-        if gap >= HOLDOFF {
-            eprintln!(
-                "split attempt {attempt}: inconclusive sender gap {gap:?}; offsets {offsets:?}"
-            );
+        let tail_started = sent.elapsed();
+        let before_tail = [esc_started, esc_completed, tail_started];
+        if sender_gap(before_tail, None, HOLDOFF) == SenderGap::SpoiledBeforeSending {
+            eprintln!("split attempt {attempt}: discarded before sending; offsets {before_tail:?}");
+            // A plain x cannot continue Esc. Whether the terminal parser
+            // consumes it with Esc or repair flushes Esc first, the following
+            // Ctrl-P opens the palette only after that Esc is no longer held.
+            // Observe that opening before starting a fresh composer child.
+            session.send("x\x10").expect("failed to open the palette after discarding the gap");
+            session.expect("search commands").expect("the discarded Esc was never consumed");
+            session.expect("\x1b[?25l").expect("the open palette never hid the cursor");
             if attempt == ATTEMPTS {
-                session
-                    .escape_failure("the sender never got a compliant gap below 25 ms", &offsets);
+                session.escape_failure("the sender never got a timely gap", &before_tail);
             }
-            // A new child gives the next attempt an untouched composer line.
             session.quit_and_assert_clean_exit();
             continue;
         }
+        session.send("[D").expect("failed to send the sequence tail");
+        let tail_completed = sent.elapsed();
+        let offsets = [esc_started, esc_completed, tail_started, tail_completed];
+        let lower = tail_started - esc_completed;
+        let upper = tail_completed - esc_started;
+        let gap = sender_gap(before_tail, Some(tail_completed), HOLDOFF);
+        eprintln!(
+            "split attempt {attempt}: {gap:?}; gap bounds {lower:?}..={upper:?}; offsets {offsets:?}"
+        );
         session.send("X").expect("failed to type the marker");
-        offsets.push(sent.elapsed());
         session.send("\r").expect("failed to submit");
-        offsets.push(sent.elapsed());
-        eprintln!("split attempt {attempt}: compliant sender gap {gap:?}; offsets {offsets:?}");
         if let Err(error) = session.expect("heXl") {
+            let evidence = match gap {
+                SenderGap::ShownCompliant => "shown compliant sender gap",
+                SenderGap::NotShownCompliant => "sender gap that could not be shown compliant",
+                SenderGap::SpoiledBeforeSending => {
+                    unreachable!("spoiled attempts continue before sending")
+                }
+            };
             session.escape_failure(
-                &format!("the split arrow was not repaired into a Left with a compliant sender gap: {error}"),
+                &format!("the split arrow was not repaired into a Left with {evidence}; gap bounds {lower:?}..={upper:?}; offsets are [esc_started, esc_completed, tail_started, tail_completed]: {error}"),
                 &offsets,
             );
         }
+        eprintln!(
+            "split pass attempt {attempt}; gap bounds {lower:?}..={upper:?}; offsets {offsets:?}"
+        );
         session.quit_and_assert_clean_exit();
         return;
     }
