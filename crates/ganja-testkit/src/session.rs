@@ -53,11 +53,13 @@ pub const PRE_UUID_ID: &str = "ses_0193b2f0a1c2000000";
 /// Plants the store a build from before **D493** left behind: one session
 /// under [`PRE_UUID_ID`], at `root`.
 ///
-/// Answers the still-open handle beside the database path, because *when*
-/// the planting connection closes is part of each quarantine drill: SQLite
-/// folds the write-ahead log back in and deletes it when the last connection
-/// goes, so a drill about the `-wal` travelling opens its keeper before it
-/// drops this, and the others drop it at once.
+/// Answers the still-open handle beside the database path so each caller can
+/// choose when the planting store closes. Quarantine drills drop it before
+/// reopening; the lease drill holds it to prove that a live store blocks
+/// exclusive admission. Dropping it closes both connections and releases its
+/// lease, but the planted row may still be only in the write-ahead log. A
+/// drill that needs the row in the main file checkpoints it itself and checks
+/// that the checkpoint completed.
 pub fn plant_preuuid_store(root: std::path::PathBuf) -> (Storage, std::path::PathBuf) {
     let planted = Storage::open(root);
     planted
