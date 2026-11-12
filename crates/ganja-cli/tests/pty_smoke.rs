@@ -30,7 +30,7 @@
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expectrl::process::unix::WaitStatus;
@@ -199,13 +199,11 @@ impl Ganja {
         Self { session: Some(session), _homes: homes, sockets }
     }
 
-    /// Keeps the pty drained for `ms` milliseconds so the app stays live.
+    /// Drains pty output for `ms` milliseconds to avoid stdout backpressure.
     ///
-    /// A bare `thread::sleep` starves the pty: the app blocks writing its
-    /// next frame into the kernel buffer nobody is reading, and never gets
-    /// to *read* the input a test sent — so bytes meant to arrive split are
-    /// read in one batch after all. Draining while waiting is what makes a
-    /// deliberate pause on this side a real pause on the app's side.
+    /// An unread output buffer can block the app before it reads more input.
+    /// Draining does not acknowledge input consumption or guarantee that
+    /// separate writes are read in separate batches.
     fn breathe(&mut self, ms: u64) {
         let deadline = std::time::Instant::now() + Duration::from_millis(ms);
         let mut sink = [0u8; 4096];
@@ -227,6 +225,28 @@ impl Ganja {
             thread::sleep(Duration::from_millis(2));
         }
         all
+    }
+
+    /// Reports the send clock and the child's own submission, preserving its log.
+    fn escape_failure(&mut self, message: &str, offsets: &[Duration]) -> ! {
+        let logs = self.sockets.parent().expect("the sockets have a data home").join("ganja/log");
+        let submitted: Vec<_> = fs::read_dir(&logs)
+            .expect("the child's isolated log directory exists")
+            .flat_map(|entry| {
+                let path = entry.expect("a log entry is readable").path();
+                let text = fs::read_to_string(&path).expect("the child's log is readable");
+                text.lines()
+                    .filter(|line| line.contains("the composer took a line"))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if let Some(homes) = self._homes.take() {
+            let _ = homes.keep();
+        }
+        panic!(
+            "{message}; write offsets: {offsets:?}; submitted: {submitted:?}; logs retained at {logs:?}"
+        );
     }
 
     /// Waits for the process to end and checks that it ended cleanly.
@@ -282,6 +302,7 @@ fn ganja() -> Ganja {
     // A script exported in the shell that runs the tests would otherwise
     // replace the canned reply these two are about.
     command.env_remove("GANJA_FAKE_SCRIPT");
+    command.env("RUST_LOG", "ganja_tui::app=debug");
 
     Ganja::spawn(command, SMOKE_ROWS)
 }
@@ -389,57 +410,162 @@ fn a_negative_kitty_probe_pushes_nothing() {
     session.quit_and_assert_clean_exit();
 }
 
-/// **D516.** A Left arrow whose `ESC [ D` bytes are split across two writes
-/// lands as cursor movement, never as the literal text `[D` — and the phantom
-/// Esc the split once produced reaches nothing.
-///
-/// The drained pause between the two writes forces the read boundary the
-/// repair exists for: the app reads the bare ESC alone, then its tail inside
-/// the hold-off window. Asserted on the submitted transcript line, which
-/// paints in one frame — the composer's own cell-diffed echo never yields a
-/// contiguous needle for the pty stream to match.
-#[test]
-fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
-    let mut session = ganja();
-    session.breathe(100);
-
-    session.send("hel").expect("failed to type into the composer");
-    session.breathe(30);
-    session.send("\x1b").expect("failed to send the bare escape");
-    session.breathe(5);
-    session.send("[D").expect("failed to send the sequence tail");
-    session.send("X").expect("failed to type the marker");
-    session.send("\r").expect("failed to submit");
-
-    session.expect("heXl").expect("the split arrow was not repaired into a Left");
-
-    session.quit_and_assert_clean_exit();
+#[derive(Debug, PartialEq, Eq)]
+enum SenderGap {
+    SpoiledBeforeSending,
+    ShownCompliant,
+    NotShownCompliant,
 }
 
-/// **D516.** A bare Esc followed by nothing within the hold-off was a real
-/// key press: it is released at the deadline, and a `[D` typed after that
-/// deadline is literal text — exactly what the person sent.
-///
-/// The gap before the tail is twenty hold-offs, not five: the hold-off runs
-/// from when the app *reads* the Esc, which nothing on this side can see, and
-/// on the ubuntu runner the app was descheduled past a 120ms gap after the
-/// Esc was sent — it then read Esc and `[D` in one batch, repaired them into
-/// a Left arrow, and the literal text never showed (2026-08-24). A late tail
-/// is late by any margin, so the margin is the generous one.
+fn sender_gap(
+    offsets: [Duration; 3],
+    tail_completed: Option<Duration>,
+    holdoff: Duration,
+) -> SenderGap {
+    let [esc_started, _esc_completed, tail_started] = offsets;
+    // Reserve half the hold-off for the tail write itself and its clock reading.
+    if tail_started - esc_started >= holdoff / 2 {
+        SenderGap::SpoiledBeforeSending
+    } else if tail_completed.is_some_and(|completed| completed - esc_started < holdoff) {
+        SenderGap::ShownCompliant
+    } else {
+        SenderGap::NotShownCompliant
+    }
+}
+
+#[test]
+fn sender_gap_bounds_never_retry_an_uncertain_write() {
+    let holdoff = Duration::from_millis(25);
+    for (offsets_ns, expected) in [
+        ([0, 1_000, 12_500_000, 12_501_000], SenderGap::SpoiledBeforeSending),
+        ([0, 1_000, 12_499_999, 12_500_000], SenderGap::ShownCompliant),
+        ([0, 1_000, 5_000_000, 25_000_000], SenderGap::NotShownCompliant),
+        ([0, 1_000, 5_000_000, 24_999_999], SenderGap::ShownCompliant),
+        ([0, 1_000, 5_000_000, 40_000_000], SenderGap::NotShownCompliant),
+        ([41, 46_168_625, 52_227_375, 52_266_583], SenderGap::SpoiledBeforeSending),
+    ] {
+        let [esc_started, esc_completed, tail_started, tail_completed] =
+            offsets_ns.map(Duration::from_nanos);
+        let offsets = [esc_started, esc_completed, tail_started];
+        assert_eq!(
+            sender_gap(offsets, Some(tail_completed), holdoff),
+            expected,
+            "write offsets in ns: {offsets_ns:?}"
+        );
+        assert_eq!(
+            sender_gap(offsets, None, holdoff),
+            if expected == SenderGap::SpoiledBeforeSending {
+                SenderGap::SpoiledBeforeSending
+            } else {
+                SenderGap::NotShownCompliant
+            },
+            "before sending the tail, write offsets in ns: {offsets_ns:?}"
+        );
+    }
+}
+
+/// Split writes exercise the real terminal path. A spoiled pre-send gap discards
+/// the child without sending a tail. Once sent, a failed repair is never retried;
+/// sender timestamps do not prove UI consumption.
+#[test]
+fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
+    const ATTEMPTS: usize = 5;
+    const HOLDOFF: Duration = Duration::from_millis(25);
+
+    for attempt in 1..=ATTEMPTS {
+        let mut session = ganja();
+        session.expect(COMPOSER).expect("the app is up and reading keys");
+        session.send("hel").expect("failed to type into the composer");
+        session.breathe(30);
+        let sent = Instant::now();
+        let esc_started = sent.elapsed();
+        session.send("\x1b").expect("failed to send the bare escape");
+        let esc_completed = sent.elapsed();
+        session.breathe(5);
+        let tail_started = sent.elapsed();
+        let before_tail = [esc_started, esc_completed, tail_started];
+        if sender_gap(before_tail, None, HOLDOFF) == SenderGap::SpoiledBeforeSending {
+            eprintln!("split attempt {attempt}: discarded before sending; offsets {before_tail:?}");
+            // A plain x cannot continue Esc. Whether the terminal parser
+            // consumes it with Esc or repair flushes Esc first, the following
+            // Ctrl-P opens the palette only after that Esc is no longer held.
+            // Observe that opening before starting a fresh composer child.
+            session.send("x\x10").expect("failed to open the palette after discarding the gap");
+            session.expect("search commands").expect("the discarded Esc was never consumed");
+            session.expect("\x1b[?25l").expect("the open palette never hid the cursor");
+            if attempt == ATTEMPTS {
+                session.escape_failure("the sender never got a timely gap", &before_tail);
+            }
+            session.quit_and_assert_clean_exit();
+            continue;
+        }
+        session.send("[D").expect("failed to send the sequence tail");
+        let tail_completed = sent.elapsed();
+        let offsets = [esc_started, esc_completed, tail_started, tail_completed];
+        let lower = tail_started - esc_completed;
+        let upper = tail_completed - esc_started;
+        let gap = sender_gap(before_tail, Some(tail_completed), HOLDOFF);
+        eprintln!(
+            "split attempt {attempt}: {gap:?}; gap bounds {lower:?}..={upper:?}; offsets {offsets:?}"
+        );
+        session.send("X").expect("failed to type the marker");
+        session.send("\r").expect("failed to submit");
+        if let Err(error) = session.expect("heXl") {
+            let evidence = match gap {
+                SenderGap::ShownCompliant => "shown compliant sender gap",
+                SenderGap::NotShownCompliant => "sender gap that could not be shown compliant",
+                SenderGap::SpoiledBeforeSending => {
+                    unreachable!("spoiled attempts continue before sending")
+                }
+            };
+            session.escape_failure(
+                &format!("the split arrow was not repaired into a Left with {evidence}; gap bounds {lower:?}..={upper:?}; offsets are [esc_started, esc_completed, tail_started, tail_completed]: {error}"),
+                &offsets,
+            );
+        }
+        eprintln!(
+            "split pass attempt {attempt}; gap bounds {lower:?}..={upper:?}; offsets {offsets:?}"
+        );
+        session.quit_and_assert_clean_exit();
+        return;
+    }
+}
+
+/// The palette owns every key. Without Enter or a click, only a delivered
+/// Esc closes it; the next frame restores the composer's cursor. Consuming
+/// the open palette's cursor-hide before writing Esc excludes earlier
+/// cursor-show output. That close proves release; the retained 500 ms drain
+/// that follows is not the proof. The tail must be literal submitted text.
 #[test]
 fn a_late_continuation_stays_literal_text() {
     let mut session = ganja();
-    session.breathe(100);
-
+    session.expect(COMPOSER).expect("the app is up and reading keys");
+    let sent = Instant::now();
+    let mut offsets = Vec::new();
     session.send("ok").expect("failed to type into the composer");
+    offsets.push(sent.elapsed());
     session.breathe(30);
+    session.send("\x10").expect("failed to open the command palette with Ctrl-P");
+    offsets.push(sent.elapsed());
+    session.expect("search commands").expect("the command palette never opened");
+    session.expect("\x1b[?25l").expect("the open palette never hid the cursor");
     session.send("\x1b").expect("failed to send the bare escape");
+    offsets.push(sent.elapsed());
+    if let Err(error) = session.expect("\x1b[?25h") {
+        session.escape_failure(
+            &format!("the Esc was never released to close the palette: {error}"),
+            &offsets,
+        );
+    }
     session.breathe(500);
     session.send("[D").expect("failed to send the late tail");
+    offsets.push(sent.elapsed());
     session.send("\r").expect("failed to submit");
-
-    session.expect("ok[D").expect("a late tail should stay literal text");
-
+    offsets.push(sent.elapsed());
+    eprintln!("late attempt: observed Esc release; offsets {offsets:?}");
+    if let Err(error) = session.expect("ok[D") {
+        session.escape_failure(&format!("a late tail should stay literal text: {error}"), &offsets);
+    }
     session.quit_and_assert_clean_exit();
 }
 

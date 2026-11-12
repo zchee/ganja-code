@@ -816,3 +816,43 @@ Pinned by: `crates/ganja-teammate-cloud/src/delivery_tests.rs`,
 `the_process_exits_after_bounded_cloud_cleanup`),
 `crates/ganja-teammate-cloud/src/member.rs`,
 `crates/ganja-teammate-cloud/src/state.rs`.
+
+## D587 — launch health retries do not disable the worker's first suspend (2026-11-12)
+
+Crates: ganja-teammate-cloud
+Amends: D577
+
+The bounded engine-readiness health wait is an explicit exception to permanent
+uncertain-attempt accounting. It begins after bootstrap succeeds and ends with
+the first successfully decoded engine health response, or with launch failure
+or cancellation. Only the literal health call in that wait bypasses the request
+gate; an init-shaped refusal with a valid server epoch does not end the wait.
+Failed probes keep the existing retry cadence and health/launch deadlines.
+
+Bootstrap and its status reconciliation, session listing, session creation,
+initial event connection and reconnects remain accounted. Every post-launch
+request, including health, keeps the existing permit and outcome rules. Generic
+REST calls during bootstrap remain accounted too. No successful later request,
+admission reopening or owner resume clears the permanent uncertain latch, and
+automatic suspend still requires certainty for every accounted attempt.
+
+This is an exception to the earlier contract, not proof that a failed startup
+probe was never delivered. A delayed startup probe could still wake the same
+worker after it has suspended. That remaining limitation has not been measured
+on a real worker; fixture failures reproduce an HTTP outcome, not the physical
+listener gap or the platform router's delivery/cancellation behavior. Removing
+the worker's init-to-serve listener gap is a separate change.
+
+An exemption by error kind was rejected: a router's headerless 502 does not say
+whether it forwarded the request, and Transport does not establish non-delivery
+either. An init server's epoch-bearing 404 is not successful engine readiness.
+A phase-wide exemption or latch clearing would also exempt unrelated attempts;
+the exception is confined to the bounded launch health call site instead.
+
+Pinned by: `crates/ganja-teammate-cloud/tests/fake_provisioner.rs`
+(`a_launch_health_gap_does_not_disable_the_first_suspend`,
+`an_init_health_refusal_does_not_end_the_launch_probe_exception`),
+`crates/ganja-teammate-cloud/src/member_tests.rs`
+(`a_post_launch_health_failure_still_latches_uncertainty`,
+`a_non_health_launch_attempt_keeps_the_uncertain_latch`).
+Commit: 3493328
