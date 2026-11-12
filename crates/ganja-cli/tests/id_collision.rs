@@ -43,6 +43,7 @@
 #![cfg(unix)]
 
 use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -50,8 +51,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ganja_core::{SessionId, Storage};
-use ganja_protocol::is_uuidv7;
+use ganja_protocol::{Message, Part, Role, is_uuidv7};
 use ganja_testkit::Homes;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 /// How many processes are released together — the N the live drill ran at.
@@ -260,9 +262,82 @@ fn kill_all(children: &mut [Child]) {
     }
 }
 
-/// Whether `haystack` holds `needle` anywhere in it.
-fn carries(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|window| window == needle)
+/// Every stored column, including opaque record bytes, is part of the oracle.
+fn logical_rows(database: &Path) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("the complete set must open with ordinary WAL-aware SQLite reads");
+    ["session", "message", "part"]
+        .into_iter()
+        .map(|table| {
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM {table} ORDER BY 1, 2, 3"))
+                .expect("every retained table is readable");
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|index| row.get(index))
+                        .collect::<Result<Vec<rusqlite::types::Value>, _>>()
+                })
+                .expect("retained rows read")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("every retained value decodes");
+            (table.to_owned(), rows)
+        })
+        .collect()
+}
+
+fn copy_database_set(source: &Path, target: &Path) {
+    let name = source.file_name().expect("source database basename").to_string_lossy();
+    let target_name = target.file_name().expect("target database basename").to_string_lossy();
+    for suffix in ["", "-wal", "-shm"] {
+        let from = source.with_file_name(format!("{name}{suffix}"));
+        let to = target.with_file_name(format!("{target_name}{suffix}"));
+        match from.try_exists() {
+            Ok(true) => {
+                fs::copy(&from, &to).unwrap_or_else(|error| {
+                    panic!("copy {} to {}: {error}", from.display(), to.display())
+                });
+            }
+            Ok(false) if !suffix.is_empty() => {}
+            Ok(false) => panic!("archive main {} is missing", from.display()),
+            Err(error) => panic!("inspect archive component {}: {error}", from.display()),
+        }
+    }
+}
+
+#[test]
+fn the_archive_oracle_rejects_a_foreign_wal_even_when_the_old_id_bytes_remain() {
+    let directory = tempfile::TempDir::new().expect("oracle fixture");
+    let old = directory.path().join("old.db");
+    let foreign = directory.path().join("foreign.db");
+    let schema = "CREATE TABLE session(id TEXT, parent_id TEXT, data TEXT); CREATE TABLE message(id TEXT, session_id TEXT, data TEXT); CREATE TABLE part(id TEXT, message_id TEXT, data TEXT);";
+    let connection = Connection::open(&old).expect("old main fixture");
+    connection.execute_batch(schema).expect("old schema");
+    connection
+        .execute("INSERT INTO session VALUES (?1, NULL, 'old logical row')", [OLD_ID])
+        .expect("old row");
+    drop(connection);
+    let expected = logical_rows(&old);
+    let connection = Connection::open(&foreign).expect("foreign generation");
+    connection.execute_batch("PRAGMA journal_mode=WAL;").expect("foreign WAL mode");
+    connection.execute_batch(schema).expect("foreign schema lives in WAL");
+    connection
+        .set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .expect("retain foreign WAL");
+    drop(connection);
+    fs::copy(directory.path().join("foreign.db-wal"), directory.path().join("old.db-wal"))
+        .expect("stage the observed generation mismatch");
+    let bytes = fs::read(&old).expect("main retained");
+    assert!(
+        bytes.windows(OLD_ID.len()).any(|window| window == OLD_ID.as_bytes()),
+        "a byte-only witness would accept this retained main"
+    );
+    assert_ne!(
+        logical_rows(&old),
+        expected,
+        "ordinary WAL-aware queries must reject the foreign-log set even though immutable or byte-only reads see old data"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -299,8 +374,8 @@ fn n_processes_started_together_mint_n_sessions() {
     }
 }
 
-/// The other half of D493's drill: two processes opening the same pre-UUIDv7
-/// store must leave **one** aside file, not two, and must delete nothing.
+/// Two processes opening the same pre-UUIDv7 store leave one readable archive
+/// and persist both new transcripts without inheriting any previous ids.
 ///
 /// The store is planted rather than found: a run creates it (so the project
 /// slug stays `ganja-permission`'s to decide), and one row is then rewritten
@@ -313,7 +388,7 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
     // One process, so nothing races yet: this exists only to create the store.
     drill.released_together(1);
 
-    let database = {
+    let (database, old_ids) = {
         let store = drill.store();
         let mut info = store
             .list_sessions()
@@ -321,7 +396,18 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
             .pop()
             .expect("the first run stored a session");
         info.id = SessionId::from(OLD_ID.to_owned());
+        info.title = Some("distinctive retained session title".to_owned());
         store.save_info(&info).expect("the old-format row is writable");
+        let mut message = Message::assistant("archive-fixture");
+        message.parts.push(Part::text("distinctive retained transcript content"));
+        store.save_message(&info.id, &message).expect("old message stores");
+        for part in &message.parts {
+            store.save_part(&info.id, &message.id, part).expect("old part stores");
+        }
+        assert_eq!(
+            store.load_transcript(&info.id).expect("seeded transcript reads"),
+            vec![message]
+        );
 
         // Read back through the same handle rather than trusted: a race
         // against a store that never held an old id would find nothing set
@@ -332,8 +418,18 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
             "the pre-UUIDv7 row is not in the store the race is about to open",
         );
 
-        store.database().to_path_buf()
+        let old_ids: BTreeSet<_> = store
+            .list_sessions()
+            .expect("seeded sessions read")
+            .into_iter()
+            .map(|info| info.id.as_str().to_owned())
+            .collect();
+        (store.database().to_path_buf(), old_ids)
     };
+    let baseline = tempfile::TempDir::new().expect("disposable seed query directory");
+    let seed_copy = baseline.path().join("seed.db");
+    copy_database_set(&database, &seed_copy);
+    let expected = logical_rows(&seed_copy);
 
     // Two now, together, against a store both must decide about at once.
     drill.released_together(2);
@@ -343,13 +439,10 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
         database.file_name().expect("the database has a name").to_string_lossy().into_owned();
     let marker = format!("{name}.{PREUUID}-");
 
-    // `set_aside` stamps before it suffixes — `sessions.db.preuuid-<millis>`,
-    // then `…-wal` and `…-shm` — so the companions match the same prefix and
-    // are excluded by their tails rather than counted as second quarantines.
+    // Companions share the reserved archive prefix and are not additional mains.
     let mut aside: Vec<PathBuf> = fs::read_dir(directory)
         .expect("the project directory is readable")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| entry.expect("each archive directory entry is readable").path())
         .filter(|path| {
             let file = path.file_name().unwrap_or_default().to_string_lossy();
 
@@ -365,42 +458,43 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
         aside.len(),
     );
 
-    let sessions = drill.store().list_sessions().expect("the fresh store lists its sessions");
-    let ids: Vec<&str> = sessions.iter().map(|info| info.id.as_str()).collect();
-
+    // Both children and every test-owned Storage have closed. Keep the captured
+    // set untouched, and let ordinary SQLite consume only a second query copy.
+    let retained = tempfile::TempDir::new().expect("retained archive directory");
+    let evidence = retained.path().join("retained.db");
+    copy_database_set(&aside[0], &evidence);
+    let query = tempfile::TempDir::new().expect("disposable query directory");
+    let copied = query.path().join("query.db");
+    copy_database_set(&evidence, &copied);
     assert_eq!(
-        sessions.len(),
-        2,
-        "the store the race left behind holds the two sessions it created — {ids:?}",
+        logical_rows(&copied),
+        expected,
+        "every old session/message/part column and content must survive an ordinary WAL-aware read"
     );
+
+    let live = drill.store();
+    let sessions = live.list_sessions().expect("the fresh store lists its sessions");
+    let ids: Vec<&str> = sessions.iter().map(|info| info.id.as_str()).collect();
+    assert_eq!(sessions.len(), 2, "both racing sessions must persist — {ids:?}");
     assert!(
-        ids.iter().all(|id| is_uuidv7(id)),
-        "the store the race left behind carries a pre-UUIDv7 id — {ids:?}",
+        ids.iter().all(|id| is_uuidv7(id) && !old_ids.contains(*id)),
+        "the live generation must contain only new ids — {ids:?}"
     );
-
-    // Nothing was deleted. The row is looked for in the set-aside database and
-    // in its companions, because closing a connection does not promise a
-    // checkpointed file: an id that is still in the write-ahead log is an id
-    // that is still there.
-    let base = aside[0].to_string_lossy().into_owned();
-    let scan = || {
-        ["", "-wal", "-shm"].into_iter().any(|suffix| {
-            fs::read(format!("{base}{suffix}"))
-                .is_ok_and(|bytes| carries(&bytes, OLD_ID.as_bytes()))
-        })
-    };
-    // Repeated for a while rather than read once: a checkpoint still in
-    // flight moves the row's page from the log into the file *between* one
-    // read and the next — the file read before the page landed, the log after
-    // it was reset — and a single pass through the three can miss it in both
-    // (seen on the three-core macOS runner, 2026-08-24; bead ganja-code-bry).
-    // The row is there throughout; only where it is moves.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut kept = scan();
-    while !kept && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        kept = scan();
+    let mut prompts = BTreeSet::new();
+    for session in sessions {
+        let transcript = live.load_transcript(&session.id).expect("new transcript reads");
+        assert_eq!(transcript.len(), 2, "each child persists its prompt and reply");
+        assert_eq!(transcript[0].role, Role::User);
+        assert_eq!(transcript[1].role, Role::Assistant);
+        let text = |message: &Message| {
+            message.parts.iter().filter_map(|part| part.as_text()).collect::<String>()
+        };
+        prompts.insert(text(&transcript[0]));
+        assert_eq!(
+            text(&transcript[1]),
+            CLOSING,
+            "a successful child must retain its complete reply"
+        );
     }
-
-    assert!(kept, "the set-aside store no longer carries the row it was set aside for: {base}",);
+    assert_eq!(prompts, BTreeSet::from(["drill 0".to_owned(), "drill 1".to_owned()]));
 }
