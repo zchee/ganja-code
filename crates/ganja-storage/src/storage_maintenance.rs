@@ -226,6 +226,8 @@ impl Pending {
             if exists(&to)? {
                 continue;
             }
+            #[cfg(test)]
+            observation.hit(Phase::Renaming(component.suffix()));
             fs::rename(&from, &to).map_err(|source| StorageError::Io { path: from, source })?;
             #[cfg(test)]
             observation.hit(Phase::Renamed(component.suffix()));

@@ -16,6 +16,9 @@ use super::{DATABASE, Observation, Phase, Storage, with_suffix};
 const FRESH: &str = "0198f2c4-a1b0-7000-8000-000000000001";
 const OLD: &str = "ses_before_uuid";
 
+#[path = "storage_recovery_tests.rs"]
+mod recovery;
+
 struct Worker {
     child: Child,
     input: Option<ChildStdin>,
@@ -25,9 +28,15 @@ struct Worker {
 
 impl Worker {
     fn start(root: &Path) -> Self {
+        Self::configured(root, FRESH, Duration::from_secs(10))
+    }
+
+    fn configured(root: &Path, id: &str, budget: Duration) -> Self {
         let mut child = Command::new(std::env::current_exe().expect("unit-test executable"))
             .args(["--exact", "storage::maintenance_tests::maintenance_worker", "--nocapture"])
             .env("GANJA_STORAGE_TEST_WORKER", root)
+            .env("GANJA_STORAGE_TEST_ID", id)
+            .env("GANJA_STORAGE_TEST_BUDGET_MS", budget.as_millis().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -102,8 +111,16 @@ fn maintenance_worker() {
         let mut release = String::new();
         assert_ne!(std::io::stdin().read_line(&mut release).expect("phase acknowledgement"), 0);
     });
-    Arc::get_mut(&mut storage.inner).expect("worker is not shared").no_checkpoint = true;
-    storage.save_info(&info(FRESH, 1)).expect("worker persists");
+    let inner = Arc::get_mut(&mut storage.inner).expect("worker is not shared");
+    inner.no_checkpoint = true;
+    inner.admission_budget = Some(Duration::from_millis(
+        std::env::var("GANJA_STORAGE_TEST_BUDGET_MS")
+            .expect("private worker budget")
+            .parse()
+            .expect("budget is milliseconds"),
+    ));
+    let id = std::env::var("GANJA_STORAGE_TEST_ID").expect("private worker id");
+    storage.save_info(&info(&id, 1)).expect("worker persists");
     println!("STORAGE_PHASE Saved");
     std::io::stdout().flush().expect("saved flushes");
     let mut release = String::new();

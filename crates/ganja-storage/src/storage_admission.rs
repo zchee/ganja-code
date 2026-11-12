@@ -149,6 +149,8 @@ impl Inner {
                 drop(exclusive);
                 continue;
             }
+            #[cfg(test)]
+            self.observation.hit(Phase::ExclusiveBlocked);
             if Instant::now() >= deadline {
                 // Re-enter shared admission once more to distinguish a readable
                 // old store from a pending/corrupt generation before deferring.

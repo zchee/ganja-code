@@ -2065,6 +2065,7 @@ enum Phase {
     SharedBlocked,
     ExclusiveWanted,
     ExclusiveAcquired,
+    ExclusiveBlocked,
     OldIds,
     ReaderOpening,
     ReaderOpened,
@@ -2078,6 +2079,7 @@ enum Phase {
     IntentTemporary,
     IntentPublished,
     IntentRemoved,
+    Renaming(&'static str),
     Renamed(&'static str),
 }
 
