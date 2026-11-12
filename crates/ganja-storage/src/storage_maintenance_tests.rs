@@ -150,8 +150,9 @@ fn an_archive_keeps_its_old_rows_when_another_process_opens_the_live_name() {
 
 fn observed(root: &Path, callback: impl Fn(Phase) + Send + Sync + 'static) -> Storage {
     let mut storage = Storage::open(root.to_path_buf());
-    Arc::get_mut(&mut storage.inner).expect("not shared yet").observation =
-        Observation(Some(Arc::new(callback)));
+    let inner = Arc::get_mut(&mut storage.inner).expect("not shared yet");
+    inner.observation = Observation(Some(Arc::new(callback)));
+    inner.admission_budget = Some(Duration::from_millis(200));
     storage
 }
 
@@ -227,15 +228,76 @@ fn a_fresh_opener_cannot_connect_during_archive_publication() {
 #[test]
 fn a_store_retains_its_lease_until_both_connections_close() {
     let directory = TempDir::new().expect("fixture");
-    let store = Storage::open(directory.path().join("storage"));
+    let root = directory.path().join("storage");
+    let seed = Storage::open(root.clone());
+    seed.save_info(&info(FRESH, 1)).expect("initialized fixture");
+    drop(seed);
+    let (arrived, closing) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let store = observed(&root, move |phase| {
+        if matches!(phase, Phase::ReaderClosed | Phase::WriterClosing) {
+            arrived.send(phase).expect("connection closure observed");
+        }
+        if phase == Phase::WriterClosing {
+            released
+                .lock()
+                .expect("release lock")
+                .recv_timeout(Duration::from_secs(15))
+                .expect("writer released");
+        }
+    });
     store.save_info(&info(FRESH, 1)).expect("the writer is ready");
     let exclusive = lock_file(store.database());
     assert!(
         matches!(exclusive.try_lock(), Err(fs::TryLockError::WouldBlock)),
         "a live reader and writer must retain shared admission"
     );
-    drop(store);
+    let dropped = thread::spawn(move || drop(store));
+    let closed: Vec<_> = (0..2)
+        .map(|_| {
+            closing
+                .recv_timeout(Duration::from_secs(15))
+                .expect("connection closure before deadline")
+        })
+        .collect();
+    assert!(closed.contains(&Phase::ReaderClosed) && closed.contains(&Phase::WriterClosing));
+    assert!(
+        matches!(exclusive.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        "the writer retains admission after the reader closes"
+    );
+    release.send(()).expect("writer may close");
+    dropped.join().expect("store closes both connections and joins its writer");
     exclusive.try_lock().expect("both connections closed before admission is released");
+}
+
+#[test]
+fn the_reader_retains_admission_after_the_writer_has_closed() {
+    let directory = TempDir::new().expect("fixture");
+    let store = Storage::open(directory.path().join("storage"));
+    store.save_info(&info(FRESH, 1)).expect("store writes");
+    let reader = store.handles().expect("store handles").reader.clone();
+    let exclusive = lock_file(store.database());
+    drop(store);
+    assert!(
+        matches!(exclusive.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        "a reader outliving the writer still owns the generation"
+    );
+    drop(reader);
+    exclusive.try_lock().expect("final reader closed");
+}
+
+#[test]
+fn four_independent_stores_share_admission_and_all_persist() {
+    let directory = TempDir::new().expect("fixture");
+    let stores: Vec<_> = (0..4).map(|_| Storage::open(directory.path().join("storage"))).collect();
+    for (index, store) in stores.iter().enumerate() {
+        let id = format!("0198f2c4-a1b0-7000-8000-{index:012x}");
+        store.save_info(&info(&id, index as u64)).expect("independent shared owner persists");
+    }
+    for store in stores {
+        assert_eq!(store.list_sessions().expect("shared store reads").len(), 4);
+    }
 }
 
 #[test]

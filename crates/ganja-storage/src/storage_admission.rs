@@ -1,0 +1,255 @@
+//! Admission for one local database generation. The stable lock inode is never moved.
+
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use std::{fs, thread};
+
+use rusqlite::Connection;
+
+use super::{
+    Inner, PREUUID, QUARANTINE, QUARANTINE_LOCK, StorageError, connect, convert, damaged,
+    integrity, migrate, preuuid_id, set_aside, with_suffix,
+};
+#[cfg(test)]
+use super::{Observation, Phase};
+
+const ADMISSION_BUDGET: Duration = Duration::from_secs(5);
+const ADMISSION_POLL: Duration = Duration::from_millis(10);
+
+/// One independently opened lock descriptor, shared only through its Arc.
+pub(super) struct Lease(fs::File);
+
+impl Lease {
+    fn try_take(database: &Path, exclusive: bool) -> Result<Option<Arc<Self>>, StorageError> {
+        let path = with_suffix(database, &format!(".{QUARANTINE_LOCK}"));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        let outcome = if exclusive { file.try_lock() } else { file.try_lock_shared() };
+        match outcome {
+            Ok(()) => Ok(Some(Arc::new(Self(file)))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(source)) => Err(StorageError::Io { path, source }),
+        }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Connection first, lease last, including thread-spawn and startup failures.
+pub(super) struct LeasedConnection {
+    connection: Option<Connection>,
+    pub(super) lease: Arc<Lease>,
+    #[cfg(test)]
+    observation: Observation,
+    #[cfg(test)]
+    closed: Phase,
+}
+
+impl LeasedConnection {
+    pub(super) fn new(
+        connection: Connection,
+        lease: Arc<Lease>,
+        #[cfg(test)] observation: Observation,
+        #[cfg(test)] closed: Phase,
+    ) -> Self {
+        Self {
+            connection: Some(connection),
+            lease,
+            #[cfg(test)]
+            observation,
+            #[cfg(test)]
+            closed,
+        }
+    }
+}
+
+impl Deref for LeasedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection.as_ref().expect("a live connection is only taken during drop")
+    }
+}
+
+impl DerefMut for LeasedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection.as_mut().expect("a live connection is only taken during drop")
+    }
+}
+
+impl Drop for LeasedConnection {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if self.closed == Phase::WriterClosed {
+            self.observation.hit(Phase::WriterClosing);
+        }
+        drop(self.connection.take());
+        #[cfg(test)]
+        self.observation.hit(self.closed);
+    }
+}
+
+enum Probe {
+    Ready(LeasedConnection),
+    Old(LeasedConnection, String),
+    Corrupt(String),
+    Absent,
+}
+
+impl Inner {
+    pub(super) fn admit(&self) -> Result<LeasedConnection, StorageError> {
+        let budget = ADMISSION_BUDGET;
+        #[cfg(test)]
+        let budget = self.admission_budget.unwrap_or(budget);
+        let deadline = Instant::now() + budget;
+        if let Some(parent) = self.database.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|source| StorageError::Io { path: parent.to_path_buf(), source })?;
+        }
+        loop {
+            #[cfg(test)]
+            self.observation.hit(Phase::Admission);
+            let Some(shared) = Lease::try_take(&self.database, false)? else {
+                if Instant::now() >= deadline {
+                    return Err(StorageError::Maintaining { path: self.database.clone() });
+                }
+                thread::sleep(
+                    ADMISSION_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+                continue;
+            };
+            #[cfg(test)]
+            self.observation.hit(Phase::SharedAcquired);
+            match self.probe(&shared)? {
+                Probe::Ready(connection) => return Ok(connection),
+                Probe::Old(connection, _) if Instant::now() >= deadline => {
+                    tracing::warn!(path = %self.database.display(),
+                        "setting the old session store aside was deferred: another process still owns a shared lease");
+                    return Ok(connection);
+                }
+                Probe::Old(connection, _) => drop(connection),
+                Probe::Corrupt(_) | Probe::Absent => {}
+            }
+            drop(shared);
+            #[cfg(test)]
+            self.observation.hit(Phase::ExclusiveWanted);
+            if let Some(exclusive) = Lease::try_take(&self.database, true)? {
+                #[cfg(test)]
+                self.observation.hit(Phase::ExclusiveAcquired);
+                self.maintain(&exclusive)?;
+                drop(exclusive);
+                continue;
+            }
+            if Instant::now() >= deadline {
+                // Re-enter shared admission once more to distinguish a readable
+                // old store from a pending/corrupt generation before deferring.
+                let Some(shared) = Lease::try_take(&self.database, false)? else {
+                    return Err(StorageError::Maintaining { path: self.database.clone() });
+                };
+                match self.probe(&shared)? {
+                    Probe::Ready(connection) | Probe::Old(connection, _) => return Ok(connection),
+                    Probe::Corrupt(_) | Probe::Absent => {
+                        return Err(StorageError::Maintaining { path: self.database.clone() });
+                    }
+                }
+            }
+            thread::sleep(ADMISSION_POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    fn connection(&self, lease: &Arc<Lease>) -> Result<LeasedConnection, StorageError> {
+        #[cfg(test)]
+        self.observation.hit(Phase::ReaderOpening);
+        let connection = connect(&self.database)?;
+        #[cfg(test)]
+        self.observation.hit(Phase::ReaderOpened);
+        Ok(LeasedConnection::new(
+            connection,
+            lease.clone(),
+            #[cfg(test)]
+            self.observation.clone(),
+            #[cfg(test)]
+            Phase::ReaderClosed,
+        ))
+    }
+
+    fn probe(&self, lease: &Arc<Lease>) -> Result<Probe, StorageError> {
+        if !self
+            .database
+            .try_exists()
+            .map_err(|source| StorageError::Io { path: self.database.clone(), source })?
+        {
+            return Ok(Probe::Absent);
+        }
+        let mut connection = match self.connection(lease) {
+            Ok(connection) => connection,
+            Err(error) if damaged(&error) => return Ok(Probe::Corrupt(error.to_string())),
+            Err(error) => return Err(error),
+        };
+        if let Err(reason) = integrity(&connection) {
+            return Ok(Probe::Corrupt(reason));
+        }
+        migrate(&mut connection, &self.database)?;
+        match preuuid_id(&connection, &self.database)? {
+            Some(old) => {
+                #[cfg(test)]
+                self.observation.hit(Phase::OldIds);
+                Ok(Probe::Old(connection, old))
+            }
+            None => Ok(Probe::Ready(connection)),
+        }
+    }
+
+    fn maintain(&self, lease: &Arc<Lease>) -> Result<(), StorageError> {
+        // The earlier shared probe is not authority: a competing starter may
+        // have completed the replacement before this exclusive acquisition.
+        let (reason, kind) = match self.probe(lease)? {
+            Probe::Ready(connection) => {
+                drop(connection);
+                return Ok(());
+            }
+            Probe::Absent => return self.initialize(lease, true),
+            Probe::Old(connection, old) => {
+                drop(connection);
+                (format!("session {old} predates UUIDv7 ids"), PREUUID)
+            }
+            Probe::Corrupt(reason) => (reason, QUARANTINE),
+        };
+        if !set_aside(
+            &self.database,
+            &reason,
+            kind,
+            #[cfg(test)]
+            &self.observation,
+        ) {
+            return Err(StorageError::Maintenance {
+                path: self.database.clone(),
+                reason: "the database file set could not be moved".to_owned(),
+            });
+        }
+        self.initialize(lease, false)
+    }
+
+    fn initialize(&self, lease: &Arc<Lease>, import: bool) -> Result<(), StorageError> {
+        let mut connection = self.connection(lease)?;
+        #[cfg(test)]
+        self.observation.hit(Phase::ReplacementCreated);
+        migrate(&mut connection, &self.database)?;
+        #[cfg(test)]
+        self.observation.hit(Phase::Migrated);
+        if import {
+            convert(&mut connection, &self.root, &self.database)?;
+        }
+        Ok(())
+    }
+}

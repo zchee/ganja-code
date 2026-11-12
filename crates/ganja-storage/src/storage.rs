@@ -77,6 +77,10 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[path = "storage_admission.rs"]
+mod admission;
+use admission::{Lease, LeasedConnection};
+
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
 
@@ -377,6 +381,20 @@ pub struct SessionInfo {
 /// refusals a whole database can earn.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// Another cooperating process still owns the generation that needs maintenance.
+    #[error("another process is still maintaining {path}; persistence is unavailable")]
+    Maintaining {
+        /// The database waiting for maintenance.
+        path: PathBuf,
+    },
+    /// Maintenance cannot finish without guessing or losing retained data.
+    #[error("cannot finish maintenance of {path}: {reason}")]
+    Maintenance {
+        /// The database whose transition was refused.
+        path: PathBuf,
+        /// Why the retained file set cannot safely be advanced.
+        reason: String,
+    },
     /// The filesystem refused a read, create, or rename.
     #[error("failed to access {path}: {source}")]
     Io {
@@ -508,6 +526,8 @@ struct Inner {
     thread: Mutex<Option<thread::JoinHandle<()>>>,
     #[cfg(test)]
     observation: Observation,
+    #[cfg(test)]
+    admission_budget: Option<std::time::Duration>,
 }
 
 /// What an opened store is reached through.
@@ -519,7 +539,7 @@ struct Handles {
     writer: mpsc::Sender<Job>,
     /// The read connection, shared: WAL means it never blocks the writer, and
     /// the lock only keeps two readers off one connection.
-    reader: Arc<Mutex<Connection>>,
+    reader: Arc<Mutex<LeasedConnection>>,
 }
 
 /// One write, and where its answer goes.
@@ -618,6 +638,8 @@ impl Storage {
                 thread: Mutex::new(None),
                 #[cfg(test)]
                 observation: Observation::default(),
+                #[cfg(test)]
+                admission_budget: None,
             }),
         }
     }
@@ -1000,7 +1022,7 @@ impl Storage {
     fn reader<'handles>(
         &self,
         handles: &'handles Handles,
-    ) -> std::sync::MutexGuard<'handles, Connection> {
+    ) -> std::sync::MutexGuard<'handles, LeasedConnection> {
         handles.reader.lock().expect("the read connection is never poisoned")
     }
 }
@@ -1030,76 +1052,14 @@ impl Inner {
     /// Opens the store: the connection, the schema, and — on the first open a
     /// project ever has — the conversion of whatever the file layout left.
     fn start(&self) -> Result<Handles, StorageError> {
-        #[cfg(test)]
-        self.observation.hit(Phase::Admission);
-        // Asked before the open, because opening creates the file: the
-        // question is "has this project ever had a database", and after
-        // `connect` the answer is always yes.
-        let mut first = !self.database.exists();
-
-        // Opening never fails on a corrupt database — it reads no pages — so
-        // one of these two is the first moment damage can be seen. Neither
-        // moves the file: the verdict is a read on *this* connection, and by
-        // the time a rename would happen another process may already have
-        // replaced what the path names. Both hand it to `set_aside_corrupt`,
-        // which decides again under the lock.
-        let sound = match connect(&self.database) {
-            Ok(connection) => match integrity(&connection) {
-                Ok(()) => Some(connection),
-                Err(_) => {
-                    drop(connection);
-                    set_aside_corrupt(
-                        &self.database,
-                        #[cfg(test)]
-                        &self.observation,
-                    )?
-                }
-            },
-            // A file so damaged that the pragmas cannot even be set: the same
-            // damage `integrity` reports, arriving one statement earlier.
-            // Anything else — a full disk, a directory that will not open — is
-            // a passing condition and must not cost the file.
-            Err(error) if damaged(&error) => set_aside_corrupt(
-                &self.database,
-                #[cfg(test)]
-                &self.observation,
-            )?,
-            Err(error) => return Err(error),
-        };
-
-        let mut connection = match sound {
-            Some(connection) => connection,
-            None => {
-                first = true;
-                connect(&self.database)?
-            }
-        };
-
-        #[cfg(test)]
-        self.observation.hit(Phase::ReaderOpened);
-        migrate(&mut connection, &self.database)?;
-        if first {
-            convert(&mut connection, &self.root, &self.database)?;
-        }
-        // After both, never beside the checks above: at that point the
-        // `session` table may not exist at all, and on a first open `convert`
-        // has not yet written the older store's ids — a probe placed there
-        // would pass on an empty file and then rename the store `convert` had
-        // just filled.
-        let connection = set_aside_preuuid(
-            connection,
-            &self.database,
-            #[cfg(test)]
-            &self.observation,
-        )?;
-
+        let connection = self.admit()?;
         let (writer, thread) = spawn_writer(
             self.database.clone(),
+            connection.lease.clone(),
             #[cfg(test)]
             self.observation.clone(),
         )?;
         *self.thread.lock().expect("the writer thread handle is never poisoned") = Some(thread);
-
         Ok(Handles { writer, reader: Arc::new(Mutex::new(connection)) })
     }
 }
@@ -1908,6 +1868,7 @@ fn json<T: Serialize>(value: &T) -> Result<String, rusqlite::Error> {
 /// task.
 fn spawn_writer(
     path: PathBuf,
+    lease: Arc<Lease>,
     #[cfg(test)] observation: Observation,
 ) -> Result<(mpsc::Sender<Job>, thread::JoinHandle<()>), StorageError> {
     let (sender, receiver) = mpsc::channel::<Job>();
@@ -1931,6 +1892,14 @@ fn spawn_writer(
                 }
             };
 
+            let connection = LeasedConnection::new(
+                connection,
+                lease,
+                #[cfg(test)]
+                observation.clone(),
+                #[cfg(test)]
+                Phase::WriterClosed,
+            );
             #[cfg(test)]
             observation.hit(Phase::WriterOpened);
             for job in receiver {
@@ -2108,9 +2077,19 @@ fn stored_files(directory: &Path) -> Result<Vec<PathBuf>, StorageError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Admission,
+    SharedAcquired,
+    ExclusiveWanted,
+    ExclusiveAcquired,
+    OldIds,
+    ReaderOpening,
     ReaderOpened,
+    ReaderClosed,
     WriterOpening,
     WriterOpened,
+    WriterClosing,
+    WriterClosed,
+    ReplacementCreated,
+    Migrated,
     Renamed(&'static str),
 }
 
