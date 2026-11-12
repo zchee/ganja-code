@@ -120,6 +120,35 @@ fn a_late_continuation_is_text_not_a_key() {
 }
 
 #[test]
+fn an_opener_at_the_holdoff_boundary_is_literal() {
+    let mut machine = EscRepair::active();
+    let base = Instant::now();
+    assert!(machine.accept(esc(), base).is_empty());
+    assert_eq!(machine.accept(ch('['), base + HOLDOFF), vec![esc(), ch('[')]);
+    assert_eq!(machine.accept(ch('D'), base + HOLDOFF), vec![ch('D')]);
+    assert_eq!(machine.deadline(), None);
+}
+
+#[test]
+fn sequence_completion_is_bounded_from_the_original_escape() {
+    for (completion_ms, expected) in
+        [(49, vec![key(KeyCode::Left, KeyModifiers::NONE)]), (50, vec![esc(), ch('['), ch('D')])]
+    {
+        let mut machine = EscRepair::active();
+        let base = Instant::now();
+        assert!(machine.accept(esc(), base).is_empty());
+        assert!(machine.accept(ch('['), base + Duration::from_millis(24)).is_empty());
+        assert_eq!(machine.deadline(), Some(base + Duration::from_millis(50)));
+        assert_eq!(
+            machine.accept(ch('D'), base + Duration::from_millis(completion_ms)),
+            expected,
+            "completion at {completion_ms} ms after Esc"
+        );
+        assert_eq!(machine.deadline(), None);
+    }
+}
+
+#[test]
 fn a_runaway_sequence_is_released_at_the_cap() {
     let mut machine = EscRepair::active();
     let base = Instant::now();
