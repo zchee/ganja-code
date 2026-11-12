@@ -192,7 +192,7 @@ fn announced_ports(output: &str) -> impl Iterator<Item = u16> + '_ {
         .map(|address| address.port())
 }
 
-fn worker_stderr(state: &Path) -> String {
+pub(super) fn worker_stderr(state: &Path) -> String {
     std::fs::read_to_string(state.join("stderr"))
         .expect("stderr log")
         .replace("synthetic-worker-password", "[redacted]")

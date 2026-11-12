@@ -624,7 +624,7 @@ async fn explicit_initializer_ports_survive_the_server_handoff() {
             .env("GIT_SSL_CAINFO", &server.ca)
             .current_dir(&work)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::fs::File::create(home.path().join("stderr")).expect("stderr file"))
             .kill_on_drop(true);
         if requested != 0 {
             drop(reservation.take());
@@ -632,11 +632,19 @@ async fn explicit_initializer_ports_survive_the_server_handoff() {
         let mut child = command.spawn().expect("worker init");
         let stdout = child.stdout.take().expect("stdout");
         let mut lines = BufReader::new(stdout).lines();
-        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let announced = tokio::time::timeout_at(deadline, lines.next_line())
             .await
             .expect("initializer announces its bound address")
-            .expect("address line")
-            .expect("stdout stays open");
+            .expect("address line");
+        let Some(line) = announced else {
+            let status = tokio::time::timeout_at(deadline, child.wait()).await;
+            let stderr = worker_support::worker_stderr(home.path());
+            let tail = &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(4096))..];
+            panic!(
+                "initializer stdout closed before announcement; requested={requested}; child status: {status:?}; stderr tail: {tail}"
+            );
+        };
         let address: std::net::SocketAddr = line
             .strip_prefix("ganja server listening on http://")
             .expect("same address format as serve")
