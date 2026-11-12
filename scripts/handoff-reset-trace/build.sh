@@ -3,6 +3,10 @@ set -euo pipefail
 
 mkdir -p target/handoff-reset-results
 results="$PWD/target/handoff-reset-results"
+# shellcheck source=scripts/handoff-reset-trace/disk.sh
+source scripts/handoff-reset-trace/disk.sh
+record_disk before-target-build
+require_compile_space
 {
   date -u '+%Y-%m-%d %H:%M:%S UTC'
   git rev-parse HEAD
@@ -22,3 +26,4 @@ binary="$(< "$results/test-binary.txt")"
 sha256sum "$binary" target/debug/ganja > "$results/binary-sha256.txt"
 "$binary" --list > "$results/test-list.txt"
 grep -q '^the_initializer_and_replacement_server_announce_the_same_ephemeral_port: test$' "$results/test-list.txt"
+record_disk after-target-build

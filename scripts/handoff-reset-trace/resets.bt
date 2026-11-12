@@ -1,7 +1,6 @@
-BEGIN { printf("READY mono_ns=%llu\n", nsecs); }
 tracepoint:tcp:tcp_send_reset
-/args->family == 2 && args->saddr[0] == 127/
+/args->saddr[0] == 2 && args->saddr[1] == 0 && (args->saddr[4] == 127 || args->daddr[4] == 127)/
 {
-  printf("RESET mono_ns=%llu pid=%d tid=%d comm=%s local=%s:%d peer=%s:%d state=%d\n", nsecs, pid, tid, comm, ntop(args->saddr), args->sport, ntop(args->daddr), args->dport, args->state);
+  printf("RESET mono_ns=%llu pid=%d tid=%d comm=%s sk=%p local=%d.%d.%d.%d:%d peer=%d.%d.%d.%d:%d state=%d reason=%d\n", nsecs, pid, tid, comm, args->skaddr, args->saddr[4], args->saddr[5], args->saddr[6], args->saddr[7], args->saddr[2] * 256 + args->saddr[3], args->daddr[4], args->daddr[5], args->daddr[6], args->daddr[7], args->daddr[2] * 256 + args->daddr[3], args->state, args->reason);
   printf("%s\n", kstack(12));
 }

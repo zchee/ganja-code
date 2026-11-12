@@ -57,7 +57,7 @@ jobs:
         run: command -v bun && command -v tmux && command -v cargo-nextest && command -v rust-analyzer
       - name: build the unchanged worker initialization test
         run: bash scripts/handoff-reset-trace/build.sh
-      - name: measure beside the real CI suite
+      - name: measure worker-test neighbourhood then the exact CI suite
         run: bash scripts/handoff-reset-trace/loaded.sh
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22

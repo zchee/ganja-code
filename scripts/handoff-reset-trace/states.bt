@@ -1,0 +1,11 @@
+tracepoint:tcp:tcp_receive_reset
+/args->family == 2 && args->saddr[0] == 127/
+{
+  printf("RECEIVE_RESET mono_ns=%llu pid=%d tid=%d comm=%s sk=%p local=%s:%d peer=%s:%d\n", nsecs, pid, tid, comm, args->skaddr, ntop(args->saddr), args->sport, ntop(args->daddr), args->dport);
+}
+
+tracepoint:sock:inet_sock_set_state
+/args->family == 2 && args->protocol == 6 && args->saddr[0] == 127/
+{
+  printf("STATE mono_ns=%llu pid=%d tid=%d comm=%s sk=%p local=%s:%d peer=%s:%d old=%d new=%d\n", nsecs, pid, tid, comm, args->skaddr, ntop(args->saddr), args->sport, ntop(args->daddr), args->dport, args->oldstate, args->newstate);
+}

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 missing=()
-for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env pgrep ps sleep /home/linuxbrew/.linuxbrew/bin/brew; do
+for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env ps sleep df du stat mktemp install id cat awk /bin/true /home/linuxbrew/.linuxbrew/bin/brew; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 if (( ${#missing[@]} != 0 )); then
@@ -13,6 +13,14 @@ if (( ${#missing[@]} != 0 )); then
 fi
 results="$PWD/target/handoff-reset-results"
 mkdir -p "$results/observers"
+printf '%s\n' "$(date +%s)" > "$results/job-start-epoch.txt"
+# shellcheck source=scripts/handoff-reset-trace/disk.sh
+source scripts/handoff-reset-trace/disk.sh
+printf 'utc\tlabel\tpath\tfree_bytes\tbinary_bytes\tbinary_size_source\ttarget_bytes\tcopy_floor_bytes\n' > "$results/disk.tsv"
+record_disk job-start
+choose_test_temp
+record_disk temp-selected
+require_compile_space
 sudo apt-get update
 sudo apt-get install -y iproute2
 for tool in nstat ip ss; do
@@ -34,22 +42,45 @@ if command -v tcpdump >/dev/null; then
     printf 'Packet observer unavailable (exit %s); continuing without it.\n' "$status" | tee -a "$results/observers/availability.txt"
   fi
 fi
+for event in tcp/tcp_send_reset tcp/tcp_receive_reset sock/inet_sock_set_state; do
+  name="${event//\//-}"
+  sudo -n cat "/sys/kernel/tracing/events/$event/format" > "$results/observers/$name-format.txt" 2>&1 || true
+done
 if command -v bpftrace >/dev/null; then
-  for program in sockets resets; do
-    status=0
-    sudo -n timeout --signal=INT 5s bpftrace -q "scripts/handoff-reset-trace/$program.bt" > "$results/observers/$program-preflight.txt" 2>&1 || status=$?
-    if (( status == 0 || status == 124 )) && grep -q '^READY' "$results/observers/$program-preflight.txt"; then
-      printf '%s\n' "$program" > "$results/observers/kernel.enabled"
-      break
-    fi
-    printf 'Kernel observer %s unavailable (exit %s).\n' "$program" "$status" | tee -a "$results/observers/availability.txt"
+  program="$results/observers/kernel-generated.bt"
+  printf 'BEGIN { printf("READY mono_ns=%%llu\\n", nsecs); }\n' > "$program"
+  sudo -n cat /sys/kernel/tracing/available_filter_functions | grep -E '^(tcp_close|tcp_send_active_reset|inet_csk_listen_stop|inet_csk_accept)( |$)' > "$results/observers/socket-functions.txt" || true
+  full=1
+  for symbol in tcp_close tcp_send_active_reset inet_csk_listen_stop inet_csk_accept; do
+    if ! grep -q "^$symbol\( \|$\)" "$results/observers/socket-functions.txt"; then full=0; fi
   done
+  if (( full == 1 )); then
+    printf '%s\n' "$(< scripts/handoff-reset-trace/sockets.bt)" >> "$program"
+  fi
+  if grep -q 'saddr\[28\]' "$results/observers/tcp-tcp_send_reset-format.txt" && grep -q 'field:.*reason;' "$results/observers/tcp-tcp_send_reset-format.txt"; then
+    # The runner's sockaddr arrays contain family, network-order port and IPv4 bytes.
+    printf '%s\n' "$(< scripts/handoff-reset-trace/resets.bt)" >> "$program"
+  else
+    printf 'Sent-reset tracepoint layout unrecognized; socket and packet observers remain available.\n' | tee -a "$results/observers/availability.txt"
+  fi
+  if grep -q 'field:.*sport;' "$results/observers/tcp-tcp_receive_reset-format.txt" && grep -q 'field:.*oldstate;' "$results/observers/sock-inet_sock_set_state-format.txt"; then
+    printf '%s\n' "$(< scripts/handoff-reset-trace/states.bt)" >> "$program"
+  fi
+  status=0
+  sudo -n timeout --signal=INT --kill-after=5s 45s bpftrace -B line -q "$program" > "$results/observers/kernel-preflight.txt" 2>&1 || status=$?
+  if (( status == 0 || status == 124 )) && grep -q '^READY' "$results/observers/kernel-preflight.txt"; then
+    printf '%s\n' "$program" > "$results/observers/kernel.enabled"
+  else
+    printf 'Single kernel preflight unavailable (exit %s); continuing with packet capture and counters.\n' "$status" | tee -a "$results/observers/availability.txt"
+  fi
 fi
 {
   date -u '+%Y-%m-%d %H:%M:%S UTC'
+  uname -a
   printf 'epoch_ns=%s\n' "$(date +%s%N)"
   read -r uptime _ < /proc/uptime
   printf 'uptime_seconds=%s\n' "$uptime"
   command -v tcpdump >/dev/null && tcpdump --version || true
   command -v bpftrace >/dev/null && bpftrace --version || true
 } > "$results/observers/versions.txt"
+record_disk after-preflight
