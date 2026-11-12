@@ -13,7 +13,7 @@ done
 printf '%s\n' "$(date +%s)" > "$results/job-start-epoch.txt" || note 'Job epoch record failed.'
 printf 'utc\tlabel\tpath\tfree_bytes\tbinary_bytes\tbinary_size_source\ttarget_bytes\trecords_floor_bytes\n' > "$results/disk.tsv" || note 'Disk table header failed.'
 record_disk job-start
-require_space || exit $?
+diag 'Diagnostic-output space check' require_space
 df -B1 > "$results/filesystems.txt" 2>&1 || note 'Filesystem listing unavailable.'
 diag 'Package index refresh' sudo apt-get update
 diag 'Counter and inventory utilities install' sudo apt-get install -y iproute2 fd-find

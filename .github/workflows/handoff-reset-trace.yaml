@@ -11,7 +11,32 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-26.04
-    timeout-minutes: 44
+    name: fresh CI / ${{ matrix.sample }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        sample:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
     defaults:
       run:
         shell: bash
@@ -27,7 +52,7 @@ jobs:
         run: rustup toolchain install nightly --profile minimal --component rust-analyzer && rustup default nightly
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          save-if: "false"
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -46,20 +71,14 @@ jobs:
           ref: v1.18.22
           path: upstream/opencode-v1.18.22
           persist-credentials: false
-      - uses: actions/cache@v6
+      - uses: actions/cache/restore@v6
         with:
           path: upstream/opencode-v1.18.22/node_modules
           key: opencode-v1.18.22-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.22/bun.lock') }}
       - name: install the upstream CI fixture
         working-directory: upstream/opencode-v1.18.22
         run: bun install --frozen-lockfile
-      - name: record installed suite commands before compilation
-        run: |
-          source scripts/handoff-reset-trace/disk.sh
-          for tool in bun tmux cargo-nextest rust-analyzer; do
-            command -v "$tool" || note "Suite command unavailable: $tool"
-          done
-      - name: run fresh CI then cold-cache CI rounds
+      - name: run fresh CI once
         run: bash scripts/handoff-reset-trace/loaded.sh
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
@@ -68,7 +87,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: handoff-reset-${{ github.run_id }}-${{ github.run_attempt }}
+          name: handoff-reset-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.sample }}
           path: target/handoff-reset-results
           if-no-files-found: error
           retention-days: 14

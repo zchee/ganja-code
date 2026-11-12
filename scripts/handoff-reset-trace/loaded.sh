@@ -7,7 +7,6 @@ results="$PWD/target/handoff-reset-results"
 # shellcheck source=scripts/handoff-reset-trace/disk.sh
 source scripts/handoff-reset-trace/disk.sh
 for tool in bun tmux cargo-nextest rust-analyzer; do command -v "$tool" >/dev/null || note "Measurement prerequisite missing: $tool."; done
-require_space || exit $?
 observer_wrappers=()
 observer_pidfiles=()
 sampler_pid=''
@@ -63,19 +62,30 @@ if [[ -e "$results/observers/kernel.enabled" ]]; then
   grep -q '^READY' "$results/observers/kernel-live.txt" || note 'Kernel observer unavailable; continue with remaining diagnostics.'
 fi
 status=0
-job_start="$(< "$results/job-start-epoch.txt")"
-if [[ ! "$job_start" =~ ^[0-9]+$ ]]; then note 'Job clock anchor unavailable; using current clock for loop deadline.'; job_start="$(date +%s)"; fi
-job_deadline=$(( job_start + ${TRACE_TOTAL_SECONDS:-2100} ))
-bash scripts/handoff-reset-trace/suite.sh "$job_deadline" || status=$?
+bash scripts/handoff-reset-trace/suite.sh || status=$?
 cleanup
 record_disk after-measurement
 ps -eo pid,ppid,comm > "$results/observers/processes-after.txt" || note 'Process cleanup listing unavailable.'
-if [[ -e "$results/target-reset-recorded" ]]; then status=1; fi
-if (( status == 0 )) && [[ ! -e "$results/iteration-failed" ]]; then
+if (( status == 0 )); then
+  for name in capture kernel; do
+    enabled=0
+    lost=0
+    if [[ -e "$results/observers/$name.enabled" ]]; then enabled=1; fi
+    if [[ -e "$results/observers/$name.not-running" ]]; then lost=1; fi
+    printf '%s_enabled=%s %s_process_absent=%s\n' "$name" "$enabled" "$name" "$lost" >> "$results/observers/counts.txt" || note 'Observer availability count unavailable.'
+  done
   for log in "$results/observers/kernel-live.txt" "$results/observers/capture.txt"; do
     if [[ -f "$log" ]]; then wc -l "$log" >> "$results/observers/counts.txt" || note 'Observer line count unavailable.'; fi
   done
-  rm -f "$results/observers"/control.pcap* "$results/observers/kernel-live.txt" || note 'Passing observer cleanup failed.'
+  if [[ -f "$results/observers/kernel-live.txt" ]]; then
+    awk '/^READY/ {print} END {print "kernel_lines=" NR}' "$results/observers/kernel-live.txt" >> "$results/observers/counts.txt" || note 'Kernel readiness count unavailable.'
+  fi
+  if [[ -f "$results/observers/capture.txt" ]]; then
+    awk '/packets (captured|received by filter|dropped by kernel)/ {print}' "$results/observers/capture.txt" >> "$results/observers/counts.txt" || note 'Capture counts unavailable.'
+  fi
+  for file in "$results/observers"/*; do
+    if [[ "$file" != "$results/observers/counts.txt" ]]; then rm -f "$file" || note 'Passing observer cleanup failed.'; fi
+  done
+  rm -f "$results/filesystems.txt" "$results/diagnostic-notes.txt" || note 'Passing diagnostic cleanup failed.'
 fi
-if [[ ! -e "$results/retain-kernel-live" ]]; then rm -f "$results/observers/kernel-live.txt" || note 'Live kernel cleanup unavailable.'; fi
 exit "$status"

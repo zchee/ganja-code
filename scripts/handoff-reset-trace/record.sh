@@ -11,7 +11,11 @@ prelude=1
 while IFS= read -r line; do
   if (( prelude == 1 )); then
     printf '%s\n' "$line" >&5 || { note 'Command prelude write failed.'; exec 5> /dev/null; }
-    if [[ "$line" =~ ^[[:space:]]*Starting[[:space:]] ]]; then prelude=0; exec 5>&-; fi
+    if [[ "$line" =~ ^[[:space:]]*Starting[[:space:]] ]]; then
+      printf '%s\t%s\n' "$(date +%s%N)" "$line" > "$directory/test-phase-start.tsv" || note 'Test phase timestamp write failed.'
+      prelude=0
+      exec 5>&-
+    fi
   fi
   if ! printf '%s\n' "$line" >&3; then
     note 'Test log write failed; continue draining reporter output.'
