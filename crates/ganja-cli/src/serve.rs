@@ -21,15 +21,13 @@
 //! `POST /permission/{id}/reply` (deviation:
 //! serve-keeps-interactive-permissions).
 //!
-//! The SIGTERM and SIGINT listeners are registered **before** the server is
-//! bound, and so before the address line. Both the open port and the line are
-//! what a supervisor reads as "up", and one that signals the instant it sees
-//! either must meet a handler: a TERM that arrives before registration takes
-//! the default disposition and kills the process outright — exit `signal:
-//! 15` instead of the clean 0, with none of the shutdown below run. The
-//! listeners used to be registered after the line was flushed, and a loaded CI
-//! runner landed a TERM in that window (bead `ganja-code-0dj9`);
-//! `tests/serve.rs` signals on the line itself to keep the order pinned.
+//! SIGTERM and SIGINT handlers are registered before engine HTTP service
+//! starts and before serve prints its address line. Ordinary serve also
+//! registers them before binding. An inherited worker listener is already
+//! TCP-reachable during assembly: a signal before registration takes its
+//! default disposition and does not run orderly engine shutdown. TCP connect
+//! success alone therefore does not imply registered handlers or HTTP
+//! readiness. `tests/serve.rs` pins registration before the address line.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -52,6 +50,13 @@ pub struct ServeArgs {
     /// is not loopback requires GANJA_SERVER_PASSWORD to be set.
     #[arg(long, value_name = "HOST", default_value = ganja_serve::DEFAULT_HOSTNAME)]
     hostname: String,
+    /// The one listening socket retained by worker init across exec.
+    /// The hostname must be an IP address literal equal to the socket's bound
+    /// address, or localhost (case-insensitive), meaning IPv4 loopback.
+    /// Other names or nonmatching addresses are refused before adoption.
+    #[cfg(unix)]
+    #[arg(long, hide = true, value_name = "FD", requires = "port", allow_hyphen_values = true)]
+    listen_fd: Option<std::os::fd::RawFd>,
 }
 
 /// Serves the engine until SIGINT or SIGTERM, then shuts everything down in
@@ -65,6 +70,20 @@ pub struct ServeArgs {
 /// the deliberate one: a non-loopback bind with no password configured. Also
 /// when SIGINT cannot be listened for (see [`Shutdown::listen`]).
 pub async fn serve(args: ServeArgs) -> Result<()> {
+    #[cfg(unix)]
+    let inherited = if let Some(number) = args.listen_fd {
+        let ip = if args.hostname.eq_ignore_ascii_case("localhost") {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            args.hostname
+                .parse()
+                .context("inherited listener requires an IP address or localhost")?
+        };
+        let port = args.port.context("inherited listener requires its expected port")?;
+        Some(crate::inherited_listener::take(number, std::net::SocketAddr::new(ip, port))?)
+    } else {
+        None
+    };
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     // No judge here, whatever the config names (**D567**): a served engine
     // runs turns for clients that were never told what it screens or where
@@ -93,24 +112,27 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     // watches and one-shot `run` does not.
     engine.watch_files();
 
-    // Before the bind, not after the address line: see the module docs.
+    // Before starting HTTP service and announcing its address: see the module docs.
     let shutdown = Shutdown::listen()?;
 
-    let handle = ganja_serve::serve(
-        Arc::clone(&engine),
-        ganja_serve::ServeConfig {
-            listen: ganja_serve::Listen::Tcp { hostname: args.hostname.clone(), port: args.port },
-            credentials,
-            directory: cwd,
-            root: assembled.root,
-            data: Some(assembled.data),
-            storage: Some(assembled.storage),
-            config: Some(assembled.config),
-            heartbeat: ganja_serve::HEARTBEAT,
-            journal: ganja_serve::EventJournal::default(),
-        },
-    )
-    .await?;
+    let config = ganja_serve::ServeConfig {
+        listen: ganja_serve::Listen::Tcp { hostname: args.hostname.clone(), port: args.port },
+        credentials,
+        directory: cwd,
+        root: assembled.root,
+        data: Some(assembled.data),
+        storage: Some(assembled.storage),
+        config: Some(assembled.config),
+        heartbeat: ganja_serve::HEARTBEAT,
+        journal: ganja_serve::EventJournal::default(),
+    };
+    #[cfg(unix)]
+    let handle = match inherited {
+        Some(listener) => ganja_serve::serve_on_tcp(Arc::clone(&engine), config, listener).await?,
+        None => ganja_serve::serve(Arc::clone(&engine), config).await?,
+    };
+    #[cfg(not(unix))]
+    let handle = ganja_serve::serve(Arc::clone(&engine), config).await?;
 
     // Upstream's line (`serve.ts:20`) under this build's name: the payload a
     // script parses, so stdout, flushed before anything waits. This

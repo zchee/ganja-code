@@ -856,3 +856,53 @@ Pinned by: `crates/ganja-teammate-cloud/tests/fake_provisioner.rs`
 (`a_post_launch_health_failure_still_latches_uncertainty`,
 `a_non_health_launch_attempt_keeps_the_uncertain_latch`).
 Commit: 3493328
+
+## D588 — worker init and serve keep one listening socket across exec (2026-11-12)
+
+Crates: ganja-cli, ganja-serve
+Amends: D578
+
+For a successful handoff, with the process making progress and room in the
+listen backlog, the same socket stays bound and listening from before the
+bootstrap response until serve accepts. Requests init already accepted finish
+in init with init's epoch; connections that arrive after init stops accepting
+wait in the kernel queue and are answered by serve with serve's epoch.
+
+Init retains an atomically close-on-exec duplicate of its Tokio listener,
+drains the bootstrap service unchanged, and passes only that descriptor across
+the existing filtered exec. Serve probes the raw number before constructing
+any borrowed or owning descriptor, verifies a listening IPv4 or IPv6 stream
+socket at the expected address, restores close-on-exec, and adopts it once
+before engine assembly can spawn children. Any probe error refuses startup;
+there is no bind fallback. The prebound server entry requires TCP routing and
+applies the password rule to the socket's actual local address. The environment
+allowlists, bootstrap wire, readiness route and signal-registration point are
+unchanged. TCP reachability during assembly does not imply registered signal
+handlers or HTTP readiness.
+
+Not guaranteed: an answer to every connection (malformed or idle connections,
+client cancellation, a full backlog, exec or assembly failure, process death,
+a hook that blocks), or any bound on the wait. The launch-time health exception
+in D587 stays in force: a continuously listening socket does not establish
+router delivery or cancellation, HTTP readiness, or a response within the
+client's deadline. No post-launch uncertain-attempt accounting or latch-clearing
+rule changes.
+
+Only the live run can show that the deployed Linux image, entrypoint and
+platform preserve the descriptor, how the actual router CONNECT path and read
+deadlines behave during assembly, whether delayed startup traffic can wake a
+suspended worker, and whether first suspend and next-message wake complete.
+Local socket and process tests do not establish those platform properties.
+
+Pinned by: `crates/ganja-cli/tests/worker_init.rs`
+(`a_connection_queued_during_worker_handoff_is_answered_by_serve`, both barrier
+cleanup tests), `crates/ganja-cli/tests/worker_support/handoff_tests.rs`
+(the bootstrap scan and its inheritable-child positive control, explicit-number
+snapshot and hook probes, real invalid-start cases, exec and queued assembly
+failures), `crates/ganja-cli/src/inherited_listener_tests.rs` (raw-number refusal
+without closing unrelated resources and reused-number process failure),
+`crates/ganja-serve/tests/bootstrap_init.rs`
+(`a_retained_init_listener_accepts_connections_after_handoff`), and the
+prebound address and transport cases in `crates/ganja-serve/tests/ports.rs` and
+`crates/ganja-serve/tests/posture.rs`.
+Commit: 2d9a0cc, 2c1b824

@@ -23,6 +23,24 @@ use ganja_serve::{Credentials, DEFAULT_HOSTNAME, Handle, Listen, ServeConfig};
 use ganja_testkit::{ScriptedProvider, says};
 use secrecy::SecretString;
 
+/// Run a server fixture on its own runtime, ending every async task before
+/// returning its saved result to the test's assertions.
+///
+/// Call from a synchronous test: runtime shutdown must not block another runtime.
+/// The fixtures use cooperative async server tasks, not unbounded blocking work.
+/// Panics still drop this runtime after `block_on` has unwound.
+pub fn server_fixture<F: std::future::Future>(exercise: impl FnOnce() -> F) -> F::Output {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("fixture runtime");
+    let outcome = runtime.block_on(exercise());
+    // Aborting a shutdown wrapper detaches its inner accept task. Ending the
+    // owning runtime also drops that task and every accepted connection task.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    outcome
+}
+
 /// A heartbeat quick enough that a suite sees one without waiting ten
 /// seconds.
 pub const FAST_HEARTBEAT: Duration = Duration::from_millis(50);

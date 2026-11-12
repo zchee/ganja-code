@@ -263,6 +263,12 @@ pub enum ServeError {
     /// Reusing a journal for another engine would mix unrelated event histories.
     #[error("an event journal may only be attached to its original engine")]
     JournalEngineMismatch,
+    /// A prebound TCP listener cannot use a socket transport's routes or guard.
+    #[error("an already-bound TCP listener requires a TCP listen configuration")]
+    ExpectedTcp,
+    /// The operating system could not report the prebound listener's address.
+    #[error("failed to read the already-bound TCP listener's local address")]
+    ListenerAddress(#[source] io::Error),
     /// A bind that faces the network was asked for with nothing guarding it.
     /// Upstream warns and serves anyway; refusing is deliberate — see the
     /// crate docs (deviation: non-loopback-requires-a-password).
@@ -410,6 +416,40 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Handle, S
         Listen::Session { id, directory } => bind_session(directory, id).await?,
     };
 
+    start(engine, config, bound).await
+}
+
+/// Serves `engine` on an already-bound TCP `listener`, without binding again.
+/// The listener's actual address determines whether credentials are required;
+/// `config.listen` must select TCP so its routes and credential guard agree.
+///
+/// # Errors
+///
+/// [`ServeError::ExpectedTcp`] for a socket-classified config,
+/// [`ServeError::ListenerAddress`] when the local address is unavailable,
+/// [`ServeError::UnsecuredNonLoopback`] for a network-facing listener without
+/// credentials, or the journal's engine-subscription refusal.
+/// Every refusal drops the supplied listener.
+pub async fn serve_on_tcp(
+    engine: Arc<Engine>,
+    config: ServeConfig,
+    listener: TcpListener,
+) -> Result<Handle, ServeError> {
+    if !matches!(config.listen, Listen::Tcp { .. }) {
+        return Err(ServeError::ExpectedTcp);
+    }
+    let address = listener.local_addr().map_err(ServeError::ListenerAddress)?;
+    if !address.ip().is_loopback() && config.credentials.is_none() {
+        return Err(ServeError::UnsecuredNonLoopback { hostname: address.ip().to_string() });
+    }
+    start(engine, config, Bound::Tcp(listener, address)).await
+}
+
+async fn start(
+    engine: Arc<Engine>,
+    config: ServeConfig,
+    bound: Bound,
+) -> Result<Handle, ServeError> {
     // Registration and permission projection share the journal's ordering.
     // Rebinding the same journal does not add another engine subscription.
     config.journal.attach(&engine).await?;

@@ -1,3 +1,5 @@
+pub mod listener;
+
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
@@ -190,10 +192,12 @@ fn announced_ports(output: &str) -> impl Iterator<Item = u16> + '_ {
         .map(|address| address.port())
 }
 
-fn worker_stderr(state: &Path) -> String {
-    std::fs::read_to_string(state.join("stderr"))
-        .expect("stderr log")
-        .replace("synthetic-worker-password", "[redacted]")
+pub(super) fn redact_worker_text(text: &str) -> String {
+    text.replace("synthetic-worker-password", "[redacted]")
+}
+
+pub(super) fn worker_stderr(state: &Path) -> String {
+    redact_worker_text(&std::fs::read_to_string(state.join("stderr")).expect("stderr log"))
 }
 
 pub struct WorkerProcess {
@@ -341,11 +345,15 @@ impl WorkerProcess {
         worker
     }
 
+    /// Captured announcement output with the synthetic server password removed.
+    pub fn announcements(&self) -> std::io::Result<String> {
+        std::fs::read_to_string(self._state.path().join("stdout"))
+            .map(|output| redact_worker_text(&output))
+    }
+
     /// Ports announced by the initializer and its replacement server.
     pub fn announced_ports(&self) -> Vec<u16> {
-        let output =
-            std::fs::read_to_string(self._state.path().join("stdout")).expect("stdout log");
-        announced_ports(&output).collect()
+        announced_ports(&self.announcements().expect("stdout log")).collect()
     }
 
     /// Proves the provider received its own key rather than server authentication.
@@ -364,8 +372,13 @@ impl WorkerProcess {
         worker_stderr(self._state.path())
     }
 
+    /// Current child status, reaping it only if it has already exited.
+    pub fn status(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
     pub fn is_alive(&mut self) -> bool {
-        self.child.try_wait().expect("child state").is_none()
+        self.status().expect("child state").is_none()
     }
 
     fn signal_shutdown(&mut self) {
@@ -401,6 +414,40 @@ impl Drop for WorkerProcess {
     }
 }
 
+/// Spawn a test-written executable within the caller's existing deadline.
+///
+/// The closure must perform only the spawn, not wait for the child's result.
+/// Returns the child on success or the spawn error on failure.
+///
+/// # Errors
+///
+/// Returns the last spawn error when the executable stays busy past the deadline,
+/// or any other spawn error immediately.
+pub fn spawn_written_executable<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+    deadline: tokio::time::Instant,
+) -> std::io::Result<T> {
+    // Linux cannot execute a just-written file while any process holds it open
+    // for writing; another test thread can be mid-spawn with that descriptor.
+    loop {
+        let error = match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) => error,
+        };
+        if error.kind() != std::io::ErrorKind::ExecutableFileBusy {
+            return Err(error);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(error);
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+    }
+}
+
 fn git(directory: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -414,3 +461,7 @@ fn git(directory: &Path, args: &[&str]) {
         .expect("real git installed");
     assert!(status.success(), "git fixture setup failed");
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

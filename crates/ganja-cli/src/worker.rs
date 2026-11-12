@@ -2,6 +2,7 @@
 //! process handoff boundary, so project discovery and snapshots see a real repo.
 
 use std::io::Write as _;
+use std::os::fd::{AsFd as _, AsRawFd as _};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -71,6 +72,10 @@ pub(crate) async fn run(action: Action) -> Result<()> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, args.port))
         .await
         .context("failed to bind the worker init listener")?;
+    let retained = listener
+        .as_fd()
+        .try_clone_to_owned()
+        .context("failed to retain the worker listener for handoff")?;
     let executor = Arc::new(GitExecutor {
         directory: directory.clone(),
         cancel: CancellationToken::new(),
@@ -96,18 +101,29 @@ pub(crate) async fn run(action: Action) -> Result<()> {
     }
 
     use std::os::unix::process::CommandExt as _;
-    let error = std::process::Command::new(std::env::current_exe().context("cannot locate ganja")?)
+    let mut command =
+        std::process::Command::new(std::env::current_exe().context("cannot locate ganja")?);
+    command
         .env_clear()
         .envs(
             SERVE_ENVIRONMENT
                 .into_iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
         )
-        // The platform router reaches the pod address, so serve binds all
-        // interfaces; isolation relies on one tenant per sandbox and Basic auth.
+        // The platform router reaches the pod address, so the retained listener
+        // faces all interfaces; isolation relies on one tenant and Basic auth.
         .args(["serve", "--hostname", "0.0.0.0", "--port", &port.to_string()])
-        .current_dir(directory)
-        .exec();
+        .args(["--listen-fd", &retained.as_raw_fd().to_string()])
+        .current_dir(directory);
+    let flags =
+        rustix::io::fcntl_getfd(&retained).context("failed to read listener descriptor flags")?;
+    // The bootstrap git child has been reaped and the accept task joined;
+    // nothing else in this process spawns. Build the command first, then
+    // clear only this descriptor's CLOEXEC and exec without an await or spawn.
+    rustix::io::fcntl_setfd(&retained, flags - rustix::io::FdFlags::CLOEXEC)
+        .context("failed to pass the worker listener across exec")?;
+    let error = command.exec();
+    drop(retained);
     Err(error).context("failed to replace worker init with ganja serve")
 }
 

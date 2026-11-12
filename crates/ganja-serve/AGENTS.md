@@ -13,7 +13,7 @@ The engine over HTTP: REST routes and an SSE event stream over `ganja-core`, on 
 
 | Path | Holds |
 |---|---|
-| `src/lib.rs` | `serve(Arc<Engine>, ServeConfig) -> Result<Handle, ServeError>`, `Listen`, `Address`, `DEFAULT_HOSTNAME`, `DEFAULT_PORT`, `HEARTBEAT`. |
+| `src/lib.rs` | `serve(Arc<Engine>, ServeConfig)` binds a listener; `serve_on_tcp` consumes an already-bound Tokio TCP listener. Both return `Result<Handle, ServeError>` and share journal, routing and startup. Also `Listen`, `Address`, `DEFAULT_HOSTNAME`, `DEFAULT_PORT`, `HEARTBEAT`. |
 | `src/journal.rs` | Caller-owned `EventJournal`: bounded replay and the ordered permission projection. |
 | `src/bootstrap.rs` | Pre-engine init router, strict bootstrap bodies, one-operation admission and drained handoff. |
 | `src/routes.rs` | `tcp_routes`, `socket_routes`, the `guard` middleware (log, credential, directory), every handler. |
@@ -61,6 +61,7 @@ cargo depgate check --config depgate.toml         # the boundary rules above
 ## Gotchas
 
 - Bind rules (`serve` in `src/lib.rs`): hostname is an IP or `localhost`, anything else is `UnknownHostname`. An explicit port is taken or refused; no port tries `DEFAULT_PORT` (4096) and falls back to an OS-assigned port. A non-loopback TCP bind with no credential fails with `UnsecuredNonLoopback`, naming `GANJA_SERVER_PASSWORD`.
+- An already-bound TCP listener requires a TCP-classified `ServeConfig`; `serve_on_tcp` checks the password requirement against its actual local address, not the config's claimed hostname. It never rebinds. The worker CLI retains init's socket across exec: requests accepted by init finish with init's epoch; connections queued after init stops accepting are answered by serve with serve's epoch. The successful-handoff conditions and limits are in [the CLI instructions](../ganja-cli/AGENTS.md); TCP reachability during assembly is not HTTP readiness and does not remove the launch-time health exception.
 - Password: `GANJA_SERVER_PASSWORD`, with `GANJA_SERVER_USERNAME` defaulting to `ganja` (`src/auth.rs`). With a password set, every TCP route except `GET /readyz` answers `401` with `Basic realm="Secure Area"` unless the request carries the Basic header or `?auth_token=`. The socket never asks for the password, even when one is configured.
 - `ganja serve` (`ganja-cli/src/serve.rs`, flags `--port`, `--hostname`) warns on stderr when the password is unset.
 - Directory rule: a `?directory=` query or `x-ganja-directory` header naming anything but the launch directory is `400` (`wrong_directory` in `src/routes.rs`). On the unauthenticated readiness route the refusal body is empty, so it never discloses the launch directory.
