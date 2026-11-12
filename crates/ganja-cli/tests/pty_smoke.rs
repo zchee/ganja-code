@@ -203,13 +203,26 @@ impl Ganja {
     ///
     /// An unread output buffer can block the app before it reads more input.
     /// Draining does not acknowledge input consumption or guarantee that
-    /// separate writes are read in separate batches.
+    /// separate writes are read in separate batches. Its sleeps can overshoot;
+    /// use [`Ganja::pause_until`] to avoid timer-based waits between writes.
     fn breathe(&mut self, ms: u64) {
         let deadline = std::time::Instant::now() + Duration::from_millis(ms);
         let mut sink = [0u8; 4096];
         while std::time::Instant::now() < deadline {
             let _ = self.try_read(&mut sink);
             thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Drains until a monotonic deadline, using the caller's waiting step.
+    fn pause_until(&mut self, deadline: Instant, mut wait: impl FnMut()) {
+        let mut sink = [0u8; 4096];
+        while Instant::now() < deadline {
+            // The split drill must not yield or sleep: its inter-write gap is
+            // the stimulus, not a wait for other runnable work. O_NONBLOCK
+            // avoids timed polling; std's clock needs no timer crate.
+            let _ = self.try_read(&mut sink);
+            wait();
         }
     }
 
@@ -464,9 +477,40 @@ fn sender_gap_bounds_never_retry_an_uncertain_write() {
     }
 }
 
-/// Split writes exercise the real terminal path. A spoiled pre-send gap discards
-/// the child without sending a tail. Once sent, a failed repair is never retried;
-/// sender timestamps do not prove UI consumption.
+#[test]
+fn a_coarse_pause_is_spoiled_before_sending() {
+    let offsets = [42, 44_708, 17_846_250].map(Duration::from_nanos);
+    assert_eq!(
+        sender_gap(offsets, None, Duration::from_millis(25)),
+        SenderGap::SpoiledBeforeSending,
+    );
+}
+
+#[test]
+fn the_split_pause_usually_leaves_time_to_send_the_tail() {
+    let mut readings = Vec::with_capacity(21);
+    for _ in 0..21 {
+        let mut session = ganja();
+        session.expect(COMPOSER).expect("the app is up and reading keys");
+        let started = Instant::now();
+        session.send("\x1b").expect("failed to send the bare escape");
+        session.pause_until(started + Duration::from_millis(5), std::hint::spin_loop);
+        readings.push(started.elapsed());
+    }
+    readings.sort_unstable();
+    let median = readings[readings.len() / 2];
+    eprintln!("split pause median {median:?}; readings {readings:?}");
+    assert!(
+        median < Duration::from_millis(25) / 2,
+        "the median pre-send reading must leave half the hold-off: {median:?}"
+    );
+}
+
+/// Split writes exercise the real terminal path, spinning and draining without
+/// sleeping until five milliseconds after the reading before the Esc write.
+/// Scheduling can still spoil a pre-send gap, which discards the child without
+/// sending a tail. Once sent, a failed repair is never retried; sender timestamps
+/// do not prove UI consumption.
 #[test]
 fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
     const ATTEMPTS: usize = 5;
@@ -481,7 +525,7 @@ fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
         let esc_started = sent.elapsed();
         session.send("\x1b").expect("failed to send the bare escape");
         let esc_completed = sent.elapsed();
-        session.breathe(5);
+        session.pause_until(sent + esc_started + Duration::from_millis(5), std::hint::spin_loop);
         let tail_started = sent.elapsed();
         let before_tail = [esc_started, esc_completed, tail_started];
         if sender_gap(before_tail, None, HOLDOFF) == SenderGap::SpoiledBeforeSending {
