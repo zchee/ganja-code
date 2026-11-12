@@ -49,14 +49,9 @@ impl Lease {
                     }
                 }
                 Err(source) => {
-                    #[cfg(unix)]
-                    if source.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
-                        return Err(StorageError::Maintenance {
-                            path,
-                            reason: "the admission lock must not be a link".to_owned(),
-                        });
-                    }
-                    if source.kind() == std::io::ErrorKind::IsADirectory {
+                    // Special-file open errors differ between macOS and Linux;
+                    // classify the object without following its final component.
+                    if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
                         return Err(StorageError::Maintenance {
                             path,
                             reason: "the admission lock must be a regular file".to_owned(),

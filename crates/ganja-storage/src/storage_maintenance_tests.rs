@@ -129,6 +129,56 @@ fn maintenance_worker() {
     println!("STORAGE_PHASE Done");
 }
 
+#[cfg(unix)]
+#[test]
+fn socket_lock_worker() {
+    use std::os::unix::fs::FileTypeExt as _;
+    use std::os::unix::net::UnixListener;
+
+    if std::env::var_os("GANJA_STORAGE_SOCKET_WORKER").is_none() {
+        return;
+    }
+    let database = Path::new(DATABASE);
+    fs::write(database, b"untouched corrupt main").expect("source marker");
+    // A relative bind avoids the macOS sockaddr_un path limit for long temp roots.
+    let path = with_suffix(database, ".quarantine.lock");
+    let _socket = UnixListener::bind(&path).expect("socket occupies lock path");
+    let opens = Arc::new(AtomicBool::new(false));
+    let seen = opens.clone();
+    let store = observed(Path::new("storage"), move |phase| {
+        if phase == Phase::ReaderOpening {
+            seen.store(true, Ordering::SeqCst);
+        }
+    });
+    let result = store.list_sessions();
+    assert!(
+        matches!(result, Err(super::StorageError::Maintenance { .. })),
+        "socket lock must return typed maintenance refusal: {result:?}"
+    );
+    assert!(!opens.load(Ordering::SeqCst), "no SQLite connection opens");
+    assert_eq!(fs::read(database).expect("source intact"), b"untouched corrupt main");
+    assert!(fs::symlink_metadata(path).expect("socket intact").file_type().is_socket());
+    assert_eq!(fs::read_dir(".").expect("no moves").count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_lock_is_refused_before_sqlite_or_moves() {
+    let directory = TempDir::new().expect("socket fixture");
+    let output = Command::new(std::env::current_exe().expect("unit-test executable"))
+        .args(["--exact", "storage::maintenance_tests::socket_lock_worker", "--nocapture"])
+        .current_dir(directory.path())
+        .env("GANJA_STORAGE_SOCKET_WORKER", "1")
+        .output()
+        .expect("socket worker runs");
+    assert!(
+        output.status.success(),
+        "socket fixture: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn test_workers_report_real_connection_phases() {
     let directory = TempDir::new().expect("fixture");
