@@ -55,8 +55,11 @@ jobs:
         run: bun install --frozen-lockfile
       - name: preflight installed suite commands before compilation
         run: command -v bun && command -v tmux && command -v cargo-nextest && command -v rust-analyzer
-      - name: build the unchanged worker initialization test
+      - name: build only the unchanged CI workspace
         run: bash scripts/handoff-reset-trace/build.sh
+        env:
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
+          GANJA_LSP_EDIT_BUDGET_MS: "6000"
       - name: measure worker-test neighbourhood then the exact CI suite
         run: bash scripts/handoff-reset-trace/loaded.sh
         env:

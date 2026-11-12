@@ -4,7 +4,7 @@
 set -euo pipefail
 
 missing=()
-for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env ps sleep df du stat mktemp install id cat awk /bin/true /home/linuxbrew/.linuxbrew/bin/brew; do
+for tool in bash sudo apt-get rustup cargo rustc git uname nproc lscpu taskset sysctl ip timeout jq wc sha256sum tee date rm mkdir grep setsid touch env ps sleep df du stat cat awk xargs sort cmp diff /home/linuxbrew/.linuxbrew/bin/brew; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 if (( ${#missing[@]} != 0 )); then
@@ -16,14 +16,13 @@ mkdir -p "$results/observers"
 printf '%s\n' "$(date +%s)" > "$results/job-start-epoch.txt"
 # shellcheck source=scripts/handoff-reset-trace/disk.sh
 source scripts/handoff-reset-trace/disk.sh
-printf 'utc\tlabel\tpath\tfree_bytes\tbinary_bytes\tbinary_size_source\ttarget_bytes\tcopy_floor_bytes\n' > "$results/disk.tsv"
+printf 'utc\tlabel\tpath\tfree_bytes\tbinary_bytes\tbinary_size_source\ttarget_bytes\trecords_floor_bytes\n' > "$results/disk.tsv"
 record_disk job-start
-choose_test_temp
-record_disk temp-selected
-require_compile_space
+require_space
+df -B1 > "$results/filesystems.txt"
 sudo apt-get update
-sudo apt-get install -y iproute2
-for tool in nstat ip ss; do
+sudo apt-get install -y iproute2 fd-find
+for tool in nstat ip ss fdfind; do
   command -v "$tool" >/dev/null || { printf 'Missing installed prerequisite: %s\n' "$tool" >&2; exit 1; }
 done
 sudo apt-get install -y tcpdump bpftrace > "$results/observers/install.txt" 2>&1 || printf 'Optional observer installation failed; inspect the install log.\n'
@@ -68,8 +67,9 @@ if command -v bpftrace >/dev/null; then
   fi
   status=0
   sudo -n timeout --signal=INT --kill-after=5s 45s bpftrace -B line -q "$program" > "$results/observers/kernel-preflight.txt" 2>&1 || status=$?
-  if (( status == 0 || status == 124 )) && grep -q '^READY' "$results/observers/kernel-preflight.txt"; then
+  if grep -q '^READY' "$results/observers/kernel-preflight.txt"; then
     printf '%s\n' "$program" > "$results/observers/kernel.enabled"
+    printf 'Kernel attach verified READY; bounded preflight shutdown exit=%s.\n' "$status" | tee -a "$results/observers/availability.txt"
   else
     printf 'Single kernel preflight unavailable (exit %s); continuing with packet capture and counters.\n' "$status" | tee -a "$results/observers/availability.txt"
   fi
