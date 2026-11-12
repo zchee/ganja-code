@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context as _, Result};
 use etcetera::BaseStrategy as _;
 use etcetera::base_strategy::Xdg;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::{FutureExt as _, Stream, StreamExt as _};
 use ganja_core::{
     Engine,
     EngineError,
@@ -86,7 +86,7 @@ use crate::component::skill_menu::SkillMenu;
 use crate::component::status::{Activity, Status, Todos, Totals, budget_left};
 use crate::component::themes::ThemeList;
 use crate::component::{context, effort, held, mcp, plugin, team, usage};
-use crate::escrepair::EscRepair;
+use crate::escrepair::{EscRepair, SEQ_DEADLINE};
 use crate::event::AppEvent;
 use crate::history::{self, History};
 use crate::keybind::{self, Keybinds};
@@ -95,6 +95,48 @@ use crate::{
     NOTICE_SEPARATOR, binder, clipboard, command, external, graphics, lister, member, mention,
     notify, transcript,
 };
+
+struct TerminalBatch {
+    ready: Vec<TermEvent>,
+    // Apply a read error or EOF only after handling the released input.
+    open: Result<bool>,
+}
+
+/// Reads a possible split without drawing, engine events or handlers between
+/// its fragments, for at most the whole-sequence allowance per wait. A hold
+/// left by repeated Escs returns to the general loop's deadline handling.
+async fn settle_terminal<S>(
+    first: TermEvent,
+    events: &mut S,
+    repair: &mut EscRepair,
+) -> TerminalBatch
+where
+    S: Stream<Item = std::io::Result<TermEvent>> + Unpin,
+{
+    let started = tokio::time::Instant::now();
+    let wait_deadline = started + SEQ_DEADLINE;
+    let mut ready = repair.accept(first, started.into_std());
+    while tokio::time::Instant::now() < wait_deadline {
+        let Some(deadline) = repair.deadline() else {
+            break;
+        };
+        let wake = tokio::time::Instant::from_std(deadline).min(wait_deadline);
+        match tokio::time::timeout_at(wake, events.next()).await {
+            Ok(Some(Ok(event))) => {
+                ready.extend(repair.accept(event, tokio::time::Instant::now().into_std()));
+            }
+            Ok(Some(Err(error))) => {
+                return TerminalBatch {
+                    ready,
+                    open: Err(error).context("failed to read a terminal event"),
+                };
+            }
+            Ok(None) => return TerminalBatch { ready, open: Ok(false) },
+            Err(_) => ready.extend(repair.expire(tokio::time::Instant::now().into_std())),
+        }
+    }
+    TerminalBatch { ready, open: Ok(true) }
+}
 
 /// Shortest gap between frames: roughly 60 FPS.
 pub const FRAME: Duration = Duration::from_millis(16);
@@ -1594,6 +1636,15 @@ impl App {
     pub async fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.open().await;
         let outcome = self.drive(terminal).await;
+        self.teardown().await;
+        outcome
+    }
+
+    async fn teardown(&mut self) {
+        // No loop exit may leave a spawn running without a UI to answer its dialogs.
+        if let Some(spawn) = self.team_spawn.take() {
+            spawn.abort();
+        }
         // The record first, and the socket after it (**D527**): stop
         // advertising before stopping answering. A record without a live
         // lock is filtered by every reader; a socket without a record is
@@ -1614,8 +1665,6 @@ impl App {
         // the id the envelope names is the session the engine is on *now* —
         // which a resume may have moved since startup.
         self.engine.session_end(ganja_core::hook::EXIT_REASON).await;
-
-        outcome
     }
 
     /// Keeps the session socket bound under the engine's current id, when
@@ -1887,17 +1936,11 @@ impl App {
             let repair_wake = self.escrepair.deadline().map(tokio::time::Instant::from_std);
 
             let events: Vec<AppEvent> = tokio::select! {
-                incoming = term_events.next() => match incoming {
-                    Some(incoming) => {
-                        let event = incoming.context("failed to read a terminal event")?;
-                        self.escrepair
-                            .accept(event, Instant::now())
-                            .into_iter()
-                            .map(AppEvent::Term)
-                            .collect()
+                incoming = term_events.next() => {
+                    if !self.terminal_input(incoming, &mut term_events).await? {
+                        break;
                     }
-                    // The event source closed; there is nothing left to react to.
-                    None => break,
+                    Vec::new()
                 },
                 incoming = core_events.next() => match incoming {
                     Some(incoming) => vec![AppEvent::core(incoming)],
@@ -1906,14 +1949,9 @@ impl App {
                 () = tokio::time::sleep(self.until_next_wakeup()), if self.wants_wakeup() => {
                     vec![AppEvent::Tick]
                 }
-                // A held Esc's deadline passed with nothing behind it: what
-                // was held was a real key press, released here (**D516**).
+                // Repeated Escs may leave a hold after the bounded inline wait.
                 () = tokio::time::sleep_until(repair_wake.unwrap_or_else(tokio::time::Instant::now)), if repair_wake.is_some() => {
-                    self.escrepair
-                        .expire(Instant::now())
-                        .into_iter()
-                        .map(AppEvent::Term)
-                        .collect()
+                    self.expired_terminal()
                 }
                 // Raw mode swallows Ctrl-C, so this arm only fires for a signal
                 // raised from outside the terminal, such as `kill -INT`.
@@ -1945,6 +1983,33 @@ impl App {
         }
 
         Ok(())
+    }
+
+    async fn terminal_input<S>(
+        &mut self,
+        incoming: Option<std::io::Result<TermEvent>>,
+        events: &mut S,
+    ) -> Result<bool>
+    where
+        S: Stream<Item = std::io::Result<TermEvent>> + Unpin,
+    {
+        let Some(incoming) = incoming else {
+            return Ok(false);
+        };
+        let first = incoming.context("failed to read a terminal event")?;
+        let batch = settle_terminal(first, events, &mut self.escrepair).await;
+        for event in batch.ready {
+            self.handle(AppEvent::Term(event)).await?;
+        }
+        batch.open
+    }
+
+    fn expired_terminal(&mut self) -> Vec<AppEvent> {
+        self.escrepair
+            .expire(tokio::time::Instant::now().into_std())
+            .into_iter()
+            .map(AppEvent::Term)
+            .collect()
     }
 
     /// Applies one event to the UI state.

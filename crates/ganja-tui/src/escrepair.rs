@@ -16,9 +16,17 @@
 //! crossterm would have produced unsplit is dispatched in their place.
 //! Anything that is not a continuation releases the held Esc, then everything
 //! accumulated, in arrival order — nothing is invented and nothing a person
-//! typed is lost. A genuine Esc is therefore never dropped, only delayed by
-//! at most the hold-off, which is well inside the backtrack gesture's 500ms
-//! window and imperceptible against the render loop's own 16ms cadence.
+//! typed is lost. A genuine Esc is therefore never dropped, only delayed
+//! until its hold-off expires.
+//!
+//! The caller reads held input without other UI work for at most the
+//! whole-sequence allowance per wait. Repeated Escs can leave a new hold
+//! pending when that cap returns control to the UI loop. Events are stamped
+//! when the terminal stream yields them, not when
+//! their bytes reach the terminal. Events already queued after a UI stall
+//! are stamped back to back, so a real Esc followed by typed `[D` during
+//! that stall can still look like an arrow. Whole-process descheduling and
+//! the terminal library's read batching remain outside this repair.
 //!
 //! Two complete-but-unmappable sequences are deliberately **swallowed**
 //! rather than replayed as text: a split SGR mouse fragment (a lost click
@@ -43,10 +51,11 @@ use ratatui::crossterm::event::{
 
 /// How long a bare Esc waits for its `[` or `O` continuation.
 ///
-/// The continuation, when the Esc really was a split sequence, arrives in the
-/// very next read — microseconds to single-digit milliseconds behind. 25ms is
-/// vim's `ttimeoutlen` neighborhood: far above any pty scheduling gap, far
-/// below what a person perceives on a deliberate Esc press.
+/// On a saturated machine, a continuation written 11.6 ms after Esc was
+/// observed as literal text. A deterministic example demonstrates that a
+/// consumption-time stamp can produce that result, not what caused that run.
+/// Reading a pending sequence without intervening UI work removes that gap;
+/// 25 ms remains the policy, not a bound on scheduling delays.
 const HOLDOFF: Duration = Duration::from_millis(25);
 
 /// How long a whole sequence may take from the Esc to its final byte.
@@ -55,7 +64,7 @@ const HOLDOFF: Duration = Duration::from_millis(25);
 /// (`ESC` + `[1;` + `5D`), so the sequence deadline is longer than the first
 /// byte's — but bounded, so a stream that opens like a sequence and never
 /// finishes cannot hold input hostage.
-const SEQ_DEADLINE: Duration = Duration::from_millis(50);
+pub(crate) const SEQ_DEADLINE: Duration = Duration::from_millis(50);
 
 /// The longest accumulated continuation entertained before giving up.
 ///
