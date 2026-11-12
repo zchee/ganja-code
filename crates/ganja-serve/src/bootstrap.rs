@@ -1,4 +1,6 @@
 //! The pre-engine listener. A successful response drains before the caller may exec serve.
+//! HTTP/1 responses close their connection explicitly; HTTP/2 remains accepted and
+//! retires through GOAWAY during the handoff's graceful shutdown.
 //!
 //! Git execution belongs to the worker process. This module owns admission, strict wire
 //! bodies and status reconciliation, so a disconnected POST cannot admit a second clone.
@@ -12,7 +14,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode, Version, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
@@ -251,8 +253,20 @@ impl Handle {
 }
 
 async fn guard(State(service): State<Service>, request: Request, next: Next) -> Response {
+    let version = request.version();
     let inner = service.inner.clone();
-    crate::routes::stamp_epoch(guarded(service, request, next).await, &inner.epoch)
+    let mut response =
+        crate::routes::stamp_epoch(guarded(service, request, next).await, &inner.epoch);
+    // A delayed TCP FIN must not let a peer pool an initializer connection
+    // across exec. HTTP/2 uses GOAWAY during the existing graceful shutdown.
+    if matches!(version, Version::HTTP_10 | Version::HTTP_11) {
+        // Preserve HTTP/1.0 before Hyper applies its keep-alive compatibility fix.
+        *response.version_mut() = version;
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+    }
+    response
 }
 
 async fn guarded(service: Service, request: Request, next: Next) -> Response {
