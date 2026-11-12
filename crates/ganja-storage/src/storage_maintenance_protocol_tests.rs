@@ -40,6 +40,164 @@ fn destination_conflicts_preserve_both_sets() {
     assert!(Pending::read(&database).expect("pending reads").is_some());
 }
 
+#[cfg(unix)]
+#[test]
+fn archive_destinations_refuse_links_without_moving_either_set() {
+    use std::os::unix::fs::symlink;
+
+    for suffix in ["", "-wal", "-shm"] {
+        for dangling in [false, true] {
+            let (directory, database) = raw_set();
+            let observation = Observation::default();
+            let pending =
+                Pending::begin(&database, PREUUID, &observation).expect("intent publishes");
+            let archived = database.with_file_name(&pending.target);
+            let target = directory.path().join("unrelated");
+            if !dangling {
+                fs::write(&target, b"unrelated data").expect("link target");
+            }
+            let destination = with_suffix(&archived, suffix);
+            symlink(&target, &destination).expect("archive destination link");
+            assert!(
+                matches!(
+                    pending.move_files(&database, &observation),
+                    Err(StorageError::Maintenance { .. })
+                ),
+                "archive link must refuse before moving: {suffix:?}, dangling={dangling}"
+            );
+            for (component, bytes) in
+                [("", b"old main".as_slice()), ("-wal", b"old wal"), ("-shm", b"old shm")]
+            {
+                assert_eq!(
+                    fs::read(with_suffix(&database, component)).expect("source intact"),
+                    bytes
+                );
+                let to = with_suffix(&archived, component);
+                if component == suffix {
+                    assert_eq!(fs::read_link(to).expect("destination link intact"), target);
+                } else {
+                    assert!(!to.exists(), "no other destination created");
+                }
+            }
+            if !dangling {
+                assert_eq!(fs::read(&target).expect("target intact"), b"unrelated data");
+            } else {
+                assert!(!target.exists(), "dangling target not created");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_paths_refuse_links_instead_of_following_or_replacing_them() {
+    use std::os::unix::fs::symlink;
+
+    for dangling in [false, true] {
+        let (directory, database) = raw_set();
+        let observation = Observation::default();
+        let target = directory.path().join("unrelated");
+        if !dangling {
+            let pending = Pending::begin(&database, PREUUID, &observation).expect("valid record");
+            fs::rename(with_suffix(&database, PENDING), &target).expect("valid record as target");
+            assert_eq!(pending.components.len(), 3);
+        }
+        let path = with_suffix(&database, PENDING);
+        symlink(&target, &path).expect("pending link");
+        assert!(
+            matches!(Pending::read(&database), Err(StorageError::Maintenance { .. })),
+            "pending links must be refused, dangling={dangling}"
+        );
+        assert!(matches!(
+            Pending::begin(&database, PREUUID, &observation),
+            Err(StorageError::Maintenance { .. })
+        ));
+        assert_eq!(fs::read_link(path).expect("link intact"), target);
+        assert_eq!(fs::read(&database).expect("source intact"), b"old main");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn intent_publication_never_replaces_a_link_at_the_pending_name() {
+    use std::os::unix::fs::symlink;
+
+    for dangling in [false, true] {
+        let (directory, database) = raw_set();
+        let target = directory.path().join("unrelated");
+        if !dangling {
+            fs::write(&target, b"unrelated record").expect("pending target");
+        }
+        let path = with_suffix(&database, PENDING);
+        let pending_path = path.clone();
+        let link_target = target.clone();
+        let observation = Observation(Some(Arc::new(move |phase| {
+            if phase == Phase::IntentTemporary {
+                symlink(&link_target, &pending_path).expect("occupy publication name");
+            }
+        })));
+        assert!(
+            matches!(
+                Pending::begin(&database, PREUUID, &observation),
+                Err(StorageError::Maintenance { .. })
+            ),
+            "a link occupies the pending name, dangling={dangling}"
+        );
+        assert_eq!(fs::read_link(path).expect("pending link retained"), target);
+        assert_eq!(fs::read(&database).expect("source retained"), b"old main");
+        if !dangling {
+            assert_eq!(fs::read(&target).expect("target retained"), b"unrelated record");
+        } else {
+            assert!(!target.exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn captured_components_refuse_links_before_publishing_an_intent() {
+    use std::os::unix::fs::symlink;
+
+    for suffix in ["", "-wal", "-shm"] {
+        for dangling in [false, true] {
+            let (directory, database) = raw_set();
+            let target = directory.path().join("unrelated");
+            if !dangling {
+                fs::write(&target, b"foreign component").expect("link target");
+            }
+            let component = with_suffix(&database, suffix);
+            fs::remove_file(&component).expect("replace fixture with a link");
+            symlink(&target, &component).expect("captured component link");
+            assert!(matches!(
+                Pending::begin(&database, PREUUID, &Observation::default()),
+                Err(StorageError::Maintenance { .. })
+            ));
+            assert_eq!(fs::read_link(component).expect("link intact"), target);
+            assert!(!with_suffix(&database, PENDING).exists(), "no intent published");
+        }
+    }
+}
+
+#[test]
+fn oversized_pending_records_are_refused_before_decoding_the_whole_file() {
+    let (_directory, database) = raw_set();
+    let pending =
+        Pending::begin(&database, PREUUID, &Observation::default()).expect("valid record");
+    let mut bytes = serde_json::to_vec(&pending).expect("valid record bytes");
+    bytes.resize(64 * 1024, b' ');
+    fs::write(with_suffix(&database, PENDING), &bytes).expect("oversized but valid JSON");
+    let error = Pending::read(&database).expect_err("a valid record above the cap must be refused");
+    assert!(
+        matches!(error, StorageError::Maintenance { ref reason, .. } if reason.contains("exceeds")),
+        "the size cap, not JSON validation, must refuse: {error}"
+    );
+    assert_eq!(fs::read(&database).expect("source intact"), b"old main");
+    assert_eq!(
+        fs::metadata(with_suffix(&database, PENDING)).expect("record retained").len(),
+        bytes.len() as u64
+    );
+}
+
 #[test]
 fn missing_components_refuse_persistence() {
     let (_directory, database) = raw_set();

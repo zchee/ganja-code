@@ -5,7 +5,7 @@
 //! its WAL afterwards, so recovery never replays companion moves after publication.
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use super::{Inner, PREUUID, QUARANTINE, StorageError, with_suffix};
 use super::{Observation, Phase};
 
 const PENDING: &str = ".quarantine.pending";
+const MAX_PENDING_BYTES: u64 = 4096;
 
 #[cfg(test)]
 #[path = "storage_maintenance_protocol_tests.rs"]
@@ -79,18 +80,52 @@ fn refused(database: &Path, reason: impl Into<String>) -> StorageError {
     StorageError::Maintenance { path: database.to_path_buf(), reason: reason.into() }
 }
 
-fn exists(path: &Path) -> Result<bool, StorageError> {
-    path.try_exists().map_err(|source| StorageError::Io { path: path.to_path_buf(), source })
+pub(super) fn exists(path: &Path) -> Result<bool, StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(refused(path, "a maintenance component must not be a link"))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(StorageError::Io { path: path.to_path_buf(), source }),
+    }
 }
 
 impl Pending {
     pub(super) fn read(database: &Path) -> Result<Option<Self>, StorageError> {
         let path = with_suffix(database, PENDING);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(StorageError::Io { path, source }),
-        };
+        if !exists(&path)? {
+            return Ok(None);
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            options.custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            );
+        }
+        let file = options
+            .open(&path)
+            .map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        if !file
+            .metadata()
+            .map_err(|source| StorageError::Io { path: path.clone(), source })?
+            .is_file()
+        {
+            return Err(refused(database, "the pending record must be a regular file"));
+        }
+        // Read one extra byte to detect oversize records without trusting a size
+        // observed before a concurrent change, or allocating for the whole file.
+        let mut bytes = Vec::with_capacity(MAX_PENDING_BYTES as usize + 1);
+        file.take(MAX_PENDING_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        if bytes.len() as u64 > MAX_PENDING_BYTES {
+            return Err(refused(database, "the pending record exceeds the size limit"));
+        }
         let pending: Self = serde_json::from_slice(&bytes)
             .map_err(|error| refused(database, format!("invalid pending record: {error}")))?;
         pending.validate(database)?;
@@ -174,6 +209,10 @@ impl Pending {
                 .map_err(|source| StorageError::Io { path: temporary.clone(), source })?;
             file.write_all(&bytes)
                 .map_err(|source| StorageError::Io { path: temporary.clone(), source })?;
+            // Close the missing publication barrier, not a power-loss guarantee
+            // for the later file-set moves or SQLite replacement initialization.
+            file.sync_all()
+                .map_err(|source| StorageError::Io { path: temporary.clone(), source })?;
         }
         #[cfg(test)]
         observation.hit(Phase::IntentTemporary);
@@ -184,6 +223,10 @@ impl Pending {
         }
         fs::rename(&temporary, &path)
             .map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| StorageError::Io { path: parent.to_path_buf(), source })?;
         #[cfg(test)]
         observation.hit(Phase::IntentPublished);
         Ok(pending)

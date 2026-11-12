@@ -237,6 +237,73 @@ fn archive(directory: &Path) -> PathBuf {
         .expect("one archive exists")
 }
 
+#[cfg(unix)]
+#[test]
+fn a_lock_path_link_is_refused_before_any_sqlite_open_or_move() {
+    use std::os::unix::fs::symlink;
+
+    for dangling in [false, true] {
+        let directory = TempDir::new().expect("lock fixture");
+        let root = directory.path().join("storage");
+        let database = Storage::open(root.clone()).database().to_path_buf();
+        fs::write(&database, b"untouched corrupt main").expect("source marker");
+        let target = directory.path().join("lock-target");
+        if !dangling {
+            fs::write(&target, b"untouched lock target").expect("target marker");
+        }
+        let path = with_suffix(&database, ".quarantine.lock");
+        symlink(&target, &path).expect("lock path link");
+        let opens = Arc::new(AtomicBool::new(false));
+        let seen = opens.clone();
+        let store = observed(&root, move |phase| {
+            if phase == Phase::ReaderOpening {
+                seen.store(true, Ordering::SeqCst);
+            }
+        });
+        let result = store.list_sessions();
+        assert!(
+            matches!(result, Err(super::StorageError::Maintenance { .. })),
+            "a lock link must refuse with a typed maintenance error: {result:?}"
+        );
+        assert!(!opens.load(Ordering::SeqCst), "no SQLite connection is opened");
+        assert_eq!(fs::read(&database).expect("main intact"), b"untouched corrupt main");
+        assert_eq!(fs::read_link(&path).expect("lock link intact"), target);
+        assert_eq!(
+            fs::read_dir(directory.path()).expect("no extra moves").count(),
+            2 + usize::from(!dangling)
+        );
+        if !dangling {
+            assert_eq!(fs::read(&target).expect("target intact"), b"untouched lock target");
+        } else {
+            assert!(!target.exists(), "no dangling target is created");
+        }
+    }
+}
+
+#[test]
+fn a_non_regular_lock_path_is_refused_as_maintenance() {
+    let directory = TempDir::new().expect("lock fixture");
+    let store = Storage::open(directory.path().join("storage"));
+    fs::create_dir(with_suffix(store.database(), ".quarantine.lock")).expect("non-file lock path");
+    assert!(matches!(store.list_sessions(), Err(super::StorageError::Maintenance { .. })));
+    assert!(!store.database().exists(), "no SQLite main created");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_parent_directory_still_admits_a_regular_lock() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new().expect("parent link fixture");
+    let real = directory.path().join("real");
+    fs::create_dir(&real).expect("real parent");
+    let linked = directory.path().join("linked");
+    symlink(&real, &linked).expect("parent link");
+    let store = Storage::open(linked.join("storage"));
+    store.save_info(&info(FRESH, 1)).expect("only final component must be a regular file");
+    assert_eq!(store.list_sessions().expect("linked parent reads"), vec![info(FRESH, 1)]);
+}
+
 #[test]
 fn a_fresh_opener_cannot_connect_during_archive_publication() {
     let directory = TempDir::new().expect("fixture");

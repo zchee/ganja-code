@@ -66,6 +66,12 @@
 //! stores, or blocked shared admission, return a typed storage error instead.
 //! Callers can continue in memory on that failure, but it is not persistence.
 //!
+//! An ordinary independently opened store retains one lock descriptor shared by
+//! its two connections, with a constant amount of startup file and lock work.
+//! Only maintenance contention adds admission waiting, bounded by that deadline.
+//! The write connection opens synchronously; the five-second budget bounds
+//! admission waiting, not the time SQLite takes to open either connection.
+//!
 //! Under exclusive admission, a complete versioned `.quarantine.pending` record
 //! names the reserved archive and captured components before any move. WAL and
 //! SHM move first; main moves last and publishes the archive. Closing SQLite does
@@ -1750,6 +1756,7 @@ fn stored_files(directory: &Path) -> Result<Vec<PathBuf>, StorageError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Admission,
+    AdmissionDeadline(std::time::Instant),
     SharedAcquired,
     SharedBlocked,
     ExclusiveWanted,

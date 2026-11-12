@@ -8,7 +8,7 @@ use std::{fs, thread};
 
 use rusqlite::Connection;
 
-use super::maintenance::Pending;
+use super::maintenance::{Pending, exists};
 use super::{
     Inner, PREUUID, QUARANTINE, QUARANTINE_LOCK, StorageError, connect, convert, damaged,
     integrity, migrate, preuuid_id, with_suffix,
@@ -25,12 +25,57 @@ pub(super) struct Lease(fs::File);
 impl Lease {
     fn try_take(database: &Path, exclusive: bool) -> Result<Option<Arc<Self>>, StorageError> {
         let path = with_suffix(database, &format!(".{QUARANTINE_LOCK}"));
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|source| StorageError::Io { path: path.clone(), source })?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            options.custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            );
+        }
+        let file = loop {
+            match options.open(&path) {
+                Ok(file) => break file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match options.create_new(true).open(&path) {
+                        Ok(file) => break file,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            // Another opener won creation; open its stable inode without truncating.
+                            options.create_new(false);
+                        }
+                        Err(source) => return Err(StorageError::Io { path, source }),
+                    }
+                }
+                Err(source) => {
+                    #[cfg(unix)]
+                    if source.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                        return Err(StorageError::Maintenance {
+                            path,
+                            reason: "the admission lock must not be a link".to_owned(),
+                        });
+                    }
+                    if source.kind() == std::io::ErrorKind::IsADirectory {
+                        return Err(StorageError::Maintenance {
+                            path,
+                            reason: "the admission lock must be a regular file".to_owned(),
+                        });
+                    }
+                    return Err(StorageError::Io { path, source });
+                }
+            }
+        };
+        if !file
+            .metadata()
+            .map_err(|source| StorageError::Io { path: path.clone(), source })?
+            .is_file()
+        {
+            return Err(StorageError::Maintenance {
+                path,
+                reason: "the admission lock must be a regular file".to_owned(),
+            });
+        }
         let outcome = if exclusive { file.try_lock() } else { file.try_lock_shared() };
         match outcome {
             Ok(()) => Ok(Some(Arc::new(Self(file)))),
@@ -120,6 +165,8 @@ impl Inner {
         }
         loop {
             #[cfg(test)]
+            self.observation.hit(Phase::AdmissionDeadline(deadline));
+            #[cfg(test)]
             self.observation.hit(Phase::Admission);
             let Some(shared) = Lease::try_take(&self.database, false)? else {
                 #[cfg(test)]
@@ -161,7 +208,7 @@ impl Inner {
                     Probe::Ready(connection) => return Ok(connection),
                     Probe::Old(connection, _) => {
                         tracing::warn!(path = %self.database.display(),
-                            "setting the old session store aside was deferred: another process still owns a shared lease");
+                            "setting the old session store aside was deferred: another process still owns a shared lease; the existing readable store remains live with its old ids");
                         return Ok(connection);
                     }
                     Probe::Corrupt(_) | Probe::Absent | Probe::Pending => {
@@ -199,11 +246,7 @@ impl Inner {
         if Pending::read(&self.database)?.is_some() {
             return Ok(Probe::Pending);
         }
-        if !self
-            .database
-            .try_exists()
-            .map_err(|source| StorageError::Io { path: self.database.clone(), source })?
-        {
+        if !exists(&self.database)? {
             return Ok(Probe::Absent);
         }
         let mut connection = match self.connection(lease) {

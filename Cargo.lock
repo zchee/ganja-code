@@ -1644,6 +1644,7 @@ dependencies = [
  "ganja-permission",
  "ganja-protocol",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

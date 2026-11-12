@@ -43,6 +43,10 @@ tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
 # never dropped in silence: the store has no other channel to a person.
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Refuse final-component links when opening the permanent admission lock.
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 # `#[tokio::test]` needs a runtime to spawn onto (`rt`, current-thread by
