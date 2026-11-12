@@ -270,6 +270,30 @@ async fn an_inherited_port_mismatch_exits_with_an_ordinary_error() {
         .await;
 }
 
+async fn scan_child(
+    address: SocketAddr,
+    output: &std::path::Path,
+    inherited: Option<&std::os::fd::OwnedFd>,
+) -> anyhow::Result<String> {
+    let spec = serde_json::json!({"address": address, "output": output});
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["--exact", "handoff::inherited_socket_probe", "--nocapture"])
+        .env(PROBE, spec.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(descriptor) = inherited {
+        listener::inherit(&mut command, descriptor);
+    }
+    let mut child = command.spawn()?;
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    let cleanup = reap(&mut child).await;
+    cleanup?;
+    anyhow::ensure!(status??.success(), "scan child failed");
+    Ok(std::fs::read_to_string(output)?)
+}
+
 #[tokio::test]
 async fn the_bounded_child_probe_detects_an_inheritable_listener_duplicate() {
     use std::os::fd::AsFd as _;
@@ -280,22 +304,9 @@ async fn the_bounded_child_probe_detects_an_inheritable_listener_duplicate() {
     let duplicate = socket.as_fd().try_clone_to_owned().expect("inheritable control duplicate");
     assert!(duplicate.as_raw_fd() < listener::scan_bound().expect("scan bound"));
     let output = home.path().join("probe-result");
-    let spec = serde_json::json!({"address": address, "output": output});
-    let mut command = tokio::process::Command::new(std::env::current_exe().expect("test binary"));
-    command
-        .args(["--exact", "handoff::inherited_socket_probe", "--nocapture"])
-        .env(PROBE, spec.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    listener::inherit(&mut command, &duplicate);
-    let mut child = command.spawn().expect("probe child with selected inheritable duplicate");
+    let result = scan_child(address, &output, Some(&duplicate)).await;
     drop(duplicate);
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
-    let cleanup = reap(&mut child).await;
-    cleanup.expect("probe child reaped");
-    assert!(status.expect("bounded positive control").expect("child status").success());
-    assert_eq!(std::fs::read_to_string(output).expect("scan output"), "present\n");
+    assert_eq!(result.expect("positive-control child reaped"), "present\n");
 }
 
 #[tokio::test]
@@ -421,6 +432,10 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
         .expect("executable wrapper");
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
         .expect("wrapper PATH");
+    let test_process =
+        scan_child((Ipv4Addr::LOCALHOST, 0).into(), &home.path().join("test-process-result"), None)
+            .await
+            .expect("test-process scan child completed and reaped");
     let deadline = Instant::now() + Duration::from_secs(30);
     let (mut worker, worker_home) =
         super::handoff_worker(&server, &barrier, false, None, &[("PATH", path.as_os_str())]);
@@ -430,11 +445,13 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
         let probes = std::fs::read_to_string(&output)?;
         anyhow::ensure!(
             !probes.is_empty() && probes.lines().all(|line| line == "absent"),
-            "bootstrap Git must not inherit a listening stream socket: {probes}"
+            "bootstrap Git must not inherit a listening stream socket; git child:\n{probes}"
         );
         Ok(())
     }
     .await;
+    let result = result
+        .map_err(|error| error.context(format!("test-process child: {}", test_process.trim_end())));
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
     super::assert_handoff(
