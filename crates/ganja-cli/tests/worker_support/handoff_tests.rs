@@ -267,7 +267,7 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("worker and held hook reaped");
+    assert_eq!(cleanup.expect("worker and held hook reaped"), super::HookCleanup::Gone);
     result.expect("the bounded bootstrap Git probe sees no retained listener");
 }
 
@@ -438,6 +438,10 @@ async fn an_exec_failure_closes_the_worker_port_without_a_replacement_listener()
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("worker reaped and barrier released on exec failure");
-    result.expect("failed exec drops the only retained listener");
+    result.expect("worker status and startup diagnostic prove exec failed before assembly");
+    assert_eq!(
+        cleanup.expect("worker reaped and barrier released on exec failure"),
+        super::HookCleanup::NoHookObserved,
+        "no hook can start when replacement exec fails"
+    );
 }

@@ -32,6 +32,12 @@ fn worker_init_defaults_to_port_8080() {
     assert!(help.contains("[default: 8080]"), "unexpected default: {help}");
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum HookCleanup {
+    Gone,
+    NoHookObserved,
+}
+
 // FIFO owners stay read-write and nonblocking on the Linux and macOS hosts
 // this suite supports. No helper thread can remain blocked in open or read.
 struct HandoffBarrier {
@@ -105,7 +111,7 @@ impl HandoffBarrier {
             }
         })
         .await
-        .map_err(std::io::Error::other)?
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::TimedOut, error))?
     }
 
     fn release(&mut self) -> std::io::Result<()> {
@@ -113,16 +119,18 @@ impl HandoffBarrier {
         self.release.write_all(b"release\n")
     }
 
-    async fn cleanup(&mut self, worker: &mut tokio::process::Child) -> std::io::Result<()> {
+    async fn cleanup(
+        &mut self,
+        worker: &mut tokio::process::Child,
+    ) -> std::io::Result<HookCleanup> {
         let hook_deadline = Instant::now() + Duration::from_secs(5);
         let deadline = hook_deadline + Duration::from_secs(5);
-        // A failed scenario may leave a complete or partial arrival unread. Keep
-        // the FIFO owners and parent alive while recovering the hook's identity.
+        // Parent exit does not end an independently grouped hook. Keep recovering
+        // its identity for the whole reserve, even after the worker is reaped.
         let recovery = if self.group.is_none() {
-            tokio::select! {
-                biased;
-                arrived = self.arrived(hook_deadline) => arrived,
-                exited = worker.wait() => exited.map(|_| ()),
+            match self.arrived(hook_deadline).await {
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(()),
+                result => result,
             }
         } else {
             Ok(())
@@ -143,7 +151,8 @@ impl HandoffBarrier {
             .await
             .map_err(std::io::Error::other)
             .and_then(|status| status.map(|_| ()));
-        recovery.and(release).and(hook_cleanup).and(kill).and(reaped)
+        recovery.and(release).and(hook_cleanup).and(kill).and(reaped)?;
+        Ok(if self.group.is_some() { HookCleanup::Gone } else { HookCleanup::NoHookObserved })
     }
 }
 
@@ -327,7 +336,11 @@ async fn a_connection_queued_during_worker_handoff_is_answered_by_serve() {
     }.await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("barrier released, hook gone and worker reaped within cleanup reserve");
+    assert_eq!(
+        cleanup.expect("bounded worker cleanup"),
+        HookCleanup::Gone,
+        "hook disappearance must be verified"
+    );
     result.expect("queued requests survive the init-to-serve handoff");
 }
 
@@ -340,9 +353,19 @@ async fn barrier_cleanup_reaps_a_worker_that_fails_before_the_hook_arrives() {
     let status = tokio::time::timeout_at(deadline, worker.wait()).await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("bounded cleanup before hook arrival");
-    assert!(!status.expect("startup ends").expect("reaped").success());
-    assert!(barrier.group.is_none(), "no hook was started");
+    let diagnostics =
+        std::fs::read_to_string(_home.path().join("stderr")).expect("startup diagnostic");
+    assert_eq!(status.expect("startup ends").expect("reaped").code(), Some(1));
+    assert!(
+        diagnostics
+            .contains("ganja worker init requires GIT_CONFIG_GLOBAL to name a readable file"),
+        "failure must precede engine assembly: {diagnostics}"
+    );
+    assert_eq!(
+        cleanup.expect("bounded cleanup before hook arrival"),
+        HookCleanup::NoHookObserved,
+        "no-hook cleanup is accepted only because worker status and diagnostic prove startup failed before assembly"
+    );
 }
 
 #[tokio::test]
@@ -361,7 +384,7 @@ async fn barrier_cleanup_reaps_a_worker_and_hook_after_arrival() {
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("bounded cleanup after hook arrival");
+    assert_eq!(cleanup.expect("bounded cleanup after hook arrival"), HookCleanup::Gone);
     arrived.expect("hook was held when the failure was injected");
     assert!(worker.try_wait().expect("child state").is_some(), "worker reaped");
 }
@@ -382,7 +405,7 @@ async fn barrier_cleanup_recovers_a_started_hook_whose_arrival_was_not_consumed(
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("bounded cleanup with an unread hook arrival");
+    assert_eq!(cleanup.expect("bounded cleanup with an unread hook arrival"), HookCleanup::Gone);
     started.expect("hook started before the scenario failed");
     assert!(barrier.group.is_some(), "cleanup must recover and verify the unread hook group");
     if let Some(group) = barrier.group {
@@ -390,6 +413,58 @@ async fn barrier_cleanup_recovers_a_started_hook_whose_arrival_was_not_consumed(
         assert_eq!(unsafe { libc::kill(-group, 0) }, -1, "no live hook group after cleanup");
         assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
+    assert!(worker.try_wait().expect("child state").is_some(), "worker reaped");
+}
+
+#[tokio::test]
+async fn barrier_cleanup_recovers_a_hook_that_reports_arrival_after_its_worker_exits() {
+    let server = GitServer::start(false).await;
+    let mut barrier = HandoffBarrier::new();
+    let mut delayed = HandoffBarrier::new();
+    let command = format!(
+        "printf '%s\\n' \"$$\" > {:?}; read -r token < {:?}; printf '%s\\n' \"$$\" > {:?}; read -r token < {:?}; read -r token < {:?}",
+        delayed.home.path().join("arrival"),
+        delayed.home.path().join("release"),
+        barrier.home.path().join("arrival"),
+        barrier.home.path().join("release"),
+        barrier.home.path().join("release"),
+    );
+    std::fs::write(
+        barrier.home.path().join("ganja.toml"),
+        format!("model = \"fake/handoff\"\n[[hooks.SessionStart]]\nhooks = [{{ type = \"command\", command = {command:?}, timeout = 120 }}]\n"),
+    )
+    .expect("delayed arrival hook");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut worker, _home) = handoff_worker(&server, &barrier, false, None, &[]);
+    let started: anyhow::Result<()> = async {
+        bootstrap_worker(&mut worker, &server, deadline, None).await?;
+        delayed.arrived(deadline).await?;
+        worker.start_kill()?;
+        tokio::time::timeout_at(deadline, worker.wait()).await??;
+        anyhow::ensure!(barrier.group.is_none(), "hook identity is still unread");
+        Ok(())
+    }
+    .await;
+    // The gate stays held until cleanup has been polled with an exited worker.
+    let (cleanup, released) = tokio::join!(barrier.cleanup(&mut worker), async {
+        tokio::task::yield_now().await;
+        delayed.release()
+    });
+    let recovered = barrier.group;
+    // Independent ownership prevents the red control itself leaving a hook alive.
+    let emergency = if let Some(group) = delayed.group {
+        // SAFETY: the separate startup token identifies this fixture's hook group.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        wait_for_hook_exit(group, Instant::now() + Duration::from_secs(5)).await
+    } else {
+        Ok(())
+    };
+    server.close().await;
+    emergency.expect("independently owned hook group disappeared");
+    released.expect("arrival gate released");
+    started.expect("worker exited after starting the delayed hook");
+    assert_eq!(cleanup.expect("late-arrival hook cleanup completed"), HookCleanup::Gone);
+    assert!(recovered.is_some(), "cleanup must recover the hook after its worker exits");
     assert!(worker.try_wait().expect("child state").is_some(), "worker reaped");
 }
 
@@ -415,7 +490,7 @@ async fn a_hook_held_past_its_cleanup_check_deadline_is_reported_as_live() {
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    cleanup.expect("held hook and worker stopped after the control");
+    assert_eq!(cleanup.expect("held hook and worker stopped after the control"), HookCleanup::Gone);
     let error = check.expect("hook was held").expect_err("a live hook cannot pass its exit check");
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(error.to_string().contains("still live"), "{error}");

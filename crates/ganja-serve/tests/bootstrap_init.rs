@@ -288,8 +288,8 @@ async fn concurrent_posts_admit_one_clone_and_success_drains_before_handoff() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn a_retained_init_listener_accepts_connections_after_handoff() {
+#[test]
+fn a_retained_init_listener_accepts_connections_after_handoff() {
     use std::os::fd::AsFd as _;
     use std::time::Duration;
 
@@ -309,12 +309,13 @@ async fn a_retained_init_listener_accepts_connections_after_handoff() {
         }
     }
 
-    let deadline = Instant::now() + DEADLINE;
-    let release = Arc::new(Semaphore::new(0));
-    let mut posting = None;
-    let mut handoff = None;
-    let mut server = None;
-    let exercise: Result<TestResult<()>, _> = tokio::time::timeout_at(deadline, async {
+    let (exercise, cleanup_errors) = support::server_fixture(|| async {
+        let deadline = Instant::now() + DEADLINE;
+        let release = Arc::new(Semaphore::new(0));
+        let mut posting = None;
+        let mut handoff = None;
+        let mut server = None;
+        let exercise: Result<TestResult<()>, _> = tokio::time::timeout_at(deadline, async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let retained = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned()?);
         let address = listener.local_addr()?;
@@ -387,25 +388,27 @@ async fn a_retained_init_listener_accepts_connections_after_handoff() {
         }
         Ok(())
     }).await;
-    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
-    release.add_permits(1);
-    let mut cleanup_errors = Vec::new();
-    if let Some(task) = posting
-        && let Err(error) = finish(task, cleanup_deadline).await
-    {
-        cleanup_errors.push(format!("posting cleanup: {error}"));
-    }
-    if let Some(task) = handoff
-        && let Err(error) = finish(task, cleanup_deadline).await
-    {
-        cleanup_errors.push(format!("handoff cleanup: {error}"));
-    }
-    if let Some(server) = server {
-        let shutdown = finish(tokio::spawn(server.shutdown()), cleanup_deadline).await;
-        if let Err(error) = shutdown.and_then(|result| result.map_err(Into::into)) {
-            cleanup_errors.push(format!("engine shutdown: {error}"));
+        let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+        release.add_permits(1);
+        let mut cleanup_errors = Vec::new();
+        if let Some(task) = posting
+            && let Err(error) = finish(task, cleanup_deadline).await
+        {
+            cleanup_errors.push(format!("posting cleanup: {error}"));
         }
-    }
+        if let Some(task) = handoff
+            && let Err(error) = finish(task, cleanup_deadline).await
+        {
+            cleanup_errors.push(format!("handoff cleanup: {error}"));
+        }
+        if let Some(server) = server {
+            let shutdown = finish(tokio::spawn(server.shutdown()), cleanup_deadline).await;
+            if let Err(error) = shutdown.and_then(|result| result.map_err(Into::into)) {
+                cleanup_errors.push(format!("engine shutdown: {error}"));
+            }
+        }
+        (exercise, cleanup_errors)
+    });
     assert!(cleanup_errors.is_empty(), "fixture cleanup failed: {cleanup_errors:?}");
     exercise
         .expect("absolute scenario deadline")
