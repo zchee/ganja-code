@@ -34,7 +34,22 @@ fn a_cooperative_owner_fences_maintenance_and_a_quiescent_wal_survives_recovery(
     lease.try_lock().expect("all cooperative connections closed before maintenance");
 
     let connection = Connection::open(&database).expect("quiescent fixture opens under EX");
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE session SET data = 'distinctive WAL-only old content';").expect("old content commits only in WAL");
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .expect("fixture uses WAL without automatic checkpoints");
+    // Closing Storage guarantees quiescence, not a checkpointed baseline.
+    let checkpoint: (i32, i32, i32) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("fixture checkpoints its planted baseline under EX");
+    assert_eq!(checkpoint, (0, 0, 0), "the baseline checkpoint completed and emptied WAL");
+    let previous: String = connection
+        .query_row("SELECT data FROM session WHERE id = ?1", [PRE_UUID_ID], |row| row.get(0))
+        .expect("planted baseline row");
+    connection
+        .execute("UPDATE session SET data = 'distinctive WAL-only old content'", [])
+        .expect("old content commits only in WAL");
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .expect("real SQLite preserves the log at close");
@@ -65,6 +80,7 @@ fn a_cooperative_owner_fences_maintenance_and_a_quiescent_wal_survives_recovery(
     let old: String = main
         .query_row("SELECT data FROM session WHERE id = ?1", [PRE_UUID_ID], |row| row.get(0))
         .expect("previous checkpointed row");
+    assert_eq!(old, previous, "the main-only control retains the planted baseline");
     assert_ne!(
         old, "distinctive WAL-only old content",
         "old content still requires its WAL immediately before record publication"
