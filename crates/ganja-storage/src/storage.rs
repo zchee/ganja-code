@@ -79,6 +79,8 @@ use serde::{Deserialize, Serialize};
 
 #[path = "storage_admission.rs"]
 mod admission;
+#[path = "storage_maintenance.rs"]
+mod maintenance;
 use admission::{Lease, LeasedConnection};
 
 /// The record format this build writes.
@@ -528,6 +530,8 @@ struct Inner {
     observation: Observation,
     #[cfg(test)]
     admission_budget: Option<std::time::Duration>,
+    #[cfg(test)]
+    no_checkpoint: bool,
 }
 
 /// What an opened store is reached through.
@@ -640,6 +644,8 @@ impl Storage {
                 observation: Observation::default(),
                 #[cfg(test)]
                 admission_budget: None,
+                #[cfg(test)]
+                no_checkpoint: false,
             }),
         }
     }
@@ -2078,6 +2084,7 @@ fn stored_files(directory: &Path) -> Result<Vec<PathBuf>, StorageError> {
 enum Phase {
     Admission,
     SharedAcquired,
+    SharedBlocked,
     ExclusiveWanted,
     ExclusiveAcquired,
     OldIds,
@@ -2090,6 +2097,9 @@ enum Phase {
     WriterClosed,
     ReplacementCreated,
     Migrated,
+    IntentTemporary,
+    IntentPublished,
+    IntentRemoved,
     Renamed(&'static str),
 }
 

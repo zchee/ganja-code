@@ -96,12 +96,13 @@ fn maintenance_worker() {
     let Some(root) = std::env::var_os("GANJA_STORAGE_TEST_WORKER") else {
         return;
     };
-    let storage = observed(Path::new(&root), |phase| {
+    let mut storage = observed(Path::new(&root), |phase| {
         println!("STORAGE_PHASE {phase:?}");
         std::io::stdout().flush().expect("phase flushes");
         let mut release = String::new();
         assert_ne!(std::io::stdin().read_line(&mut release).expect("phase acknowledgement"), 0);
     });
+    Arc::get_mut(&mut storage.inner).expect("worker is not shared").no_checkpoint = true;
     storage.save_info(&info(FRESH, 1)).expect("worker persists");
     println!("STORAGE_PHASE Saved");
     std::io::stdout().flush().expect("saved flushes");
@@ -135,16 +136,27 @@ fn an_archive_keeps_its_old_rows_when_another_process_opens_the_live_name() {
     let observation = Observation(Some(Arc::new(move |phase| {
         if phase == Phase::Renamed("") {
             let mut newcomer = Worker::start(&root);
-            newcomer.until("Saved");
+            newcomer.until("Admission");
+            newcomer.release();
+            assert_eq!(
+                newcomer.event(),
+                "SharedBlocked",
+                "the newcomer is fenced before any SQLite open"
+            );
             *keeper.lock().expect("newcomer keeper") = Some(newcomer);
         }
     })));
-    assert!(super::set_aside(&database, "fixture", super::PREUUID, &observation));
+    move_set(&database, &observation);
+    let mut newcomer = other.lock().expect("worker keeper").take().expect("newcomer exists");
+    newcomer.release();
+    newcomer.until("Saved");
     assert_eq!(
         old_rows(&archive(directory.path())),
         vec![OLD],
         "the retained old main must not be paired with the newcomer's WAL"
     );
+    newcomer.release();
+    newcomer.finish();
     drop(other);
 }
 
@@ -163,6 +175,14 @@ fn lock_file(database: &Path) -> fs::File {
         .truncate(false)
         .open(with_suffix(database, ".quarantine.lock"))
         .expect("the stable lock file opens")
+}
+
+fn move_set(database: &Path, observation: &Observation) {
+    let exclusive = lock_file(database);
+    exclusive.lock().expect("raw fixture maintenance is exclusive");
+    let pending = super::maintenance::Pending::begin(database, super::PREUUID, observation)
+        .expect("intent publishes before moving");
+    pending.move_files(database, observation).expect("captured set moves");
 }
 
 fn copy_set(from: &Path, to: &Path) {
@@ -335,8 +355,21 @@ fn an_archive_is_readable_when_its_main_name_is_published() {
             seen.store(true, Ordering::SeqCst);
         }
     })));
-    assert!(super::set_aside(&database, "fixture", super::PREUUID, &observation));
+    move_set(&database, &observation);
     assert!(checked.load(Ordering::SeqCst), "the real main rename was observed");
+}
+
+#[test]
+fn a_probe_that_spends_its_budget_still_tries_exclusive_admission() {
+    let directory = TempDir::new().expect("fixture");
+    let root = directory.path().join("storage");
+    let planted = Storage::open(root.clone());
+    planted.save_info(&info(OLD, 1)).expect("old fixture");
+    drop(planted);
+    let mut opener = observed(&root, |_| {});
+    Arc::get_mut(&mut opener.inner).expect("not shared").admission_budget = Some(Duration::ZERO);
+    assert!(opener.list_sessions().expect("uncontended maintenance is admitted").is_empty());
+    assert_eq!(old_rows(&archive(directory.path())), vec![OLD]);
 }
 
 #[test]

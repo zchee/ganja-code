@@ -8,9 +8,10 @@ use std::{fs, thread};
 
 use rusqlite::Connection;
 
+use super::maintenance::Pending;
 use super::{
     Inner, PREUUID, QUARANTINE, QUARANTINE_LOCK, StorageError, connect, convert, damaged,
-    integrity, migrate, preuuid_id, set_aside, with_suffix,
+    integrity, migrate, preuuid_id, with_suffix,
 };
 #[cfg(test)]
 use super::{Observation, Phase};
@@ -104,6 +105,7 @@ enum Probe {
     Old(LeasedConnection, String),
     Corrupt(String),
     Absent,
+    Pending,
 }
 
 impl Inner {
@@ -120,6 +122,8 @@ impl Inner {
             #[cfg(test)]
             self.observation.hit(Phase::Admission);
             let Some(shared) = Lease::try_take(&self.database, false)? else {
+                #[cfg(test)]
+                self.observation.hit(Phase::SharedBlocked);
                 if Instant::now() >= deadline {
                     return Err(StorageError::Maintaining { path: self.database.clone() });
                 }
@@ -132,13 +136,8 @@ impl Inner {
             self.observation.hit(Phase::SharedAcquired);
             match self.probe(&shared)? {
                 Probe::Ready(connection) => return Ok(connection),
-                Probe::Old(connection, _) if Instant::now() >= deadline => {
-                    tracing::warn!(path = %self.database.display(),
-                        "setting the old session store aside was deferred: another process still owns a shared lease");
-                    return Ok(connection);
-                }
                 Probe::Old(connection, _) => drop(connection),
-                Probe::Corrupt(_) | Probe::Absent => {}
+                Probe::Corrupt(_) | Probe::Absent | Probe::Pending => {}
             }
             drop(shared);
             #[cfg(test)]
@@ -157,8 +156,13 @@ impl Inner {
                     return Err(StorageError::Maintaining { path: self.database.clone() });
                 };
                 match self.probe(&shared)? {
-                    Probe::Ready(connection) | Probe::Old(connection, _) => return Ok(connection),
-                    Probe::Corrupt(_) | Probe::Absent => {
+                    Probe::Ready(connection) => return Ok(connection),
+                    Probe::Old(connection, _) => {
+                        tracing::warn!(path = %self.database.display(),
+                            "setting the old session store aside was deferred: another process still owns a shared lease");
+                        return Ok(connection);
+                    }
+                    Probe::Corrupt(_) | Probe::Absent | Probe::Pending => {
                         return Err(StorageError::Maintaining { path: self.database.clone() });
                     }
                 }
@@ -172,6 +176,12 @@ impl Inner {
         self.observation.hit(Phase::ReaderOpening);
         let connection = connect(&self.database)?;
         #[cfg(test)]
+        if self.no_checkpoint {
+            connection
+                .set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+                .expect("the real SQLite fixture supports no-checkpoint-on-close");
+        }
+        #[cfg(test)]
         self.observation.hit(Phase::ReaderOpened);
         Ok(LeasedConnection::new(
             connection,
@@ -184,6 +194,9 @@ impl Inner {
     }
 
     fn probe(&self, lease: &Arc<Lease>) -> Result<Probe, StorageError> {
+        if Pending::read(&self.database)?.is_some() {
+            return Ok(Probe::Pending);
+        }
         if !self
             .database
             .try_exists()
@@ -211,6 +224,9 @@ impl Inner {
     }
 
     fn maintain(&self, lease: &Arc<Lease>) -> Result<(), StorageError> {
+        if let Some(pending) = Pending::read(&self.database)? {
+            return self.recover(lease, pending);
+        }
         // The earlier shared probe is not authority: a competing starter may
         // have completed the replacement before this exclusive acquisition.
         let (reason, kind) = match self.probe(lease)? {
@@ -224,23 +240,24 @@ impl Inner {
                 (format!("session {old} predates UUIDv7 ids"), PREUUID)
             }
             Probe::Corrupt(reason) => (reason, QUARANTINE),
+            Probe::Pending => {
+                return Err(StorageError::Maintenance {
+                    path: self.database.clone(),
+                    reason: "the pending record changed during maintenance".to_owned(),
+                });
+            }
         };
-        if !set_aside(
+        let pending = Pending::begin(
             &self.database,
-            &reason,
             kind,
             #[cfg(test)]
             &self.observation,
-        ) {
-            return Err(StorageError::Maintenance {
-                path: self.database.clone(),
-                reason: "the database file set could not be moved".to_owned(),
-            });
-        }
-        self.initialize(lease, false)
+        )?;
+        tracing::warn!(path = %self.database.display(), reason, "setting the session database aside");
+        self.recover(lease, pending)
     }
 
-    fn initialize(&self, lease: &Arc<Lease>, import: bool) -> Result<(), StorageError> {
+    pub(super) fn initialize(&self, lease: &Arc<Lease>, import: bool) -> Result<(), StorageError> {
         let mut connection = self.connection(lease)?;
         #[cfg(test)]
         self.observation.hit(Phase::ReplacementCreated);
