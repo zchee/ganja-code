@@ -25,19 +25,29 @@ fn inherited_socket_probe() {
                 .expect("announced listener address")
         };
         let address: SocketAddr = address.trim().parse().expect("announced socket address");
-        let present = if let Some(number) = spec.get("number").and_then(serde_json::Value::as_i64) {
+        let result = if let Some(number) = spec.get("number").and_then(serde_json::Value::as_i64) {
             listener::matches(i32::try_from(number).expect("descriptor"), address)
-                .expect("raw probe")
         } else {
-            listener::scan(address).expect("bounded raw descriptor scan")
+            listener::scan(address)
         };
+        let outcome = match result {
+            Ok(true) => "present".to_owned(),
+            Ok(false) => "absent".to_owned(),
+            Err(error) => format!("error {error}"),
+        };
+        let output = spec
+            .get("output_environment")
+            .map(|key| {
+                std::env::var_os(key.as_str().expect("output environment name"))
+                    .expect("probe output environment")
+            })
+            .unwrap_or_else(|| spec["output"].as_str().expect("probe output path").into());
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(spec["output"].as_str().expect("probe output path"))
+            .open(output)
             .expect("probe output");
-        file.write_all(if present { b"present\n" } else { b"absent\n" })
-            .expect("record identity only");
+        writeln!(file, "{outcome}").expect("record probe outcome");
         return;
     }
     // Positive and negative controls run when this binary is not acting as a child probe.
@@ -62,6 +72,45 @@ fn probe_command(spec: serde_json::Value) -> String {
         shlex::try_quote(&spec).expect("quote probe"),
         shlex::try_quote(binary.to_str().expect("binary path")).expect("quote binary")
     )
+}
+
+fn record_probe_command(mut spec: serde_json::Value) -> String {
+    let output = spec["output"].as_str().expect("probe output").to_owned();
+    spec["output_environment"] = serde_json::json!("GANJA_TEST_LISTENER_PROBE_OUTPUT");
+    let probe = probe_command(spec);
+    let output = shlex::try_quote(&output).expect("quote output");
+    format!(
+        "probe_file={output}.probe.$$\nif GANJA_TEST_LISTENER_PROBE_OUTPUT=\"$probe_file\" {probe} >/dev/null 2>&1; then\n  IFS= read -r result < \"$probe_file\" || result='probe-failed status=0'\nelse\n  status=$?; result=\"probe-failed status=$status\"\nfi\nrm -f \"$probe_file\"\nprintf '%s\\n' \"$result\" >> {output}",
+    )
+}
+
+#[tokio::test]
+async fn a_probe_failure_is_recorded_without_stopping_git() {
+    let home = tempfile::tempdir().expect("failed probe home");
+    let output = home.path().join("probe-result");
+    let probe = record_probe_command(serde_json::json!({
+        "address_file": home.path().join("missing-address"), "output": output,
+    }));
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", &format!("{probe}\nexec git --version")])
+        .stdout(std::fs::File::create(home.path().join("stdout")).expect("git stdout"))
+        .stderr(std::fs::File::create(home.path().join("stderr")).expect("git stderr"))
+        .kill_on_drop(true)
+        .spawn()
+        .expect("git wrapper");
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    let cleanup = reap(&mut child).await;
+    cleanup.expect("git wrapper reaped");
+    assert!(status.expect("bounded wrapper").expect("git status").success());
+    assert_eq!(
+        std::fs::read_to_string(output).expect("failure record"),
+        "probe-failed status=101\n"
+    );
+    assert!(
+        std::fs::read_to_string(home.path().join("stdout"))
+            .expect("git output")
+            .starts_with("git version ")
+    );
 }
 
 async fn reap(child: &mut tokio::process::Child) -> std::io::Result<std::process::ExitStatus> {
@@ -222,6 +271,98 @@ async fn the_bounded_child_probe_detects_an_inheritable_listener_duplicate() {
 }
 
 #[tokio::test]
+async fn the_child_scan_distinguishes_unrelated_inherited_descriptor_kinds() {
+    use std::os::fd::AsFd as _;
+
+    let home = tempfile::tempdir().expect("descriptor matrix home");
+    let (pipe_read, pipe_write) = std::io::pipe().expect("pipe");
+    let file = tempfile::tempfile().expect("regular file");
+    let null = std::fs::File::open("/dev/null").expect("null device");
+    let unix_listener = std::os::unix::net::UnixListener::bind(home.path().join("listener.sock"))
+        .expect("Unix listener");
+    let unix_datagram = std::os::unix::net::UnixDatagram::bind(home.path().join("datagram.sock"))
+        .expect("Unix datagram");
+    let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bound UDP");
+    let tcp_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("different TCP listener");
+    let address = tcp_listener.local_addr().expect("TCP address");
+    let connected = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .expect("connected TCP");
+    let (_peer, _) = tcp_listener.accept().expect("connected peer");
+    let shutdown = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .expect("TCP before shutdown");
+    let (peer, _) = tcp_listener.accept().expect("shutdown peer");
+    shutdown.shutdown(std::net::Shutdown::Both).expect("shutdown TCP");
+    drop(peer);
+    let (socketpair, peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+    drop(peer);
+    let cases = [
+        ("pipe read end", pipe_read.as_fd()),
+        ("pipe write end", pipe_write.as_fd()),
+        ("regular file", file.as_fd()),
+        ("/dev/null", null.as_fd()),
+        ("Unix stream listener", unix_listener.as_fd()),
+        ("Unix datagram", unix_datagram.as_fd()),
+        ("bound UDP", udp.as_fd()),
+        ("different TCP listener", tcp_listener.as_fd()),
+        ("connected TCP", connected.as_fd()),
+        ("shutdown TCP with closed peer", shutdown.as_fd()),
+        ("socketpair with closed peer", socketpair.as_fd()),
+    ];
+    // A kqueue cannot reach a forked child, so it is not an inheritance case.
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: initialized writable storage receives the process limit.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) }, 0);
+    let limit = i32::try_from(limit.rlim_cur).expect("descriptor limit fits raw fd");
+    for (kind, descriptor) in cases {
+        let number = descriptor.as_raw_fd();
+        assert!(number < listener::scan_bound().expect("scan bound"), "{kind} is scanned");
+        let output = home.path().join("probe-result");
+        std::fs::write(&output, "").expect("reset matrix output");
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args(["--exact", "handoff::inherited_socket_probe", "--nocapture"])
+            .env_clear()
+            .env(PROBE, serde_json::json!({"address": "127.0.0.1:0", "output": output}).to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(home.path().join("stderr")).expect("matrix stderr"))
+            .kill_on_drop(true);
+        listener::inherit(&mut command, &descriptor);
+        // SAFETY: only async-signal-safe flag queries/updates run after fork.
+        // Other descriptors, including spawn's error pipe, remain usable until exec;
+        // only the selected descriptor survives it alongside stdio.
+        unsafe {
+            command.pre_exec(move || {
+                for candidate in 3..limit {
+                    if candidate == number {
+                        continue;
+                    }
+                    let flags = libc::fcntl(candidate, libc::F_GETFD);
+                    if flags == -1 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::EBADF) {
+                            return Err(error);
+                        }
+                    } else if libc::fcntl(candidate, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("matrix child");
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+        let cleanup = reap(&mut child).await;
+        cleanup.expect("matrix child reaped");
+        assert!(status.expect("bounded matrix child").expect("matrix exit").success(), "{kind}");
+        let outcome = std::fs::read_to_string(&output).expect("matrix result");
+        assert_eq!(outcome, "absent\n", "{kind}: {outcome}");
+    }
+}
+
+#[tokio::test]
 async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -237,12 +378,13 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
         .map(|directory| directory.join("git"))
         .find(|candidate| candidate.is_file())
         .expect("real git");
-    let probe = probe_command(serde_json::json!({"address_file": address_file, "output": output}));
+    let probe =
+        record_probe_command(serde_json::json!({"address_file": address_file, "output": output}));
     let wrapper = bin.join("git");
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nset -e\n{probe} >/dev/null 2>&1\nexec {} \"$@\"\n",
+            "#!/bin/sh\n{probe}\nexec {} \"$@\"\n",
             shlex::try_quote(git.to_str().expect("git path")).expect("quote git")
         ),
     )
@@ -252,7 +394,7 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
         .expect("wrapper PATH");
     let deadline = Instant::now() + Duration::from_secs(30);
-    let (mut worker, _worker_home) =
+    let (mut worker, worker_home) =
         super::handoff_worker(&server, &barrier, false, None, &[("PATH", path.as_os_str())]);
     let result: anyhow::Result<()> = async {
         super::bootstrap_worker(&mut worker, &server, deadline, Some(&address_file)).await?;
@@ -267,8 +409,13 @@ async fn the_bootstrap_git_child_does_not_inherit_the_retained_listener() {
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    assert_eq!(cleanup.expect("worker and held hook reaped"), super::HookCleanup::Gone);
-    result.expect("the bounded bootstrap Git probe sees no retained listener");
+    super::assert_handoff(
+        result,
+        cleanup,
+        super::HookCleanup::Gone,
+        &mut worker,
+        worker_home.path(),
+    );
 }
 
 #[tokio::test]
@@ -301,8 +448,8 @@ async fn the_inherited_listener_is_not_passed_to_engine_children() {
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then {} >/dev/null 2>&1; fi\nexec {} \"$@\"\n",
-            probe_command(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then {}\nfi\nexec {} \"$@\"\n",
+            record_probe_command(
                 serde_json::json!({"number": number, "address": address, "output": snapshot_probe})
             ),
             shlex::try_quote(git.to_str().expect("git path")).expect("quote git")
@@ -438,10 +585,11 @@ async fn an_exec_failure_closes_the_worker_port_without_a_replacement_listener()
     .await;
     let cleanup = barrier.cleanup(&mut worker).await;
     server.close().await;
-    result.expect("worker status and startup diagnostic prove exec failed before assembly");
-    assert_eq!(
-        cleanup.expect("worker reaped and barrier released on exec failure"),
+    super::assert_handoff(
+        result,
+        cleanup,
         super::HookCleanup::NoHookObserved,
-        "no hook can start when replacement exec fails"
+        &mut worker,
+        home.path(),
     );
 }

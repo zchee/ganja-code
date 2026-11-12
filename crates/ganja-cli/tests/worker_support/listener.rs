@@ -62,7 +62,7 @@ pub fn matches(number: RawFd, expected: SocketAddr) -> std::io::Result<bool> {
         let error = std::io::Error::last_os_error();
         return match error.raw_os_error() {
             Some(libc::EBADF | libc::ENOTSOCK) => Ok(false),
-            _ => Err(error),
+            _ => Err(query_error("getsockname", number, error)),
         };
     }
     // SAFETY: all buffer bytes were initialized before the successful query.
@@ -83,7 +83,8 @@ pub fn matches(number: RawFd, expected: SocketAddr) -> std::io::Result<bool> {
         _ => false,
     };
     if !same_address
-        || integer_option(number, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
+        || integer_option(number, libc::SOL_SOCKET, libc::SO_TYPE, "getsockopt(SO_TYPE)")?
+            != libc::SOCK_STREAM
     {
         return Ok(false);
     }
@@ -95,7 +96,7 @@ pub fn scan_bound() -> std::io::Result<i32> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: the initialized limit is writable and getrlimit changes no process state.
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
-        return Err(std::io::Error::last_os_error());
+        return Err(query_error("getrlimit", -1, std::io::Error::last_os_error()));
     }
     i32::try_from(limit.rlim_cur.min(4096)).map_err(std::io::Error::other)
 }
@@ -109,7 +110,7 @@ pub fn scan(expected: SocketAddr) -> std::io::Result<bool> {
             if error.raw_os_error() == Some(libc::EBADF) {
                 continue;
             }
-            return Err(error);
+            return Err(query_error("fcntl(F_GETFD)", number, error));
         }
         if matches(number, expected)? {
             return Ok(true);
@@ -118,7 +119,19 @@ pub fn scan(expected: SocketAddr) -> std::io::Result<bool> {
     Ok(false)
 }
 
-fn integer_option(number: RawFd, level: libc::c_int, option: libc::c_int) -> std::io::Result<i32> {
+fn query_error(query: &str, number: RawFd, error: std::io::Error) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{query} fd={number} errno={}",
+        error.raw_os_error().unwrap_or(0)
+    ))
+}
+
+fn integer_option(
+    number: RawFd,
+    level: libc::c_int,
+    option: libc::c_int,
+    query: &str,
+) -> std::io::Result<i32> {
     let mut value = 0_i32;
     let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
     // SAFETY: the integer is initialized and writable for the supplied size;
@@ -126,17 +139,22 @@ fn integer_option(number: RawFd, level: libc::c_int, option: libc::c_int) -> std
     if unsafe { libc::getsockopt(number, level, option, (&raw mut value).cast(), &raw mut length) }
         == -1
     {
-        return Err(std::io::Error::last_os_error());
+        return Err(query_error(query, number, std::io::Error::last_os_error()));
     }
     if length as usize != std::mem::size_of_val(&value) {
-        return Err(std::io::Error::other("invalid socket option size"));
+        return Err(query_error(
+            query,
+            number,
+            std::io::Error::other("invalid socket option size"),
+        ));
     }
     Ok(value)
 }
 
 #[cfg(not(target_vendor = "apple"))]
 fn listening(number: RawFd) -> std::io::Result<bool> {
-    Ok(integer_option(number, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? == 1)
+    Ok(integer_option(number, libc::SOL_SOCKET, libc::SO_ACCEPTCONN, "getsockopt(SO_ACCEPTCONN)")?
+        == 1)
 }
 
 #[cfg(target_vendor = "apple")]
@@ -156,10 +174,18 @@ fn listening(number: RawFd) -> std::io::Result<bool> {
         )
     } == -1
     {
-        return Err(std::io::Error::last_os_error());
+        return Err(query_error(
+            "getsockopt(TCP_CONNECTION_INFO)",
+            number,
+            std::io::Error::last_os_error(),
+        ));
     }
     if !(1..=size).contains(&(length as usize)) {
-        return Err(std::io::Error::other("invalid TCP connection-info size"));
+        return Err(query_error(
+            "getsockopt(TCP_CONNECTION_INFO)",
+            number,
+            std::io::Error::other("invalid TCP connection-info size"),
+        ));
     }
     // SAFETY: the buffer was initialized and the returned prefix contains state.
     Ok(unsafe { info.assume_init() }.tcpi_state == 1)
