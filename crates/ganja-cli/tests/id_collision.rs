@@ -112,6 +112,20 @@ struct Drill {
     releases: Cell<usize>,
 }
 
+#[derive(Default)]
+struct Children {
+    children: Vec<Child>,
+    reaped: bool,
+}
+
+impl Drop for Children {
+    fn drop(&mut self) {
+        if !self.reaped {
+            kill_all(&mut self.children);
+        }
+    }
+}
+
 impl Drill {
     fn new() -> Self {
         let homes = Homes::new();
@@ -150,30 +164,29 @@ impl Drill {
         let go = barrier.join("go");
         File::create(&alive).expect("the liveness file is creatable");
 
-        let mut children: Vec<Child> = (0..count)
-            .map(|index| {
-                let mut command = Command::new("sh");
-                command
-                    .arg("-c")
-                    .arg(WAIT_THEN_RUN)
-                    .env("DRILL_READY", barrier.join(format!("ready.{index}")))
-                    .env("DRILL_GO", &go)
-                    .env("DRILL_ALIVE", &alive)
-                    .env("DRILL_BIN", env!("CARGO_BIN_EXE_ganja"))
-                    .env("DRILL_PROMPT", format!("drill {index}"))
-                    // A closed pipe rather than the harness's stdin: `run`
-                    // reads standard input whole when it is not a terminal.
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::from(created(&barrier, "out", index)))
-                    .stderr(Stdio::from(created(&barrier, "err", index)));
-                self.pinned(&mut command);
+        let mut children = Children::default();
+        for index in 0..count {
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg(WAIT_THEN_RUN)
+                .env("DRILL_READY", barrier.join(format!("ready.{index}")))
+                .env("DRILL_GO", &go)
+                .env("DRILL_ALIVE", &alive)
+                .env("DRILL_BIN", env!("CARGO_BIN_EXE_ganja"))
+                .env("DRILL_PROMPT", format!("drill {index}"))
+                // A closed pipe rather than the harness's stdin: `run`
+                // reads standard input whole when it is not a terminal.
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(created(&barrier, "out", index)))
+                .stderr(Stdio::from(created(&barrier, "err", index)));
+            self.pinned(&mut command);
 
-                command.spawn().expect("the shell is spawnable")
-            })
-            .collect();
+            children.children.push(command.spawn().expect("the shell is spawnable"));
+        }
 
         wait_for(
-            &mut children,
+            &mut children.children,
             READY_DEADLINE,
             || (0..count).all(|index| barrier.join(format!("ready.{index}")).exists()),
             "every process to reach the barrier",
@@ -182,7 +195,8 @@ impl Drill {
         // The release itself. Every child is one `stat` away from `exec`.
         File::create(&go).expect("the release file is creatable");
 
-        let statuses = reaped(&mut children);
+        let statuses = reaped(&mut children.children);
+        children.reaped = true;
         for (index, status) in statuses.iter().enumerate() {
             assert!(
                 status.success(),
