@@ -15,16 +15,16 @@ and the server must never include a provisioner in its dependency closure.
 
 ## Lifecycle
 
-Every worker request needs a `WorkerGate` permit. Stream and REST have separate
-admission doors. Suspend closes both, holds the reconnect loop with an ack,
-actively closes and joins the stream, drains REST, and checks that every attempt
-received a typed answer from the worker before calling the control plane.
+Worker requests need a `WorkerGate` permit except bounded launch health probes
+after bootstrap success through the first decoded health. Stream and REST have
+separate doors. Suspend closes both, holds reconnect with an ack, closes and joins
+the stream, drains REST, and checks typed worker answers before control-plane suspend.
 
-A drain timeout defers suspend. An unclassified routed attempt permanently disables
-automatic suspend for that worker identity: a later health answer, including through
-another router, cannot fence an earlier dispatch. This is an independent gate latch,
-not a lifecycle phase. Only a reconciled deletion and a distinctly named
-replacement recover that identity boundary.
+A drain timeout defers suspend. Except for those launch probes, an unclassified
+routed attempt permanently disables automatic suspend for that worker identity:
+a later health answer, including through another router, cannot fence an earlier
+dispatch. This independent gate latch is not a lifecycle phase. Only reconciled
+deletion and a distinctly named replacement recover that identity boundary.
 
 Launch and cleanup have finite independent deadlines; ambiguous mutations are reconciled,
 never resent blindly. Terminal decisions are deduplicated per assistant message id;
