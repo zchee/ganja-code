@@ -52,9 +52,10 @@ use ratatui::crossterm::event::{
 /// How long a bare Esc waits for its `[` or `O` continuation.
 ///
 /// On a saturated machine, a continuation written 11.6 ms after Esc was
-/// once judged late because the caller used UI consumption time. The caller
-/// now reads a pending sequence without intervening UI work; 25 ms remains
-/// the policy, not a bound on scheduling delays.
+/// observed as literal text. A deterministic example demonstrates that a
+/// consumption-time stamp can produce that result, not what caused that run.
+/// Reading a pending sequence without intervening UI work removes that gap;
+/// 25 ms remains the policy, not a bound on scheduling delays.
 const HOLDOFF: Duration = Duration::from_millis(25);
 
 /// How long a whole sequence may take from the Esc to its final byte.

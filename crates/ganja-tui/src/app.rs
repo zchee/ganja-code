@@ -96,6 +96,12 @@ use crate::{
     notify, transcript,
 };
 
+struct TerminalBatch {
+    ready: Vec<TermEvent>,
+    // Apply a read error or EOF only after handling the released input.
+    open: Result<bool>,
+}
+
 /// Reads a possible split without drawing, engine events or handlers between
 /// its fragments, for at most the whole-sequence allowance per wait. A hold
 /// left by repeated Escs returns to the general loop's deadline handling.
@@ -103,7 +109,7 @@ async fn settle_terminal<S>(
     first: TermEvent,
     events: &mut S,
     repair: &mut EscRepair,
-) -> Result<Vec<TermEvent>>
+) -> TerminalBatch
 where
     S: Stream<Item = std::io::Result<TermEvent>> + Unpin,
 {
@@ -116,15 +122,20 @@ where
         };
         let wake = tokio::time::Instant::from_std(deadline).min(wait_deadline);
         match tokio::time::timeout_at(wake, events.next()).await {
-            Ok(Some(event)) => {
-                let event = event.context("failed to read a terminal event")?;
+            Ok(Some(Ok(event))) => {
                 ready.extend(repair.accept(event, tokio::time::Instant::now().into_std()));
             }
-            Ok(None) => break,
+            Ok(Some(Err(error))) => {
+                return TerminalBatch {
+                    ready,
+                    open: Err(error).context("failed to read a terminal event"),
+                };
+            }
+            Ok(None) => return TerminalBatch { ready, open: Ok(false) },
             Err(_) => ready.extend(repair.expire(tokio::time::Instant::now().into_std())),
         }
     }
-    Ok(ready)
+    TerminalBatch { ready, open: Ok(true) }
 }
 
 /// Shortest gap between frames: roughly 60 FPS.
@@ -1918,17 +1929,11 @@ impl App {
             let repair_wake = self.escrepair.deadline().map(tokio::time::Instant::from_std);
 
             let events: Vec<AppEvent> = tokio::select! {
-                incoming = term_events.next() => match incoming {
-                    Some(incoming) => {
-                        let event = incoming.context("failed to read a terminal event")?;
-                        settle_terminal(event, &mut term_events, &mut self.escrepair)
-                            .await?
-                            .into_iter()
-                            .map(AppEvent::Term)
-                            .collect()
+                incoming = term_events.next() => {
+                    if !self.terminal_input(incoming, &mut term_events).await? {
+                        break;
                     }
-                    // The event source closed; there is nothing left to react to.
-                    None => break,
+                    Vec::new()
                 },
                 incoming = core_events.next() => match incoming {
                     Some(incoming) => vec![AppEvent::core(incoming)],
@@ -1939,11 +1944,7 @@ impl App {
                 }
                 // Repeated Escs may leave a hold after the bounded inline wait.
                 () = tokio::time::sleep_until(repair_wake.unwrap_or_else(tokio::time::Instant::now)), if repair_wake.is_some() => {
-                    self.escrepair
-                        .expire(Instant::now())
-                        .into_iter()
-                        .map(AppEvent::Term)
-                        .collect()
+                    self.expired_terminal()
                 }
                 // Raw mode swallows Ctrl-C, so this arm only fires for a signal
                 // raised from outside the terminal, such as `kill -INT`.
@@ -1975,6 +1976,33 @@ impl App {
         }
 
         Ok(())
+    }
+
+    async fn terminal_input<S>(
+        &mut self,
+        incoming: Option<std::io::Result<TermEvent>>,
+        events: &mut S,
+    ) -> Result<bool>
+    where
+        S: Stream<Item = std::io::Result<TermEvent>> + Unpin,
+    {
+        let Some(incoming) = incoming else {
+            return Ok(false);
+        };
+        let first = incoming.context("failed to read a terminal event")?;
+        let batch = settle_terminal(first, events, &mut self.escrepair).await;
+        for event in batch.ready {
+            self.handle(AppEvent::Term(event)).await?;
+        }
+        batch.open
+    }
+
+    fn expired_terminal(&mut self) -> Vec<AppEvent> {
+        self.escrepair
+            .expire(tokio::time::Instant::now().into_std())
+            .into_iter()
+            .map(AppEvent::Term)
+            .collect()
     }
 
     /// Applies one event to the UI state.
