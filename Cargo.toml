@@ -126,7 +126,7 @@ async-trait = "0.1.92"
 # and tower stacks already in the tree.
 axum = "0.8.9"
 # Dev-only HTTPS git fixtures exercise the worker against a real TLS listener.
-axum-server = { version = "0.9.0", features = ["tls-rustls"] }
+axum-server = { version = "0.9.2", features = ["tls-rustls"] }
 # Local router-identity CSRs and self-signed certificates for HTTPS fixtures.
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 # The mailbox lock's retry schedule, and only that. Claude holds the inbox
@@ -206,7 +206,7 @@ hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"
 # Typed Kubernetes resources and in-process port-forwarding; no controller runtime.
 k8s-openapi = { version = "0.29.0", features = ["v1_37"] }
 # Match reqwest's AWS-LC choice so the workspace has one rustls provider.
-kube = { version = "5.0.0", default-features = false, features = ["client", "config", "rustls-tls", "aws-lc-rs", "ws"] }
+kube = { version = "5.1.0", default-features = false, features = ["client", "config", "rustls-tls", "aws-lc-rs", "ws"] }
 # `Retry-After` can be an IMF-fixdate; the exact-purpose parser for it,
 # zero-dependency and already in the lock through hyper. The one form it may
 # not share with the hand parser it replaces — a leap-second `:60` — is
@@ -231,7 +231,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 # retires the CLI's silent UTC degradation. Pre-1.0 accepted deliberately;
 # each adopting crate's jiff surface is enumerated in its commit so a future
 # major is a grep-sized migration.
-jiff = "0.2.40"
+jiff = "0.2.46"
 # The JSONC dialect ganja's own config has left, kept for the two readers that
 # still meet a file written in it: `config::legacy`, which is how `ganja config
 # migrate` reads what it converts, and `import.rs`, which reads upstream
@@ -271,7 +271,7 @@ markup5ever_rcdom = "0.38.0"
 nucleo-matcher = "0.3.1"
 # Filesystem events behind the stale-read watcher: a file read this session
 # and then changed outside it is flagged before the next turn trusts it.
-notify = "8.2.1"
+notify = "8.2.2"
 # RFC 3986 percent-coding, already in the tree under `url`: the hand decoder
 # it replaces read high bytes as Latin-1 (`%E2%9C%93` decoded to mojibake),
 # and the hand encoder was one drift away from the same class. The one
@@ -287,9 +287,9 @@ percent-encoding = "2.3.2"
 # rather than the whole `image` stack a second time.
 png = "0.18.1"
 # Agent Substrate's published protobuf wire and its well-known timestamp types.
-prost = "0.14.4"
+prost = "0.14.6"
 # Generated Substrate messages carry protobuf Timestamp fields.
-prost-types = "0.14.4"
+prost-types = "0.14.6"
 # Client-only gRPC; server is enabled only by the cloud crate's test dependency.
 # In particular, router stays off so axum never enters a provisioner's closure.
 # AWS-LC matches reqwest so client/server tests share one rustls provider.
@@ -352,7 +352,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.9.0", default-features = false, features = [
+rmcp = { version = "3.10.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -495,7 +495,7 @@ unicode-width = "0.2.3"
 # is what puts that context behind the crate's own mutex; with defaults off,
 # the other six UUID versions and their generators stay out. No `serde`
 # feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
-uuid = { version = "1.29.1", default-features = false, features = ["v7", "std"] }
+uuid = { version = "1.29.2", default-features = false, features = ["v7", "std"] }
 # PATH resolution with access(2) semantics: the hand walk answered "somebody
 # could run this" (`mode & 0o111`) where a spawn needs "this process can run
 # it", so a binary exec-only for another owner died at spawn with EACCES
