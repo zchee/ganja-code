@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use ganja_core::{McpStatus, SessionInfo, Storage, auth, catalog};
 use ganja_permission::Project;
 use ganja_protocol::Usage;
@@ -34,6 +34,7 @@ mod assemble;
 #[cfg(unix)]
 mod binder;
 mod claude_hooks;
+mod completions;
 mod evaluate;
 mod import;
 #[cfg(unix)]
@@ -324,6 +325,17 @@ enum Command {
         #[command(subcommand)]
         action: Auth,
     },
+    /// Print the script a shell loads to complete this command line.
+    ///
+    /// Generated from this build's own subcommands and flags, so a script
+    /// evaluated as the shell starts always matches the binary on PATH:
+    /// `eval "$(ganja completions zsh)"` after `compinit`, or the same line
+    /// naming `bash`. A script saved to a file wants writing again after an
+    /// upgrade.
+    ///
+    /// Names that are only known at run time — a provider, a model, a
+    /// session, an MCP server — are not completed.
+    Completions(completions::CompletionsArgs),
     /// Work with ganja's configuration files.
     Config {
         #[command(subcommand)]
@@ -855,7 +867,16 @@ async fn main() -> Result<ExitCode> {
     // from the already-parsed `Cli` because this runs before any subcommand is
     // dispatched, and a level decided after the fact would miss the startup it
     // was set to watch.
-    let _logging = install_logging(cli.verbose);
+    //
+    // `completions` goes without one. Its script is typically evaluated by
+    // every interactive shell as it starts, and a log directory made and an
+    // appender thread started for each of those would be for a run that, like
+    // `--help`, never started anything worth a log.
+    let _logging = if matches!(cli.command, Some(Command::Completions(_))) {
+        None
+    } else {
+        install_logging(cli.verbose)
+    };
 
     match cli.command {
         None => {
@@ -910,6 +931,9 @@ async fn main() -> Result<ExitCode> {
             .map(succeeded)
         }
         Some(Command::Auth { action }) => auth_command(action).await.map(succeeded),
+        Some(Command::Completions(args)) => {
+            completions::completions(&args, Cli::command()).map(succeeded)
+        }
         Some(Command::Config { action }) => config_command(action).map(succeeded),
         // The one arm with a code of its own, and the reason `main` returns
         // one at all.

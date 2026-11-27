@@ -150,6 +150,12 @@ backon = { version = "1.6.0", default-features = false, features = [
 # later `default-features = false` cannot drop the vectorised codec silently.
 base64 = { version = "0.23.1", features = ["simd-unsafe"] }
 clap = { version = "4.6.10", features = ["derive"] }
+# `ganja completions <shell>`: the completion script is generated from the
+# `clap::Command` the binary parses with, so it cannot name a flag the build
+# lacks. Hand-writing one per shell would be a second copy of the command
+# line to keep in step. No features: the default set is the static
+# generators and depends on nothing but clap.
+clap_complete = "4.6.12"
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }

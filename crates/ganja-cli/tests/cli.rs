@@ -66,6 +66,83 @@ fn version_flag_reports_the_binary_name_and_version() {
     );
 }
 
+/// Where a run's log directory lands under its data home.
+fn logs_at(data: &TempDir) -> std::path::PathBuf {
+    data.path().join("ganja").join("log")
+}
+
+/// The script is all that reaches standard output, because a shell evaluates
+/// whatever arrives there; and nothing is left on disk, because that shell is
+/// every shell this user opens.
+#[test]
+fn completions_prints_only_the_script_and_leaves_no_log_directory() {
+    for (shell, opening, registration) in [
+        ("bash", "_ganja() {", "complete -F _ganja"),
+        ("zsh", "#compdef ganja", "compdef _ganja ganja"),
+    ] {
+        let data = data();
+
+        ganja(&data)
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stderr(predicate::str::is_empty())
+            .stdout(
+                predicate::str::starts_with(opening).and(predicate::str::contains(registration)),
+            );
+
+        assert!(
+            !logs_at(&data).exists(),
+            "`completions {shell}` made a log directory at {}",
+            logs_at(&data).display()
+        );
+    }
+
+    // The control: any other subcommand does make one, so the path watched
+    // above is the path a log would have been written to.
+    let data = data();
+    ganja(&data).args(["auth", "list"]).assert().success();
+    assert!(logs_at(&data).is_dir(), "`auth list` logs under {}", logs_at(&data).display());
+}
+
+/// `ganja completions bash | head -1`: a reader that has what it wanted and
+/// closes the pipe is not an error to print into somebody's terminal. The
+/// script is larger than a pipe holds, so the write cannot finish before the
+/// reader is gone.
+#[test]
+fn completions_ends_quietly_when_its_reader_stops_reading() {
+    let data = data();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ganja"))
+        .args(["completions", "bash"])
+        .env("XDG_DATA_HOME", data.path())
+        .env("XDG_CONFIG_HOME", data.path())
+        .env("HOME", data.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the binary exits");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "a closed pipe exits {}:\n{stderr}", output.status);
+    assert!(stderr.is_empty(), "and prints nothing:\n{stderr}");
+}
+
+/// Exit 2 with the offered shells named, which is clap's own refusal: a
+/// script for the wrong shell would fail later and less legibly, in an rc
+/// file.
+#[test]
+fn completions_refuses_a_shell_it_has_no_script_for() {
+    ganja(&data())
+        .args(["completions", "tcsh"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("bash").and(predicate::str::contains("zsh")));
+}
+
 #[test]
 fn a_key_given_on_the_command_line_is_stored_and_reported_redacted() {
     let data = data();

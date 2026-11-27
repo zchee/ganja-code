@@ -24,6 +24,9 @@ dist = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# The `completions` subcommand: the generators that turn this binary's own
+# `clap::Command` into the script a shell loads.
+clap_complete.workspace = true
 # The log directory is resolved here rather than asked of `ganja-core`, which
 # exposes its own paths but not the data home they hang under. `auth.rs` and
 # `project.rs` already each resolve it this way; this is the third.

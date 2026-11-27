@@ -1116,3 +1116,46 @@ WAL-dependent recovery), `crates/ganja-cli/tests/id_collision.rs`
 negative control), and `crates/ganja-testkit/src/session.rs`
 (the close contract).
 Commit: 60d71e29
+
+## D592 — `ganja completions <shell>` prints a statically generated script, hidden flags included (2026-11-28)
+
+Crates: ganja-cli
+Amends: none
+
+`ganja completions <SHELL>` writes one shell's completion script to standard
+output and nothing else, and exits 0. `SHELL` is required and is
+`clap_complete::Shell`: `bash`, `elvish`, `fish`, `powershell` or `zsh`. A
+shell outside that set, or none, is clap's own usage error and exits 2. The
+owner asked for bash and zsh; the other three come with the type and are
+`clap_complete`'s output as generated, not tried against those shells.
+
+The script is generated when asked for, by `clap_complete::generate`, from the
+same `clap::Command` the binary parses with (`Cli::command()`), so it cannot
+drift from the flags the build has. Two limits follow and are accepted:
+
+- A flag declared `hide = true` is offered on Tab. Hiding governs `--help`;
+  the generators write every argument in the `Command`, and clap cannot remove
+  an argument from a built `Command`. This covers `--socket-dir`, `--yolo`,
+  `--dangerously-skip-permissions`, the pane-member flags (`--agent-id`,
+  `--agent-name`, `--team-name`, `--agent-color`, `--parent-session-id`) and
+  `serve --listen-fd`. Accepted by the owner on 2026-11-28.
+- Only what the `Command` states is completed: subcommands, flags, enumerated
+  values and paths. A provider id, model, session id, agent or MCP server
+  name is not.
+
+The subcommand installs no log: the script is typically evaluated by every
+interactive shell at startup, so it creates no log directory and starts no
+appender thread.
+
+Rejected: `clap_complete`'s dynamic engine (the `unstable-dynamic` feature),
+which would filter hidden flags and could complete run-time names, because its
+API is unstable, it runs `ganja` on every Tab, and a completer that reads
+config would do so in whatever directory the shell is in. Rejected: generating
+the scripts in `build.rs`, which cannot see `Cli` — the type lives in the
+binary and its value parsers call into `ganja-core`.
+
+Pinned by: `crates/ganja-cli/src/completions_tests.rs` (every shell's script
+offers each visible subcommand; the shell is required and checked at parse),
+`crates/ganja-cli/tests/cli.rs`
+(`completions_prints_only_the_script_and_leaves_no_log_directory`,
+`completions_refuses_a_shell_it_has_no_script_for`)

@@ -66,6 +66,7 @@ cargo run -- models anthropic --refresh     # the catalog for one provider; `mod
 cargo run -- mcp                            # configured MCP servers; also mcp list, add, get, remove, login
 cargo run -- plugin list                    # also details, install, enable, disable, remove, marketplace add/list/remove/update
 cargo run -- skills                         # the discovered skill roster
+cargo run -- completions zsh                # a shell completion script on stdout; also bash, elvish, fish, powershell
 cargo run -- evaluate --questions @q.json   # TypeSafe's judge, no session; exit 0 answered, 3 unconfigured, 4 refused, 5 unavailable, 64 usage
 cargo run -- config migrate                 # also config import-opencode, import-claude-hooks; --dry-run, --global, --file
 dist build                                  # local archive under target/distrib/; never let dist write a workflow file
