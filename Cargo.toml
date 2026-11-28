@@ -243,13 +243,14 @@ jiff = "1.0.3"
 # Nothing writes this dialect any more, and the `cst` feature left with the
 # last writer — `mcp add` edits TOML through toml_edit now.
 jsonc-parser = "0.34.0"
-# Compiles and validates the in-repo config schema against Draft 2020-12, both
-# in the drift test (crates/ganja-core/tests/config_schema.rs) and nowhere
-# else — dev-only. Default features add a `reqwest`-backed resolver for
-# `$ref`s that live over HTTP or on disk; the schema has neither, only local
+# Compiles and validates the in-repo config schema against Draft 2020-12
+# in the drift test (crates/ganja-core/tests/config_schema.rs), and the cloud
+# settings schema in its fixture test — dev-only. Default features add a
+# `reqwest`-backed resolver for `$ref`s that live over HTTP and a file
+# resolver for refs on disk; the schemas have neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.60.2", default-features = false }
+jsonschema = { version = "0.63.2", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
 # team task store opens a document it can judge on the descriptor rather
