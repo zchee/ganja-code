@@ -364,11 +364,11 @@ rmcp = { version = "3.12.0", default-features = false, features = [
 ] }
 # Session storage is SQLite, the way upstream's is. `bundled` compiles the
 # exact SQLite this workspace was validated against instead of linking
-# whatever the platform ships: the pragma *defaults* the storage layer relies
-# on (`foreign_keys`, WAL synchronous level) are build-time properties that
-# differ between system libraries, so pinning the library is what pins the
-# semantics.
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+# whatever the platform ships: the pragma *defaults* (`foreign_keys`, WAL
+# synchronous level) are build-time properties that differ between system
+# libraries, so pinning the library is what pins the semantics. The store
+# does not rely on those defaults: it sets both on every connection.
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Safe openat/mkdirat wrappers for the anchored file IO in `ganja-tool`'s
 # `anchor.rs` — already in the lock beneath tempfile. Staged here with the
 # rest of the sweep's pins, but the anchor swap proceeds only behind its own
