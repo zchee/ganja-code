@@ -711,10 +711,10 @@ fn every_category_has_a_heading() {
 fn six_in_the_morning() -> SystemTime {
     let zoned = jiff::civil::date(2026, 9, 11)
         .at(6, 0, 0, 0)
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .expect("06:00 on this date exists in this zone");
 
-    SystemTime::from(zoned.timestamp())
+    SystemTime::try_from(zoned.timestamp()).expect("the fixture fits the system clock")
 }
 
 /// **D557.** Every span the grammar takes, resolved against the moment it was
@@ -756,11 +756,14 @@ fn a_deadline_clock_time_resolves_to_today_in_the_local_zone() {
     for (typed, hour, minute) in [("10:00", 10, 0), ("22:30", 22, 30), ("9:30", 9, 30)] {
         let wanted = jiff::civil::date(2026, 9, 11)
             .at(hour, minute, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::system())
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
             .expect("the time exists in this zone");
         assert_eq!(
             super::deadline(&format!("/deadline {typed}"), now),
-            Some(Deadline::Set(SystemTime::from(wanted.timestamp()))),
+            Some(Deadline::Set(
+                SystemTime::try_from(wanted.timestamp())
+                    .expect("the fixture fits the system clock")
+            )),
             "{typed:?} is today's own {typed} where this machine is sitting"
         );
     }

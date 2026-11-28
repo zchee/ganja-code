@@ -584,7 +584,7 @@ fn current_utc_year() -> u32 {
 }
 
 fn year_in_utc(timestamp: Timestamp) -> u32 {
-    u32::try_from(timestamp.to_zoned(TimeZone::UTC).year()).unwrap_or(1970)
+    u32::try_from(timestamp.to_zoned_datetime(TimeZone::UTC).year()).unwrap_or(1970)
 }
 
 #[cfg(test)]

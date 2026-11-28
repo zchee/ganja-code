@@ -1646,7 +1646,7 @@ fn clock_at(until: SystemTime) -> String {
         return "--:--".to_owned();
     };
 
-    timestamp.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string()
+    timestamp.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string()
 }
 
 /// A span as both surfaces spell one: `2h13m`, `4m30s`, `45s` — the largest

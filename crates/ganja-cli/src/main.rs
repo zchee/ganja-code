@@ -1122,7 +1122,7 @@ fn local_date_at(instant: SystemTime) -> Date {
 }
 
 fn date_in(timestamp: Timestamp, timezone: TimeZone) -> Date {
-    let date = timestamp.to_zoned(timezone).date();
+    let date = timestamp.to_zoned_datetime(timezone).date();
     (
         i32::from(date.year()),
         u32::try_from(date.month()).expect("jiff months are positive"),
