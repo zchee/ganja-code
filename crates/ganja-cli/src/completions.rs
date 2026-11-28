@@ -14,9 +14,11 @@
 //!   way to take an argument back out of a built `Command`, so keeping them
 //!   out would mean filtering the generated text per shell.
 //! - **Only what the `Command` states is completed**: subcommands, flags,
-//!   the values of an enumerated flag, and paths. A provider id, a model, a
-//!   session id or an MCP server name is read from config or storage at run
-//!   time, and a static script has nothing to ask.
+//!   the values of an enumerated flag, and a path where a flag takes one. A
+//!   provider id, a model, a session id or an MCP server name is read from
+//!   config or storage at run time, and a static script has nothing to ask.
+//!   For those, and for any other free text such as a key or a name, bash
+//!   and zsh fall back to their default and offer file names.
 
 use std::io::{self, Write as _};
 

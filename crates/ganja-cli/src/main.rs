@@ -334,7 +334,9 @@ enum Command {
     /// upgrade.
     ///
     /// Names that are only known at run time — a provider, a model, a
-    /// session, an MCP server — are not completed.
+    /// session, an MCP server — are not completed. A flag that takes a path
+    /// completes paths; where a flag takes one of those names, or any other
+    /// free text, bash and zsh offer file names all the same.
     Completions(completions::CompletionsArgs),
     /// Work with ganja's configuration files.
     Config {

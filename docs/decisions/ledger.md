@@ -1140,12 +1140,21 @@ drift from the flags the build has. Two limits follow and are accepted:
   `--agent-name`, `--team-name`, `--agent-color`, `--parent-session-id`) and
   `serve --listen-fd`. Accepted by the owner on 2026-11-28.
 - Only what the `Command` states is completed: subcommands, flags, enumerated
-  values and paths. A provider id, model, session id, agent or MCP server
-  name is not.
+  values, and a path where a flag takes one. A provider id, model, session
+  id, agent or MCP server name is not; for those and any other free-text
+  value (`--key`, `--name`), bash and zsh fall back to their default and
+  offer file names.
 
 The subcommand installs no log: the script is typically evaluated by every
 interactive shell at startup, so it creates no log directory and starts no
-appender thread.
+appender thread. The global `-v` is therefore accepted and changes nothing;
+`completions --help` and the scripts still list it, because it is declared
+once for every subcommand.
+
+A reader that closes the pipe before the script is through
+(`ganja completions zsh | head -1`) ends the command with exit 0 and nothing
+on stderr: the script is generated into memory, and a `BrokenPipe` from
+writing it out is not reported.
 
 Rejected: `clap_complete`'s dynamic engine (the `unstable-dynamic` feature),
 which would filter hidden flags and could complete run-time names, because its
@@ -1154,8 +1163,11 @@ config would do so in whatever directory the shell is in. Rejected: generating
 the scripts in `build.rs`, which cannot see `Cli` — the type lives in the
 binary and its value parsers call into `ganja-core`.
 
-Pinned by: `crates/ganja-cli/src/completions_tests.rs` (every shell's script
-offers each visible subcommand; the shell is required and checked at parse),
+Pinned by: `crates/ganja-cli/src/completions_tests.rs`
+(`every_shell_gets_a_script_that_offers_each_visible_subcommand`,
+`the_script_reaches_below_the_top_level`,
+`the_shell_is_named_and_must_be_one_a_script_exists_for`),
 `crates/ganja-cli/tests/cli.rs`
 (`completions_prints_only_the_script_and_leaves_no_log_directory`,
+`completions_ends_quietly_when_its_reader_stops_reading`,
 `completions_refuses_a_shell_it_has_no_script_for`)

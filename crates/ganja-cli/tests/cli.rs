@@ -74,11 +74,16 @@ fn logs_at(data: &TempDir) -> std::path::PathBuf {
 /// The script is all that reaches standard output, because a shell evaluates
 /// whatever arrives there; and nothing is left on disk, because that shell is
 /// every shell this user opens.
+///
+/// Both ends are held: the script's first line is the first thing printed and
+/// the lines that register it are the last, so a line written before or after
+/// it — a hint, a banner — fails here instead of in somebody's rc file. Each
+/// end occurs once, so the script is not printed twice either.
 #[test]
 fn completions_prints_only_the_script_and_leaves_no_log_directory() {
-    for (shell, opening, registration) in [
-        ("bash", "_ganja() {", "complete -F _ganja"),
-        ("zsh", "#compdef ganja", "compdef _ganja ganja"),
+    for (shell, opening, closing) in [
+        ("bash", "_ganja() {", "complete -F _ganja -o bashdefault -o default ganja\nfi\n"),
+        ("zsh", "#compdef ganja", "compdef _ganja ganja\nfi\n"),
     ] {
         let data = data();
 
@@ -87,9 +92,10 @@ fn completions_prints_only_the_script_and_leaves_no_log_directory() {
             .assert()
             .success()
             .stderr(predicate::str::is_empty())
-            .stdout(
-                predicate::str::starts_with(opening).and(predicate::str::contains(registration)),
-            );
+            .stdout(predicate::str::starts_with(opening).and(predicate::str::ends_with(closing)))
+            .stdout(predicate::function(|script: &str| {
+                script.matches(opening).count() == 1 && script.matches(closing).count() == 1
+            }));
 
         assert!(
             !logs_at(&data).exists(),

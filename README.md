@@ -36,6 +36,9 @@ the cockpit, and three things follow from that.
 > disposable checkout. This is not delivered fleet scale or hostile-code isolation.
 > Local teammates also run in-process or in tmux panes, with the reach that implies.
 
+If it looks useful, a **Star** is welcome. Releases are not published yet, so
+**Watch** the repo to follow the work as it lands.
+
 ## Shell completions
 
 `ganja completions <shell>` prints a completion script generated from the
@@ -57,6 +60,3 @@ eval "$(ganja completions bash)"
 `elvish`, `fish` and `powershell` are accepted too; their scripts are
 `clap_complete`'s output as it comes and are not tried against those shells
 here.
-
-If it looks useful, a **Star** is welcome. Releases are not published yet, so
-**Watch** the repo to follow the work as it lands.
