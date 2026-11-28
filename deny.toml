@@ -40,6 +40,13 @@ ignore = [
     # notice, not a known vulnerability, and the path exists only in tests.
     # Remove this entry when expectrl and ptyprocess move off pin-utils.
     { id = "RUSTSEC-2026-0441", reason = "test-only expectrl/ptyprocess via nix; no parent upgrade removes pin-utils" },
+    # RUSTSEC-2026-0543: chrono is unmaintained and has no fixed release.
+    # It reaches this tree only through rmcp 3.9.0, ganja-core's MCP client,
+    # which depends on it unconditionally. This is a maintenance notice, not
+    # a known vulnerability. From rmcp 3.12.0 chrono sits behind a `chrono`
+    # feature that this workspace does not enable, so remove this entry with
+    # the rmcp upgrade that takes chrono out of the lock.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono via rmcp 3.9.0, no fixed release; optional from rmcp 3.12.0" },
 ]
 
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
