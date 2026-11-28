@@ -1116,3 +1116,58 @@ WAL-dependent recovery), `crates/ganja-cli/tests/id_collision.rs`
 negative control), and `crates/ganja-testkit/src/session.rs`
 (the close contract).
 Commit: 60d71e29
+
+## D592 — `ganja completions <shell>` prints a statically generated script, hidden flags included (2026-11-28)
+
+Crates: ganja-cli
+Amends: none
+
+`ganja completions <SHELL>` writes one shell's completion script to standard
+output and nothing else, and exits 0. `SHELL` is required and is
+`clap_complete::Shell`: `bash`, `elvish`, `fish`, `powershell` or `zsh`. A
+shell outside that set, or none, is clap's own usage error and exits 2. The
+owner asked for bash and zsh; the other three come with the type and are
+`clap_complete`'s output as generated, not tried against those shells.
+
+The script is generated when asked for, by `clap_complete::generate`, from the
+same `clap::Command` the binary parses with (`Cli::command()`), so it cannot
+drift from the flags the build has. Two limits follow and are accepted:
+
+- A flag declared `hide = true` is offered on Tab. Hiding governs `--help`;
+  the generators write every argument in the `Command`, and clap cannot remove
+  an argument from a built `Command`. This covers `--socket-dir`, `--yolo`,
+  `--dangerously-skip-permissions`, the pane-member flags (`--agent-id`,
+  `--agent-name`, `--team-name`, `--agent-color`, `--parent-session-id`) and
+  `serve --listen-fd`. Accepted by the owner on 2026-11-28.
+- Only what the `Command` states is completed: subcommands, flags, enumerated
+  values, and a path where a flag takes one. A provider id, model, session
+  id, agent or MCP server name is not; for those and any other free-text
+  value (`--key`, `--name`), bash and zsh fall back to their default and
+  offer file names.
+
+The subcommand installs no log: the script is typically evaluated by every
+interactive shell at startup, so it creates no log directory and starts no
+appender thread. The global `-v` is therefore accepted and changes nothing;
+`completions --help` and the scripts still list it, because it is declared
+once for every subcommand.
+
+A reader that closes the pipe before the script is through
+(`ganja completions zsh | head -1`) ends the command with exit 0 and nothing
+on stderr: the script is generated into memory, and a `BrokenPipe` from
+writing it out is not reported.
+
+Rejected: `clap_complete`'s dynamic engine (the `unstable-dynamic` feature),
+which would filter hidden flags and could complete run-time names, because its
+API is unstable, it runs `ganja` on every Tab, and a completer that reads
+config would do so in whatever directory the shell is in. Rejected: generating
+the scripts in `build.rs`, which cannot see `Cli` — the type lives in the
+binary and its value parsers call into `ganja-core`.
+
+Pinned by: `crates/ganja-cli/src/completions_tests.rs`
+(`every_shell_gets_a_script_that_offers_each_visible_subcommand`,
+`the_script_reaches_below_the_top_level`,
+`the_shell_is_named_and_must_be_one_a_script_exists_for`),
+`crates/ganja-cli/tests/cli.rs`
+(`completions_prints_only_the_script_and_leaves_no_log_directory`,
+`completions_ends_quietly_when_its_reader_stops_reading`,
+`completions_refuses_a_shell_it_has_no_script_for`)
