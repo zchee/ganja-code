@@ -95,7 +95,7 @@ ganja-tui = { path = "crates/ganja-tui" }
 # control-mode driver for the two pane backends, and the same gate proves it
 # links nothing of the sealed leaf.
 
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 # Clipboard read and write through each platform's native surface.
 # `image-data` decodes a clipboard image to raw RGBA pixels: the protocol has
 # carried binary attachments since P8, so a paste that finds no text can now
@@ -126,7 +126,7 @@ async-trait = "0.1.92"
 # and tower stacks already in the tree.
 axum = "0.8.9"
 # Dev-only HTTPS git fixtures exercise the worker against a real TLS listener.
-axum-server = { version = "0.9.0", features = ["tls-rustls"] }
+axum-server = { version = "0.9.2", features = ["tls-rustls"] }
 # Local router-identity CSRs and self-signed certificates for HTTPS fixtures.
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 # The mailbox lock's retry schedule, and only that. Claude holds the inbox
@@ -149,7 +149,7 @@ backon = { version = "1.6.0", default-features = false, features = [
 # `simd-unsafe` is one of this crate's own defaults; it is named here so that a
 # later `default-features = false` cannot drop the vectorised codec silently.
 base64 = { version = "0.23.1", features = ["simd-unsafe"] }
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.10", features = ["derive"] }
 # `ratatui` re-exports this exact crate; depending on it here is what turns on
 # `event-stream`, which the re-export alone cannot request.
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -187,9 +187,9 @@ getrandom = "0.4.3"
 # in-memory chunk of output rather than a file `grep-searcher` would walk, so
 # it needs the matcher's `is_match` alone and none of the searcher's Sink
 # machinery.
-grep-matcher = "0.1.9"
-grep-regex = "0.1.14"
-grep-searcher = "0.1.17"
+grep-matcher = "0.1.10"
+grep-regex = "0.1.15"
+grep-searcher = "0.1.18"
 # webfetch's markdown format is a real HTML→markdown conversion (upstream
 # uses turndown); before this the markdown answer was tag-stripped text.
 htmd = "0.5.6"
@@ -213,7 +213,7 @@ kube = { version = "5.2.0", default-features = false, features = ["client", "con
 # pinned before the swap and the hand parser survives as a fallback if
 # httpdate refuses it.
 httpdate = "1.0.3"
-ignore = "0.4.34"
+ignore = "0.4.35"
 # An insertion-ordered map behind `#[serde(flatten)]`, so a key ganja does not
 # know about survives a rewrite of a Claude document *in the position it
 # arrived in*. `serde_json::Map` cannot: without `preserve_order` it is a
@@ -231,7 +231,7 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 # retires the CLI's silent UTC degradation. Pre-1.0 accepted deliberately;
 # each adopting crate's jiff surface is enumerated in its commit so a future
 # major is a grep-sized migration.
-jiff = "0.2.40"
+jiff = "0.2.46"
 # The JSONC dialect ganja's own config has left, kept for the two readers that
 # still meet a file written in it: `config::legacy`, which is how `ganja config
 # migrate` reads what it converts, and `import.rs`, which reads upstream
@@ -271,7 +271,7 @@ markup5ever_rcdom = "0.38.0"
 nucleo-matcher = "0.3.1"
 # Filesystem events behind the stale-read watcher: a file read this session
 # and then changed outside it is flagged before the next turn trusts it.
-notify = "8.2.1"
+notify = "8.2.2"
 # RFC 3986 percent-coding, already in the tree under `url`: the hand decoder
 # it replaces read high bytes as Latin-1 (`%E2%9C%93` decoded to mojibake),
 # and the hand encoder was one drift away from the same class. The one
@@ -287,9 +287,9 @@ percent-encoding = "2.3.2"
 # rather than the whole `image` stack a second time.
 png = "0.18.1"
 # Agent Substrate's published protobuf wire and its well-known timestamp types.
-prost = "0.14.4"
+prost = "0.14.6"
 # Generated Substrate messages carry protobuf Timestamp fields.
-prost-types = "0.14.4"
+prost-types = "0.14.6"
 # Client-only gRPC; server is enabled only by the cloud crate's test dependency.
 # In particular, router stays off so axum never enters a provisioner's closure.
 # AWS-LC matches reqwest so client/server tests share one rustls provider.
@@ -333,9 +333,10 @@ image = { version = "0.25.10", default-features = false, features = [
 # `grep-regex` builds a line-oriented `Matcher` for `grep-searcher`'s Sink, a
 # shape that only makes sense over a stream of lines; `nucleo-matcher` is a
 # fuzzy scorer, and a hook that fires on an approximate name would be a hook
-# that fires on the wrong call. Already resolved in the lock file through
-# `ignore`/`grep-regex`, so naming it here adds a direct edge and no build.
-regex = "1.13.1"
+# that fires on the wrong call. Already in the workspace through
+# `ratatui-textarea`'s search feature, so naming it here adds a direct edge,
+# not another version.
+regex = "1.13.2"
 reqwest = { version = "0.13.5", default-features = false, features = [
     "charset",
     "http2",
@@ -352,7 +353,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.9.0", default-features = false, features = [
+rmcp = { version = "3.12.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -399,7 +400,7 @@ serde_json = "1.0.154"
 # back as its first answer, as the SDK's lookups do, where a serde map keeps
 # the last. Without default features it builds nothing but serde_core, which
 # serde already brings; the default `macros` would add a proc-macro stack.
-serde_with = { version = "3.24.0", default-features = false, features = ["alloc"] }
+serde_with = { version = "3.25.0", default-features = false, features = ["alloc"] }
 # PKCE's S256 method is literally SHA-256 of the verifier, and the provider
 # checks it — a login is refused if the digest disagrees. The digest rustls
 # already carries reaches this workspace only transitively, and depending on
@@ -415,7 +416,7 @@ serde_with = { version = "3.24.0", default-features = false, features = ["alloc"
 # This edge requests neither `alloc` nor `oid` (a fixed-size digest over a
 # 43-byte string needs neither); rmcp enables both through feature
 # unification in the workspace build anyway.
-sha2 = { version = "0.11.1", default-features = false }
+sha2 = { version = "0.11.2", default-features = false }
 # Compare fixed-size local proxy credentials without content-dependent exits.
 # Already resolved by rustls; this adds no additional version to the workspace.
 subtle = "2.6.1"
@@ -463,14 +464,14 @@ tokio-util = "0.7.20"
 # The feature is on for the other route — `toml::Table`/`Value` is a `BTreeMap`
 # without it, and anything reaching for one would re-sort exactly the order
 # that pin exists to protect.
-toml = { version = "1.2.1", features = ["preserve_order"] }
+toml = { version = "1.2.3", features = ["preserve_order"] }
 # The same project's format-preserving half, and the reason `ganja mcp add`
 # keeps its contract (D483): editing one `[mcp.<name>]` entry of a file
 # somebody hand-commented has to put the entry back without printing the
 # comments away, which is this crate's whole job. `serde` is on because the
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
-toml_edit = { version = "0.25.19", features = ["serde"] }
+toml_edit = { version = "0.25.21", features = ["serde"] }
 # The trait the TypeSafe SDK takes a custom transport through: `Service`
 # alone, without the rest of `tower`. Already in the lock beneath hyper-util
 # and reqwest.
@@ -492,10 +493,10 @@ unicode-width = "0.2.3"
 # past the two serde crates: RFC 9562 UUIDv7, whose `ContextV7` counter is what
 # keeps ids minted inside one millisecond ordered — plain v7's random bits are
 # not, and a streaming turn mints many part ids per millisecond (D493). `std`
-# is what puts that context behind the crate's own mutex; with defaults off,
-# the other six UUID versions and their generators stay out. No `serde`
-# feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
-uuid = { version = "1.29.1", default-features = false, features = ["v7", "std"] }
+# is what puts that context behind the crate's own mutex. Only the v7
+# generator is requested. No `serde` feature: ids stay `String` newtypes,
+# so nothing here serializes a `Uuid`.
+uuid = { version = "1.29.3", default-features = false, features = ["v7", "std"] }
 # PATH resolution with access(2) semantics: the hand walk answered "somebody
 # could run this" (`mode & 0o111`) where a spawn needs "this process can run
 # it", so a binary exec-only for another owner died at spawn with EACCES
