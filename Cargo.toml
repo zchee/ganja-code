@@ -228,10 +228,11 @@ indexmap = { version = "2.14.2", features = ["serde"] }
 # crate" — one of them through an `unsafe localtime_r`. Chosen over the
 # in-lock time/chrono by owner decision (2026-08-18): Temporal-shaped API and
 # real system-tz support (unix reads /usr/share/zoneinfo), which is what
-# retires the CLI's silent UTC degradation. Pre-1.0 accepted deliberately;
-# each adopting crate's jiff surface is enumerated in its commit so a future
-# major is a grep-sized migration.
-jiff = "0.2.46"
+# retires the CLI's silent UTC degradation. Each adopting crate's jiff surface
+# is enumerated in its commit so a future major is a grep-sized migration.
+# The lock still carries jiff 0.2 for kube and k8s-openapi; both must move
+# to jiff 1 before the older version can be removed.
+jiff = "1.0.3"
 # The JSONC dialect ganja's own config has left, kept for the two readers that
 # still meet a file written in it: `config::legacy`, which is how `ganja config
 # migrate` reads what it converts, and `import.rs`, which reads upstream

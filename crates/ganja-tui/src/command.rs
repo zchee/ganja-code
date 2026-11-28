@@ -1035,7 +1035,7 @@ fn clock_deadline(
         return Err("this machine's clock is outside the range ganja can read".to_owned());
     };
     let Ok(zoned) = stamp
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .with()
         .hour(hour)
         .minute(minute)
@@ -1049,7 +1049,7 @@ fn clock_deadline(
         return Err(format!("{argument:?} does not happen today in this time zone"));
     };
 
-    let until = SystemTime::from(zoned.timestamp());
+    let until = SystemTime::try_from(zoned.timestamp()).map_err(|_| further_off(argument))?;
     if until <= now {
         return Err(format!(
             "{argument:?} is already behind: a clock time names a moment later today"

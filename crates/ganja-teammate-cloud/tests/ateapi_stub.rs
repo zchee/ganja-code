@@ -265,7 +265,7 @@ async fn kube_request(
                     .try_into()
                     .expect("SPIFFE URI"),
             )];
-            let year = i32::from(jiff::Zoned::now().year());
+            let year = i32::from(jiff::ZonedDateTime::now().year());
             request.params.not_before = rcgen::date_time_ymd(year - 20, 1, 1);
             request.params.not_after =
                 rcgen::date_time_ymd(if mode == 4 { year - 1 } else { year + 1 }, 1, 1);

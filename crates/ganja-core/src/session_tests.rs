@@ -1662,10 +1662,10 @@ fn a_hook_refusal_reads_as_the_sentence_the_wire_matches_on() {
 fn local_clock(hour: i8, minute: i8) -> SystemTime {
     let zoned = jiff::civil::date(2026, 9, 11)
         .at(hour, minute, 0, 0)
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .expect("the time exists in this zone");
 
-    SystemTime::from(zoned.timestamp())
+    SystemTime::try_from(zoned.timestamp()).expect("the fixture fits the system clock")
 }
 
 /// **D557.** The first wording, byte for byte, with the clock the person set
